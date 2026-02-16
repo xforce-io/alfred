@@ -1,0 +1,380 @@
+"""Unit tests for TelegramChannel."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from src.everbot.channels.telegram_channel import TelegramChannel, TELEGRAM_MSG_LIMIT
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_session_manager_mock():
+    sm = MagicMock()
+    sm.get_cached_agent.return_value = None
+    sm.cache_agent = MagicMock()
+    sm.acquire_session = AsyncMock(return_value=True)
+    sm.release_session = MagicMock()
+    sm.load_session = AsyncMock(return_value=None)
+    sm.save_session = AsyncMock()
+    sm.restore_timeline = MagicMock()
+    sm.restore_to_agent = AsyncMock()
+    sm.append_timeline_event = MagicMock()
+    sm.persistence = MagicMock()
+    sm.persistence._get_lock_path.return_value = Path("/tmp/test_lock")
+    return sm
+
+
+def _make_channel(tmp_path: Path, **kwargs) -> TelegramChannel:
+    sm = _make_session_manager_mock()
+    ch = TelegramChannel(
+        bot_token="123:FAKE",
+        session_manager=sm,
+        default_agent=kwargs.get("default_agent", "test_agent"),
+        allowed_chat_ids=kwargs.get("allowed_chat_ids"),
+    )
+    ch._bindings_path = tmp_path / "bindings.json"
+    return ch
+
+
+# ===========================================================================
+# 1. _split_message — pure function tests
+# ===========================================================================
+
+class TestSplitMessage:
+    def test_short_text(self):
+        result = TelegramChannel._split_message("hello")
+        assert result == ["hello"]
+
+    def test_empty_text(self):
+        result = TelegramChannel._split_message("")
+        assert result == []
+
+    def test_paragraph_split(self):
+        p1 = "a" * 3000
+        p2 = "b" * 3000
+        text = f"{p1}\n\n{p2}"
+        result = TelegramChannel._split_message(text, limit=4096)
+        assert len(result) == 2
+        assert result[0] == p1
+        assert result[1] == p2
+
+    def test_line_split_within_paragraph(self):
+        lines = [f"line{i}" * 100 for i in range(60)]
+        paragraph = "\n".join(lines)
+        result = TelegramChannel._split_message(paragraph, limit=4096)
+        assert len(result) > 1
+        for part in result:
+            assert len(part) <= 4096
+
+    def test_single_long_line_hard_split(self):
+        line = "x" * 10000
+        result = TelegramChannel._split_message(line, limit=4096)
+        assert len(result) == 3  # 4096 + 4096 + 1808
+        assert result[0] == "x" * 4096
+        assert result[1] == "x" * 4096
+
+    def test_exact_limit(self):
+        text = "a" * 4096
+        result = TelegramChannel._split_message(text, limit=4096)
+        assert result == [text]
+
+
+# ===========================================================================
+# 2. Command handling
+# ===========================================================================
+
+class TestCommands:
+    @pytest.fixture
+    def channel(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._client = MagicMock()  # mock httpx client
+        ch._send_message = AsyncMock()
+        return ch
+
+    @pytest.mark.asyncio
+    async def test_start_with_agent(self, channel):
+        await channel._handle_command("111", "/start my_agent", {})
+        assert channel._bindings["111"] == "my_agent"
+        channel._send_message.assert_awaited_once()
+        msg = channel._send_message.call_args[0][1]
+        assert "my_agent" in msg
+
+    @pytest.mark.asyncio
+    async def test_start_default_agent(self, channel):
+        await channel._handle_command("111", "/start", {})
+        assert channel._bindings["111"] == "test_agent"
+
+    @pytest.mark.asyncio
+    async def test_start_no_default_no_arg(self, tmp_path):
+        ch = _make_channel(tmp_path, default_agent="")
+        ch._send_message = AsyncMock()
+        await ch._handle_command("111", "/start", {})
+        assert "111" not in ch._bindings
+        msg = ch._send_message.call_args[0][1]
+        assert "Usage" in msg
+
+    @pytest.mark.asyncio
+    async def test_status(self, channel):
+        with patch("src.everbot.channels.telegram_channel.get_local_status") as mock_status:
+            mock_status.return_value = {
+                "running": True,
+                "pid": 1234,
+                "snapshot": {
+                    "agents": ["daily_insight"],
+                    "started_at": "2025-01-01T00:00:00",
+                },
+            }
+            await channel._handle_command("111", "/status", {})
+            msg = channel._send_message.call_args[0][1]
+            assert "running" in msg
+            assert "1234" in msg
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_no_data(self, channel):
+        with patch("src.everbot.channels.telegram_channel.get_local_status") as mock_status:
+            mock_status.return_value = {"snapshot": {"heartbeats": {}}}
+            await channel._handle_command("111", "/heartbeat", {})
+            msg = channel._send_message.call_args[0][1]
+            assert "No heartbeat" in msg
+
+    @pytest.mark.asyncio
+    async def test_tasks_no_data(self, channel):
+        with patch("src.everbot.channels.telegram_channel.get_local_status") as mock_status:
+            mock_status.return_value = {"snapshot": {"task_states": {}}}
+            await channel._handle_command("111", "/tasks", {})
+            msg = channel._send_message.call_args[0][1]
+            assert "No task" in msg
+
+    @pytest.mark.asyncio
+    async def test_help(self, channel):
+        await channel._handle_command("111", "/help", {})
+        msg = channel._send_message.call_args[0][1]
+        assert "/start" in msg
+        assert "/status" in msg
+
+    @pytest.mark.asyncio
+    async def test_unknown_command(self, channel):
+        await channel._handle_command("111", "/foo", {})
+        msg = channel._send_message.call_args[0][1]
+        assert "Unknown command" in msg
+
+    @pytest.mark.asyncio
+    async def test_command_with_bot_suffix(self, channel):
+        """Commands like /start@mybotname should work."""
+        await channel._handle_command("111", "/start@mybot daily_insight", {})
+        assert channel._bindings["111"] == "daily_insight"
+
+
+# ===========================================================================
+# 3. Event filtering
+# ===========================================================================
+
+class TestEventFiltering:
+    @pytest.fixture
+    def channel(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._send_message = AsyncMock()
+        ch._bindings = {"111": "my_agent"}
+        return ch
+
+    @pytest.mark.asyncio
+    async def test_forwards_heartbeat_delivery(self, channel):
+        await channel._on_background_event("session_1", {
+            "source_type": "heartbeat_delivery",
+            "agent_name": "my_agent",
+            "detail": "Task completed",
+            "deliver": True,
+        })
+        channel._send_message.assert_awaited_once()
+        msg = channel._send_message.call_args[0][1]
+        assert "Heartbeat" in msg
+        assert "Task completed" in msg
+
+    @pytest.mark.asyncio
+    async def test_ignores_non_heartbeat_delivery(self, channel):
+        await channel._on_background_event("session_1", {
+            "source_type": "heartbeat",
+            "agent_name": "my_agent",
+            "detail": "something",
+            "deliver": True,
+        })
+        channel._send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_ignores_deliver_false(self, channel):
+        await channel._on_background_event("session_1", {
+            "source_type": "heartbeat_delivery",
+            "agent_name": "my_agent",
+            "detail": "something",
+            "deliver": False,
+        })
+        channel._send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_ignores_no_agent_name(self, channel):
+        await channel._on_background_event("session_1", {
+            "source_type": "heartbeat_delivery",
+            "detail": "something",
+            "deliver": True,
+        })
+        channel._send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_ignores_empty_detail(self, channel):
+        await channel._on_background_event("session_1", {
+            "source_type": "heartbeat_delivery",
+            "agent_name": "my_agent",
+            "deliver": True,
+        })
+        channel._send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_only_pushes_to_bound_agent(self, channel):
+        channel._bindings = {"111": "my_agent", "222": "other_agent"}
+        await channel._on_background_event("session_1", {
+            "source_type": "heartbeat_delivery",
+            "agent_name": "my_agent",
+            "detail": "update",
+            "deliver": True,
+        })
+        assert channel._send_message.await_count == 1
+        assert channel._send_message.call_args[0][0] == "111"
+
+
+# ===========================================================================
+# 4. Message handling (chat)
+# ===========================================================================
+
+class TestMessageHandling:
+    @pytest.fixture
+    def channel(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._bindings = {"111": "test_agent"}
+        ch._send_message = AsyncMock()
+        ch._send_chat_action = AsyncMock()
+        return ch
+
+    @pytest.mark.asyncio
+    async def test_no_agent_bound(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._send_message = AsyncMock()
+        await ch._handle_message("999", "hello", {})
+        msg = ch._send_message.call_args[0][1]
+        assert "No agent bound" in msg
+
+    @pytest.mark.asyncio
+    async def test_message_with_agent_creates_instance(self, channel):
+        mock_agent = MagicMock()
+        channel._agent_service.create_agent_instance = AsyncMock(return_value=mock_agent)
+
+        # Mock core.process_message to produce a response
+        async def fake_process(agent, agent_name, session_id, message, on_event):
+            from src.everbot.core.channel.models import OutboundMessage
+            await on_event(OutboundMessage(session_id, "Hello!", msg_type="text"))
+            await on_event(OutboundMessage(session_id, "", msg_type="end"))
+
+        channel._core.process_message = fake_process
+
+        await channel._handle_message("111", "hi", {})
+
+        channel._agent_service.create_agent_instance.assert_awaited_once_with("test_agent")
+        channel._session_manager.cache_agent.assert_called_once()
+        # Should have sent the response
+        channel._send_message.assert_awaited()
+        msg = channel._send_message.call_args[0][1]
+        assert "Hello" in msg
+
+    @pytest.mark.asyncio
+    async def test_delta_collection(self, channel):
+        mock_agent = MagicMock()
+        channel._session_manager.get_cached_agent.return_value = mock_agent
+
+        async def fake_process(agent, agent_name, session_id, message, on_event):
+            from src.everbot.core.channel.models import OutboundMessage
+            await on_event(OutboundMessage(session_id, "part1", msg_type="delta"))
+            await on_event(OutboundMessage(session_id, " part2", msg_type="delta"))
+            await on_event(OutboundMessage(session_id, "", msg_type="end"))
+
+        channel._core.process_message = fake_process
+
+        await channel._handle_message("111", "test", {})
+
+        channel._send_message.assert_awaited()
+        msg = channel._send_message.call_args[0][1]
+        assert "part1 part2" in msg
+
+
+# ===========================================================================
+# 5. Binding persistence
+# ===========================================================================
+
+class TestBindingPersistence:
+    def test_save_and_load(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._bindings = {"111": "agent_a", "222": "agent_b"}
+        ch._save_bindings()
+
+        ch2 = _make_channel(tmp_path)
+        ch2._load_bindings()
+        assert ch2._bindings == {"111": "agent_a", "222": "agent_b"}
+
+    def test_load_nonexistent(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._bindings_path = tmp_path / "nonexistent.json"
+        ch._load_bindings()
+        assert ch._bindings == {}
+
+    def test_load_corrupt(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._bindings_path.write_text("not json!!!")
+        ch._load_bindings()
+        assert ch._bindings == {}
+
+    def test_start_command_persists(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._bindings["111"] = "my_agent"
+        ch._save_bindings()
+
+        raw = json.loads(ch._bindings_path.read_text())
+        assert raw["111"] == "my_agent"
+
+
+# ===========================================================================
+# 6. Access control
+# ===========================================================================
+
+class TestAccessControl:
+    @pytest.mark.asyncio
+    async def test_allowed_chat_ids_blocks(self, tmp_path):
+        ch = _make_channel(tmp_path, allowed_chat_ids=["111"])
+        ch._send_message = AsyncMock()
+        await ch._handle_update({
+            "update_id": 1,
+            "message": {
+                "text": "/help",
+                "chat": {"id": 999},
+            },
+        })
+        ch._send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_allowed_chat_ids_passes(self, tmp_path):
+        ch = _make_channel(tmp_path, allowed_chat_ids=["111"])
+        ch._send_message = AsyncMock()
+        await ch._handle_update({
+            "update_id": 1,
+            "message": {
+                "text": "/help",
+                "chat": {"id": 111},
+            },
+        })
+        ch._send_message.assert_awaited()

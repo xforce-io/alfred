@@ -1,0 +1,43 @@
+# EverBot 配置示例
+
+everbot:
+  enabled: true
+  runtime:
+    job_retention_days: 7           # archived job session 保留天数
+    job_max_archived_sessions: 200  # 每个实例最多保留的 archived job session 数量
+    job_cleanup_interval_seconds: 600  # 清理轮询间隔（秒）
+    scheduler_cron_jobs: true       # true=inline/isolated 分流；false=回退 heartbeat 统一执行
+
+  # Channel 配置
+  channels:
+    telegram:
+      enabled: false
+      bot_token: "${TELEGRAM_BOT_TOKEN}"
+      default_agent: "daily_insight"
+      # allowed_chat_ids: ["123456789"]
+
+  # Agent 配置
+  agents:
+    # 示例 Agent: daily_insight
+    daily_insight:
+      workspace: ~/.alfred/agents/daily_insight
+      heartbeat:
+        enabled: true
+        interval: 30          # 心跳间隔（分钟）
+        active_hours: [8, 22] # 活跃时段 8:00-22:00
+        max_retries: 3        # 最大重试次数
+        ack_max_chars: 300    # HEARTBEAT_OK suppress 阈值
+        realtime_status_hint: true  # deliver 后是否推送状态提示
+        broadcast_scope: agent      # heartbeat 事件广播粒度: session|agent
+        routine_reflection: true    # 无到期任务时是否启用 routine 反思注册
+
+    # 示例 Agent: research（心跳未启用）
+    research:
+      workspace: ~/.alfred/agents/research
+      heartbeat:
+        enabled: false
+
+# 日志配置
+logging:
+  level: INFO
+  file: ~/.alfred/logs/everbot.log

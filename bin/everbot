@@ -1,0 +1,395 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+export PYTHONPATH="${PROJECT_ROOT}"
+
+ALFRED_HOME="${ALFRED_HOME:-$HOME/.alfred}"
+PID_FILE="${ALFRED_HOME}/everbot.pid"
+WEB_PID_FILE="${ALFRED_HOME}/everbot-web.pid"
+LOG_DIR="${ALFRED_HOME}/logs"
+DAEMON_OUT="${LOG_DIR}/everbot.out"
+WEB_OUT="${LOG_DIR}/everbot-web.out"
+WEB_HOST_DEFAULT="127.0.0.1"
+WEB_PORT_DEFAULT="8765"
+
+ensure_dirs() {
+  mkdir -p "${LOG_DIR}"
+}
+
+read_pid() {
+  if [[ ! -f "${PID_FILE}" ]]; then
+    echo ""
+    return 0
+  fi
+  tr -d ' \n\r\t' < "${PID_FILE}" || true
+}
+
+is_running() {
+  local pid="$1"
+  if [[ -z "${pid}" ]]; then
+    return 1
+  fi
+  kill -0 "${pid}" >/dev/null 2>&1
+}
+
+wait_for_exit() {
+  local pid="$1"
+  local seconds="${2:-10}"
+  local i=0
+  while is_running "${pid}"; do
+    i=$((i + 1))
+    if (( i >= seconds * 10 )); then
+      return 1
+    fi
+    sleep 0.1
+  done
+  return 0
+}
+
+start_web_background() {
+  local host="$1"
+  local port="$2"
+
+  if [[ -f "${WEB_PID_FILE}" ]]; then
+    local existing
+    existing="$(read_pid_file "${WEB_PID_FILE}")"
+    if is_running "${existing}"; then
+      echo "EverBot Web already running (pid=${existing}, url=http://${host}:${port})."
+      return 0
+    fi
+    rm -f "${WEB_PID_FILE}" || true
+  fi
+
+  # 检查 uvicorn 是否安装
+  if ! python -c "import uvicorn" 2>/dev/null; then
+    echo "提示: 未安装 Web 依赖，跳过 Web 界面启动" >&2
+    echo "      如需使用 Web 界面，请运行: pip install fastapi uvicorn" >&2
+    return 1
+  fi
+
+  nohup python -m uvicorn src.everbot.web.app:app --host "${host}" --port "${port}" --log-level info > "${WEB_OUT}" 2>&1 &
+  local web_pid="$!"
+  sleep 0.2
+  if is_running "${web_pid}"; then
+    echo "${web_pid}" > "${WEB_PID_FILE}"
+    echo "EverBot Web started (pid=${web_pid}, url=http://${host}:${port})."
+    return 0
+  fi
+
+  echo "EverBot Web failed to start. Check logs: ${WEB_OUT}" >&2
+  return 1
+}
+
+read_pid_file() {
+  local path="$1"
+  if [[ ! -f "${path}" ]]; then
+    echo ""
+    return 0
+  fi
+  tr -d ' \n\r\t' < "${path}" || true
+}
+
+stop_pid_file() {
+  local path="$1"
+  local name="$2"
+  local timeout="${3:-10}"
+  local pid
+  pid="$(read_pid_file "${path}")"
+  if ! is_running "${pid}"; then
+    rm -f "${path}" || true
+    return 0
+  fi
+  kill "${pid}" || true
+  if wait_for_exit "${pid}" "${timeout}"; then
+    rm -f "${path}" || true
+    echo "${name} stopped (pid=${pid})."
+    return 0
+  fi
+  echo "${name} did not stop within ${timeout}s." >&2
+  return 1
+}
+
+cmd="$1"
+shift || true
+
+case "${cmd}" in
+  start)
+    ensure_dirs
+    background=1
+    no_web=0
+    web_host="${WEB_HOST_DEFAULT}"
+    web_port="${WEB_PORT_DEFAULT}"
+    start_args=()
+    while (($#)); do
+      case "$1" in
+        --background|--daemon)
+          background=1
+          shift
+          ;;
+        --foreground|--fg)
+          background=0
+          shift
+          ;;
+        --no-web)
+          no_web=1
+          shift
+          ;;
+        --web-host)
+          web_host="$2"
+          shift 2
+          ;;
+        --web-port)
+          web_port="$2"
+          shift 2
+          ;;
+        --)
+          shift
+          while (($#)); do
+            start_args+=("$1")
+            shift
+          done
+          ;;
+        *)
+          start_args+=("$1")
+          shift
+          ;;
+      esac
+    done
+
+    if (( background == 0 )); then
+      # Foreground supervisor: run both processes and stop the other when one exits.
+      if (( no_web == 0 )); then
+        if python -c "import uvicorn" 2>/dev/null; then
+          python -m uvicorn src.everbot.web.app:app --host "${web_host}" --port "${web_port}" --log-level info &
+          web_pid="$!"
+          echo "EverBot Web started in foreground (pid=${web_pid}, url=http://${web_host}:${web_port})"
+        else
+          echo "提示: 未安装 Web 依赖，跳过 Web 界面启动" >&2
+          echo "      如需使用 Web 界面，请运行: pip install fastapi uvicorn" >&2
+          web_pid=""
+        fi
+      else
+        web_pid=""
+      fi
+
+      python -m src.everbot.cli start ${start_args[@]+"${start_args[@]}"} &
+      daemon_pid="$!"
+      echo "${daemon_pid}" > "${PID_FILE}"
+      echo "EverBot daemon started in foreground (pid=${daemon_pid})"
+
+      trap 'kill "${daemon_pid}" >/dev/null 2>&1 || true; [[ -n "${web_pid}" ]] && kill "${web_pid}" >/dev/null 2>&1 || true' INT TERM
+      wait "${daemon_pid}" || true
+      [[ -n "${web_pid}" ]] && kill "${web_pid}" >/dev/null 2>&1 || true
+      exit 0
+    fi
+
+    daemon_already_running=0
+    if is_running "$(read_pid)"; then
+      daemon_already_running=1
+      echo "EverBot daemon already running (pid=$(read_pid))."
+    else
+      # Warn about orphan processes before starting
+      orphan_pids="$(pgrep -f 'python -m src\.everbot\.cli start' 2>/dev/null || true)"
+      if [[ -n "${orphan_pids}" ]]; then
+        echo "WARNING: Found orphan daemon process(es): ${orphan_pids// /, }" >&2
+        echo "         Run 'bin/everbot stop' first to clean up." >&2
+        exit 1
+      fi
+
+      nohup python -m src.everbot.cli start ${start_args[@]+"${start_args[@]}"} > "${DAEMON_OUT}" 2>&1 &
+      echo "$!" > "${PID_FILE}"
+      echo "Starting EverBot daemon in background (stdout/stderr: ${DAEMON_OUT})"
+    fi
+
+    if (( no_web == 0 )); then
+      start_web_background "${web_host}" "${web_port}" || true
+    fi
+
+    for _ in $(seq 1 50); do
+      pid="$(read_pid)"
+      if is_running "${pid}"; then
+        if (( daemon_already_running == 0 )); then
+          echo "EverBot daemon started (pid=${pid})."
+        fi
+        exit 0
+      fi
+      sleep 0.1
+    done
+
+    echo "EverBot daemon start requested, but PID file not ready yet. Check logs: ${DAEMON_OUT}" >&2
+    exit 1
+    ;;
+
+  stop)
+    ensure_dirs
+    force=0
+    timeout=10
+    while (($#)); do
+      case "$1" in
+        --force|-9)
+          force=1
+          shift
+          ;;
+        --timeout)
+          timeout="$2"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+
+    # Stop Web first so it doesn't keep serving stale data while daemon is stopping.
+    if (( force == 1 )); then
+      web_pid="$(read_pid_file "${WEB_PID_FILE}")"
+      if is_running "${web_pid}"; then
+        kill -9 "${web_pid}" || true
+      fi
+      rm -f "${WEB_PID_FILE}" || true
+    else
+      stop_pid_file "${WEB_PID_FILE}" "EverBot Web" "${timeout}" || true
+    fi
+
+    # Kill PID-file tracked process
+    pid="$(read_pid)"
+    if is_running "${pid}"; then
+      if (( force == 1 )); then
+        kill -9 "${pid}" || true
+        echo "EverBot killed (pid=${pid})."
+      else
+        kill "${pid}" || true
+        if wait_for_exit "${pid}" "${timeout}"; then
+          echo "EverBot stopped (pid=${pid})."
+        else
+          echo "EverBot (pid=${pid}) did not stop within ${timeout}s, sending SIGKILL." >&2
+          kill -9 "${pid}" 2>/dev/null || true
+        fi
+      fi
+    fi
+    rm -f "${PID_FILE}" || true
+
+    # Kill orphan daemon processes not tracked by PID file
+    orphan_pids="$(pgrep -f 'python -m src\.everbot\.cli start' 2>/dev/null || true)"
+    orphan_count=0
+    for opid in ${orphan_pids}; do
+      # Skip the PID we already handled
+      [[ "${opid}" == "${pid}" ]] && continue
+      if (( force == 1 )); then
+        kill -9 "${opid}" 2>/dev/null || true
+      else
+        kill "${opid}" 2>/dev/null || true
+        wait_for_exit "${opid}" "${timeout}" || kill -9 "${opid}" 2>/dev/null || true
+      fi
+      echo "Killed orphan daemon (pid=${opid})."
+      orphan_count=$((orphan_count + 1))
+    done
+
+    # Also kill orphan uvicorn/web processes
+    orphan_web_pids="$(pgrep -f 'uvicorn src\.everbot\.web\.app' 2>/dev/null || true)"
+    web_pid_tracked="$(read_pid_file "${WEB_PID_FILE}")"
+    for opid in ${orphan_web_pids}; do
+      [[ "${opid}" == "${web_pid_tracked}" ]] && continue
+      kill "${opid}" 2>/dev/null || true
+      echo "Killed orphan web process (pid=${opid})."
+      orphan_count=$((orphan_count + 1))
+    done
+
+    if [[ -z "${pid}" ]] && (( orphan_count == 0 )); then
+      echo "EverBot not running."
+    elif (( orphan_count > 0 )); then
+      echo "Cleaned up ${orphan_count} orphan process(es)."
+    fi
+    exit 0
+    ;;
+
+  restart)
+    ensure_dirs
+    # restart supports: bin/everbot restart [--foreground] [start args...]
+    background=1
+    no_web=0
+    web_host="${WEB_HOST_DEFAULT}"
+    web_port="${WEB_PORT_DEFAULT}"
+    start_args=()
+    while (($#)); do
+      case "$1" in
+        --background|--daemon)
+          background=1
+          shift
+          ;;
+        --foreground|--fg)
+          background=0
+          shift
+          ;;
+        --no-web)
+          no_web=1
+          shift
+          ;;
+        --web-host)
+          web_host="$2"
+          shift 2
+          ;;
+        --web-port)
+          web_port="$2"
+          shift 2
+          ;;
+        --)
+          shift
+          while (($#)); do
+            start_args+=("$1")
+            shift
+          done
+          ;;
+        *)
+          start_args+=("$1")
+          shift
+          ;;
+      esac
+    done
+
+    "${BASH_SOURCE[0]}" stop || true
+    if (( background == 1 )); then
+      extra=()
+      if (( no_web == 1 )); then extra+=(--no-web); fi
+      extra+=(--web-host "${web_host}" --web-port "${web_port}")
+      "${BASH_SOURCE[0]}" start ${extra[@]+"${extra[@]}"} -- ${start_args[@]+"${start_args[@]}"}
+    else
+      extra=()
+      if (( no_web == 1 )); then extra+=(--no-web); fi
+      extra+=(--web-host "${web_host}" --web-port "${web_port}")
+      "${BASH_SOURCE[0]}" start --foreground ${extra[@]+"${extra[@]}"} -- ${start_args[@]+"${start_args[@]}"}
+    fi
+    ;;
+
+  status|list|init|config|heartbeat|web|doctor|migrate-agent|skills)
+    exec python -m src.everbot.cli "${cmd}" "$@"
+    ;;
+
+  *)
+    cat <<'EOF'
+Usage:
+  bin/everbot start [--foreground] [--no-web] [--web-host HOST] [--web-port PORT] [-- ...args]
+  bin/everbot stop [--timeout N] [--force|-9]
+  bin/everbot restart [--foreground] [--no-web] [--web-host HOST] [--web-port PORT] [-- ...args]
+  bin/everbot status
+  bin/everbot list
+  bin/everbot init [agent_name]
+  bin/everbot config --show|--init
+  bin/everbot heartbeat --agent NAME [--force]
+  bin/everbot web [--host 127.0.0.1] [--port 8765]
+  bin/everbot migrate-agent --agent NAME
+  bin/everbot doctor
+  bin/everbot skills <subcommand> [...]   # 技能管理（search/install/list/update/remove）
+
+启动示例:
+  bin/everbot start                     # 后台启动 daemon + web (http://127.0.0.1:8765)
+  bin/everbot start --foreground        # 前台启动（调试用）
+  bin/everbot start --no-web            # 仅启动 daemon
+  bin/everbot start --web-port 9000     # 自定义 Web 端口
+EOF
+    exit 2
+    ;;
+esac

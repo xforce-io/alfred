@@ -1,0 +1,88 @@
+{
+  "version": "1.0",
+  "skills": {
+    "nano-pdf": {
+      "name": "Nano PDF",
+      "description": "Edit PDFs with natural-language instructions using nano-pdf CLI tool",
+      "version": "1.0.0",
+      "tags": ["pdf", "editor", "document"],
+      "source": {
+        "type": "git",
+        "location": "https://github.com/example/nano-pdf-skill"
+      },
+      "install": {
+        "kind": "uv",
+        "package": "nano-pdf",
+        "bins": ["nano-pdf"]
+      },
+      "requires": {
+        "bins": ["nano-pdf"],
+        "env": []
+      }
+    },
+    "calendar": {
+      "name": "Calendar Manager",
+      "description": "Manage calendar events and schedules",
+      "version": "1.2.0",
+      "tags": ["calendar", "scheduling", "time"],
+      "source": {
+        "type": "git",
+        "location": "https://github.com/example/calendar-skill"
+      },
+      "install": {
+        "kind": "npm",
+        "package": "@alfred/calendar",
+        "bins": ["alfred-calendar"]
+      },
+      "requires": {
+        "bins": ["alfred-calendar"],
+        "env": ["CALENDAR_API_KEY"]
+      }
+    },
+    "jira": {
+      "name": "Jira Integration",
+      "description": "Create and manage Jira issues from conversation",
+      "version": "2.0.1",
+      "tags": ["jira", "project-management", "api"],
+      "source": {
+        "type": "git",
+        "location": "https://github.com/example/jira-skill"
+      },
+      "requires": {
+        "env": ["JIRA_API_TOKEN", "JIRA_BASE_URL"]
+      }
+    },
+    "github-actions": {
+      "name": "GitHub Actions",
+      "description": "Trigger and monitor GitHub Actions workflows",
+      "version": "1.5.0",
+      "tags": ["github", "ci-cd", "automation"],
+      "source": {
+        "type": "git",
+        "location": "https://github.com/example/gh-actions-skill"
+      },
+      "install": {
+        "kind": "brew",
+        "formula": "gh",
+        "bins": ["gh"]
+      },
+      "requires": {
+        "bins": ["gh"],
+        "env": ["GITHUB_TOKEN"]
+      }
+    },
+    "image-gen": {
+      "name": "Image Generator",
+      "description": "Generate images using DALL-E or Stable Diffusion",
+      "version": "1.0.0",
+      "tags": ["image", "ai", "generation"],
+      "source": {
+        "type": "url",
+        "location": "https://github.com/example/image-gen-skill/archive/refs/heads/main.zip"
+      },
+      "requires": {
+        "env": ["OPENAI_API_KEY"]
+      }
+    }
+  }
+}

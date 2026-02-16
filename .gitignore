@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs & runtime artifacts
+*.log
+.background_process.log
+.heartbeat_snapshot.json
+.heartbeat_snapshot.json.bak
+
+# Sensitive config (use example files as templates)
+config/dolphin.yaml
+
+# Node.js
+node_modules/
+
+# Browser automation data
+skills/dev-browser/profiles/
+
+# Cache data
+data/cache/
+
+# Temporary files
+tmp/
+log/
+
+# Backup files
+*.bak
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Claude Code
+.claude/
+
+# Misc
+~/

@@ -1,0 +1,796 @@
+"""
+EverBot Web UI - OpenClaw 风格
+
+设计哲学：
+- Chat 是主入口（默认页面）
+- Status/Logs 是调试窗口（Tab 切换）
+- 最终会集成到不同 channel
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any, Dict, Optional
+from datetime import datetime
+
+from fastapi import FastAPI, WebSocket
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from dolphin.core import flags
+
+from ..control import get_local_status, run_heartbeat_once
+from ..user_data import UserDataManager
+from ..agent_factory import create_agent
+
+app = FastAPI(title="EverBot")
+
+_tasks: Dict[str, str] = {}
+
+
+# ============================================================================
+# HTML 界面（单页应用，Tab 切换）
+# ============================================================================
+
+@app.get("/", response_class=HTMLResponse)
+async def index() -> str:
+    """主界面：Chat 优先 + Tab 切换"""
+    return """<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EverBot - Chat & Control</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: #f5f5f7;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* 顶部 Tab 栏 */
+    .tabs {
+      background: #fff;
+      border-bottom: 1px solid #e0e0e0;
+      display: flex;
+      padding: 0 24px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+    .tab {
+      padding: 16px 24px;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      font-weight: 500;
+      color: #666;
+      transition: all 0.2s;
+    }
+    .tab:hover { color: #333; }
+    .tab.active {
+      color: #007aff;
+      border-bottom-color: #007aff;
+    }
+
+    /* 内容区域 */
+    .content {
+      flex: 1;
+      overflow: hidden;
+      position: relative;
+    }
+    .panel {
+      display: none;
+      height: 100%;
+      overflow: auto;
+    }
+    .panel.active { display: flex; flex-direction: column; }
+
+    /* Chat 面板 */
+    #chat-panel {
+      padding: 0;
+      background: #fff;
+    }
+    .chat-header {
+      padding: 16px 24px;
+      border-bottom: 1px solid #e0e0e0;
+      background: #fafafa;
+    }
+    .agent-selector {
+      padding: 8px 12px;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      font-size: 14px;
+    }
+    .chat-messages {
+      flex: 1;
+      padding: 24px;
+      overflow-y: auto;
+      background: #fff;
+    }
+    .message {
+      margin-bottom: 16px;
+      display: flex;
+      gap: 12px;
+    }
+    .message.user { justify-content: flex-end; }
+    .message-bubble {
+      max-width: 70%;
+      padding: 12px 16px;
+      border-radius: 16px;
+      line-height: 1.5;
+    }
+    .message.user .message-bubble {
+      background: #007aff;
+      color: white;
+    }
+    .message.assistant .message-bubble {
+      background: #f0f0f0;
+      color: #333;
+    }
+    .chat-input {
+      padding: 16px 24px;
+      border-top: 1px solid #e0e0e0;
+      background: #fafafa;
+      display: flex;
+      gap: 12px;
+    }
+    .chat-input input {
+      flex: 1;
+      padding: 12px 16px;
+      border: 1px solid #ddd;
+      border-radius: 20px;
+      font-size: 14px;
+      outline: none;
+    }
+    .chat-input input:focus {
+      border-color: #007aff;
+    }
+    .chat-input button {
+      padding: 12px 24px;
+      background: #007aff;
+      color: white;
+      border: none;
+      border-radius: 20px;
+      cursor: pointer;
+      font-weight: 500;
+    }
+    .chat-input button:hover {
+      background: #0051d5;
+    }
+    .chat-input button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+
+    /* Status 面板 */
+    #status-panel {
+      padding: 24px;
+      gap: 16px;
+    }
+    .status-card {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .status-card h3 {
+      margin-bottom: 12px;
+      color: #333;
+    }
+    .status-badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .status-badge.running {
+      background: #d4edda;
+      color: #155724;
+    }
+    .status-badge.stopped {
+      background: #f8d7da;
+      color: #721c24;
+    }
+
+    /* Logs 面板 */
+    #logs-panel {
+      padding: 24px;
+      gap: 16px;
+    }
+    .log-container {
+      background: #1e1e1e;
+      color: #d4d4d4;
+      padding: 16px;
+      border-radius: 8px;
+      font-family: 'SF Mono', Monaco, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      max-height: 500px;
+      overflow-y: auto;
+    }
+
+    /* Settings 面板 */
+    #settings-panel {
+      padding: 24px;
+    }
+
+    .btn {
+      padding: 10px 20px;
+      border: 1px solid #007aff;
+      background: white;
+      color: #007aff;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+    }
+    .btn:hover {
+      background: #007aff;
+      color: white;
+    }
+
+    /* 工具调用样式 */
+    .tool-call {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin: 8px 0;
+      color: white;
+      font-size: 13px;
+    }
+    .tool-call-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+    .tool-call-icon {
+      width: 20px;
+      height: 20px;
+      background: rgba(255,255,255,0.2);
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+    }
+    .tool-call-name {
+      font-family: 'SF Mono', Monaco, Consolas, monospace;
+    }
+    .tool-call-args {
+      background: rgba(0,0,0,0.2);
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-family: 'SF Mono', Monaco, Consolas, monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* 工具结果样式 */
+    .tool-result {
+      background: #f8f9fa;
+      border-left: 3px solid #28a745;
+      border-radius: 0 8px 8px 0;
+      padding: 12px 16px;
+      margin: 8px 0;
+      font-size: 13px;
+    }
+    .tool-result-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+      font-weight: 600;
+      color: #28a745;
+    }
+    .tool-result-content {
+      background: white;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-family: 'SF Mono', Monaco, Consolas, monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    /* 代码块样式 */
+    .code-block {
+      background: #1e1e1e;
+      border-radius: 8px;
+      margin: 8px 0;
+      overflow: hidden;
+    }
+    .code-block-header {
+      background: #2d2d2d;
+      padding: 8px 12px;
+      font-size: 12px;
+      color: #888;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .code-block-lang {
+      font-family: 'SF Mono', Monaco, Consolas, monospace;
+    }
+    .code-block-content {
+      padding: 12px 16px;
+      font-family: 'SF Mono', Monaco, Consolas, monospace;
+      font-size: 13px;
+      color: #d4d4d4;
+      white-space: pre-wrap;
+      overflow-x: auto;
+    }
+
+    /* 内联代码样式 */
+    .inline-code {
+      background: #e9ecef;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: 'SF Mono', Monaco, Consolas, monospace;
+      font-size: 0.9em;
+      color: #e83e8c;
+    }
+
+    /* 成功/错误标记 */
+    .status-success {
+      color: #28a745;
+    }
+    .status-error {
+      color: #dc3545;
+    }
+  </style>
+</head>
+<body>
+  <!-- 顶部 Tab 栏 -->
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('chat')">💬 Chat</div>
+    <div class="tab" onclick="switchTab('status')">📊 Status</div>
+    <div class="tab" onclick="switchTab('logs')">📝 Logs</div>
+    <div class="tab" onclick="switchTab('settings')">⚙️ Settings</div>
+  </div>
+
+  <!-- 内容区域 -->
+  <div class="content">
+    <!-- Chat 面板（默认） -->
+    <div id="chat-panel" class="panel active">
+      <div class="chat-header">
+        <select id="agent-selector" class="agent-selector">
+          <option value="">加载 Agent 列表...</option>
+        </select>
+      </div>
+      <div id="chat-messages" class="chat-messages">
+        <div class="message assistant">
+          <div class="message-bubble">
+            你好！我是 EverBot。选择一个 Agent 开始对话吧。
+          </div>
+        </div>
+      </div>
+      <div class="chat-input">
+        <input id="chat-input" type="text" placeholder="输入消息..." onkeypress="if(event.key==='Enter') sendMessage()" />
+        <button onclick="sendMessage()">发送</button>
+      </div>
+    </div>
+
+    <!-- Status 面板 -->
+    <div id="status-panel" class="panel">
+      <div class="status-card">
+        <h3>守护进程状态</h3>
+        <div id="daemon-status">加载中...</div>
+      </div>
+      <div class="status-card">
+        <h3>Agents</h3>
+        <div id="agents-list">加载中...</div>
+      </div>
+      <div class="status-card">
+        <h3>操作</h3>
+        <button class="btn" onclick="triggerHeartbeat()">手动触发心跳</button>
+      </div>
+    </div>
+
+    <!-- Logs 面板 -->
+    <div id="logs-panel" class="panel">
+      <div class="status-card">
+        <h3>心跳日志（实时）</h3>
+        <div id="heartbeat-log" class="log-container">连接中...</div>
+      </div>
+    </div>
+
+    <!-- Settings 面板 -->
+    <div id="settings-panel" class="panel">
+      <div class="status-card">
+        <h3>配置</h3>
+        <p>配置管理功能开发中...</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentAgent = null;
+    let ws = null;
+
+    // Tab 切换
+    function switchTab(tab) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+      event.target.classList.add('active');
+      document.getElementById(tab + '-panel').classList.add('active');
+
+      if (tab === 'status') loadStatus();
+      if (tab === 'logs') connectLogStream();
+    }
+
+    // 加载 Agent 列表
+    async function loadAgents() {
+      const res = await fetch('/api/agents');
+      const agents = await res.json();
+      const selector = document.getElementById('agent-selector');
+      selector.innerHTML = agents.map(a =>
+        `<option value="${a}">${a}</option>`
+      ).join('');
+      if (agents.length > 0) {
+        currentAgent = agents[0];
+        selector.value = currentAgent;
+        connectWebSocket(currentAgent);
+      }
+    }
+
+    // 切换 Agent
+    document.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('agent-selector').addEventListener('change', (e) => {
+        currentAgent = e.target.value;
+        document.getElementById('chat-messages').innerHTML = '';
+        if (ws) ws.close();
+        connectWebSocket(currentAgent);
+      });
+    });
+
+    // WebSocket 连接（实时对话）
+    function connectWebSocket(agent) {
+      if (ws) ws.close();
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${protocol}//${location.host}/ws/chat/${encodeURIComponent(agent)}`);
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === 'message') {
+          addMessage(data.role, data.content);
+        } else if (data.type === 'error') {
+          addMessage('assistant', '错误: ' + data.content);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+      };
+    }
+
+    // 发送消息
+    function sendMessage() {
+      const input = document.getElementById('chat-input');
+      const message = input.value.trim();
+      if (!message || !currentAgent) return;
+
+      addMessage('user', message);
+      input.value = '';
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ message }));
+      }
+    }
+
+    // 添加消息到界面
+    function addMessage(role, content) {
+      const messagesDiv = document.getElementById('chat-messages');
+      const messageDiv = document.createElement('div');
+      messageDiv.className = `message ${role}`;
+      messageDiv.innerHTML = `<div class="message-bubble">${formatMessage(content)}</div>`;
+      messagesDiv.appendChild(messageDiv);
+      messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // 格式化消息内容（工具调用、代码块等）
+    function formatMessage(content) {
+      if (!content) return '';
+      
+      // 先转义 HTML
+      let html = escapeHtml(content);
+      
+      // 匹配代码块 ```lang\ncode\n```
+      html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (match, lang, code) => {
+        const langLabel = lang || 'code';
+        return `<div class="code-block">
+          <div class="code-block-header">
+            <span class="code-block-lang">${escapeHtml(langLabel)}</span>
+          </div>
+          <div class="code-block-content">${escapeHtml(code.trim())}</div>
+        </div>`;
+      });
+      
+      // 匹配工具调用模式：```bash/python command ``` 运行结果：```...```
+      // 或者类似 "我来看看本地工作目录下有哪些文件：```bash ls...```"
+      const toolCallPattern = /```(bash|python|shell)\s*([\s\S]*?)```\s*(?:运行结果[：:]\s*```(?:\w*\n)?([\s\S]*?)```)?/g;
+      html = html.replace(toolCallPattern, (match, lang, command, output) => {
+        const icon = lang === 'python' ? '🐍' : '💻';
+        const toolName = lang === 'python' ? 'Python' : 'Bash';
+        let result = `<div class="tool-call">
+          <div class="tool-call-header">
+            <div class="tool-call-icon">${icon}</div>
+            <span class="tool-call-name">${toolName}</span>
+          </div>
+          <div class="tool-call-args">${escapeHtml(command.trim())}</div>
+        </div>`;
+        
+        if (output) {
+          result += `<div class="tool-result">
+            <div class="tool-result-header">
+              <span>✓</span>
+              <span>运行结果</span>
+            </div>
+            <div class="tool-result-content">${escapeHtml(output.trim())}</div>
+          </div>`;
+        }
+        return result;
+      });
+      
+      // 匹配内联代码 `code`
+      html = html.replace(/`([^`]+)`/g, '<span class="inline-code">$1</span>');
+      
+      // 匹配结果标记 ✅ 或 ❌
+      html = html.replace(/✅/g, '<span class="status-success">✅</span>');
+      html = html.replace(/❌/g, '<span class="status-error">❌</span>');
+      
+      // 保留换行
+      html = html.replace(/\n/g, '<br>');
+      
+      return html;
+    }
+
+    // 加载状态
+    async function loadStatus() {
+      const res = await fetch('/api/status');
+      const status = await res.json();
+
+      const running = status.snapshot?.status === 'running';
+      document.getElementById('daemon-status').innerHTML = `
+        <span class="status-badge ${running ? 'running' : 'stopped'}">
+          ${running ? '运行中' : '已停止'}
+        </span>
+        ${status.pid ? `<span style="margin-left:12px; color:#666;">PID: ${status.pid}</span>` : ''}
+      `;
+
+      const agents = status.snapshot?.agents || [];
+      document.getElementById('agents-list').innerHTML = agents.length > 0
+        ? agents.map(a => `<div style="padding:4px 0;">• ${a}</div>`).join('')
+        : '<div style="color:#999;">无 Agent</div>';
+    }
+
+    // 连接日志流
+    function connectLogStream() {
+      const logDiv = document.getElementById('heartbeat-log');
+      logDiv.innerHTML = '';
+      const es = new EventSource('/api/logs/heartbeat/stream');
+      es.onmessage = (e) => {
+        logDiv.textContent += e.data + "\\n";
+        logDiv.scrollTop = logDiv.scrollHeight;
+      };
+    }
+
+    // 触发心跳
+    async function triggerHeartbeat() {
+      const agent = prompt('输入 Agent 名称:');
+      if (!agent) return;
+      await fetch(`/api/agents/${encodeURIComponent(agent)}/heartbeat?force=true`, {
+        method: 'POST'
+      });
+      alert('心跳已触发');
+    }
+
+    // 初始化
+    loadAgents();
+  </script>
+</body>
+</html>"""
+
+
+# ============================================================================
+# API 接口
+# ============================================================================
+
+@app.get("/api/agents")
+async def api_list_agents() -> list[str]:
+    """列出所有 Agent"""
+    user_data = UserDataManager()
+    return user_data.list_agents()
+
+
+@app.get("/api/status")
+async def api_status() -> Dict[str, Any]:
+    """获取状态"""
+    return get_local_status(UserDataManager())
+
+
+@app.post("/api/agents/{agent_name}/heartbeat")
+async def api_trigger_heartbeat(agent_name: str, force: bool = False) -> JSONResponse:
+    """触发心跳"""
+    task_id = f"{agent_name}:{asyncio.get_event_loop().time()}"
+    _tasks[task_id] = "scheduled"
+
+    async def _run() -> None:
+        try:
+            _tasks[task_id] = "running"
+            await run_heartbeat_once(agent_name, force=force)
+            _tasks[task_id] = "done"
+        except Exception as e:
+            _tasks[task_id] = f"error: {e}"
+
+    asyncio.create_task(_run())
+    return JSONResponse({"scheduled": True, "task_id": task_id})
+
+
+@app.get("/api/logs/heartbeat/stream")
+async def api_stream_heartbeat_log() -> StreamingResponse:
+    """日志流（SSE）"""
+    user_data = UserDataManager()
+    log_path = user_data.heartbeat_log_file
+
+    async def _events():
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        f = open(log_path, "a+", encoding="utf-8")
+        try:
+            f.seek(0, 2)
+            while True:
+                line = f.readline()
+                if not line:
+                    await asyncio.sleep(0.5)
+                    continue
+                yield f"data: {line.rstrip()}\n\n"
+        finally:
+            try:
+                f.close()
+            except Exception:
+                pass
+
+    return StreamingResponse(_events(), media_type="text/event-stream")
+
+
+# ============================================================================
+# WebSocket 接口（实时 Chat）
+# ============================================================================
+
+@app.websocket("/ws/chat/{agent_name}")
+async def websocket_chat(websocket: WebSocket, agent_name: str):
+    """
+    WebSocket Chat 接口
+
+    实时对话，支持流式输出
+    """
+    await websocket.accept()
+
+    try:
+        # 创建 Agent
+        print(f"[WebSocket] Connecting to agent: {agent_name}")
+        user_data = UserDataManager()
+        agent_dir = user_data.get_agent_dir(agent_name)
+
+        if not agent_dir.exists():
+            print(f"[WebSocket] Agent directory not found: {agent_dir}")
+            await websocket.send_json({
+                "type": "error",
+                "content": f"Agent {agent_name} 不存在"
+            })
+            await websocket.close()
+            return
+
+        try:
+            # IMPORTANT: Disable EXPLORE_BLOCK_V2 flag BEFORE creating agent
+            flags.set_flag(flags.EXPLORE_BLOCK_V2, False)
+            print(f"[WebSocket] Flags configured (EXPLORE_BLOCK_V2=False)")
+
+            print(f"[WebSocket] Creating agent from: {agent_dir}")
+            agent = await create_agent(agent_name, agent_dir)
+            print(f"[WebSocket] Agent created successfully: {agent.name}")
+
+            # DEBUG: Check if workspace_instructions is set in context
+            try:
+                context = agent.executor.context
+                ws_instr = context.get_var_value("workspace_instructions")
+                model_var = context.get_var_value("model_name")
+                print(f"[DEBUG] workspace_instructions length: {len(ws_instr) if ws_instr else 0}")
+                print(f"[DEBUG] model_name variable: {model_var}")
+                if ws_instr:
+                    print(f"[DEBUG] workspace_instructions preview: {ws_instr[:200]}...")
+                else:
+                    print(f"[WARNING] workspace_instructions is EMPTY!")
+            except Exception as e:
+                print(f"[DEBUG] Failed to check context: {e}")
+        except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
+            print(f"[WebSocket] Agent initialization error:\n{error_detail}")
+            await websocket.send_json({
+                "type": "error",
+                "content": f"Agent 初始化失败: {str(e)}"
+            })
+            await websocket.close()
+            return
+
+        # 欢迎消息
+        print(f"[WebSocket] Sending welcome message")
+        await websocket.send_json({
+            "type": "message",
+            "role": "assistant",
+            "content": f"已连接到 {agent_name}，开始对话吧！"
+        })
+        print(f"[WebSocket] Ready to receive messages")
+
+        # 接收消息循环
+        while True:
+            data = await websocket.receive_json()
+            message = data.get("message", "").strip()
+
+            if not message:
+                continue
+
+            # 不需要回显用户消息（前端已经显示）
+
+            # 执行 Agent
+            response = ""
+            try:
+                print(f"[Chat] Agent={agent_name}, Message={message[:50]}")
+
+                
+                # FIX: Explicitly pass system_prompt since continue_exploration doesn't parse agent.dph
+                # The $workspace_instructions in agent.dph is never evaluated because continue_exploration
+                # creates a new ExploreBlock without calling parse_block_content on the DPH file.
+                ctx = agent.executor.context
+                workspace_instructions = ctx.get_var_value("workspace_instructions") or ""
+                print(f"[FIX] Passing system_prompt to continue_chat: {len(workspace_instructions)} chars")
+                
+                async for event in agent.continue_chat(message=message, stream_mode="delta", system_prompt=workspace_instructions):
+                    if "_progress" in event:
+                        for progress in event["_progress"]:
+                            if progress.get("stage") == "llm":
+                                answer = progress.get("answer", "")
+                                if answer:
+                                    response = answer
+                                    print(f"[Chat] Got answer: {answer[:100]}")
+
+                # 发送完整响应
+                print(f"[Chat] Sending response: {response[:100]}")
+                await websocket.send_json({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": response if response else "（无响应）"
+                })
+
+            except Exception as e:
+                import traceback
+                error_detail = traceback.format_exc()
+                print(f"[Chat] Agent execution error:\n{error_detail}")
+                await websocket.send_json({
+                    "type": "error",
+                    "content": f"执行失败: {str(e)}"
+                })
+
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"WebSocket error:\n{error_detail}")
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass

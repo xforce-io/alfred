@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+
+{% block content %}
+<!-- 顶部 Tab 栏 -->
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('chat')">💬 Chat</div>
+  <div class="tab" onclick="switchTab('status')">📊 Status</div>
+  <div class="tab" onclick="switchTab('logs')">📝 Logs</div>
+  <div class="tab" onclick="switchTab('settings')">⚙️ Settings</div>
+</div>
+
+<!-- 内容区域 -->
+<div class="content">
+  <!-- Chat 面板（默认） -->
+  <div id="chat-panel" class="panel active">
+    <div class="chat-header">
+      <select id="agent-selector" class="agent-selector">
+        <option value="">加载 Agent 列表...</option>
+      </select>
+      <select id="session-selector" class="agent-selector" title="会话">
+        <option value="">加载会话...</option>
+      </select>
+      <button id="new-chat-btn" type="button" class="new-chat-btn" onclick="newConversation(event)" title="新建对话">+
+        新对话</button>
+      <button id="clear-history-btn" type="button" class="new-chat-btn" onclick="clearHistory()"
+        title="清除当前会话的聊天记录">清除历史</button>
+      <div class="chat-header-spacer"></div>
+      <button id="trace-btn" type="button" class="trace-btn" onclick="openTraceModal()"
+        title="查看 Context Trace、Timeline 与 Trajectory">📊 Trace</button>
+    </div>
+    <div id="chat-messages" class="chat-messages">
+      <div class="message assistant">
+        <div class="message-bubble">
+          你好！我是 EverBot。选择一个 Agent 开始对话吧。
+        </div>
+      </div>
+    </div>
+    <div id="chat-status-bar"
+      style="padding: 4px 24px; font-size: 12px; color: #888; background: #fff; min-height: 20px;"></div>
+    <button id="chat-latest" type="button" class="chat-latest-btn" onclick="scrollToLatest()" title="回到最新">↓</button>
+    <div class="chat-input">
+      <input id="chat-input" type="text" placeholder="输入消息..." />
+      <button id="chat-send" type="button" onclick="sendMessage()">发送</button>
+      <button id="chat-stop" type="button" onclick="stopMessage()" style="display:none; background:#ff3b30;">停止</button>
+    </div>
+  </div>
+
+  <!-- Status 面板 -->
+  <div id="status-panel" class="panel">
+    <div class="status-card">
+      <h3>守护进程状态</h3>
+      <div id="daemon-status">加载中...</div>
+    </div>
+    <div class="status-card">
+      <h3>Agents</h3>
+      <div id="agents-list">加载中...</div>
+    </div>
+    <div class="status-card">
+      <h3>操作</h3>
+      <button class="btn" type="button" onclick="triggerHeartbeat()">手动触发心跳</button>
+    </div>
+  </div>
+
+  <!-- Logs 面板 -->
+  <div id="logs-panel" class="panel">
+    <div class="status-card">
+      <h3>心跳事件</h3>
+      <div id="heartbeat-events" class="events-container"></div>
+    </div>
+  </div>
+
+  <!-- Settings 面板 -->
+  <div id="settings-panel" class="panel">
+    <div class="status-card">
+      <h3>Telegram Channel</h3>
+      <form id="telegram-settings-form" onsubmit="event.preventDefault(); saveTelegramSettings();">
+        <div class="settings-field">
+          <label class="settings-label">
+            <input type="checkbox" id="tg-enabled" />
+            启用 Telegram Channel
+          </label>
+        </div>
+        <div class="settings-field">
+          <label class="settings-label">Bot Token</label>
+          <input type="text" id="tg-bot-token" class="settings-input" readonly disabled placeholder="通过环境变量或配置文件设置" />
+          <div class="settings-hint">Bot Token 不可通过 Web 修改，请使用环境变量或编辑 config.yaml</div>
+        </div>
+        <div class="settings-field">
+          <label class="settings-label">Default Agent</label>
+          <select id="tg-default-agent" class="settings-input"></select>
+        </div>
+        <div class="settings-field">
+          <label class="settings-label">Allowed Chat IDs</label>
+          <input type="text" id="tg-allowed-chat-ids" class="settings-input" placeholder="逗号分隔，如 12345,67890" />
+          <div class="settings-hint">允许使用 Bot 的 Telegram Chat ID，逗号分隔</div>
+        </div>
+        <div class="settings-actions">
+          <button type="submit" class="btn">保存</button>
+          <span id="tg-save-status" class="settings-status"></span>
+        </div>
+      </form>
+    </div>
+    <div class="status-card">
+      <h3>Skills</h3>
+      <div class="settings-hint" style="margin-bottom: 12px;">管理已安装的技能，切换启用/禁用状态。禁用的技能不会出现在 Agent prompt 中。变更在新建对话后生效。</div>
+      <div id="skills-list" class="skills-list">加载中...</div>
+    </div>
+    <div class="status-card">
+      <h3>危险操作</h3>
+      <div class="settings-field">
+        <div class="settings-hint" style="margin-bottom: 8px;">重置将删除当前 Agent 的所有会话、临时文件与缓存，不可恢复。</div>
+        <button id="reset-env-btn" type="button" class="btn" style="background: #e74c3c; color: #fff;"
+          onclick="resetEnvironment()">重置 Agent 环境</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="trace-modal-overlay" class="trace-modal-overlay" onclick="closeTraceModal(event)">
+  <div class="trace-modal" onclick="event.stopPropagation()">
+    <div class="trace-modal-header">
+      <div class="trace-tabs">
+        <button id="trace-tab-trace" class="trace-tab active" onclick="switchTraceTab('trace')">Context Trace</button>
+        <button id="trace-tab-trajectory" class="trace-tab" onclick="switchTraceTab('trajectory')">Timeline</button>
+        <button id="trace-tab-dolphin" class="trace-tab" onclick="switchTraceTab('dolphin')">Trajectory</button>
+      </div>
+      <div class="trace-modal-actions">
+        <button class="trace-action-btn" type="button" onclick="downloadTraceJSON('trace')">下载 Context Trace</button>
+        <button class="trace-action-btn" type="button" onclick="downloadTraceJSON('trajectory')">下载 Timeline</button>
+        <button class="trace-action-btn" type="button" onclick="downloadTraceJSON('dolphin')">下载 Trajectory</button>
+        <button class="trace-close-btn" type="button" onclick="closeTraceModal()">关闭</button>
+      </div>
+    </div>
+    <div class="trace-modal-body">
+      <div id="trace-content" class="trace-content active"></div>
+      <div id="trajectory-content" class="trace-content"></div>
+      <div id="dolphin-content" class="trace-content"></div>
+    </div>
+  </div>
+</div>
+{% endblock %}
