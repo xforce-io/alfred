@@ -12,13 +12,14 @@ import time
 import uuid
 import re
 from pathlib import Path
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager, contextmanager
 import logging
 
 from ...infra.dolphin_state_adapter import DolphinStateAdapter
+from .compressor import SessionCompressor
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,7 @@ class SessionPersistence:
         model_name: str = "gpt-4",
         timeline: Optional[list] = None,
         context_trace: Optional[Dict[str, Any]] = None,
+        trailing_messages: Optional[List[Dict[str, Any]]] = None,
     ):
         """
         保存 Session 到文件
@@ -188,8 +190,11 @@ class SessionPersistence:
         """
         try:
             context = agent.executor.context
-            exported_state = DolphinStateAdapter.export_session_state(agent)
-            serializable_history = exported_state.get("history_messages", [])
+            portable = agent.snapshot.export_portable_session()
+            serializable_history = portable.get("history_messages", [])
+            if trailing_messages:
+                serializable_history = list(serializable_history) + list(trailing_messages)
+            exported_variables = portable.get("variables", {})
             previous = await self.load(session_id)
             next_revision = ((previous.revision if previous else 0) or 0) + 1
             created_at = (
@@ -205,11 +210,7 @@ class SessionPersistence:
                 session_type=SessionManager.infer_session_type(session_id),
                 history_messages=serializable_history,
                 mailbox=(previous.mailbox if previous and isinstance(previous.mailbox, list) else []),
-                variables={
-                    "workspace_instructions": context.get_var_value("workspace_instructions"),
-                    "model_name": context.get_var_value("model_name"),
-                    "current_time": context.get_var_value("current_time"),
-                },
+                variables=exported_variables,
                 created_at=created_at,
                 updated_at=datetime.now().isoformat(),
                 state=(previous.state if previous and isinstance(previous.state, str) else "active"),
@@ -218,6 +219,16 @@ class SessionPersistence:
                 context_trace=context_trace or {},
                 revision=next_revision,
             )
+
+            # Compress history for primary sessions before persisting.
+            if data.session_type == "primary":
+                try:
+                    compressor = SessionCompressor(agent.executor.context)
+                    compressed, new_history = await compressor.maybe_compress(data.history_messages)
+                    if compressed:
+                        data.history_messages = new_history
+                except Exception:
+                    logger.warning("History compression failed; saving uncompressed", exc_info=True)
 
             session_path = self._get_session_path(session_id)
             serialized = self._serialize_session(data.to_dict())
@@ -417,20 +428,11 @@ class SessionPersistence:
             session_data: Session 数据
         """
         try:
-            context = agent.executor.context
-
-            # 1. 恢复变量（跳过配置派生变量，它们应从磁盘配置文件重新构建）
-            _NON_RESTORABLE_VARS = {"workspace_instructions"}
-            for name, value in session_data.variables.items():
-                if name in _NON_RESTORABLE_VARS:
-                    continue
-                if value is not None:
-                    context.set_variable(name, value)
-
-            # 2. 恢复历史消息
-            if session_data.history_messages:
+            # 1. Compact history (SDK has no max_messages truncation)
+            compacted_history = session_data.history_messages or []
+            if compacted_history:
                 compacted_history = DolphinStateAdapter.compact_session_state(
-                    session_data.history_messages,
+                    compacted_history,
                     max_messages=self.MAX_RESTORED_HISTORY_MESSAGES,
                 )
                 if len(compacted_history) < len(session_data.history_messages):
@@ -440,28 +442,26 @@ class SessionPersistence:
                         self.MAX_RESTORED_HISTORY_MESSAGES,
                         session_data.session_id,
                     )
-                issues = DolphinStateAdapter.validate_session_state({"history_messages": compacted_history})
-                if issues:
-                    logger.warning(
-                        "Detected %s history sequence issues before restore for session_id=%s. "
-                        "Using compacted suffix to preserve protocol validity.",
-                        len(issues),
-                        session_data.session_id,
-                    )
 
-                DolphinStateAdapter.import_session_state(
-                    agent,
-                    {"history_messages": compacted_history},
-                    max_messages=None,
-                )
+            # 2. Build portable state, filtering non-restorable variables
+            _NON_RESTORABLE_VARS = {"workspace_instructions"}
+            restore_variables = {
+                k: v for k, v in (session_data.variables or {}).items()
+                if k not in _NON_RESTORABLE_VARS and v is not None
+            }
 
-            # 3. 设置 session ID as a variable
-            context.set_variable("session_id", session_data.session_id)
-            if hasattr(context, "set_session_id"):
-                context.set_session_id(session_data.session_id)
+            portable_state = {
+                "schema_version": "portable_session.v1",
+                "session_id": session_data.session_id,
+                "history_messages": compacted_history,
+                "variables": restore_variables,
+            }
+
+            # 3. Import via SDK (handles history, variables, session_id, and repair)
+            agent.snapshot.import_portable_session(portable_state, repair=True)
 
             logger.info(f"Session 已恢复: {session_data.session_id}, "
-                       f"历史消息: {len(session_data.history_messages)} 条")
+                       f"历史消息: {len(compacted_history)} 条")
 
         except Exception as e:
             logger.error(f"恢复 Session 失败: {e}")
@@ -495,6 +495,13 @@ class SessionManager:
             return "sub"
         if sid.startswith("web_session_"):
             return "primary"
+        # Non-web channel sessions (tg_session_, discord_session_, etc.)
+        from ..channel.session_resolver import ChannelSessionResolver
+        for channel_type, prefix in ChannelSessionResolver._PREFIX_MAP.items():
+            if channel_type == "web":
+                continue
+            if sid.startswith(prefix):
+                return "channel"
         return "primary"
 
     @staticmethod
@@ -936,6 +943,7 @@ class SessionManager:
         model_name: str = "gpt-4",
         *,
         lock_already_held: bool = False,
+        trailing_messages: Optional[List[Dict[str, Any]]] = None,
     ):
         """保存 Session.
 
@@ -954,14 +962,30 @@ class SessionManager:
                 model_name,
                 timeline=timeline,
                 context_trace=context_trace,
+                trailing_messages=trailing_messages,
             )
             logger.debug("Session persisted.")
             return
 
         context = agent.executor.context
-        exported_state = DolphinStateAdapter.export_session_state(agent)
-        serializable_history = exported_state.get("history_messages", [])
+        portable = agent.snapshot.export_portable_session()
+        serializable_history = portable.get("history_messages", [])
+        exported_variables = portable.get("variables", {})
         created_at_hint = context.get_var_value("session_created_at")
+
+        # Compress history for primary sessions before entering the lock.
+        if SessionManager.infer_session_type(session_id) == "primary":
+            try:
+                compressor = SessionCompressor(context)
+                compressed, new_history = await compressor.maybe_compress(serializable_history)
+                if compressed:
+                    serializable_history = new_history
+            except Exception:
+                logger.warning("History compression failed; saving uncompressed", exc_info=True)
+
+        # Append trailing messages (e.g. failed turn context) to history
+        if trailing_messages:
+            serializable_history = list(serializable_history) + list(trailing_messages)
 
         def _mutator(session_data: SessionData) -> None:
             session_data.session_id = session_id
@@ -973,11 +997,7 @@ class SessionManager:
             session_data.history_messages = serializable_history
             if not isinstance(session_data.mailbox, list):
                 session_data.mailbox = []
-            session_data.variables = {
-                "workspace_instructions": context.get_var_value("workspace_instructions"),
-                "model_name": context.get_var_value("model_name"),
-                "current_time": context.get_var_value("current_time"),
-            }
+            session_data.variables = exported_variables
             if not session_data.created_at:
                 session_data.created_at = created_at_hint or datetime.now().isoformat()
             session_data.timeline = timeline or []

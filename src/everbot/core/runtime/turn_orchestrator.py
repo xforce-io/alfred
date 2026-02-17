@@ -77,6 +77,8 @@ class TurnPolicy:
         "incomplete chunked read",
         "peer closed connection",
         "connecterror",
+        "connection error",
+        "apiconnectionerror",
         "timeout",
         "remote disconnected",
         "connection broken",
@@ -340,7 +342,7 @@ class TurnOrchestrator:
                 elif stage == "skill":
                     if pid and sent_progress.get(pid) == status:
                         continue
-                    skill_info = progress.get("skill_info", {})
+                    skill_info = progress.get("skill_info") or {}
                     s_name = skill_info.get("name") or progress.get("tool_name") or ""
                     s_args = skill_info.get("args") or progress.get("args") or ""
                     s_output = progress.get("answer") or progress.get("block_answer") or progress.get("output") or ""

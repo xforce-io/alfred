@@ -36,12 +36,12 @@ async def test_session_save_and_restore_workflow():
         # Mock DolphinAgent and Context
         # We use a real AgentFactory but we might need to mock the LLM if we were doing a full end-to-end.
         # Here we focus on the state restoration logic between everbot components and Dolphin SDK.
-        
+
         mock_agent = MagicMock()
         mock_agent.name = agent_name
         mock_context = MagicMock()
         mock_agent.executor.context = mock_context
-        
+
         # Set up some initial state
         mock_context.get_history_messages.return_value = [
             {"role": "user", "content": "hello"},
@@ -53,6 +53,19 @@ async def test_session_save_and_restore_workflow():
             "current_time": "2024-01-01",
             "session_created_at": "2024-01-01T00:00:00"
         }.get(x)
+        mock_agent.snapshot.export_portable_session.return_value = {
+            "schema_version": "portable_session.v1",
+            "session_id": None,
+            "history_messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi there"},
+            ],
+            "variables": {
+                "workspace_instructions": "Be helpful.",
+                "model_name": "gpt-4",
+                "current_time": "2024-01-01",
+            },
+        }
         
         # 1. Save session
         await session_manager.save_session(session_id, mock_agent, "gpt-4")
@@ -68,13 +81,18 @@ async def test_session_save_and_restore_workflow():
         new_mock_agent = MagicMock()
         new_mock_context = MagicMock()
         new_mock_agent.executor.context = new_mock_context
-        
+
         await session_manager.restore_to_agent(new_mock_agent, loaded_data)
-        
-        # 4. Verify restoration calls
-        restored_var_names = [call.args[0] for call in new_mock_context.set_variable.call_args_list]
-        assert "workspace_instructions" not in restored_var_names
-        new_mock_context.set_variable.assert_any_call("model_name", "gpt-4")
-        new_mock_context.set_variable.assert_any_call("current_time", "2024-01-01")
-        assert new_mock_context.set_history_bucket.called
-        new_mock_context.set_variable.assert_any_call("session_id", session_id)
+
+        # 4. Verify restoration calls — now uses agent.snapshot.import_portable_session
+        new_mock_agent.snapshot.import_portable_session.assert_called_once()
+        call_args = new_mock_agent.snapshot.import_portable_session.call_args
+        portable_state = call_args[0][0]
+        assert portable_state["schema_version"] == "portable_session.v1"
+        assert portable_state["session_id"] == session_id
+        assert len(portable_state["history_messages"]) == 2
+        # workspace_instructions should be filtered out before import
+        assert "workspace_instructions" not in portable_state["variables"]
+        assert portable_state["variables"]["model_name"] == "gpt-4"
+        assert portable_state["variables"]["current_time"] == "2024-01-01"
+        assert call_args[1]["repair"] is True

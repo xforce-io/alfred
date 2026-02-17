@@ -24,6 +24,19 @@ def _build_mock_agent(trace_payload):
         "session_created_at": "2026-02-08T00:00:00",
     }.get(key)
     mock_agent.executor.context = mock_context
+    mock_agent.snapshot.export_portable_session.return_value = {
+        "schema_version": "portable_session.v1",
+        "session_id": None,
+        "history_messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ],
+        "variables": {
+            "workspace_instructions": "Be helpful.",
+            "model_name": "gpt-4",
+            "current_time": "2026-02-08T00:00:00",
+        },
+    }
     return mock_agent
 
 

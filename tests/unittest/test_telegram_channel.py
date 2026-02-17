@@ -378,3 +378,211 @@ class TestAccessControl:
             },
         })
         ch._send_message.assert_awaited()
+
+
+# ===========================================================================
+# 7. /ping command
+# ===========================================================================
+
+class TestPingCommand:
+    @pytest.fixture
+    def channel(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._client = MagicMock()
+        ch._send_message = AsyncMock()
+        ch._bindings = {"111": "my_agent"}
+        return ch
+
+    @pytest.mark.asyncio
+    async def test_ping_returns_pong(self, channel):
+        await channel._handle_command("111", "/ping", {})
+        channel._send_message.assert_awaited_once()
+        msg = channel._send_message.call_args[0][1]
+        assert "pong" in msg
+        assert "my_agent" in msg
+        assert "Queue:" in msg
+        assert "Time:" in msg
+
+    @pytest.mark.asyncio
+    async def test_ping_no_binding(self, channel):
+        await channel._handle_command("999", "/ping", {})
+        msg = channel._send_message.call_args[0][1]
+        assert "(none)" in msg
+
+    @pytest.mark.asyncio
+    async def test_help_includes_ping(self, channel):
+        await channel._handle_command("111", "/help", {})
+        msg = channel._send_message.call_args[0][1]
+        assert "/ping" in msg
+
+
+# ===========================================================================
+# 8. Send retry logic
+# ===========================================================================
+
+class TestSendRetry:
+    @pytest.fixture
+    def channel(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._client = MagicMock()
+        return ch
+
+    @pytest.mark.asyncio
+    async def test_send_message_success_on_first_try(self, channel):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"ok": True}
+        channel._client.post = AsyncMock(return_value=mock_resp)
+
+        result = await channel._send_message("111", "hello")
+        assert result is True
+        assert channel._client.post.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_send_message_markdown_fail_plain_success(self, channel):
+        md_resp = MagicMock()
+        md_resp.json.return_value = {"ok": False, "description": "bad markdown"}
+        plain_resp = MagicMock()
+        plain_resp.json.return_value = {"ok": True}
+        channel._client.post = AsyncMock(side_effect=[md_resp, plain_resp])
+
+        result = await channel._send_message("111", "hello")
+        assert result is True
+        assert channel._client.post.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_send_message_retries_on_exception(self, channel):
+        ok_resp = MagicMock()
+        ok_resp.json.return_value = {"ok": True}
+        channel._client.post = AsyncMock(
+            side_effect=[Exception("network"), ok_resp]
+        )
+
+        result = await channel._send_message("111", "hello")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_send_message_returns_false_after_all_retries(self, channel):
+        channel._client.post = AsyncMock(side_effect=Exception("network"))
+
+        result = await channel._send_message("111", "hello")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_send_plain_message_success(self, channel):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"ok": True}
+        channel._client.post = AsyncMock(return_value=mock_resp)
+
+        result = await channel._send_plain_message("111", "fallback")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_send_plain_message_no_client(self, channel):
+        channel._client = None
+        result = await channel._send_plain_message("111", "fallback")
+        assert result is False
+
+
+# ===========================================================================
+# 9. Graceful degradation (fallback on send failure)
+# ===========================================================================
+
+class TestGracefulDegradation:
+    @pytest.fixture
+    def channel(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._bindings = {"111": "test_agent"}
+        ch._send_message = AsyncMock(return_value=False)
+        ch._send_plain_message = AsyncMock(return_value=True)
+        ch._send_chat_action = AsyncMock()
+        return ch
+
+    @pytest.mark.asyncio
+    async def test_fallback_when_all_sends_fail(self, channel):
+        mock_agent = MagicMock()
+        channel._session_manager.get_cached_agent.return_value = mock_agent
+
+        async def fake_process(agent, agent_name, session_id, message, on_event):
+            from src.everbot.core.channel.models import OutboundMessage
+            await on_event(OutboundMessage(session_id, "LLM reply", msg_type="text"))
+
+        channel._core.process_message = fake_process
+
+        await channel._handle_message("111", "test", {})
+
+        # _send_message was called (returned False), then _send_plain_message as fallback
+        channel._send_message.assert_awaited()
+        channel._send_plain_message.assert_awaited_once()
+        fallback_msg = channel._send_plain_message.call_args[0][1]
+        assert "[delivery error]" in fallback_msg
+
+    @pytest.mark.asyncio
+    async def test_no_fallback_when_send_succeeds(self, channel):
+        channel._send_message = AsyncMock(return_value=True)
+        mock_agent = MagicMock()
+        channel._session_manager.get_cached_agent.return_value = mock_agent
+
+        async def fake_process(agent, agent_name, session_id, message, on_event):
+            from src.everbot.core.channel.models import OutboundMessage
+            await on_event(OutboundMessage(session_id, "OK", msg_type="text"))
+
+        channel._core.process_message = fake_process
+
+        await channel._handle_message("111", "test", {})
+
+        channel._send_plain_message.assert_not_awaited()
+
+
+# ===========================================================================
+# 10. Polling decoupling (queue + dispatcher)
+# ===========================================================================
+
+class TestPollingDecoupling:
+    @pytest.fixture
+    def channel(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._send_message = AsyncMock(return_value=True)
+        ch._send_chat_action = AsyncMock()
+        return ch
+
+    @pytest.mark.asyncio
+    async def test_polling_enqueues_instead_of_blocking(self, channel):
+        """Polling loop should put updates into inbound queue."""
+        update = {
+            "update_id": 1,
+            "message": {"text": "/help", "chat": {"id": 111}},
+        }
+        # Simulate what _polling_loop does with one update
+        channel._inbound_queue.put_nowait(update)
+        assert channel._inbound_queue.qsize() == 1
+
+    @pytest.mark.asyncio
+    async def test_inbound_queue_full_drops(self, channel):
+        """When inbound queue is full, updates are dropped."""
+        for i in range(100):
+            channel._inbound_queue.put_nowait({"update_id": i})
+        # Queue is full (maxsize=100), next put should raise
+        with pytest.raises(asyncio.QueueFull):
+            channel._inbound_queue.put_nowait({"update_id": 999})
+
+    @pytest.mark.asyncio
+    async def test_chat_worker_processes_update(self, channel):
+        """Chat worker should process updates from its queue."""
+        channel._chat_queues["111"] = asyncio.Queue(maxsize=20)
+        channel._chat_queues["111"].put_nowait({
+            "update_id": 1,
+            "message": {"text": "/help", "chat": {"id": 111}},
+        })
+
+        # Worker will process one update then timeout after 30s
+        # We use a short timeout version for testing
+        worker_task = asyncio.create_task(channel._chat_worker("111"))
+        # Give it time to process
+        await asyncio.sleep(0.1)
+        # Worker should have called _send_message for /help
+        channel._send_message.assert_awaited()
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass

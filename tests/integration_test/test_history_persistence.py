@@ -6,6 +6,7 @@ from pathlib import Path
 from dolphin.core.context.context import Context
 from dolphin.core.common.enums import Messages, MessageRole
 from dolphin.core.common.constants import KEY_HISTORY
+from dolphin.sdk.agent.dolphin_agent_snapshot import DolphinAgentSnapshot
 from src.everbot.core.session.session import SessionManager, SessionData
 
 @pytest.mark.asyncio
@@ -43,7 +44,11 @@ async def test_repro_history_wipe_condition():
             def __init__(self, ctx):
                 self.executor = type('obj', (object,), {'context': ctx})
                 self.name = "repro_agent"
-        
+                self.snapshot = DolphinAgentSnapshot(self)
+
+            def get_context(self):
+                return self.executor.context
+
         agent = MockAgent(context)
         session_id = "test_persistence"
         
@@ -89,6 +94,10 @@ async def test_restore_and_immediate_save():
             def __init__(self, ctx):
                 self.executor = type('obj', (object,), {'context': ctx})
                 self.name = "test_agent"
+                self.snapshot = DolphinAgentSnapshot(self)
+
+            def get_context(self):
+                return self.executor.context
         agent = MockAgent(context)
         
         # Phase 1: Restore

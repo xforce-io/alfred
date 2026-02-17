@@ -90,6 +90,7 @@ class ChannelCoreService:
         event_meta = {"source_type": "chat_user", "run_id": run_id}
         _inproc_acquired = False
         _flock_fd = None
+        _restore_ok = False
         mailbox_ack_ids: list[str] = []
         effective_message = message
 
@@ -126,6 +127,7 @@ class ChannelCoreService:
             if session_data:
                 self.session_manager.restore_timeline(session_id, session_data.timeline or [])
                 await self.session_manager.restore_to_agent(agent, session_data)
+            _restore_ok = True
             effective_message, mailbox_ack_ids = self._compose_turn_message(
                 message,
                 session_data,
@@ -351,7 +353,8 @@ class ChannelCoreService:
                         "本轮执行遇到错误，未能完成处理。"
                         "我已停止本轮并保留上下文，你可以直接重试或给我一个更具体的指令。"
                     ), msg_type="text"))
-                    await on_event(OutboundMessage(session_id, f"执行失败: {str(e)}", msg_type="error"))
+                    tb_text = traceback.format_exc()
+                    await on_event(OutboundMessage(session_id, f"执行失败: {str(e)}\n\n```\n{tb_text[-1000:]}\n```", msg_type="error"))
             except Exception as send_error:
                 should_send_end = False
                 logger.warning("Failed to send error payload: %s", send_error)
@@ -361,14 +364,48 @@ class ChannelCoreService:
                         await on_event(OutboundMessage(session_id, "", msg_type="end"))
                     except Exception as end_error:
                         logger.warning("Failed to send end payload: %s", end_error)
-                try:
-                    await self.session_manager.save_session(
+                if _restore_ok:
+                    try:
+                        # Build failed turn context for session history
+                        _trailing: list[dict] = []
+
+                        # Check if Dolphin already preserved the message (future-proofing)
+                        _dolphin_has_msg = False
+                        try:
+                            _exported = agent.snapshot.export_portable_session()
+                            _hist = _exported.get("history_messages", [])
+                            if _hist and _hist[-1].get("role") == "user" and _hist[-1].get("content") == message:
+                                _dolphin_has_msg = True
+                        except Exception:
+                            pass
+
+                        if not _dolphin_has_msg and message:
+                            _trailing.append({"role": "user", "content": message})
+
+                        # Build failure summary as assistant message
+                        _fail_parts = [f"（本轮执行遇到错误：{str(e)[:100]}）"]
+                        if tool_names_executed:
+                            _fail_parts.append(f"已调用工具：{', '.join(tool_names_executed)}")
+                        if response:
+                            _fail_parts.append(f"部分响应：{response[:300]}")
+                        _trailing.append({
+                            "role": "assistant",
+                            "content": "\n".join(_fail_parts),
+                        })
+
+                        await self.session_manager.save_session(
+                            session_id,
+                            agent,
+                            lock_already_held=True,
+                            trailing_messages=_trailing,
+                        )
+                    except Exception as save_error:
+                        logger.warning("Failed to persist session after error: %s", save_error)
+                else:
+                    logger.warning(
+                        "Skipping session save after error: restore was not completed for %s",
                         session_id,
-                        agent,
-                        lock_already_held=True,
                     )
-                except Exception as save_error:
-                    logger.warning("Failed to persist session after error: %s", save_error)
         finally:
             # Release cross-process file lock
             if _flock_fd is not None:

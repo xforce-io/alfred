@@ -15,7 +15,6 @@ import logging
 from types import SimpleNamespace
 
 from ...infra.dolphin_compat import ensure_continue_chat_compatibility
-from ...infra.dolphin_state_adapter import DolphinStateAdapter
 from ..models.system_event import build_system_event
 from . import RuntimeDeps, TurnExecutor
 from ..tasks.routine_manager import RoutineManager

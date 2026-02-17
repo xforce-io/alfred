@@ -15,6 +15,7 @@ import logging
 import os
 import re
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
 import httpx
@@ -77,6 +78,12 @@ class TelegramChannel:
         self._running = False
         self._poll_task: Optional[asyncio.Task] = None
 
+        # Phase 1: Polling/processing decoupling
+        self._inbound_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+        self._chat_queues: Dict[str, asyncio.Queue] = {}
+        self._chat_workers: Dict[str, asyncio.Task] = {}
+        self._dispatcher_task: Optional[asyncio.Task] = None
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -87,6 +94,7 @@ class TelegramChannel:
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0))
         self._running = True
         events.subscribe(self._on_background_event)
+        self._dispatcher_task = asyncio.create_task(self._dispatcher_loop())
         self._poll_task = asyncio.create_task(self._polling_loop())
         logger.info(
             "TelegramChannel started, restored %d binding(s)", len(self._bindings)
@@ -103,6 +111,22 @@ class TelegramChannel:
             except asyncio.CancelledError:
                 pass
             self._poll_task = None
+        if self._dispatcher_task is not None:
+            self._dispatcher_task.cancel()
+            try:
+                await self._dispatcher_task
+            except asyncio.CancelledError:
+                pass
+            self._dispatcher_task = None
+        for task in self._chat_workers.values():
+            task.cancel()
+        for task in self._chat_workers.values():
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._chat_workers.clear()
+        self._chat_queues.clear()
         if self._client is not None:
             await self._client.aclose()
             self._client = None
@@ -155,12 +179,75 @@ class TelegramChannel:
                 updates = result.get("result", [])
                 for update in updates:
                     offset = update["update_id"] + 1
-                    await self._handle_update(update)
+                    try:
+                        self._inbound_queue.put_nowait(update)
+                    except asyncio.QueueFull:
+                        logger.warning(
+                            "Inbound queue full, dropping update %s",
+                            update.get("update_id"),
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.error("Telegram polling error: %s", exc)
                 await asyncio.sleep(5)
+
+    # ------------------------------------------------------------------
+    # Dispatcher & per-chat workers
+    # ------------------------------------------------------------------
+
+    async def _dispatcher_loop(self) -> None:
+        """Read from inbound queue and route to per-chat workers."""
+        while self._running:
+            try:
+                update = await asyncio.wait_for(
+                    self._inbound_queue.get(), timeout=1.0
+                )
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                raise
+
+            msg = update.get("message") or {}
+            chat_id = str((msg.get("chat") or {}).get("id", ""))
+            if not chat_id:
+                continue
+
+            if chat_id not in self._chat_queues:
+                self._chat_queues[chat_id] = asyncio.Queue(maxsize=20)
+            chat_q = self._chat_queues[chat_id]
+
+            try:
+                chat_q.put_nowait(update)
+            except asyncio.QueueFull:
+                logger.warning(
+                    "Chat queue full for chat_id=%s, dropping update", chat_id
+                )
+                continue
+
+            if chat_id not in self._chat_workers or self._chat_workers[chat_id].done():
+                self._chat_workers[chat_id] = asyncio.create_task(
+                    self._chat_worker(chat_id)
+                )
+
+    async def _chat_worker(self, chat_id: str) -> None:
+        """Process messages for a single chat sequentially."""
+        q = self._chat_queues.get(chat_id)
+        if q is None:
+            return
+        while True:
+            try:
+                update = await asyncio.wait_for(q.get(), timeout=30.0)
+            except asyncio.TimeoutError:
+                break
+            except asyncio.CancelledError:
+                raise
+            try:
+                await self._handle_update(update)
+            except Exception as exc:
+                logger.error(
+                    "Error handling update for chat %s: %s", chat_id, exc
+                )
 
     # ------------------------------------------------------------------
     # Update routing
@@ -170,7 +257,21 @@ class TelegramChannel:
         msg = update.get("message") or {}
         text = (msg.get("text") or "").strip()
         chat_id = str((msg.get("chat") or {}).get("id", ""))
-        if not text or not chat_id:
+        if not chat_id:
+            return
+
+        # Voice message: download file, then pass path to agent
+        if not text and msg.get("voice"):
+            voice = msg["voice"]
+            duration = voice.get("duration", 0)
+            agent_name = self._bindings.get(chat_id, "")
+            local_path = await self._download_voice(voice.get("file_id", ""), agent_name)
+            if local_path:
+                text = f"[语音消息 duration={duration}s path={local_path}]"
+            else:
+                text = f"[语音消息 duration={duration}s](文件下载失败)"
+
+        if not text:
             return
 
         # Access control
@@ -196,12 +297,16 @@ class TelegramChannel:
 
         if cmd == "/start":
             await self._cmd_start(chat_id, arg)
+        elif cmd == "/ping":
+            await self._cmd_ping(chat_id)
         elif cmd == "/status":
             await self._cmd_status(chat_id)
         elif cmd == "/heartbeat":
             await self._cmd_heartbeat(chat_id)
         elif cmd == "/tasks":
             await self._cmd_tasks(chat_id)
+        elif cmd == "/new":
+            await self._cmd_new(chat_id)
         elif cmd == "/help":
             await self._cmd_help(chat_id)
         else:
@@ -218,6 +323,21 @@ class TelegramChannel:
         self._bindings[chat_id] = agent_name
         self._save_bindings()
         await self._send_message(chat_id, f"Bound to agent: {agent_name}")
+
+    async def _cmd_ping(self, chat_id: str) -> None:
+        agent = self._bindings.get(chat_id, "(none)")
+        global_depth = self._inbound_queue.qsize()
+        chat_depth = 0
+        if chat_id in self._chat_queues:
+            chat_depth = self._chat_queues[chat_id].qsize()
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        lines = [
+            "pong",
+            f"Agent: {agent}",
+            f"Queue: global={global_depth}, chat={chat_depth}",
+            f"Time: {now}",
+        ]
+        await self._send_message(chat_id, "\n".join(lines))
 
     async def _cmd_status(self, chat_id: str) -> None:
         status = get_local_status(self._user_data)
@@ -272,10 +392,26 @@ class TelegramChannel:
 
         await self._send_message(chat_id, "\n".join(lines))
 
+    async def _cmd_new(self, chat_id: str) -> None:
+        """Clear conversation history for the current chat, starting a fresh session."""
+        agent_name = self._bindings.get(chat_id)
+        if not agent_name:
+            await self._send_message(chat_id, "No agent bound. Use /start <agent_name> first.")
+            return
+
+        session_id = ChannelSessionResolver.resolve("telegram", agent_name, chat_id)
+        cleared = await self._session_manager.clear_session_history(session_id)
+        if cleared:
+            await self._send_message(chat_id, "Conversation cleared. Starting fresh.")
+        else:
+            await self._send_message(chat_id, "No conversation history to clear.")
+
     async def _cmd_help(self, chat_id: str) -> None:
         text = (
             "EverBot Telegram Assistant\n\n"
             "/start <agent> — Bind to an agent\n"
+            "/new — Clear history and start a fresh conversation\n"
+            "/ping — Health check (no LLM call)\n"
             "/status — Show daemon status\n"
             "/heartbeat — Show recent heartbeat results\n"
             "/tasks — Show task list\n"
@@ -353,8 +489,18 @@ class TelegramChannel:
             full_reply = "(no response)"
 
         converted = self._convert_markdown(full_reply)
+        sent_any = False
         for part in self._split_message(converted):
-            await self._send_message(chat_id, part)
+            success = await self._send_message(chat_id, part)
+            if success:
+                sent_any = True
+
+        # Last-resort fallback: plain text if all markdown sends failed
+        if not sent_any:
+            fallback = full_reply[:200]
+            await self._send_plain_message(
+                chat_id, f"[delivery error] {fallback}"
+            )
 
     # ------------------------------------------------------------------
     # Markdown conversion
@@ -397,32 +543,126 @@ class TelegramChannel:
     # Telegram API helpers
     # ------------------------------------------------------------------
 
-    async def _send_message(self, chat_id: str, text: str) -> None:
+    async def _send_message(self, chat_id: str, text: str) -> bool:
+        """Send message with MarkdownV2, falling back to plain text, with retry.
+
+        Returns True if the message was delivered successfully.
+        """
         if not text:
-            return
-        # Truncate as last resort
+            return True
         if len(text) > TELEGRAM_MSG_LIMIT:
             text = text[: TELEGRAM_MSG_LIMIT - 20] + "\n\n... (truncated)"
         if self._client is None:
-            return
-        try:
-            resp = await self._client.post(
-                f"{self._base_url}/sendMessage",
-                json={
-                    "chat_id": chat_id,
-                    "text": text,
-                    "parse_mode": "MarkdownV2",
-                },
-            )
-            # Fallback to plain text if Markdown fails
-            data = resp.json()
-            if not data.get("ok"):
-                await self._client.post(
+            return False
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Try MarkdownV2 first
+                resp = await self._client.post(
+                    f"{self._base_url}/sendMessage",
+                    json={
+                        "chat_id": chat_id,
+                        "text": text,
+                        "parse_mode": "MarkdownV2",
+                    },
+                )
+                data = resp.json()
+                if data.get("ok"):
+                    return True
+
+                # Fallback to plain text if Markdown fails
+                resp = await self._client.post(
                     f"{self._base_url}/sendMessage",
                     json={"chat_id": chat_id, "text": text},
                 )
+                data = resp.json()
+                if data.get("ok"):
+                    return True
+
+                logger.warning(
+                    "sendMessage failed for chat %s (attempt %d/%d): %s",
+                    chat_id, attempt + 1, max_retries,
+                    data.get("description", "unknown"),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "sendMessage exception for chat %s (attempt %d/%d): %s",
+                    chat_id, attempt + 1, max_retries, exc,
+                )
+
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)  # 1s, 2s
+
+        logger.error("Failed to send Telegram message to %s after %d retries", chat_id, max_retries)
+        return False
+
+    async def _send_plain_message(self, chat_id: str, text: str) -> bool:
+        """Send a plain text message (no Markdown), with retry. Last-resort fallback."""
+        if not text:
+            return True
+        if len(text) > TELEGRAM_MSG_LIMIT:
+            text = text[: TELEGRAM_MSG_LIMIT - 20] + "\n\n... (truncated)"
+        if self._client is None:
+            return False
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = await self._client.post(
+                    f"{self._base_url}/sendMessage",
+                    json={"chat_id": chat_id, "text": text},
+                )
+                data = resp.json()
+                if data.get("ok"):
+                    return True
+                logger.warning(
+                    "sendPlainMessage failed for chat %s (attempt %d/%d): %s",
+                    chat_id, attempt + 1, max_retries,
+                    data.get("description", "unknown"),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "sendPlainMessage exception for chat %s (attempt %d/%d): %s",
+                    chat_id, attempt + 1, max_retries, exc,
+                )
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+
+        logger.error("Failed to send plain message to %s after %d retries", chat_id, max_retries)
+        return False
+
+    async def _download_voice(self, file_id: str, agent_name: str) -> Optional[str]:
+        """Download a Telegram voice file and return the local path, or None on failure."""
+        if not file_id or self._client is None:
+            return None
+        try:
+            # Step 1: getFile to obtain file_path
+            resp = await self._client.get(
+                f"{self._base_url}/getFile",
+                params={"file_id": file_id},
+            )
+            data = resp.json()
+            if not data.get("ok"):
+                logger.warning("getFile failed for %s: %s", file_id, data.get("description"))
+                return None
+            remote_path = data["result"]["file_path"]
+
+            # Step 2: download the file
+            download_url = f"https://api.telegram.org/file/bot{self._bot_token}/{remote_path}"
+            resp = await self._client.get(download_url)
+            resp.raise_for_status()
+
+            # Save to agent's tmp directory: ~/.alfred/agents/{agent_name}/tmp/voice/
+            voice_dir = self._user_data.get_agent_tmp_dir(agent_name) / "voice"
+            voice_dir.mkdir(parents=True, exist_ok=True)
+            suffix = Path(remote_path).suffix or ".ogg"
+            local_path = voice_dir / f"{file_id}{suffix}"
+            local_path.write_bytes(resp.content)
+            return str(local_path)
         except Exception as exc:
-            logger.error("Failed to send Telegram message to %s: %s", chat_id, exc)
+            logger.error("Failed to download voice file %s: %s", file_id, exc)
+            return None
 
     async def _send_chat_action(self, chat_id: str, action: str = "typing") -> None:
         if self._client is None:
