@@ -16,7 +16,7 @@ import traceback
 import uuid
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from dolphin.core.agent.agent_state import AgentState
 from dolphin.core.common.constants import KEY_HISTORY
@@ -128,6 +128,7 @@ class ChannelCoreService:
                 self.session_manager.restore_timeline(session_id, session_data.timeline or [])
                 await self.session_manager.restore_to_agent(agent, session_data)
             _restore_ok = True
+            self._inject_skill_updates_if_needed(agent, session_id, session_data)
             effective_message, mailbox_ack_ids = self._compose_turn_message(
                 message,
                 session_data,
@@ -369,13 +370,22 @@ class ChannelCoreService:
                         # Build failed turn context for session history
                         _trailing: list[dict] = []
 
-                        # Check if Dolphin already preserved the message (future-proofing)
+                        # Check if Dolphin already committed the user message to
+                        # history (e.g. via _update_history_and_cleanup in finally).
+                        # Search the last few messages — Dolphin may have appended
+                        # both user + assistant, so the user msg is not necessarily
+                        # the very last entry.  Compare against both the raw
+                        # ``message`` and ``effective_message`` (which may carry a
+                        # mailbox prefix).
                         _dolphin_has_msg = False
                         try:
                             _exported = agent.snapshot.export_portable_session()
                             _hist = _exported.get("history_messages", [])
-                            if _hist and _hist[-1].get("role") == "user" and _hist[-1].get("content") == message:
-                                _dolphin_has_msg = True
+                            _candidates = {message, effective_message}
+                            for _m in reversed(_hist[-4:]):
+                                if _m.get("role") == "user" and _m.get("content") in _candidates:
+                                    _dolphin_has_msg = True
+                                    break
                         except Exception:
                             pass
 
@@ -384,6 +394,9 @@ class ChannelCoreService:
 
                         # Build failure summary as assistant message
                         _fail_parts = [f"（本轮执行遇到错误：{str(e)[:100]}）"]
+                        _tb_text = traceback.format_exc()
+                        if _tb_text and _tb_text.strip() != "NoneType: None":
+                            _fail_parts.append(f"错误堆栈：\n{_tb_text[-500:]}")
                         if tool_names_executed:
                             _fail_parts.append(f"已调用工具：{', '.join(tool_names_executed)}")
                         if response:
@@ -621,6 +634,116 @@ class ChannelCoreService:
         event = {"type": event_type, "timestamp": datetime.now().isoformat()}
         event.update(payload)
         self.session_manager.append_timeline_event(session_id, event)
+
+    # ------------------------------------------------------------------
+    # Skill update detection
+    # ------------------------------------------------------------------
+
+    _SESSION_VAR_KNOWN_SKILLS = "_known_resource_skills"
+
+    @staticmethod
+    def _get_current_resource_skills(agent: Any) -> Dict[str, str]:
+        """Extract current resource skill names and descriptions from the agent's ResourceSkillkit.
+
+        Returns:
+            Mapping of skill_name → description (may be empty if ResourceSkillkit not loaded).
+        """
+        global_skills = getattr(agent, "global_skills", None)
+        if global_skills is None:
+            return {}
+
+        installed = getattr(global_skills, "installedSkillset", None)
+        if installed is None:
+            return {}
+
+        rsk = None
+        for skill in installed.getSkills():
+            owner = getattr(skill, "owner_skillkit", None)
+            if owner is not None and getattr(owner, "getName", lambda: "")() == "resource_skillkit":
+                rsk = owner
+                break
+
+        if rsk is None:
+            return {}
+
+        result: Dict[str, str] = {}
+        for name in rsk.get_available_skills():
+            meta = rsk.get_skill_meta(name)
+            desc = (getattr(meta, "description", "") or "") if meta else ""
+            result[name] = desc
+        return result
+
+    def _inject_skill_updates_if_needed(
+        self,
+        agent: Any,
+        session_id: str,
+        session_data: Any,
+    ) -> None:
+        """Compare current resource skills with what the session last saw.
+
+        If skills were added or removed, inject a system message into history
+        so the LLM learns about the change without modifying the system prompt
+        (preserving prefix cache).
+        """
+        current_skills = self._get_current_resource_skills(agent)
+        if not current_skills:
+            return
+
+        current_names = set(current_skills.keys())
+
+        # Read previously known skill set from session variables
+        prev_names: Set[str] = set()
+        has_prev = False
+        if session_data and session_data.variables:
+            stored = session_data.variables.get(self._SESSION_VAR_KNOWN_SKILLS)
+            if isinstance(stored, list):
+                prev_names = set(stored)
+                has_prev = True
+
+        if current_names == prev_names and has_prev:
+            return
+
+        # First turn (no previous record): just persist the baseline, no notification needed
+        if not has_prev:
+            ctx = agent.executor.context
+            ctx.set_variable(self._SESSION_VAR_KNOWN_SKILLS, sorted(current_names))
+            return
+
+        added = sorted(current_names - prev_names)
+        removed = sorted(prev_names - current_names)
+
+        if not added and not removed:
+            return
+
+        # Build notification message
+        parts: List[str] = ["[系统通知] 可用 Resource Skills 已更新。"]
+        if added:
+            lines = [f"  - **{n}**: {current_skills[n][:80]}" for n in added]
+            parts.append("新增技能:\n" + "\n".join(lines))
+        if removed:
+            parts.append("已移除技能: " + ", ".join(f"`{n}`" for n in removed))
+        parts.append(
+            "当前完整列表: " + ", ".join(f"`{n}`" for n in sorted(current_names))
+        )
+        notification = "\n".join(parts)
+
+        # Inject into agent history
+        ctx = agent.executor.context
+        history = ctx.get_var_value(KEY_HISTORY)
+        if not isinstance(history, list):
+            history = []
+        history.append({"role": "user", "content": notification})
+        ctx.set_variable(KEY_HISTORY, history)
+
+        # Persist updated skill set for next comparison
+        ctx.set_variable(self._SESSION_VAR_KNOWN_SKILLS, sorted(current_names))
+
+        logger.info(
+            "Skill update injected for session %s: +%s -%s",
+            session_id,
+            added or "none",
+            removed or "none",
+        )
 
     def _mark_activity(self, session_id: str) -> None:
         """No-op in core service; transports override for idle-gate."""

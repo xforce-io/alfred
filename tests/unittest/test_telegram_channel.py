@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.everbot.channels.telegram_channel import TelegramChannel, TELEGRAM_MSG_LIMIT
+from src.everbot.channels.telegram_channel import TelegramChannel, TELEGRAM_MSG_LIMIT, _extract_urls
 
 
 # ---------------------------------------------------------------------------
@@ -28,6 +28,7 @@ def _make_session_manager_mock():
     sm.restore_timeline = MagicMock()
     sm.restore_to_agent = AsyncMock()
     sm.append_timeline_event = MagicMock()
+    sm.inject_history_message = AsyncMock(return_value=True)
     sm.persistence = MagicMock()
     sm.persistence._get_lock_path.return_value = Path("/tmp/test_lock")
     return sm
@@ -198,6 +199,16 @@ class TestEventFiltering:
         msg = channel._send_message.call_args[0][1]
         assert "Heartbeat" in msg
         assert "Task completed" in msg
+        # Verify the result was injected into the Telegram session history
+        sm = channel._session_manager
+        sm.inject_history_message.assert_awaited_once()
+        call_args = sm.inject_history_message.call_args
+        injected_session_id = call_args[0][0]
+        injected_msg = call_args[0][1]
+        assert injected_session_id == "tg_session_my_agent__111"
+        assert injected_msg["role"] == "assistant"
+        assert injected_msg["content"] == "Task completed"
+        assert injected_msg["metadata"]["source"] == "heartbeat_delivery"
 
     @pytest.mark.asyncio
     async def test_ignores_non_heartbeat_delivery(self, channel):
@@ -586,3 +597,283 @@ class TestPollingDecoupling:
             await worker_task
         except asyncio.CancelledError:
             pass
+
+
+# ===========================================================================
+# 11. _extract_urls helper
+# ===========================================================================
+
+class TestExtractUrls:
+    def test_url_entity(self):
+        text = "Check https://example.com please"
+        entities = [{"type": "url", "offset": 6, "length": 19}]
+        assert _extract_urls(text, entities) == ["https://example.com"]
+
+    def test_text_link_entity(self):
+        text = "Click here for details"
+        entities = [{"type": "text_link", "offset": 6, "length": 4, "url": "https://hidden.link"}]
+        assert _extract_urls(text, entities) == ["https://hidden.link"]
+
+    def test_deduplication(self):
+        text = "https://a.com and https://a.com"
+        entities = [
+            {"type": "url", "offset": 0, "length": 13},
+            {"type": "url", "offset": 18, "length": 13},
+        ]
+        assert _extract_urls(text, entities) == ["https://a.com"]
+
+    def test_mixed_types(self):
+        text = "See https://a.com or click here"
+        entities = [
+            {"type": "url", "offset": 4, "length": 13},
+            {"type": "text_link", "offset": 21, "length": 10, "url": "https://b.com"},
+        ]
+        assert _extract_urls(text, entities) == ["https://a.com", "https://b.com"]
+
+    def test_empty(self):
+        assert _extract_urls("hello", []) == []
+
+    def test_ignores_non_url_entities(self):
+        text = "hello world"
+        entities = [{"type": "bold", "offset": 0, "length": 5}]
+        assert _extract_urls(text, entities) == []
+
+
+# ===========================================================================
+# 12. _extract_media_text static method
+# ===========================================================================
+
+class TestExtractMediaText:
+    def test_photo_with_caption(self):
+        msg = {"photo": [{"file_id": "abc"}], "caption": "My photo"}
+        result = TelegramChannel._extract_media_text(msg)
+        assert "[图片]" in result
+        assert "My photo" in result
+
+    def test_photo_no_caption(self):
+        msg = {"photo": [{"file_id": "abc"}]}
+        result = TelegramChannel._extract_media_text(msg)
+        assert result == "[图片]"
+
+    def test_document_with_mime(self):
+        msg = {"document": {"file_name": "report.pdf", "mime_type": "application/pdf"}}
+        result = TelegramChannel._extract_media_text(msg)
+        assert "[文件: report.pdf (application/pdf)]" in result
+
+    def test_document_no_mime(self):
+        msg = {"document": {"file_name": "data.bin"}}
+        result = TelegramChannel._extract_media_text(msg)
+        assert "[文件: data.bin]" in result
+
+    def test_document_no_filename(self):
+        msg = {"document": {"mime_type": "text/plain"}}
+        result = TelegramChannel._extract_media_text(msg)
+        assert "[文件: unknown (text/plain)]" in result
+
+    def test_voice(self):
+        msg = {"voice": {"duration": 5, "file_id": "v1"}}
+        result = TelegramChannel._extract_media_text(msg)
+        assert "[语音消息 duration=5s]" in result
+
+    def test_audio(self):
+        msg = {"audio": {"title": "Song", "duration": 180}}
+        result = TelegramChannel._extract_media_text(msg)
+        assert "[音频: Song duration=180s]" in result
+
+    def test_audio_with_filename_fallback(self):
+        msg = {"audio": {"file_name": "track.mp3", "duration": 60}}
+        result = TelegramChannel._extract_media_text(msg)
+        assert "[音频: track.mp3 duration=60s]" in result
+
+    def test_video(self):
+        msg = {"video": {"duration": 30}}
+        result = TelegramChannel._extract_media_text(msg)
+        assert "[视频 duration=30s]" in result
+
+    def test_sticker(self):
+        msg = {"sticker": {"emoji": "😀"}}
+        result = TelegramChannel._extract_media_text(msg)
+        assert "[贴纸: 😀]" in result
+
+    def test_caption_with_text_link(self):
+        msg = {
+            "photo": [{"file_id": "abc"}],
+            "caption": "Read this article",
+            "caption_entities": [
+                {"type": "text_link", "offset": 10, "length": 7, "url": "https://example.com/article"},
+            ],
+        }
+        result = TelegramChannel._extract_media_text(msg)
+        assert "[图片]" in result
+        assert "Read this article" in result
+        assert "https://example.com/article" in result
+
+    def test_caption_url_already_in_text_not_duplicated(self):
+        url = "https://example.com"
+        msg = {
+            "photo": [{"file_id": "abc"}],
+            "caption": f"See {url}",
+            "caption_entities": [
+                {"type": "url", "offset": 4, "length": len(url)},
+            ],
+        }
+        result = TelegramChannel._extract_media_text(msg)
+        # URL appears in caption, should not be appended again
+        assert result.count(url) == 1
+
+    def test_empty_message(self):
+        assert TelegramChannel._extract_media_text({}) == ""
+
+
+# ===========================================================================
+# 13. _handle_update media integration
+# ===========================================================================
+
+class TestHandleUpdateMedia:
+    @pytest.fixture
+    def channel(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._bindings = {"111": "test_agent"}
+        ch._send_message = AsyncMock(return_value=True)
+        ch._send_chat_action = AsyncMock()
+        ch._send_plain_message = AsyncMock(return_value=True)
+        return ch
+
+    def _make_update(self, msg_body: dict) -> dict:
+        msg_body.setdefault("chat", {"id": 111})
+        return {"update_id": 1, "message": msg_body}
+
+    @pytest.mark.asyncio
+    async def test_photo_message_reaches_agent(self, channel):
+        mock_agent = MagicMock()
+        channel._session_manager.get_cached_agent.return_value = mock_agent
+        received = []
+
+        async def fake_process(agent, agent_name, session_id, message, on_event):
+            received.append(message)
+            from src.everbot.core.channel.models import OutboundMessage
+            await on_event(OutboundMessage(session_id, "ok", msg_type="text"))
+
+        channel._core.process_message = fake_process
+
+        await channel._handle_update(self._make_update({
+            "photo": [{"file_id": "p1"}],
+            "caption": "Look at this",
+        }))
+
+        assert len(received) == 1
+        assert "[图片]" in received[0]
+        assert "Look at this" in received[0]
+
+    @pytest.mark.asyncio
+    async def test_voice_message_with_download(self, channel):
+        mock_agent = MagicMock()
+        channel._session_manager.get_cached_agent.return_value = mock_agent
+        channel._download_voice = AsyncMock(return_value="/tmp/voice/v1.ogg")
+        received = []
+
+        async def fake_process(agent, agent_name, session_id, message, on_event):
+            received.append(message)
+            from src.everbot.core.channel.models import OutboundMessage
+            await on_event(OutboundMessage(session_id, "ok", msg_type="text"))
+
+        channel._core.process_message = fake_process
+
+        await channel._handle_update(self._make_update({
+            "voice": {"duration": 5, "file_id": "v1"},
+        }))
+
+        assert len(received) == 1
+        assert "[语音消息 duration=5s]" in received[0]
+        assert "path=/tmp/voice/v1.ogg" in received[0]
+
+    @pytest.mark.asyncio
+    async def test_voice_download_failure(self, channel):
+        mock_agent = MagicMock()
+        channel._session_manager.get_cached_agent.return_value = mock_agent
+        channel._download_voice = AsyncMock(return_value=None)
+        received = []
+
+        async def fake_process(agent, agent_name, session_id, message, on_event):
+            received.append(message)
+            from src.everbot.core.channel.models import OutboundMessage
+            await on_event(OutboundMessage(session_id, "ok", msg_type="text"))
+
+        channel._core.process_message = fake_process
+
+        await channel._handle_update(self._make_update({
+            "voice": {"duration": 3, "file_id": "v2"},
+        }))
+
+        assert len(received) == 1
+        assert "(文件下载失败)" in received[0]
+
+    @pytest.mark.asyncio
+    async def test_document_no_caption(self, channel):
+        mock_agent = MagicMock()
+        channel._session_manager.get_cached_agent.return_value = mock_agent
+        received = []
+
+        async def fake_process(agent, agent_name, session_id, message, on_event):
+            received.append(message)
+            from src.everbot.core.channel.models import OutboundMessage
+            await on_event(OutboundMessage(session_id, "ok", msg_type="text"))
+
+        channel._core.process_message = fake_process
+
+        await channel._handle_update(self._make_update({
+            "document": {"file_name": "data.csv", "mime_type": "text/csv"},
+        }))
+
+        assert len(received) == 1
+        assert "[文件: data.csv (text/csv)]" in received[0]
+
+    @pytest.mark.asyncio
+    async def test_text_with_hidden_link(self, channel):
+        mock_agent = MagicMock()
+        channel._session_manager.get_cached_agent.return_value = mock_agent
+        received = []
+
+        async def fake_process(agent, agent_name, session_id, message, on_event):
+            received.append(message)
+            from src.everbot.core.channel.models import OutboundMessage
+            await on_event(OutboundMessage(session_id, "ok", msg_type="text"))
+
+        channel._core.process_message = fake_process
+
+        await channel._handle_update(self._make_update({
+            "text": "Read this article",
+            "entities": [
+                {"type": "text_link", "offset": 10, "length": 7, "url": "https://example.com/article"},
+            ],
+        }))
+
+        assert len(received) == 1
+        assert "Read this article" in received[0]
+        assert "https://example.com/article" in received[0]
+
+    @pytest.mark.asyncio
+    async def test_empty_media_message_ignored(self, channel):
+        """A message with no text and no recognized media should be ignored."""
+        await channel._handle_update(self._make_update({}))
+        channel._send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sticker_message(self, channel):
+        mock_agent = MagicMock()
+        channel._session_manager.get_cached_agent.return_value = mock_agent
+        received = []
+
+        async def fake_process(agent, agent_name, session_id, message, on_event):
+            received.append(message)
+            from src.everbot.core.channel.models import OutboundMessage
+            await on_event(OutboundMessage(session_id, "ok", msg_type="text"))
+
+        channel._core.process_message = fake_process
+
+        await channel._handle_update(self._make_update({
+            "sticker": {"emoji": "👍"},
+        }))
+
+        assert len(received) == 1
+        assert "[贴纸: 👍]" in received[0]

@@ -40,6 +40,25 @@ logger = logging.getLogger(__name__)
 TELEGRAM_MSG_LIMIT = 4096
 
 
+def _extract_urls(text: str, entities: list) -> list[str]:
+    """Extract URLs from Telegram entities (url + text_link), deduplicated and ordered."""
+    seen: set[str] = set()
+    urls: list[str] = []
+    for ent in entities:
+        etype = ent.get("type", "")
+        url = ""
+        if etype == "url":
+            offset = ent.get("offset", 0)
+            length = ent.get("length", 0)
+            url = text[offset : offset + length]
+        elif etype == "text_link":
+            url = ent.get("url", "")
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
 class TelegramChannel:
     """Telegram Bot channel (long-polling, batch reply).
 
@@ -158,10 +177,34 @@ class TelegramChannel:
             f"[Heartbeat] {agent_name}\n\n{detail}"
         )
 
-        # Push to all chats bound to this agent
+        # Push to all chats bound to this agent and inject into session history
+        run_id = data.get("run_id") or ""
         for chat_id, bound_agent in list(self._bindings.items()):
             if bound_agent == agent_name:
                 await self._send_message(chat_id, text)
+                # Inject the delivered message into the Telegram session history
+                # so follow-up questions have the heartbeat result in context.
+                tg_session_id = ChannelSessionResolver.resolve(
+                    "telegram", agent_name, chat_id,
+                )
+                msg = {
+                    "role": "assistant",
+                    "content": detail,
+                    "metadata": {
+                        "source": "heartbeat_delivery",
+                        "run_id": run_id,
+                        "injected_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                }
+                if hasattr(self._session_manager, "inject_history_message"):
+                    ok = await self._session_manager.inject_history_message(
+                        tg_session_id, msg, timeout=5.0, blocking=False,
+                    )
+                    if not ok:
+                        logger.warning(
+                            "Failed to inject heartbeat result into tg session %s",
+                            tg_session_id,
+                        )
 
     # ------------------------------------------------------------------
     # Long-polling loop
@@ -250,6 +293,47 @@ class TelegramChannel:
                 )
 
     # ------------------------------------------------------------------
+    # Media extraction
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_media_text(msg: dict) -> str:
+        """Extract a structured text description from a media message."""
+        parts: list[str] = []
+        caption = (msg.get("caption") or "").strip()
+
+        if msg.get("voice"):
+            v = msg["voice"]
+            parts.append(f"[语音消息 duration={v.get('duration', 0)}s]")
+        if msg.get("audio"):
+            a = msg["audio"]
+            info = a.get("title") or a.get("file_name") or ""
+            parts.append(f"[音频: {info} duration={a.get('duration', 0)}s]")
+        if msg.get("photo"):
+            parts.append("[图片]")
+        if msg.get("video"):
+            v = msg["video"]
+            parts.append(f"[视频 duration={v.get('duration', 0)}s]")
+        if msg.get("document"):
+            d = msg["document"]
+            fname = d.get("file_name") or "unknown"
+            mime = d.get("mime_type") or ""
+            parts.append(f"[文件: {fname} ({mime})]" if mime else f"[文件: {fname}]")
+        if msg.get("sticker"):
+            s = msg["sticker"]
+            parts.append(f"[贴纸: {s.get('emoji', '')}]")
+
+        urls = _extract_urls(caption, msg.get("caption_entities") or [])
+
+        tag = " ".join(parts)
+        pieces = [p for p in [tag, caption] if p]
+        for u in urls:
+            if u not in caption:
+                pieces.append(u)
+
+        return "\n".join(pieces).strip()
+
+    # ------------------------------------------------------------------
     # Update routing
     # ------------------------------------------------------------------
 
@@ -260,16 +344,25 @@ class TelegramChannel:
         if not chat_id:
             return
 
-        # Voice message: download file, then pass path to agent
-        if not text and msg.get("voice"):
-            voice = msg["voice"]
-            duration = voice.get("duration", 0)
-            agent_name = self._bindings.get(chat_id, "")
-            local_path = await self._download_voice(voice.get("file_id", ""), agent_name)
-            if local_path:
-                text = f"[语音消息 duration={duration}s path={local_path}]"
-            else:
-                text = f"[语音消息 duration={duration}s](文件下载失败)"
+        if text:
+            # Append hidden URLs from entities (text_link) not already in text
+            urls = _extract_urls(text, msg.get("entities") or [])
+            for u in urls:
+                if u not in text:
+                    text += f"\n{u}"
+        else:
+            # Unified media message handling (voice, photo, video, document, etc.)
+            text = self._extract_media_text(msg)
+            # Voice: try to download the file and append path
+            if msg.get("voice") and text:
+                agent_name = self._bindings.get(chat_id, "")
+                local_path = await self._download_voice(
+                    msg["voice"].get("file_id", ""), agent_name,
+                )
+                if local_path:
+                    text += f" path={local_path}"
+                else:
+                    text += " (文件下载失败)"
 
         if not text:
             return
@@ -483,8 +576,10 @@ class TelegramChannel:
 
         # Send reply
         full_reply = "".join(chunks).strip()
-        if not full_reply and text_messages:
-            full_reply = "\n".join(text_messages).strip()
+        if text_messages:
+            extra = "\n".join(text_messages).strip()
+            if extra:
+                full_reply = f"{full_reply}\n\n{extra}" if full_reply else extra
         if not full_reply:
             full_reply = "(no response)"
 

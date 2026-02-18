@@ -90,7 +90,7 @@ class TurnPolicy:
 CHAT_POLICY = TurnPolicy()
 
 HEARTBEAT_POLICY = TurnPolicy(
-    max_attempts=1,
+    max_attempts=3,
     max_tool_calls=10,
     timeout_seconds=120,
 )
