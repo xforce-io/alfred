@@ -61,9 +61,9 @@ echo "    venv:        ${VENV_DIR}"
 echo "    ALFRED_HOME: ${ALFRED_HOME}"
 echo ""
 echo "Next steps:"
+echo "  source .venv/bin/activate   # 激活虚拟环境"
 if [[ "${missing_dolphin:-0}" == "1" ]]; then
-  echo "  0. Install dolphin: pip install -e /path/to/dolphin"
+  echo "  pip install -e /path/to/dolphin  # 安装 Dolphin SDK"
 fi
-echo "  1. Copy config:  bin/everbot config --init"
-echo "  2. Edit config:  \$EDITOR ~/.alfred/config.yaml"
-echo "  3. Start:        bin/everbot start"
+echo "  bin/everbot init <agent_name>    # 创建 Agent"
+echo "  bin/everbot start                # 启动"
