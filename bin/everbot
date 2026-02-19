@@ -6,6 +6,11 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 export PYTHONPATH="${PROJECT_ROOT}"
 
+# Activate virtual environment if it exists
+if [[ -f "${PROJECT_ROOT}/.venv/bin/activate" ]]; then
+  source "${PROJECT_ROOT}/.venv/bin/activate"
+fi
+
 ALFRED_HOME="${ALFRED_HOME:-$HOME/.alfred}"
 PID_FILE="${ALFRED_HOME}/everbot.pid"
 WEB_PID_FILE="${ALFRED_HOME}/everbot-web.pid"

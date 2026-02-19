@@ -1,0 +1,16 @@
+# Web framework
+fastapi
+uvicorn
+jinja2
+
+# HTTP client
+httpx
+
+# Configuration
+pyyaml
+
+# Telegram (optional)
+telegramify-markdown
+
+# Agent framework (install from source: pip install -e /path/to/dolphin)
+# dolphin

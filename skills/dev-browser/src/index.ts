@@ -198,9 +198,75 @@ export async function serve(options: ServeOptions = {}): Promise<DevBrowserServe
    */
   const context: BrowserContext = await chromium.launchPersistentContext(userDataDir, {
     headless,  // false = 显示浏览器窗口，true = 无头模式（不显示窗口）
-    args: [`--remote-debugging-port=${cdpPort}`],  // 启用 CDP 协议
+    args: [
+      `--remote-debugging-port=${cdpPort}`,  // 启用 CDP 协议
+      // 反检测参数
+      '--disable-blink-features=AutomationControlled',  // 移除 navigator.webdriver 标记
+      '--no-first-run',                                   // 跳过首次运行向导
+      '--no-default-browser-check',                       // 跳过默认浏览器检查
+      '--disable-infobars',                               // 禁用 "Chrome is being controlled" 信息栏
+    ],
   });
   console.log("Browser launched with persistent profile...");
+
+  // ===== 反检测：注入反指纹初始化脚本 =====
+  // 使用字符串形式传递脚本，因为此代码在浏览器上下文中执行，包含 window/navigator 等浏览器 API
+  await context.addInitScript(`
+    // 1. 覆盖 navigator.webdriver 为 undefined
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+    // 2. 伪造 chrome.runtime（正常 Chrome 浏览器有此对象）
+    if (!window.chrome) window.chrome = {};
+    if (!window.chrome.runtime) {
+      window.chrome.runtime = {
+        connect: function() {},
+        sendMessage: function() {},
+      };
+    }
+
+    // 3. 伪造 plugins 数组（正常浏览器至少有几个插件）
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => [
+        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
+        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
+        { name: 'Native Client', filename: 'internal-nacl-plugin' },
+      ],
+    });
+
+    // 4. 伪造 languages（确保一致性）
+    Object.defineProperty(navigator, 'languages', {
+      get: () => ['en-US', 'en', 'zh-CN', 'zh'],
+    });
+
+    // 5. 修复 Permissions API 行为（自动化浏览器会返回异常值）
+    if (window.navigator.permissions && window.navigator.permissions.query) {
+      var originalQuery = window.navigator.permissions.query.bind(window.navigator.permissions);
+      window.navigator.permissions.query = function(parameters) {
+        if (parameters.name === 'notifications') {
+          return Promise.resolve({ state: Notification.permission });
+        }
+        return originalQuery(parameters);
+      };
+    }
+  `);
+
+  // ===== 反检测：为新页面设置真实的 HTTP 头 =====
+  context.on('page', (page) => {
+    page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+    });
+  });
+
+  // ===== 反检测：设置真实的 User-Agent =====
+  const browserVersion = context.browser()?.version();
+  if (browserVersion) {
+    const majorVersion = browserVersion.split('.')[0];
+    const realUserAgent = `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${majorVersion}.0.0.0 Safari/537.36`;
+    // Apply to all existing and future pages via context-level route
+    await context.setExtraHTTPHeaders({
+      'User-Agent': realUserAgent,
+    });
+  }
 
   // ========== 第四步：获取 CDP WebSocket 端点 ==========
   
