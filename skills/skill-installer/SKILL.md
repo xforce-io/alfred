@@ -1,3 +1,8 @@
+---
+name: skill-installer
+description: Install and manage skills dynamically through conversation. Search, install, update, list, and remove skills from the registry.
+---
+
 # Skill Installer
 
 Install and manage skills dynamically through conversation.

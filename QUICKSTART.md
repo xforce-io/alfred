@@ -92,13 +92,65 @@ Agent 工作区已初始化: my_first_agent
 tail -f ~/.alfred/logs/heartbeat.log
 ```
 
-## 下一步
+## 连接 Telegram Bot（可选）
 
-### 与 Agent 对话
+### 1. 创建 Bot
+
+在 Telegram 找 `@BotFather` → 发送 `/newbot` → 按提示创建，拿到 bot token。
+
+### 2. 设置环境变量
 
 ```bash
-PYTHONPATH=. python examples/real_agent_demo.py
+export TELEGRAM_BOT_TOKEN="你的token"
 ```
+
+> 建议写入 `~/.bashrc` 或 `~/.profile` 持久化。
+
+### 3. 编辑配置
+
+```bash
+vim ~/.alfred/config.yaml
+```
+
+在 `everbot:` 下添加 `channels` 部分：
+
+```yaml
+everbot:
+  enabled: true
+  agents:
+    my_first_agent:
+      workspace: ~/.alfred/agents/my_first_agent
+      heartbeat:
+        enabled: true
+        interval: 30
+        active_hours: [8, 22]
+  channels:
+    telegram:
+      enabled: true
+      bot_token: "${TELEGRAM_BOT_TOKEN}"
+      default_agent: "my_first_agent"
+      # allowed_chat_ids: ["123456789"]  # 可选，限制允许的用户
+```
+
+### 4. 重启
+
+```bash
+./bin/everbot restart
+```
+
+### 5. 在 Telegram 中使用
+
+打开你的 bot，发送 `/start my_first_agent`，然后就可以直接对话了。
+
+常用命令：
+- `/start <agent>` — 绑定 Agent
+- `/new` — 清除对话历史
+- `/heartbeat` — 查看最近心跳结果
+- `/help` — 查看帮助
+
+---
+
+## 下一步
 
 ### 查看所有 Agent
 
