@@ -4,6 +4,16 @@
 
 建议确认 `config/dolphin.yaml`（或 `~/.alfred/dolphin.yaml`）里已启用 `system_skillkit`，否则 `_read_file/_read_folder` 等工具可能不可用。
 
+## 前置：安装
+
+```bash
+git clone <repo-url> alfred
+cd alfred
+bin/setup            # 自动创建 venv、安装依赖、建目录
+```
+
+> 需要 Python 3.10+。如果系统默认 Python 不是 3.10+，可以 `PYTHON=python3.12 bin/setup` 指定。
+
 ## 第 1 步：初始化 Agent
 
 ```bash
@@ -164,8 +174,12 @@ PYTHONPATH=. python examples/everbot_demo.py
 ### 问题 3: 找不到模块
 
 ```bash
-# 确保设置 PYTHONPATH
-export PYTHONPATH=/path/to/alfred
+# 重新运行安装脚本
+bin/setup
+
+# 或手动安装依赖
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
 ## 完整示例

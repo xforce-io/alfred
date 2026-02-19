@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+VENV_DIR="${PROJECT_ROOT}/.venv"
+
+echo "==> Alfred EverBot Setup"
+echo "    Project: ${PROJECT_ROOT}"
+echo ""
+
+# 1. Check Python version
+PYTHON="${PYTHON:-python3}"
+if ! command -v "${PYTHON}" &>/dev/null; then
+  echo "ERROR: ${PYTHON} not found. Please install Python 3.10+." >&2
+  exit 1
+fi
+
+py_version="$("${PYTHON}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+py_major="${py_version%%.*}"
+py_minor="${py_version##*.}"
+if (( py_major < 3 )) || (( py_major == 3 && py_minor < 10 )); then
+  echo "ERROR: Python 3.10+ required, found ${py_version}." >&2
+  exit 1
+fi
+echo "[1/3] Python ${py_version} ✓"
+
+# 2. Create venv if needed
+if [[ ! -d "${VENV_DIR}" ]]; then
+  echo "[2/3] Creating virtual environment..."
+  "${PYTHON}" -m venv "${VENV_DIR}"
+else
+  echo "[2/3] Virtual environment exists ✓"
+fi
+source "${VENV_DIR}/bin/activate"
+
+# 3. Install dependencies
+echo "[3/3] Installing dependencies..."
+pip install --upgrade pip -q
+pip install -r "${PROJECT_ROOT}/requirements.txt" -q
+
+# 4. Create ALFRED_HOME dirs
+ALFRED_HOME="${ALFRED_HOME:-$HOME/.alfred}"
+mkdir -p "${ALFRED_HOME}/logs" "${ALFRED_HOME}/agents"
+
+echo ""
+echo "==> Setup complete!"
+echo "    venv:       ${VENV_DIR}"
+echo "    ALFRED_HOME: ${ALFRED_HOME}"
+echo ""
+echo "Next steps:"
+echo "  1. Copy config:  bin/everbot config --init"
+echo "  2. Edit config:  \$EDITOR ~/.alfred/config.yaml"
+echo "  3. Start:        bin/everbot start"

@@ -93,7 +93,8 @@ alfred/
 ├── examples/            # 示例（2 个）
 ├── config/              # 配置示例
 ├── docs/                # 设计文档
-└── bin/everbot          # 启动脚本
+├── bin/everbot          # 启动脚本
+└── bin/setup            # 安装脚本
 ```
 
 ### 下一步
