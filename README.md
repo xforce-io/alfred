@@ -1,103 +1,29 @@
 # Alfred EverBot
 
-Ever Running Bot - 持续运行的 Agent 系统，支持心跳驱动的任务执行。
+**Ever Running Bot** — 永远在线的个人 AI Agent 平台。
+
+EverBot 让你的 AI Agent 像一个真正的助手一样持续运行：它能主动执行任务、通过多种渠道与你沟通、并随着交互不断积累记忆。你只需用 Markdown 定义 Agent 的行为和任务，剩下的交给 EverBot。
 
 ## 特性
 
-- **持续运行**: 通过 macOS `launchd` 作为后台服务运行
-- **心跳机制**: 定期自我唤醒，执行任务推进
-- **工作区管理**: 基于 Markdown 的配置文件（AGENTS.md, HEARTBEAT.md 等）
-- **Session 管理**: 自动持久化和恢复对话历史
-- **并发控制**: Session 级别的锁机制，避免竞态条件
-- **真实 Dolphin Agent**: 集成 Dolphin SDK，使用真实的 LLM Agent
+- **永远在线**: 后台守护进程，Agent 7x24 待命
+- **心跳驱动**: 定时自我唤醒，主动推进待办任务
+- **多渠道接入**: Web 界面 + Telegram Bot，随时随地对话
+- **技能系统**: 可扩展的插件化技能（浏览器自动化、数据查询、论文检索等）
+- **持久记忆**: 对话历史自动持久化，长期记忆归档到 MEMORY.md
+- **Markdown 驱动**: 用 AGENTS.md 定义人设，HEARTBEAT.md 定义任务，所见即所得
 
 ## 快速开始
 
-### 1. 安装依赖
-
 ```bash
-pip install dolphin-sdk pyyaml
+git clone <repo-url> alfred && cd alfred
+bin/setup                        # 安装环境
+source .venv/bin/activate        # 激活虚拟环境
+./bin/everbot init my_agent      # 创建 Agent（自动注册到配置）
+./bin/everbot start              # 启动（daemon + Web）
 ```
 
-可选（推荐）：确保 Dolphin 的 `system_skillkit` 已启用（提供 `_read_file/_read_folder` 等工具能力）。本仓库默认配置已包含该项：`config/dolphin.yaml`。
-
-### 2. 初始化 Agent
-
-```bash
-# 初始化 Agent 工作区
-./bin/everbot init my_agent
-```
-
-这将创建：
-
-```
-~/.alfred/agents/my_agent/
-├── agent.dph        # Agent 定义（Dolphin 格式）
-├── AGENTS.md        # 行为规范
-├── HEARTBEAT.md     # 心跳任务清单
-├── MEMORY.md        # 长期记忆
-└── USER.md          # 用户画像
-```
-
-### 3. 配置
-
-```bash
-# 复制配置示例
-cp config/everbot.example.yaml ~/.alfred/config.yaml
-
-# 编辑配置
-vim ~/.alfred/config.yaml
-```
-
-配置示例：
-
-```yaml
-everbot:
-  enabled: true
-  default_model: gpt-4  # 默认模型
-
-  agents:
-    my_agent:
-      workspace: ~/.alfred/agents/my_agent
-      heartbeat:
-        enabled: true
-        interval: 30          # 每30分钟执行一次
-        active_hours: [8, 22] # 8:00-22:00 活跃
-```
-
-### 4. 编写任务清单
-
-编辑 `~/.alfred/agents/my_agent/HEARTBEAT.md`：
-
-```markdown
-# 心跳任务
-
-## 待办
-- [ ] 检查今日新闻
-- [ ] 更新日报
-
-## 已完成
-- [x] 初始化工作区 (2026-02-01)
-```
-
-### 5. 启动
-
-```bash
-# 一键启动（后台启动 daemon + web）
-./bin/everbot start
-
-# Web 界面地址
-# http://127.0.0.1:8765
-
-# 前台启动（用于调试）
-./bin/everbot start --foreground
-
-# 仅启动 daemon（不启动 web）
-./bin/everbot start --no-web
-
-# 自定义端口
-./bin/everbot start --web-port 9000
-```
+> 详见 [QUICKSTART.md](QUICKSTART.md)，包含 Telegram 配置等完整步骤。
 
 ## CLI 命令
 
@@ -320,14 +246,11 @@ A: 查看 `~/.alfred/logs/heartbeat.log`。
 
 A: 编辑 `~/.alfred/agents/<agent_name>/agent.dph`，使用 Dolphin 语法定义 Agent 行为。
 
-## 待实现功能
+## Roadmap
 
-- [ ] launchd 集成（macOS 后台服务）
-- [ ] PID 文件管理
-- [ ] 健康检查端点
-- [ ] 手动心跳触发
-- [ ] Web 管理界面
-- [ ] Metrics 和告警
+- [ ] Metrics 和监控告警
+- [ ] 多用户权限管理
+- [ ] 技能市场（远程注册表）
 
 ## 许可证
 

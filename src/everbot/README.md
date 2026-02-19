@@ -1,6 +1,6 @@
 # EverBot - Ever Running Bot
 
-持续运行的 Agent 系统，支持心跳驱动的任务执行。
+永远在线的个人 AI Agent 平台。
 
 ## 快速开始
 

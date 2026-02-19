@@ -10,7 +10,7 @@ httpx
 pyyaml
 
 # Telegram (optional)
-telegramify-markdown
+telegramify-markdown>=1.0.0rc0
 
 # Agent framework (install from source: pip install -e /path/to/dolphin)
 # dolphin

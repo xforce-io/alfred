@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Set
 import httpx
 
 try:
-    import telegramify_markdown
+    from telegramify_markdown import convert as tg_md_convert
     HAS_TELEGRAMIFY = True
 except ImportError:
     HAS_TELEGRAMIFY = False
@@ -173,7 +173,7 @@ class TelegramChannel:
         detail = str(data.get("detail") or data.get("summary") or "").strip()
         if not detail:
             return
-        text = self._convert_markdown(
+        text, entities = self._convert_markdown(
             f"[Heartbeat] {agent_name}\n\n{detail}"
         )
 
@@ -181,7 +181,7 @@ class TelegramChannel:
         run_id = data.get("run_id") or ""
         for chat_id, bound_agent in list(self._bindings.items()):
             if bound_agent == agent_name:
-                await self._send_message(chat_id, text)
+                await self._send_message(chat_id, text, entities)
                 # Inject the delivered message into the Telegram session history
                 # so follow-up questions have the heartbeat result in context.
                 tg_session_id = ChannelSessionResolver.resolve(
@@ -583,10 +583,12 @@ class TelegramChannel:
         if not full_reply:
             full_reply = "(no response)"
 
-        converted = self._convert_markdown(full_reply)
+        converted_text, converted_entities = self._convert_markdown(full_reply)
         sent_any = False
-        for part in self._split_message(converted):
-            success = await self._send_message(chat_id, part)
+        for part in self._split_message(converted_text):
+            # entities only valid for the full unsplit text
+            ent = converted_entities if part == converted_text else None
+            success = await self._send_message(chat_id, part, ent)
             if success:
                 sent_any = True
 
@@ -602,24 +604,29 @@ class TelegramChannel:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _convert_markdown(text: str) -> str:
-        """Convert standard Markdown to Telegram MarkdownV2."""
+    def _convert_markdown(text: str) -> tuple:
+        """Convert standard Markdown to Telegram text + entities.
+
+        Returns (text, entities_list) where entities_list is a list of
+        dicts ready for the Telegram API, or None if conversion failed.
+        """
         if HAS_TELEGRAMIFY:
             try:
-                return telegramify_markdown.markdownify(text)
+                plain, entities = tg_md_convert(text)
+                return plain, [e.to_dict() for e in entities]
             except Exception:
                 pass
-        # Fallback: convert headings to bold
+        # Fallback: strip heading markers, no entities
         lines = text.split('\n')
         result = []
         for line in lines:
             stripped = line.lstrip()
             if stripped.startswith('#'):
                 heading = stripped.lstrip('#').strip()
-                result.append(f"*{heading}*")
+                result.append(heading)
             else:
                 result.append(line)
-        return '\n'.join(result)
+        return '\n'.join(result), None
 
     # ------------------------------------------------------------------
     # Typing indicator
@@ -638,8 +645,8 @@ class TelegramChannel:
     # Telegram API helpers
     # ------------------------------------------------------------------
 
-    async def _send_message(self, chat_id: str, text: str) -> bool:
-        """Send message with MarkdownV2, falling back to plain text, with retry.
+    async def _send_message(self, chat_id: str, text: str, entities: Optional[list] = None) -> bool:
+        """Send message with entities (preferred) or plain text, with retry.
 
         Returns True if the message was delivered successfully.
         """
@@ -647,33 +654,32 @@ class TelegramChannel:
             return True
         if len(text) > TELEGRAM_MSG_LIMIT:
             text = text[: TELEGRAM_MSG_LIMIT - 20] + "\n\n... (truncated)"
+            entities = None  # entities offsets would be invalid after truncation
         if self._client is None:
             return False
 
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                # Try MarkdownV2 first
+                payload: Dict[str, Any] = {"chat_id": chat_id, "text": text}
+                if entities:
+                    payload["entities"] = entities
                 resp = await self._client.post(
-                    f"{self._base_url}/sendMessage",
-                    json={
-                        "chat_id": chat_id,
-                        "text": text,
-                        "parse_mode": "MarkdownV2",
-                    },
+                    f"{self._base_url}/sendMessage", json=payload,
                 )
                 data = resp.json()
                 if data.get("ok"):
                     return True
 
-                # Fallback to plain text if Markdown fails
-                resp = await self._client.post(
-                    f"{self._base_url}/sendMessage",
-                    json={"chat_id": chat_id, "text": text},
-                )
-                data = resp.json()
-                if data.get("ok"):
-                    return True
+                # Fallback to plain text if entities send fails
+                if entities:
+                    resp = await self._client.post(
+                        f"{self._base_url}/sendMessage",
+                        json={"chat_id": chat_id, "text": text},
+                    )
+                    data = resp.json()
+                    if data.get("ok"):
+                        return True
 
                 logger.warning(
                     "sendMessage failed for chat %s (attempt %d/%d): %s",
