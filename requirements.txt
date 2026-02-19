@@ -1,6 +1,6 @@
 # Web framework
 fastapi
-uvicorn
+uvicorn[standard]
 jinja2
 
 # HTTP client
