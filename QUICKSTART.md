@@ -22,11 +22,14 @@ bin/setup            # 自动创建 venv、安装依赖、建目录
 
 输出：
 ```
-✓ Agent 工作区已初始化: my_first_agent
-✓ 路径: ~/.alfred/agents/my_first_agent
+Agent 工作区已初始化: my_first_agent
+路径: ~/.alfred/agents/my_first_agent
+已注册到配置: ~/.alfred/config.yaml
 ```
 
-## 第 2 步：自定义行为规范
+> `init` 会自动创建工作区并注册到 `~/.alfred/config.yaml`，无需手动编辑配置。
+
+## 第 2 步：自定义行为规范（可选）
 
 编辑 `~/.alfred/agents/my_first_agent/AGENTS.md`：
 
@@ -44,7 +47,7 @@ bin/setup            # 自动创建 venv、安装依赖、建目录
 - 友好、简洁
 ```
 
-## 第 3 步：设置心跳任务
+## 第 3 步：设置心跳任务（可选）
 
 编辑 `~/.alfred/agents/my_first_agent/HEARTBEAT.md`：
 
@@ -56,24 +59,7 @@ bin/setup            # 自动创建 venv、安装依赖、建目录
 - [ ] 检查天气预报
 ```
 
-## 第 4 步：配置
-
-创建 `~/.alfred/config.yaml`：
-
-```yaml
-everbot:
-  enabled: true
-
-  agents:
-    my_first_agent:
-      workspace: ~/.alfred/agents/my_first_agent
-      heartbeat:
-        enabled: true
-        interval: 30          # 每30分钟
-        active_hours: [8, 22] # 8:00-22:00
-```
-
-## 第 5 步：启动
+## 第 4 步：启动
 
 ```bash
 # 一键启动（后台启动 daemon + web）
@@ -83,20 +69,13 @@ everbot:
 ./bin/everbot start --foreground
 
 # Web 界面地址
-# http://127.0.0.1:8765
+# http://0.0.0.0:8765
 ```
 
-## 第 6 步：自检（推荐）
+## 第 5 步：自检（推荐）
 
 ```bash
 ./bin/everbot doctor
-```
-
-你会看到：
-```
-EverBot Web started (pid=12345, url=http://127.0.0.1:8765)
-Starting EverBot daemon in background (stdout/stderr: ~/.alfred/logs/everbot.out)
-EverBot daemon started (pid=12346)
 ```
 
 ## 测试心跳

@@ -17,7 +17,7 @@ WEB_PID_FILE="${ALFRED_HOME}/everbot-web.pid"
 LOG_DIR="${ALFRED_HOME}/logs"
 DAEMON_OUT="${LOG_DIR}/everbot.out"
 WEB_OUT="${LOG_DIR}/everbot-web.out"
-WEB_HOST_DEFAULT="127.0.0.1"
+WEB_HOST_DEFAULT="0.0.0.0"
 WEB_PORT_DEFAULT="8765"
 
 ensure_dirs() {

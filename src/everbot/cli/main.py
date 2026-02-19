@@ -29,6 +29,23 @@ def cmd_init(args):
         user_data.init_agent_workspace(args.agent)
         print(f"Agent 工作区已初始化: {args.agent}")
         print(f"路径: {user_data.get_agent_dir(args.agent)}")
+
+        # 自动注册到 config.yaml
+        config = load_config()
+        agents = config.setdefault("everbot", {}).setdefault("agents", {})
+        if args.agent not in agents:
+            agents[args.agent] = {
+                "workspace": f"~/.alfred/agents/{args.agent}",
+                "heartbeat": {
+                    "enabled": True,
+                    "interval": 30,
+                    "active_hours": [8, 22],
+                },
+            }
+            save_config(config)
+            print(f"已注册到配置: ~/.alfred/config.yaml")
+        else:
+            print(f"配置中已存在 agent: {args.agent}")
     else:
         print("EverBot 目录已初始化")
         print(f"路径: {user_data.alfred_home}")
