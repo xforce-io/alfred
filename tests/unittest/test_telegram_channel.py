@@ -812,6 +812,7 @@ class TestHandleUpdateMedia:
     async def test_document_no_caption(self, channel):
         mock_agent = MagicMock()
         channel._session_manager.get_cached_agent.return_value = mock_agent
+        channel._download_document = AsyncMock(return_value="/tmp/docs/data.csv")
         received = []
 
         async def fake_process(agent, agent_name, session_id, message, on_event):
@@ -822,11 +823,58 @@ class TestHandleUpdateMedia:
         channel._core.process_message = fake_process
 
         await channel._handle_update(self._make_update({
-            "document": {"file_name": "data.csv", "mime_type": "text/csv"},
+            "document": {"file_id": "d1", "file_name": "data.csv", "mime_type": "text/csv"},
         }))
 
         assert len(received) == 1
         assert "[文件: data.csv (text/csv)]" in received[0]
+        assert "path=/tmp/docs/data.csv" in received[0]
+        channel._download_document.assert_awaited_once_with("d1", "data.csv", "test_agent")
+
+    @pytest.mark.asyncio
+    async def test_document_download_failure(self, channel):
+        mock_agent = MagicMock()
+        channel._session_manager.get_cached_agent.return_value = mock_agent
+        channel._download_document = AsyncMock(return_value=None)
+        received = []
+
+        async def fake_process(agent, agent_name, session_id, message, on_event):
+            received.append(message)
+            from src.everbot.core.channel.models import OutboundMessage
+            await on_event(OutboundMessage(session_id, "ok", msg_type="text"))
+
+        channel._core.process_message = fake_process
+
+        await channel._handle_update(self._make_update({
+            "document": {"file_id": "d2", "file_name": "big.zip", "mime_type": "application/zip"},
+        }))
+
+        assert len(received) == 1
+        assert "(文件下载失败)" in received[0]
+
+    @pytest.mark.asyncio
+    async def test_document_with_caption(self, channel):
+        mock_agent = MagicMock()
+        channel._session_manager.get_cached_agent.return_value = mock_agent
+        channel._download_document = AsyncMock(return_value="/tmp/docs/report.md")
+        received = []
+
+        async def fake_process(agent, agent_name, session_id, message, on_event):
+            received.append(message)
+            from src.everbot.core.channel.models import OutboundMessage
+            await on_event(OutboundMessage(session_id, "ok", msg_type="text"))
+
+        channel._core.process_message = fake_process
+
+        await channel._handle_update(self._make_update({
+            "document": {"file_id": "d3", "file_name": "report.md", "mime_type": "text/markdown"},
+            "caption": "Please review this",
+        }))
+
+        assert len(received) == 1
+        assert "[文件: report.md (text/markdown)]" in received[0]
+        assert "Please review this" in received[0]
+        assert "path=/tmp/docs/report.md" in received[0]
 
     @pytest.mark.asyncio
     async def test_text_with_hidden_link(self, channel):

@@ -83,7 +83,7 @@ Prioritize tasks where `state=pending` and `next_run_at <= now`.
 Execute due tasks and summarize the outcome.
 
 ### Phase 2: Routine reflection (only if no due tasks)
-Review MEMORY.md and recent context for recurring intentions that are not scheduled yet.
+Review MEMORY.md (if it exists) and recent context for recurring intentions that are not scheduled yet.
 If you find one, propose it in a JSON block:
 ```json
 {"routines":[{"title":"...", "description":"...", "schedule":"...", "execution_mode":"inline|isolated", "timezone":"..."}]}

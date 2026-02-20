@@ -353,11 +353,23 @@ class TelegramChannel:
         else:
             # Unified media message handling (voice, photo, video, document, etc.)
             text = self._extract_media_text(msg)
+            agent_name = self._bindings.get(chat_id, "")
             # Voice: try to download the file and append path
             if msg.get("voice") and text:
-                agent_name = self._bindings.get(chat_id, "")
                 local_path = await self._download_voice(
                     msg["voice"].get("file_id", ""), agent_name,
+                )
+                if local_path:
+                    text += f" path={local_path}"
+                else:
+                    text += " (文件下载失败)"
+            # Document: download and append path
+            if msg.get("document") and text:
+                d = msg["document"]
+                local_path = await self._download_document(
+                    d.get("file_id", ""),
+                    d.get("file_name", ""),
+                    agent_name,
                 )
                 if local_path:
                     text += f" path={local_path}"
@@ -732,6 +744,35 @@ class TelegramChannel:
 
         logger.error("Failed to send plain message to %s after %d retries", chat_id, max_retries)
         return False
+
+    async def _download_document(self, file_id: str, file_name: str, agent_name: str) -> Optional[str]:
+        """Download a Telegram document file and return the local path, or None on failure."""
+        if not file_id or self._client is None:
+            return None
+        try:
+            resp = await self._client.get(
+                f"{self._base_url}/getFile",
+                params={"file_id": file_id},
+            )
+            data = resp.json()
+            if not data.get("ok"):
+                logger.warning("getFile failed for %s: %s", file_id, data.get("description"))
+                return None
+            remote_path = data["result"]["file_path"]
+
+            download_url = f"https://api.telegram.org/file/bot{self._bot_token}/{remote_path}"
+            resp = await self._client.get(download_url)
+            resp.raise_for_status()
+
+            doc_dir = self._user_data.get_agent_tmp_dir(agent_name) / "documents"
+            doc_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = file_name or Path(remote_path).name or f"{file_id}"
+            local_path = doc_dir / safe_name
+            local_path.write_bytes(resp.content)
+            return str(local_path)
+        except Exception as exc:
+            logger.error("Failed to download document %s: %s", file_id, exc)
+            return None
 
     async def _download_voice(self, file_id: str, agent_name: str) -> Optional[str]:
         """Download a Telegram voice file and return the local path, or None on failure."""

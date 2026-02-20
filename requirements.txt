@@ -9,6 +9,9 @@ httpx
 # Configuration
 pyyaml
 
+# HTML parsing
+beautifulsoup4
+
 # Telegram (optional)
 telegramify-markdown>=1.0.0rc0
 
