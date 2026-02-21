@@ -16,7 +16,7 @@ import traceback
 import uuid
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Union
 
 from dolphin.core.agent.agent_state import AgentState
 from dolphin.core.common.constants import KEY_HISTORY
@@ -67,19 +67,33 @@ class ChannelCoreService:
     # Public API
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _extract_text_from_message(message: Union[str, list]) -> str:
+        """Extract the text portion from a message (str or multimodal list)."""
+        if isinstance(message, str):
+            return message
+        if isinstance(message, list):
+            parts = []
+            for item in message:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    parts.append(item.get("text", ""))
+            return " ".join(parts)
+        return str(message)
+
     async def process_message(
         self,
         agent: Any,
         agent_name: str,
         session_id: str,
-        message: str,
+        message: Union[str, list],
         on_event: Callable[[OutboundMessage], Awaitable[None]],
     ) -> None:
         """处理一条用户消息（加锁 → 加载 → compose → run_turn → 持久化 → 释放锁）。
 
         Turn 执行过程中产生的事件通过 *on_event* 回调投递。
         """
-        logger.debug("Processing message for agent=%s, message='%s'", agent_name, message[:80])
+        message_text = self._extract_text_from_message(message)
+        logger.debug("Processing message for agent=%s, message='%s'", agent_name, message_text[:80])
 
         response = ""
         tool_call_count = 0
@@ -129,15 +143,20 @@ class ChannelCoreService:
                 await self.session_manager.restore_to_agent(agent, session_data)
             _restore_ok = True
             self._inject_skill_updates_if_needed(agent, session_id, session_data)
-            effective_message, mailbox_ack_ids = self._compose_turn_message(
-                message,
-                session_data,
-                agent_name,
-            )
+            if isinstance(message, list):
+                # Multimodal message: skip mailbox composition, pass as-is
+                effective_message = message
+                mailbox_ack_ids = []
+            else:
+                effective_message, mailbox_ack_ids = self._compose_turn_message(
+                    message,
+                    session_data,
+                    agent_name,
+                )
 
-            logger.debug("Agent=%s, Message=%s", agent_name, message[:50])
+            logger.debug("Agent=%s, Message=%s", agent_name, message_text[:50])
 
-            message_preview, _, _ = self._truncate_preview(message, 200)
+            message_preview, _, _ = self._truncate_preview(message_text, 200)
             turn_start_time = datetime.now()
             self._record_timeline_event(
                 session_id,
@@ -381,7 +400,7 @@ class ChannelCoreService:
                         try:
                             _exported = agent.snapshot.export_portable_session()
                             _hist = _exported.get("history_messages", [])
-                            _candidates = {message, effective_message}
+                            _candidates = {message_text, effective_message if isinstance(effective_message, str) else message_text}
                             for _m in reversed(_hist[-4:]):
                                 if _m.get("role") == "user" and _m.get("content") in _candidates:
                                     _dolphin_has_msg = True
@@ -389,8 +408,8 @@ class ChannelCoreService:
                         except Exception:
                             pass
 
-                        if not _dolphin_has_msg and message:
-                            _trailing.append({"role": "user", "content": message})
+                        if not _dolphin_has_msg and message_text:
+                            _trailing.append({"role": "user", "content": message_text})
 
                         # Build failure summary as assistant message
                         _fail_parts = [f"（本轮执行遇到错误：{str(e)[:100]}）"]

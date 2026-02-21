@@ -744,9 +744,48 @@ class TestHandleUpdateMedia:
         return {"update_id": 1, "message": msg_body}
 
     @pytest.mark.asyncio
-    async def test_photo_message_reaches_agent(self, channel):
+    async def test_photo_download_success_multimodal(self, channel, tmp_path):
+        """Photo download success → multimodal list message with base64 image."""
         mock_agent = MagicMock()
         channel._session_manager.get_cached_agent.return_value = mock_agent
+
+        # Create a fake image file
+        fake_img = tmp_path / "photo.jpg"
+        fake_img.write_bytes(b"\xff\xd8\xff\xe0fake_jpeg_data")
+        channel._download_photo = AsyncMock(return_value=str(fake_img))
+        received = []
+
+        async def fake_process(agent, agent_name, session_id, message, on_event):
+            received.append(message)
+            from src.everbot.core.channel.models import OutboundMessage
+            await on_event(OutboundMessage(session_id, "ok", msg_type="text"))
+
+        channel._core.process_message = fake_process
+
+        await channel._handle_update(self._make_update({
+            "photo": [{"file_id": "sm"}, {"file_id": "lg"}],
+            "caption": "Look at this",
+        }))
+
+        assert len(received) == 1
+        msg = received[0]
+        # Should be a multimodal list
+        assert isinstance(msg, list)
+        assert len(msg) == 2
+        assert msg[0]["type"] == "text"
+        assert "[图片]" in msg[0]["text"]
+        assert "Look at this" in msg[0]["text"]
+        assert msg[1]["type"] == "image_url"
+        assert msg[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+        # Should pick the last (largest) photo
+        channel._download_photo.assert_awaited_once_with("lg", "test_agent")
+
+    @pytest.mark.asyncio
+    async def test_photo_download_failure_fallback_text(self, channel):
+        """Photo download failure → fallback to text with error note."""
+        mock_agent = MagicMock()
+        channel._session_manager.get_cached_agent.return_value = mock_agent
+        channel._download_photo = AsyncMock(return_value=None)
         received = []
 
         async def fake_process(agent, agent_name, session_id, message, on_event):
@@ -762,8 +801,38 @@ class TestHandleUpdateMedia:
         }))
 
         assert len(received) == 1
-        assert "[图片]" in received[0]
-        assert "Look at this" in received[0]
+        msg = received[0]
+        assert isinstance(msg, str)
+        assert "[图片]" in msg
+        assert "Look at this" in msg
+        assert "(图片下载失败)" in msg
+
+    @pytest.mark.asyncio
+    async def test_photo_no_caption_multimodal(self, channel, tmp_path):
+        """Photo without caption still produces multimodal message."""
+        mock_agent = MagicMock()
+        channel._session_manager.get_cached_agent.return_value = mock_agent
+
+        fake_img = tmp_path / "photo.jpg"
+        fake_img.write_bytes(b"fake_img")
+        channel._download_photo = AsyncMock(return_value=str(fake_img))
+        received = []
+
+        async def fake_process(agent, agent_name, session_id, message, on_event):
+            received.append(message)
+            from src.everbot.core.channel.models import OutboundMessage
+            await on_event(OutboundMessage(session_id, "ok", msg_type="text"))
+
+        channel._core.process_message = fake_process
+
+        await channel._handle_update(self._make_update({
+            "photo": [{"file_id": "p1"}],
+        }))
+
+        assert len(received) == 1
+        msg = received[0]
+        assert isinstance(msg, list)
+        assert msg[0]["text"] == "[图片]"
 
     @pytest.mark.asyncio
     async def test_voice_message_with_download(self, channel):
@@ -925,3 +994,33 @@ class TestHandleUpdateMedia:
 
         assert len(received) == 1
         assert "[贴纸: 👍]" in received[0]
+
+
+# ===========================================================================
+# 14. _extract_text_from_message (core_service helper)
+# ===========================================================================
+
+class TestExtractTextFromMessage:
+    def test_string_message(self):
+        from src.everbot.core.channel.core_service import ChannelCoreService
+        assert ChannelCoreService._extract_text_from_message("hello") == "hello"
+
+    def test_multimodal_list(self):
+        from src.everbot.core.channel.core_service import ChannelCoreService
+        msg = [
+            {"type": "text", "text": "[图片] caption"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}},
+        ]
+        result = ChannelCoreService._extract_text_from_message(msg)
+        assert "[图片]" in result
+        assert "caption" in result
+        assert "base64" not in result
+
+    def test_empty_list(self):
+        from src.everbot.core.channel.core_service import ChannelCoreService
+        assert ChannelCoreService._extract_text_from_message([]) == ""
+
+    def test_list_no_text_items(self):
+        from src.everbot.core.channel.core_service import ChannelCoreService
+        msg = [{"type": "image_url", "image_url": {"url": "data:..."}}]
+        assert ChannelCoreService._extract_text_from_message(msg) == ""

@@ -12,7 +12,7 @@ import asyncio
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +201,7 @@ class TurnOrchestrator:
     async def run_turn(
         self,
         agent: Any,
-        message: str,
+        message: Union[str, list],
         *,
         system_prompt: str = "",
         stream_mode: str = "delta",
@@ -268,7 +268,7 @@ class TurnOrchestrator:
     async def _run_attempt(
         self,
         agent: Any,
-        message: str,
+        message: Union[str, list],
         *,
         system_prompt: str,
         stream_mode: str,

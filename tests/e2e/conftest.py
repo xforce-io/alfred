@@ -57,12 +57,37 @@ class FakeContext:
         self._vars["session_id"] = session_id
 
 
+class FakeSnapshot:
+    """Minimal snapshot for ScriptedAgent compatibility with SessionManager."""
+
+    def __init__(self, context: FakeContext):
+        self._context = context
+
+    def import_portable_session(self, state: dict, repair: bool = False) -> None:
+        history = state.get("history_messages", [])
+        if history:
+            self._context.set_variable(KEY_HISTORY, history)
+            self._context._history = list(history)
+        variables = state.get("variables", {})
+        for k, v in variables.items():
+            if k != KEY_HISTORY:
+                self._context.set_variable(k, v)
+
+    def export_portable_session(self) -> dict:
+        return {
+            "history_messages": list(self._context._history),
+            "variables": dict(self._context._vars),
+        }
+
+
 class ScriptedAgent:
     """Fake agent that streams scripted progress events."""
 
     def __init__(self, name: str, script: list[Any]):
         self.name = name
-        self.executor = SimpleNamespace(context=FakeContext())
+        ctx = FakeContext()
+        self.executor = SimpleNamespace(context=ctx)
+        self.snapshot = FakeSnapshot(ctx)
         self._script = script
         self._interrupted = asyncio.Event()
         self.state = None

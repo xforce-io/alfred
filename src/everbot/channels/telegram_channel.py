@@ -10,13 +10,14 @@ Binding persistence uses a JSON file at ``~/.alfred/telegram_bindings.json``.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
 import re
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Union
 
 import httpx
 
@@ -344,27 +345,55 @@ class TelegramChannel:
         if not chat_id:
             return
 
+        # message can be str or list (multimodal)
+        message: Union[str, list] = ""
+
         if text:
             # Append hidden URLs from entities (text_link) not already in text
             urls = _extract_urls(text, msg.get("entities") or [])
             for u in urls:
                 if u not in text:
                     text += f"\n{u}"
+            message = text
         else:
             # Unified media message handling (voice, photo, video, document, etc.)
             text = self._extract_media_text(msg)
             agent_name = self._bindings.get(chat_id, "")
+
+            # Photo: download and build multimodal message
+            if msg.get("photo") and text:
+                photos = msg["photo"]
+                file_id = photos[-1].get("file_id", "") if photos else ""
+                local_path = await self._download_photo(file_id, agent_name)
+                if local_path:
+                    try:
+                        with open(local_path, "rb") as f:
+                            img_data = base64.b64encode(f.read()).decode("utf-8")
+                        message = [
+                            {"type": "text", "text": text},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_data}"}},
+                        ]
+                    except Exception as exc:
+                        logger.error("Failed to encode photo %s: %s", local_path, exc)
+                        text += " (图片编码失败)"
+                        message = text
+                else:
+                    text += " (图片下载失败)"
+                    message = text
+            else:
+                message = text
+
             # Voice: try to download the file and append path
-            if msg.get("voice") and text:
+            if msg.get("voice") and isinstance(message, str) and message:
                 local_path = await self._download_voice(
                     msg["voice"].get("file_id", ""), agent_name,
                 )
                 if local_path:
-                    text += f" path={local_path}"
+                    message += f" path={local_path}"
                 else:
-                    text += " (文件下载失败)"
+                    message += " (文件下载失败)"
             # Document: download and append path
-            if msg.get("document") and text:
+            if msg.get("document") and isinstance(message, str) and message:
                 d = msg["document"]
                 local_path = await self._download_document(
                     d.get("file_id", ""),
@@ -372,11 +401,11 @@ class TelegramChannel:
                     agent_name,
                 )
                 if local_path:
-                    text += f" path={local_path}"
+                    message += f" path={local_path}"
                 else:
-                    text += " (文件下载失败)"
+                    message += " (文件下载失败)"
 
-        if not text:
+        if not message:
             return
 
         # Access control
@@ -384,10 +413,11 @@ class TelegramChannel:
             logger.debug("Ignoring message from unauthorized chat_id=%s", chat_id)
             return
 
-        if text.startswith("/"):
-            await self._handle_command(chat_id, text, msg)
+        # Commands only from plain text messages
+        if isinstance(message, str) and message.startswith("/"):
+            await self._handle_command(chat_id, message, msg)
         else:
-            await self._handle_message(chat_id, text, msg)
+            await self._handle_message(chat_id, message, msg)
 
     # ------------------------------------------------------------------
     # Commands
@@ -530,7 +560,7 @@ class TelegramChannel:
     # ------------------------------------------------------------------
 
     async def _handle_message(
-        self, chat_id: str, text: str, raw_msg: dict
+        self, chat_id: str, message: Union[str, list], raw_msg: dict
     ) -> None:
         agent_name = self._bindings.get(chat_id)
         if not agent_name:
@@ -573,7 +603,7 @@ class TelegramChannel:
                 agent=agent,
                 agent_name=agent_name,
                 session_id=session_id,
-                message=text,
+                message=message,
                 on_event=on_event,
             )
         except Exception as exc:
@@ -804,6 +834,35 @@ class TelegramChannel:
             return str(local_path)
         except Exception as exc:
             logger.error("Failed to download voice file %s: %s", file_id, exc)
+            return None
+
+    async def _download_photo(self, file_id: str, agent_name: str) -> Optional[str]:
+        """Download a Telegram photo and return the local path, or None on failure."""
+        if not file_id or self._client is None:
+            return None
+        try:
+            resp = await self._client.get(
+                f"{self._base_url}/getFile",
+                params={"file_id": file_id},
+            )
+            data = resp.json()
+            if not data.get("ok"):
+                logger.warning("getFile failed for %s: %s", file_id, data.get("description"))
+                return None
+            remote_path = data["result"]["file_path"]
+
+            download_url = f"https://api.telegram.org/file/bot{self._bot_token}/{remote_path}"
+            resp = await self._client.get(download_url)
+            resp.raise_for_status()
+
+            photo_dir = self._user_data.get_agent_tmp_dir(agent_name) / "photos"
+            photo_dir.mkdir(parents=True, exist_ok=True)
+            suffix = Path(remote_path).suffix or ".jpg"
+            local_path = photo_dir / f"{file_id}{suffix}"
+            local_path.write_bytes(resp.content)
+            return str(local_path)
+        except Exception as exc:
+            logger.error("Failed to download photo %s: %s", file_id, exc)
             return None
 
     async def _send_chat_action(self, chat_id: str, action: str = "typing") -> None:
