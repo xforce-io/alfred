@@ -112,10 +112,20 @@ class WorkspaceLoader:
         if instructions.user_md:
             parts.append(f"# 用户画像\n\n{instructions.user_md}")
 
-        if instructions.memory_md:
-            # 仅包含 MEMORY.md 的摘要部分（避免过长）
-            memory_lines = instructions.memory_md.split('\n')[:50]
-            parts.append(f"# 历史记忆\n\n" + '\n'.join(memory_lines))
+        # 用 MemoryManager 加载结构化记忆
+        try:
+            from ..core.memory.manager import MemoryManager
+            memory_prompt = MemoryManager(self.workspace_path / "MEMORY.md").get_prompt_memories()
+            if memory_prompt:
+                parts.append(memory_prompt)
+            elif instructions.memory_md:
+                # Fallback：旧格式 MEMORY.md
+                memory_lines = instructions.memory_md.split('\n')[:50]
+                parts.append(f"# 历史记忆\n\n" + '\n'.join(memory_lines))
+        except Exception:
+            if instructions.memory_md:
+                memory_lines = instructions.memory_md.split('\n')[:50]
+                parts.append(f"# 历史记忆\n\n" + '\n'.join(memory_lines))
 
         if instructions.heartbeat_md:
             parts.append(f"# 心跳任务\n\n{instructions.heartbeat_md}")

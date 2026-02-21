@@ -172,6 +172,8 @@ class ChannelCoreService:
             if agent.state != AgentState.PAUSED:
                 ctx.set_variable("query", effective_message)
             self._cache_runtime_workspace_instructions(agent_name, ctx)
+            # Refresh current_time so the LLM always knows the actual time
+            ctx.set_variable("current_time", datetime.now().strftime("%Y-%m-%d %H:%M"))
             system_prompt_override = self._build_turn_system_prompt(session_data, agent_name)
             ensure_continue_chat_compatibility()
 

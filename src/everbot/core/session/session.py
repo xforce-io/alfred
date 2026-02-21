@@ -955,6 +955,23 @@ class SessionManager:
         timeline = self.get_timeline(session_id)
         context_trace = self._extract_context_trace(agent)
 
+        # Extract structured memories for primary / channel sessions.
+        session_type = SessionManager.infer_session_type(session_id)
+        if session_type in ("primary", "channel"):
+            try:
+                agent_name = getattr(agent, "name", "")
+                if agent_name:
+                    context = agent.executor.context
+                    from ..memory.manager import MemoryManager
+                    from ...infra.user_data import UserDataManager
+                    memory_path = UserDataManager().get_agent_dir(agent_name) / "MEMORY.md"
+                    mm = MemoryManager(memory_path, context)
+                    portable = agent.snapshot.export_portable_session()
+                    history = portable.get("history_messages", [])
+                    await mm.process_session_end(history, session_id)
+            except Exception:
+                logger.warning("Memory extraction failed; skipping", exc_info=True)
+
         if lock_already_held:
             await self.persistence.save(
                 session_id,
