@@ -1403,10 +1403,14 @@ If not, reply with `HEARTBEAT_OK`.
 
         if not results:
             return "HEARTBEAT_OK"
-        # Filter out isolated-task status markers — their actual results have
-        # already been injected into primary history individually.
-        _ISOLATED_PREFIXES = ("ISOLATED_DONE:", "ISOLATED_TIMEOUT:", "ISOLATED_FAILED:")
-        meaningful = [r for r in results if not any(r.startswith(p) for p in _ISOLATED_PREFIXES)]
+        # Filter out task status markers — isolated results have already been
+        # injected into primary history individually, and inline failure/timeout
+        # markers should not leak into user-visible output.
+        _STATUS_PREFIXES = (
+            "ISOLATED_DONE:", "ISOLATED_TIMEOUT:", "ISOLATED_FAILED:",
+            "TASK_FAILED:", "TASK_TIMEOUT:",
+        )
+        meaningful = [r for r in results if not any(r.startswith(p) for p in _STATUS_PREFIXES)]
         return "; ".join(meaningful) if meaningful else "HEARTBEAT_OK"
 
     def _trim_session_history(self, session_data: Any) -> None:
