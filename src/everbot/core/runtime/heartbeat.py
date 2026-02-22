@@ -26,6 +26,7 @@ from ..tasks.task_manager import (
     claim_task,
     update_task_state,
     write_task_block,
+    purge_stale_tasks,
     TaskList,
     TaskState,
     ParseResult,
@@ -922,6 +923,9 @@ If not, reply with `HEARTBEAT_OK`.
             return
         hb_path = self.workspace_path / "HEARTBEAT.md"
         try:
+            purged = purge_stale_tasks(task_list)
+            if purged:
+                logger.info("Purged %d stale task(s) from HEARTBEAT.md", purged)
             content = hb_path.read_text(encoding="utf-8")
             updated = write_task_block(content, task_list)
             self._write_heartbeat_file(updated)

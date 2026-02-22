@@ -288,6 +288,48 @@ def update_task_state(
             task.state = TaskState.FAILED.value
 
 
+_STALE_THRESHOLD = timedelta(days=7)
+
+
+def purge_stale_tasks(
+    task_list: TaskList,
+    now: Optional[datetime] = None,
+    threshold: timedelta = _STALE_THRESHOLD,
+) -> int:
+    """Remove terminal tasks older than *threshold* from *task_list*.
+
+    Purges:
+    - One-shot done tasks (state=done, no schedule) with last_run_at older than threshold
+    - Permanently failed tasks (state=failed, retry >= max_retry) with last_run_at older than threshold
+
+    Returns the number of removed tasks.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    cutoff = now - threshold
+    keep: List[Task] = []
+    removed = 0
+
+    for task in task_list.tasks:
+        if task.state == TaskState.DONE.value and task.schedule is None:
+            last_run = _parse_iso_datetime(task.last_run_at) if task.last_run_at else None
+            if last_run is not None and last_run < cutoff:
+                removed += 1
+                continue
+        elif task.state == TaskState.FAILED.value and task.retry >= task.max_retry:
+            last_run = _parse_iso_datetime(task.last_run_at) if task.last_run_at else None
+            if last_run is not None and last_run < cutoff:
+                removed += 1
+                continue
+        keep.append(task)
+
+    task_list.tasks = keep
+    return removed
+
+
 def write_task_block(content: str, task_list: TaskList) -> str:
     """Replace the JSON task block in HEARTBEAT.md content, or append one."""
     block_json = json.dumps(task_list.to_dict(), indent=2, ensure_ascii=False)
