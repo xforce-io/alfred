@@ -284,6 +284,13 @@ def update_task_state(
         if task.retry < task.max_retry:
             # Re-arm as pending for retry
             task.state = TaskState.PENDING.value
+        elif task.schedule:
+            # Scheduled task: reset retry counter and re-arm for next cycle
+            task.retry = 0
+            task.state = TaskState.PENDING.value
+            next_run = _compute_next_run(task.schedule, now, task.timezone)
+            if next_run:
+                task.next_run_at = next_run
         else:
             task.state = TaskState.FAILED.value
 
@@ -300,7 +307,9 @@ def purge_stale_tasks(
 
     Purges:
     - One-shot done tasks (state=done, no schedule) with last_run_at older than threshold
-    - Permanently failed tasks (state=failed, retry >= max_retry) with last_run_at older than threshold
+    - One-shot failed tasks (state=failed, no schedule, retry exhausted) with last_run_at older than threshold
+
+    Scheduled tasks are never purged (they re-arm automatically).
 
     Returns the number of removed tasks.
     """
@@ -314,12 +323,12 @@ def purge_stale_tasks(
     removed = 0
 
     for task in task_list.tasks:
-        if task.state == TaskState.DONE.value and task.schedule is None:
+        if task.schedule is None and task.state == TaskState.DONE.value:
             last_run = _parse_iso_datetime(task.last_run_at) if task.last_run_at else None
             if last_run is not None and last_run < cutoff:
                 removed += 1
                 continue
-        elif task.state == TaskState.FAILED.value and task.retry >= task.max_retry:
+        elif task.schedule is None and task.state == TaskState.FAILED.value and task.retry >= task.max_retry:
             last_run = _parse_iso_datetime(task.last_run_at) if task.last_run_at else None
             if last_run is not None and last_run < cutoff:
                 removed += 1
