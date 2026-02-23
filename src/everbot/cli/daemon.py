@@ -319,8 +319,10 @@ class EverBotDaemon:
             env_key = bot_token[2:-1]
             bot_token = os.environ.get(env_key, "")
         if not bot_token:
-            logger.warning("Telegram channel enabled but bot_token is empty")
-            return None
+            raise RuntimeError(
+                "Telegram channel is enabled but bot_token is empty. "
+                "Set the TELEGRAM_BOT_TOKEN environment variable or disable the channel."
+            )
 
         default_agent = str(tg_cfg.get("default_agent", "") or "")
         allowed_ids = tg_cfg.get("allowed_chat_ids")
@@ -333,6 +335,48 @@ class EverBotDaemon:
             default_agent=default_agent,
             allowed_chat_ids=allowed_ids,
         )
+
+    # -- Config validation --------------------------------------------------
+
+    def _validate_env_refs(self):
+        """Fail fast if any ${ENV_VAR} reference in config resolves to empty."""
+        import re
+
+        missing: list[str] = []
+
+        # 1. Check everbot config.yaml for ${...} patterns
+        def _walk(obj: Any, path: str = "") -> None:
+            if isinstance(obj, str):
+                for m in re.finditer(r'\$\{(\w+)\}', obj):
+                    env_key = m.group(1)
+                    if not os.environ.get(env_key):
+                        missing.append(f"{path}: ${{{env_key}}}")
+            elif isinstance(obj, dict):
+                for k, v in obj.items():
+                    _walk(v, f"{path}.{k}" if path else k)
+            elif isinstance(obj, list):
+                for i, v in enumerate(obj):
+                    _walk(v, f"{path}[{i}]")
+
+        _walk(self.config)
+
+        # 2. Check dolphin.yaml (LLM provider config)
+        dolphin_path = getattr(self.agent_factory, "global_config_path", None)
+        if dolphin_path and Path(dolphin_path).exists():
+            try:
+                import yaml as _yaml
+                with open(dolphin_path, "r", encoding="utf-8") as f:
+                    dolphin_cfg = _yaml.safe_load(f) or {}
+                _walk(dolphin_cfg, "dolphin.yaml")
+            except Exception:
+                pass  # non-critical; dolphin SDK will report its own errors
+
+        if missing:
+            details = "\n  ".join(missing)
+            raise RuntimeError(
+                f"Required environment variables are not set:\n  {details}\n"
+                "Set them before starting the daemon."
+            )
 
     # -- Lifecycle ----------------------------------------------------------
 
@@ -348,6 +392,7 @@ class EverBotDaemon:
 
         try:
             await self._init_components()
+            self._validate_env_refs()
             self._pid = write_pid_file(self.user_data.pid_file)
             self._create_heartbeat_runners()
             self._telegram_channel = self._create_telegram_channel()
