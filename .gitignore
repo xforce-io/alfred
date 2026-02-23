@@ -17,6 +17,7 @@ htmlcov/
 .background_process.log
 .heartbeat_snapshot.json
 .heartbeat_snapshot.json.bak
+HEARTBEAT.md
 
 # Sensitive config (use example files as templates)
 config/dolphin.yaml

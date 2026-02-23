@@ -10,11 +10,11 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from ..agent.factory import get_agent_factory
-from ...infra.config import load_config
+from ...infra.config import get_config
 from .heartbeat import HeartbeatRunner
 from ...infra.process import is_pid_running, read_pid_file, remove_pid_file
 from ..session.session import SessionManager
-from ...infra.user_data import UserDataManager
+from ...infra.user_data import UserDataManager, get_user_data_manager
 
 
 def get_local_status(user_data: Optional[UserDataManager] = None) -> Dict[str, Any]:
@@ -23,7 +23,7 @@ def get_local_status(user_data: Optional[UserDataManager] = None) -> Dict[str, A
 
     This does not attempt network calls; it relies on local files written by the daemon.
     """
-    user_data = user_data or UserDataManager()
+    user_data = user_data or get_user_data_manager()
     pid = read_pid_file(user_data.pid_file)
 
     running = False
@@ -55,10 +55,10 @@ async def run_heartbeat_once(
     force: bool = False,
 ) -> str:
     """Run a single heartbeat for an agent."""
-    user_data = UserDataManager()
+    user_data = get_user_data_manager()
     user_data.ensure_directories()
 
-    config = load_config(config_path)
+    config = get_config(config_path)
     agents_config = config.get("everbot", {}).get("agents", {})
     agent_config = agents_config.get(agent_name, {})
     heartbeat_config = agent_config.get("heartbeat", {}) or {}

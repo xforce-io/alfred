@@ -40,7 +40,7 @@ def test_session_reset_api_cleans_cache_disk_and_tmp(client, isolated_web_env):
         encoding="utf-8",
     )
 
-    agent_tmp = web_app.UserDataManager().get_agent_dir(agent_name) / "tmp"
+    agent_tmp = web_app.get_user_data_manager().get_agent_dir(agent_name) / "tmp"
     agent_tmp.mkdir(parents=True, exist_ok=True)
     (agent_tmp / "stale.tmp").write_text("stale", encoding="utf-8")
 

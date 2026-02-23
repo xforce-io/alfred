@@ -10,8 +10,8 @@ import subprocess
 import signal
 from pathlib import Path
 
-from ..infra.user_data import UserDataManager
-from ..infra.config import load_config, save_config, get_default_config
+from ..infra.user_data import get_user_data_manager
+from ..infra.config import load_config, get_config, save_config, get_default_config
 from .daemon import EverBotDaemon
 from ..core.runtime.control import get_local_status, run_heartbeat_once
 from .doctor import collect_doctor_report
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 def cmd_init(args):
     """初始化 Agent 工作区"""
-    user_data = UserDataManager()
+    user_data = get_user_data_manager()
     user_data.ensure_directories()
 
     if args.agent:
@@ -31,7 +31,7 @@ def cmd_init(args):
         print(f"路径: {user_data.get_agent_dir(args.agent)}")
 
         # 自动注册到 config.yaml
-        config = load_config()
+        config = load_config()  # mutable copy for save_config
         agents = config.setdefault("everbot", {}).setdefault("agents", {})
         if args.agent not in agents:
             agents[args.agent] = {
@@ -53,7 +53,7 @@ def cmd_init(args):
 
 def cmd_list(args):
     """列出所有 Agent"""
-    user_data = UserDataManager()
+    user_data = get_user_data_manager()
     agents = user_data.list_agents()
 
     if not agents:
@@ -67,7 +67,7 @@ def cmd_list(args):
 
 def cmd_status(args):
     """查看状态"""
-    status = get_local_status(UserDataManager())
+    status = get_local_status(get_user_data_manager())
     running = bool(status.get("running"))
     pid = status.get("pid")
     snapshot = status.get("snapshot") or {}
@@ -115,7 +115,7 @@ def cmd_config(args):
     """配置管理"""
     if args.show:
         # 显示当前配置
-        config = load_config(args.config)
+        config = get_config(args.config)
         import yaml
         print(yaml.dump(config, default_flow_style=False, allow_unicode=True))
     elif args.init:
@@ -129,7 +129,7 @@ def cmd_config(args):
 
 def cmd_stop(args):
     """停止守护进程 + Web 服务器"""
-    user_data = UserDataManager()
+    user_data = get_user_data_manager()
     stopped_any = False
 
     # 停止 daemon
@@ -184,7 +184,7 @@ def cmd_migrate_agent(args):
     from ..core.agent.factory import AgentFactory
     from ..infra.workspace import WorkspaceLoader
 
-    user_data = UserDataManager()
+    user_data = get_user_data_manager()
     agent_dir = user_data.get_agent_dir(args.agent)
     if not agent_dir.exists():
         print(f"Agent 不存在: {args.agent}")

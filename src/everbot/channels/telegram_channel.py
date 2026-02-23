@@ -33,7 +33,7 @@ from ..core.channel.session_resolver import ChannelSessionResolver
 from ..core.runtime import events
 from ..core.runtime.control import get_local_status
 from ..core.session.session import SessionManager
-from ..infra.user_data import UserDataManager
+from ..infra.user_data import get_user_data_manager
 from ..web.services.agent_service import AgentService
 
 logger = logging.getLogger(__name__)
@@ -82,7 +82,7 @@ class TelegramChannel:
             set(allowed_chat_ids) if allowed_chat_ids else None
         )
 
-        self._user_data = UserDataManager()
+        self._user_data = get_user_data_manager()
         self._agent_service = AgentService()
         self._core = ChannelCoreService(
             session_manager=self._session_manager,
@@ -775,6 +775,30 @@ class TelegramChannel:
         logger.error("Failed to send plain message to %s after %d retries", chat_id, max_retries)
         return False
 
+    # ------------------------------------------------------------------
+    # Download helpers — security hardened
+    # ------------------------------------------------------------------
+
+    # Size limits (bytes)
+    _MAX_DOCUMENT_SIZE = 50 * 1024 * 1024   # 50 MB
+    _MAX_VOICE_SIZE = 20 * 1024 * 1024      # 20 MB
+    _MAX_PHOTO_SIZE = 20 * 1024 * 1024      # 20 MB
+
+    @staticmethod
+    def _sanitize_filename(raw: str) -> str:
+        """Strip path components and special characters to prevent path traversal."""
+        name = Path(raw).name                              # drop directory parts
+        name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)     # keep only safe chars
+        return name.strip("._-") or "unnamed"
+
+    def _safe_local_path(self, target_dir: Path, filename: str) -> Optional[Path]:
+        """Resolve the final path and verify it stays inside *target_dir*."""
+        candidate = (target_dir / filename).resolve()
+        if not str(candidate).startswith(str(target_dir.resolve())):
+            logger.warning("Path traversal attempt blocked: %s", filename)
+            return None
+        return candidate
+
     async def _download_document(self, file_id: str, file_name: str, agent_name: str) -> Optional[str]:
         """Download a Telegram document file and return the local path, or None on failure."""
         if not file_id or self._client is None:
@@ -788,16 +812,32 @@ class TelegramChannel:
             if not data.get("ok"):
                 logger.warning("getFile failed for %s: %s", file_id, data.get("description"))
                 return None
-            remote_path = data["result"]["file_path"]
+            file_info = data["result"]
+            remote_path = file_info["file_path"]
+
+            # Size check (Telegram returns file_size for files ≤ 20 MB guaranteed)
+            file_size = file_info.get("file_size", 0)
+            if file_size and file_size > self._MAX_DOCUMENT_SIZE:
+                logger.warning("Document %s exceeds size limit (%d > %d), skipping",
+                               file_id, file_size, self._MAX_DOCUMENT_SIZE)
+                return None
 
             download_url = f"https://api.telegram.org/file/bot{self._bot_token}/{remote_path}"
             resp = await self._client.get(download_url)
             resp.raise_for_status()
 
+            if len(resp.content) > self._MAX_DOCUMENT_SIZE:
+                logger.warning("Document %s download size exceeds limit (%d), discarding",
+                               file_id, len(resp.content))
+                return None
+
             doc_dir = self._user_data.get_agent_tmp_dir(agent_name) / "documents"
             doc_dir.mkdir(parents=True, exist_ok=True)
-            safe_name = file_name or Path(remote_path).name or f"{file_id}"
-            local_path = doc_dir / safe_name
+            raw_name = file_name or Path(remote_path).name or f"{file_id}"
+            safe_name = self._sanitize_filename(raw_name)
+            local_path = self._safe_local_path(doc_dir, safe_name)
+            if local_path is None:
+                return None
             local_path.write_bytes(resp.content)
             return str(local_path)
         except Exception as exc:
@@ -809,7 +849,6 @@ class TelegramChannel:
         if not file_id or self._client is None:
             return None
         try:
-            # Step 1: getFile to obtain file_path
             resp = await self._client.get(
                 f"{self._base_url}/getFile",
                 params={"file_id": file_id},
@@ -818,18 +857,31 @@ class TelegramChannel:
             if not data.get("ok"):
                 logger.warning("getFile failed for %s: %s", file_id, data.get("description"))
                 return None
-            remote_path = data["result"]["file_path"]
+            file_info = data["result"]
+            remote_path = file_info["file_path"]
 
-            # Step 2: download the file
+            file_size = file_info.get("file_size", 0)
+            if file_size and file_size > self._MAX_VOICE_SIZE:
+                logger.warning("Voice %s exceeds size limit (%d > %d), skipping",
+                               file_id, file_size, self._MAX_VOICE_SIZE)
+                return None
+
             download_url = f"https://api.telegram.org/file/bot{self._bot_token}/{remote_path}"
             resp = await self._client.get(download_url)
             resp.raise_for_status()
 
-            # Save to agent's tmp directory: ~/.alfred/agents/{agent_name}/tmp/voice/
+            if len(resp.content) > self._MAX_VOICE_SIZE:
+                logger.warning("Voice %s download size exceeds limit (%d), discarding",
+                               file_id, len(resp.content))
+                return None
+
             voice_dir = self._user_data.get_agent_tmp_dir(agent_name) / "voice"
             voice_dir.mkdir(parents=True, exist_ok=True)
             suffix = Path(remote_path).suffix or ".ogg"
-            local_path = voice_dir / f"{file_id}{suffix}"
+            safe_name = self._sanitize_filename(f"{file_id}{suffix}")
+            local_path = self._safe_local_path(voice_dir, safe_name)
+            if local_path is None:
+                return None
             local_path.write_bytes(resp.content)
             return str(local_path)
         except Exception as exc:
@@ -849,16 +901,31 @@ class TelegramChannel:
             if not data.get("ok"):
                 logger.warning("getFile failed for %s: %s", file_id, data.get("description"))
                 return None
-            remote_path = data["result"]["file_path"]
+            file_info = data["result"]
+            remote_path = file_info["file_path"]
+
+            file_size = file_info.get("file_size", 0)
+            if file_size and file_size > self._MAX_PHOTO_SIZE:
+                logger.warning("Photo %s exceeds size limit (%d > %d), skipping",
+                               file_id, file_size, self._MAX_PHOTO_SIZE)
+                return None
 
             download_url = f"https://api.telegram.org/file/bot{self._bot_token}/{remote_path}"
             resp = await self._client.get(download_url)
             resp.raise_for_status()
 
+            if len(resp.content) > self._MAX_PHOTO_SIZE:
+                logger.warning("Photo %s download size exceeds limit (%d), discarding",
+                               file_id, len(resp.content))
+                return None
+
             photo_dir = self._user_data.get_agent_tmp_dir(agent_name) / "photos"
             photo_dir.mkdir(parents=True, exist_ok=True)
             suffix = Path(remote_path).suffix or ".jpg"
-            local_path = photo_dir / f"{file_id}{suffix}"
+            safe_name = self._sanitize_filename(f"{file_id}{suffix}")
+            local_path = self._safe_local_path(photo_dir, safe_name)
+            if local_path is None:
+                return None
             local_path.write_bytes(resp.content)
             return str(local_path)
         except Exception as exc:

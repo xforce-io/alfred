@@ -55,16 +55,31 @@ def _make_runner(workspace_path: Path = Path("."), **overrides) -> HeartbeatRunn
 
 def _make_session_manager_for_execute():
     """Build a session manager with sufficient mocks for _execute_once."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _file_lock(session_id, blocking=False):
+        yield True
+
     sm = SimpleNamespace(
         get_primary_session_id=lambda agent_name: f"web_session_{agent_name}",
         get_heartbeat_session_id=lambda agent_name: f"heartbeat_session_{agent_name}",
         acquire_session=AsyncMock(return_value=True),
         release_session=MagicMock(),
+        file_lock=_file_lock,
         load_session=AsyncMock(return_value=None),
         get_cached_agent=MagicMock(return_value=None),
         cache_agent=MagicMock(),
         save_session=AsyncMock(),
         append_timeline_event=MagicMock(),
+        record_metric=MagicMock(),
+        migrate_legacy_sessions_for_agent=AsyncMock(return_value=False),
+        deposit_mailbox_event=AsyncMock(return_value=True),
+        inject_history_message=AsyncMock(return_value=True),
+        mark_session_archived=AsyncMock(return_value=True),
+        restore_timeline=MagicMock(),
+        restore_to_agent=AsyncMock(),
+        update_atomic=AsyncMock(return_value=None),
     )
     sm.persistence = SimpleNamespace(
         restore_to_agent=AsyncMock(),

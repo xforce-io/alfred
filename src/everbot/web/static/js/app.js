@@ -6,6 +6,44 @@ let traceModalData = null;
 let currentTraceTab = 'trace';
 let trajectoryIncludeHeartbeat = false;
 
+// ── API Key helpers ──
+function getApiKey() {
+  return localStorage.getItem('everbot_api_key') || '';
+}
+
+function setApiKey(key) {
+  if (key) {
+    localStorage.setItem('everbot_api_key', key);
+  } else {
+    localStorage.removeItem('everbot_api_key');
+  }
+}
+
+function authHeaders(extra = {}) {
+  const headers = { ...extra };
+  const key = getApiKey();
+  if (key) headers['X-API-Key'] = key;
+  return headers;
+}
+
+async function authFetch(url, options = {}) {
+  options.headers = authHeaders(options.headers || {});
+  const res = await fetch(url, options);
+  if (res.status === 401) {
+    promptForApiKey();
+    throw new Error('Unauthorized');
+  }
+  return res;
+}
+
+function promptForApiKey() {
+  const key = window.prompt('API Key required. Please enter your EverBot API key:');
+  if (key !== null) {
+    setApiKey(key.trim());
+    location.reload();
+  }
+}
+
 // 智能自动滚动函数
 function scrollToBottom() {
   const messagesDiv = document.getElementById('chat-messages');
@@ -78,7 +116,7 @@ function switchTab(tab) {
 
 // 加载 Agent 列表
 async function loadAgents() {
-  const res = await fetch('/api/agents');
+  const res = await authFetch('/api/agents');
   const agents = await res.json();
   const selector = document.getElementById('agent-selector');
   selector.innerHTML = agents.map(a =>
@@ -120,7 +158,7 @@ function renderSessionLabel(session) {
 
 async function loadSessions(agent, preferredSessionId = null) {
   const sessionSelector = document.getElementById('session-selector');
-  const res = await fetch(`/api/agents/${encodeURIComponent(agent)}/sessions?limit=20`);
+  const res = await authFetch(`/api/agents/${encodeURIComponent(agent)}/sessions?limit=20`);
   const payload = await res.json();
   const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
   sessionSelector.innerHTML = sessions.map((s) => (
@@ -204,6 +242,8 @@ function connectWebSocket(agent, sessionId) {
   currentSessionId = sessionId || `web_session_${agent}`;
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const query = new URLSearchParams({ session_id: currentSessionId });
+  const apiKey = getApiKey();
+  if (apiKey) query.set('api_key', apiKey);
   const socket = new WebSocket(`${protocol}//${location.host}/ws/chat/${encodeURIComponent(agent)}?${query.toString()}`);
   ws = socket;
 
@@ -472,7 +512,7 @@ function formatMessage(content) {
 
 // 加载状态
 async function loadStatus() {
-  const res = await fetch('/api/status');
+  const res = await authFetch('/api/status');
   const status = await res.json();
 
   const running = status.snapshot?.status === 'running';
@@ -525,7 +565,11 @@ function connectLogStream() {
 
   if (logEventSource) { logEventSource.close(); logEventSource = null; }
 
-  const es = new EventSource('/api/logs/heartbeat/events/stream');
+  const sseQuery = new URLSearchParams();
+  const sseApiKey = getApiKey();
+  if (sseApiKey) sseQuery.set('api_key', sseApiKey);
+  const sseUrl = '/api/logs/heartbeat/events/stream' + (sseQuery.toString() ? '?' + sseQuery.toString() : '');
+  const es = new EventSource(sseUrl);
   logEventSource = es;
 
   let firstEvent = true;
@@ -566,7 +610,7 @@ function connectLogStream() {
 async function triggerHeartbeat() {
   const agent = prompt('输入 Agent 名称:');
   if (!agent) return;
-  await fetch(`/api/agents/${encodeURIComponent(agent)}/heartbeat?force=true`, {
+  await authFetch(`/api/agents/${encodeURIComponent(agent)}/heartbeat?force=true`, {
     method: 'POST'
   });
   alert('心跳已触发');
@@ -727,7 +771,7 @@ async function newConversation(evt = null) {
   }
   let createdSessionId = null;
   try {
-    const response = await fetch(`/api/agents/${encodeURIComponent(currentAgent)}/sessions`, {
+    const response = await authFetch(`/api/agents/${encodeURIComponent(currentAgent)}/sessions`, {
       method: 'POST',
       headers: {
         'X-Everbot-Trigger': debugMeta.trigger,
@@ -763,7 +807,7 @@ async function resetEnvironment() {
   const second = window.confirm('这是不可恢复操作。请再次确认执行“重置环境”。');
   if (!second) return;
   try {
-    await fetch(`/api/agents/${encodeURIComponent(currentAgent)}/sessions/reset`, { method: 'POST' });
+    await authFetch(`/api/agents/${encodeURIComponent(currentAgent)}/sessions/reset`, { method: 'POST' });
   } catch (e) {
     console.error('Failed to reset environment:', e);
     return;
@@ -796,7 +840,7 @@ async function clearHistory() {
   const confirmed = window.confirm(msg);
   if (!confirmed) return;
   try {
-    await fetch(`/api/agents/${encodeURIComponent(currentAgent)}/sessions/${encodeURIComponent(targetSessionId)}/clear-history`, { method: 'POST' });
+    await authFetch(`/api/agents/${encodeURIComponent(currentAgent)}/sessions/${encodeURIComponent(targetSessionId)}/clear-history`, { method: 'POST' });
   } catch (e) {
     console.error('Failed to clear history:', e);
     return;
@@ -821,7 +865,7 @@ async function fetchTraceData() {
   if (!currentAgent) return null;
   const activeSessionId = currentSessionId || `web_session_${currentAgent}`;
   const query = new URLSearchParams({ session_id: activeSessionId });
-  const response = await fetch(`/api/agents/${encodeURIComponent(currentAgent)}/session/trace?${query.toString()}`);
+  const response = await authFetch(`/api/agents/${encodeURIComponent(currentAgent)}/session/trace?${query.toString()}`);
   if (!response.ok) {
     throw new Error(`Trace API failed: ${response.status}`);
   }
@@ -1377,7 +1421,7 @@ async function loadSkillsSettings() {
   const container = document.getElementById('skills-list');
   if (!container) return;
   try {
-    const res = await fetch('/api/settings/skills');
+    const res = await authFetch('/api/settings/skills');
     const data = await res.json();
     const skills = data.skills || [];
     if (skills.length === 0) {
@@ -1407,7 +1451,7 @@ async function loadSkillsSettings() {
 
 async function toggleSkill(skillName, enabled) {
   try {
-    const res = await fetch(`/api/settings/skills/${encodeURIComponent(skillName)}/toggle`, {
+    const res = await authFetch(`/api/settings/skills/${encodeURIComponent(skillName)}/toggle`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled }),
@@ -1423,7 +1467,7 @@ async function toggleSkill(skillName, enabled) {
 // Telegram Settings
 async function loadTelegramSettings() {
   try {
-    const res = await fetch('/api/settings/telegram');
+    const res = await authFetch('/api/settings/telegram');
     const data = await res.json();
 
     document.getElementById('tg-enabled').checked = !!data.enabled;
@@ -1447,7 +1491,7 @@ async function saveTelegramSettings() {
   statusEl.textContent = '保存中...';
   statusEl.className = 'settings-status';
   try {
-    const res = await fetch('/api/settings/telegram', {
+    const res = await authFetch('/api/settings/telegram', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

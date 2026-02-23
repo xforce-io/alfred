@@ -243,3 +243,28 @@ class UserDataManager:
         (agent_dir / "skills").mkdir(exist_ok=True)
 
         logger.info(f"Agent 工作区初始化完成: {agent_name}")
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton
+# ---------------------------------------------------------------------------
+
+_default_user_data: Optional[UserDataManager] = None
+
+
+def get_user_data_manager(alfred_home: Optional[Path] = None) -> UserDataManager:
+    """Return the shared UserDataManager singleton.
+
+    On first call the instance is created (optionally with *alfred_home*).
+    Subsequent calls return the cached instance regardless of *alfred_home*.
+    """
+    global _default_user_data
+    if _default_user_data is None:
+        _default_user_data = UserDataManager(alfred_home=alfred_home)
+    return _default_user_data
+
+
+def reset_user_data_manager() -> None:
+    """Reset the singleton (mainly for tests)."""
+    global _default_user_data
+    _default_user_data = None

@@ -4,6 +4,10 @@ Dolphin patches for web environment compatibility
 Fixes blocking issues when running Dolphin agents in non-TTY environments.
 """
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def patch_globalskills_for_web():
     """
@@ -11,6 +15,8 @@ def patch_globalskills_for_web():
 
     Main issue: rich.Console.status blocks in uvicorn/web environments.
     Solution: Disable entry points loading and use quiet console.
+
+    .. deprecated:: No call sites in the current codebase; consider removing.
     """
     try:
         import dolphin.sdk.skill.global_skills as gs_module
@@ -22,16 +28,19 @@ def patch_globalskills_for_web():
 
         gs_module.GlobalSkills._loadSkillkitsFromEntryPoints = skip_entry_points
 
-        print("[Patch] GlobalSkills: Disabled entry points loading for web compatibility")
+        logger.info("GlobalSkills: Disabled entry points loading for web compatibility")
 
     except ImportError as e:
-        print(f"[Patch] Warning: Could not patch GlobalSkills: {e}")
+        logger.warning("Could not patch GlobalSkills: %s", e)
     except Exception as e:
-        print(f"[Patch] Error patching GlobalSkills: {e}")
+        logger.warning("Error patching GlobalSkills: %s", e)
 
 
 def apply_all_patches():
-    """Apply all Dolphin patches for web environment"""
-    print("[Patch] Applying Dolphin patches for web environment...")
+    """Apply all Dolphin patches for web environment.
+
+    .. deprecated:: No call sites in the current codebase; consider removing.
+    """
+    logger.info("Applying Dolphin patches for web environment...")
     patch_globalskills_for_web()
-    print("[Patch] All patches applied")
+    logger.info("All patches applied")

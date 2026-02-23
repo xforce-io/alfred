@@ -2,6 +2,11 @@
 
 everbot:
   enabled: true
+
+  # Web UI 配置
+  web:
+    api_key: ""  # 留空则不启用认证；设置后所有 API 需携带此 key
+
   runtime:
     job_retention_days: 7           # archived job session 保留天数
     job_max_archived_sessions: 200  # 每个实例最多保留的 archived job session 数量

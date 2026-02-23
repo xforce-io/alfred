@@ -22,7 +22,7 @@ from ...core.channel.models import OutboundMessage
 from ...core.runtime.mailbox import compose_message_with_mailbox_updates
 from ...core.runtime.turn_orchestrator import CHAT_POLICY
 from ...core.session.session import SessionManager
-from ...infra.user_data import UserDataManager
+from ...infra.user_data import get_user_data_manager
 
 
 class ChatService:
@@ -41,7 +41,7 @@ class ChatService:
 
     def __init__(self):
         self.agent_service = AgentService()
-        self.user_data = UserDataManager()
+        self.user_data = get_user_data_manager()
         self.session_manager = SessionManager(self.user_data.sessions_dir)
         self._core = ChannelCoreService(self.session_manager, self.agent_service, self.user_data)
         self._setup_event_listener()

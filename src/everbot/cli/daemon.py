@@ -15,8 +15,8 @@ import uuid
 
 from ..core.runtime.heartbeat import HeartbeatRunner
 from ..core.session.session import SessionManager
-from ..infra.user_data import UserDataManager
-from ..infra.config import load_config
+from ..infra.user_data import get_user_data_manager
+from ..infra.config import get_config
 from ..core.agent.factory import get_agent_factory
 from ..infra.process import DaemonLock, write_pid_file, remove_pid_file
 from ..core.runtime.scheduler import AgentSchedule, Scheduler, SchedulerTask
@@ -38,8 +38,8 @@ class EverBotDaemon:
         global_config_path: Optional[str] = None,
         default_model: Optional[str] = None,
     ):
-        self.config = load_config(config_path)
-        self.user_data = UserDataManager()
+        self.config = get_config(config_path)
+        self.user_data = get_user_data_manager()
         self.session_manager: Optional[SessionManager] = None
         self.heartbeat_runners: Dict[str, HeartbeatRunner] = {}
         self._heartbeat_state: Dict[str, Dict[str, str]] = {}
@@ -199,7 +199,7 @@ class EverBotDaemon:
         """Periodically cleanup archived job sessions."""
         while self._running:
             try:
-                if self.session_manager is not None and hasattr(self.session_manager, "cleanup_archived_job_sessions"):
+                if self.session_manager is not None:
                     removed = await self.session_manager.cleanup_archived_job_sessions(
                         retention_days=self._job_retention_days,
                         max_sessions=self._job_max_archived_sessions,
@@ -444,8 +444,14 @@ async def main():
     )
 
     loop = asyncio.get_event_loop()
+    _shutdown_tasks: list[asyncio.Task] = []
+
+    def _request_shutdown():
+        task = asyncio.create_task(daemon.stop())
+        _shutdown_tasks.append(task)
+
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(daemon.stop()))
+        loop.add_signal_handler(sig, _request_shutdown)
 
     await daemon.start()
 

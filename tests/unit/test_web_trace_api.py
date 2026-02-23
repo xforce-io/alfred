@@ -67,7 +67,7 @@ async def test_trace_api_uses_persisted_session_data_only(monkeypatch, tmp_path:
     )
 
     web_app.chat_service.session_manager = _StrictSessionManager(session_data)
-    monkeypatch.setattr(web_app, "UserDataManager", lambda: _FakeUserDataManager(tmp_path))
+    monkeypatch.setattr(web_app, "get_user_data_manager", lambda: _FakeUserDataManager(tmp_path))
 
     result = await web_app.get_agent_session_trace(agent_name)
 
@@ -81,7 +81,7 @@ async def test_trace_api_uses_persisted_session_data_only(monkeypatch, tmp_path:
 async def test_trace_api_returns_empty_structures_when_no_persisted_session(monkeypatch, tmp_path: Path):
     agent_name = "empty_agent"
     web_app.chat_service.session_manager = _StrictSessionManager(None)
-    monkeypatch.setattr(web_app, "UserDataManager", lambda: _FakeUserDataManager(tmp_path))
+    monkeypatch.setattr(web_app, "get_user_data_manager", lambda: _FakeUserDataManager(tmp_path))
 
     result = await web_app.get_agent_session_trace(agent_name)
 
@@ -115,7 +115,7 @@ async def test_trace_api_is_stable_across_refresh_requests(monkeypatch, tmp_path
         context_trace=persisted_context_trace,
     )
     web_app.chat_service.session_manager = _StrictSessionManager(session_data)
-    monkeypatch.setattr(web_app, "UserDataManager", lambda: _FakeUserDataManager(tmp_path))
+    monkeypatch.setattr(web_app, "get_user_data_manager", lambda: _FakeUserDataManager(tmp_path))
 
     first = await web_app.get_agent_session_trace(agent_name)
     second = await web_app.get_agent_session_trace(agent_name)
@@ -133,7 +133,7 @@ async def test_trace_api_uses_requested_session_id_for_trajectory(monkeypatch, t
     trajectory_file.write_text(json.dumps(persisted_trajectory), encoding="utf-8")
 
     web_app.chat_service.session_manager = _StrictSessionManager(None)
-    monkeypatch.setattr(web_app, "UserDataManager", lambda: _FakeUserDataManager(tmp_path))
+    monkeypatch.setattr(web_app, "get_user_data_manager", lambda: _FakeUserDataManager(tmp_path))
 
     result = await web_app.get_agent_session_trace(agent_name, session_id=requested_session_id)
     assert result["session_id"] == requested_session_id
@@ -145,7 +145,7 @@ async def test_trace_api_rejects_invalid_session_id(monkeypatch, tmp_path: Path)
     agent_name = "demo_agent"
     invalid_session_id = "web_session_demo_agent/../../etc/passwd"
     web_app.chat_service.session_manager = _StrictSessionManager(None)
-    monkeypatch.setattr(web_app, "UserDataManager", lambda: _FakeUserDataManager(tmp_path))
+    monkeypatch.setattr(web_app, "get_user_data_manager", lambda: _FakeUserDataManager(tmp_path))
 
     with pytest.raises(HTTPException) as exc_info:
         await web_app.get_agent_session_trace(agent_name, session_id=invalid_session_id)

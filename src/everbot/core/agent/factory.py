@@ -15,7 +15,7 @@ from dolphin.sdk import DolphinAgent, Env, GlobalSkills
 from dolphin.core.config.global_config import GlobalConfig
 
 from ...infra.workspace import WorkspaceLoader
-from ...infra.user_data import UserDataManager
+from ...infra.user_data import get_user_data_manager
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +142,11 @@ class AgentFactory:
         if 'enabled' not in agent_config.resource_skills:
             agent_config.resource_skills['enabled'] = True
 
+        # 注入变量供 SKILL.md 中的 $WORKSPACE_ROOT 等占位符替换
+        variables = agent_config.resource_skills.get('variables', {})
+        variables['WORKSPACE_ROOT'] = str(workspace_path)
+        agent_config.resource_skills['variables'] = variables
+
         return agent_config
 
     async def create_agent(
@@ -266,6 +271,7 @@ class AgentFactory:
         try:
             raw = agent_dph_path.read_text(encoding="utf-8")
         except Exception:
+            logger.debug("Failed to read agent.dph at %s", agent_dph_path, exc_info=True)
             return agent_dph_path
 
         if "->" in raw or ">>" in raw:
@@ -302,6 +308,7 @@ class AgentFactory:
             )
             return agent_dph_path
         except Exception:
+            logger.warning("Failed to migrate legacy agent.dph at %s", agent_dph_path, exc_info=True)
             return agent_dph_path
 
     def _try_parse_legacy_yaml_agent(self, raw: str) -> Optional[Dict[str, Any]]:
@@ -309,11 +316,13 @@ class AgentFactory:
         try:
             import yaml
         except Exception:
+            logger.debug("yaml module not available, skipping legacy agent.dph parse")
             return None
 
         try:
             data = yaml.safe_load(raw)
         except Exception:
+            logger.debug("Failed to parse legacy YAML agent.dph", exc_info=True)
             return None
 
         if not isinstance(data, dict):
@@ -379,7 +388,7 @@ Current time: $current_time
 
     def _append_runtime_paths(self, *, workspace_instructions: str, workspace_path: Path) -> str:
         """Append runtime path hints to workspace instructions for agent self-service."""
-        user_data = UserDataManager()
+        user_data = get_user_data_manager()
         parts = []
         if workspace_instructions.strip():
             parts.append(workspace_instructions.strip())
@@ -440,6 +449,7 @@ Current time: $current_time
         try:
             content = skill_md.read_text(encoding="utf-8")
         except Exception:
+            logger.debug("Failed to read SKILL.md at %s", skill_md, exc_info=True)
             return None
 
         # 提取标题（第一个 # 标题）
@@ -554,6 +564,7 @@ Current time: $current_time
                     resource_skillkit = skillkit
                     break
             except Exception:
+                logger.debug("Failed to get name for skillkit %r", skillkit, exc_info=True)
                 continue
 
         if resource_skillkit is None:
@@ -573,6 +584,7 @@ Current time: $current_time
                 try:
                     meta = get_skill_meta(name)
                 except Exception:
+                    logger.debug("Failed to get metadata for skill %r", name, exc_info=True)
                     meta = None
                 if meta is not None:
                     title = getattr(meta, "name", None) or title

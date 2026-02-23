@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.e2e.conftest import ScriptedAgent, receive_until
+from tests.web.conftest import ScriptedAgent, receive_until
 
 
 def test_ws_chat_happy_path_and_history_replay(client, isolated_web_env):

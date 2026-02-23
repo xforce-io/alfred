@@ -165,7 +165,7 @@ def isolated_web_env(monkeypatch, tmp_path):
         create_agent_instance=AsyncMock()
     )
 
-    monkeypatch.setattr(web_app, "UserDataManager", lambda: UserDataManager(alfred_home=alfred_home))
+    monkeypatch.setattr(web_app, "get_user_data_manager", lambda: UserDataManager(alfred_home=alfred_home))
     return SimpleNamespace(
         alfred_home=alfred_home,
         user_data=user_data,

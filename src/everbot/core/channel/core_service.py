@@ -632,23 +632,7 @@ class ChannelCoreService:
         """Acknowledge consumed mailbox events after successful turn."""
         if not event_ids:
             return
-        if hasattr(self.session_manager, "ack_mailbox_events"):
-            await self.session_manager.ack_mailbox_events(session_id, event_ids)
-            return
-
-        if hasattr(self.session_manager, "update_atomic"):
-            ids = {str(eid).strip() for eid in event_ids if str(eid).strip()}
-            if not ids:
-                return
-
-            def _mutator(session_data):
-                mailbox = getattr(session_data, "mailbox", []) or []
-                session_data.mailbox = [
-                    e for e in mailbox
-                    if not isinstance(e, dict) or str(e.get("event_id") or "").strip() not in ids
-                ]
-
-            await self.session_manager.update_atomic(session_id, _mutator, timeout=5.0, blocking=True)
+        await self.session_manager.ack_mailbox_events(session_id, event_ids)
 
     def _record_timeline_event(self, session_id: str, event_type: str, **payload) -> None:
         """Record one timeline event with an ISO timestamp."""

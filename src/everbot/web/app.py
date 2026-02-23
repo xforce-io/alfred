@@ -16,17 +16,28 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, WebSocket, Request, HTTPException
+from fastapi import FastAPI, WebSocket, Request, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from .auth import verify_api_key, verify_ws_api_key
 from .services import AgentService, ChatService
 from ..core.session.session import SessionData
-from ..infra.user_data import UserDataManager
-from ..infra.config import load_config, save_config
+from ..infra.user_data import get_user_data_manager
+from ..infra.config import get_config, load_config, save_config
 # FastAPI app
 app = FastAPI(title="EverBot")
+
+# CORS middleware — permissive by default for local use; tighten via config if needed.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Directory configuration
 BASE_DIR = Path(__file__).parent
@@ -58,19 +69,19 @@ async def index(request: Request):
 # API Routes
 # ============================================================================
 
-@app.get("/api/agents")
+@app.get("/api/agents", dependencies=[Depends(verify_api_key)])
 async def api_list_agents() -> list[str]:
     """List all agents"""
     return agent_service.list_agents()
 
 
-@app.get("/api/status")
+@app.get("/api/status", dependencies=[Depends(verify_api_key)])
 async def api_status() -> Dict[str, Any]:
     """Get daemon and agent status"""
     return agent_service.get_status()
 
 
-@app.post("/api/agents/{agent_name}/heartbeat")
+@app.post("/api/agents/{agent_name}/heartbeat", dependencies=[Depends(verify_api_key)])
 async def api_trigger_heartbeat(agent_name: str, force: bool = False) -> JSONResponse:
     """Trigger heartbeat for an agent"""
     task_id = f"{agent_name}:{asyncio.get_event_loop().time()}"
@@ -88,7 +99,7 @@ async def api_trigger_heartbeat(agent_name: str, force: bool = False) -> JSONRes
     return JSONResponse({"scheduled": True, "task_id": task_id})
 
 
-@app.post("/api/agents/{agent_name}/sessions/reset")
+@app.post("/api/agents/{agent_name}/sessions/reset", dependencies=[Depends(verify_api_key)])
 async def reset_agent_session(agent_name: str, request: Request):
     """Hard reset agent environment: clear all sessions, cache, and temp files."""
     forwarded_for = request.headers.get("x-forwarded-for", "").strip()
@@ -109,7 +120,7 @@ async def reset_agent_session(agent_name: str, request: Request):
 
     # A-4: Clean up agent temp directory to prevent leftover artifacts
     # from contaminating the next conversation.
-    user_data = UserDataManager()
+    user_data = get_user_data_manager()
     agent_tmp = user_data.alfred_home / "agents" / agent_name / "tmp"
     if agent_tmp.is_dir():
         import shutil
@@ -120,7 +131,7 @@ async def reset_agent_session(agent_name: str, request: Request):
     return {"status": "ok", "removed_sessions": removed_sessions}
 
 
-@app.post("/api/agents/{agent_name}/sessions/{session_id}/clear-history")
+@app.post("/api/agents/{agent_name}/sessions/{session_id}/clear-history", dependencies=[Depends(verify_api_key)])
 async def clear_session_history(agent_name: str, session_id: str):
     """Clear conversation history for a single session while preserving session metadata."""
     found = await chat_service.session_manager.clear_session_history(session_id)
@@ -130,7 +141,7 @@ async def clear_session_history(agent_name: str, session_id: str):
     return {"status": "ok", "session_id": session_id}
 
 
-@app.get("/api/agents/{agent_name}/sessions")
+@app.get("/api/agents/{agent_name}/sessions", dependencies=[Depends(verify_api_key)])
 async def list_agent_sessions(agent_name: str, limit: int = 20) -> Dict[str, Any]:
     """List persisted sessions for one agent."""
     sessions = await chat_service.session_manager.list_agent_sessions(agent_name, limit=limit)
@@ -151,7 +162,7 @@ async def list_agent_sessions(agent_name: str, limit: int = 20) -> Dict[str, Any
     return {"agent_name": agent_name, "sessions": sessions}
 
 
-@app.post("/api/agents/{agent_name}/sessions")
+@app.post("/api/agents/{agent_name}/sessions", dependencies=[Depends(verify_api_key)])
 async def create_agent_session(agent_name: str, request: Request) -> Dict[str, Any]:
     """Create a new chat session id for one agent."""
     forwarded_for = request.headers.get("x-forwarded-for", "").strip()
@@ -192,7 +203,7 @@ async def create_agent_session(agent_name: str, request: Request) -> Dict[str, A
     return {"agent_name": agent_name, "session_id": session_id}
 
 
-@app.get("/api/agents/{agent_name}/session/trace")
+@app.get("/api/agents/{agent_name}/session/trace", dependencies=[Depends(verify_api_key)])
 async def get_agent_session_trace(agent_name: str, session_id: Optional[str] = None) -> Dict[str, Any]:
     """Get persisted trace data for one agent session."""
     await chat_service.session_manager.migrate_legacy_sessions_for_agent(agent_name)
@@ -203,7 +214,7 @@ async def get_agent_session_trace(agent_name: str, session_id: Optional[str] = N
 
     # Read session-scoped trajectory first, then fallback to legacy shared path.
     trajectory: Dict[str, Any] = {}
-    user_data = UserDataManager()
+    user_data = get_user_data_manager()
     trajectory_file = user_data.get_session_trajectory_path(agent_name, resolved_session_id)
     legacy_trajectory_file = user_data.get_agent_tmp_dir(agent_name) / "trajectory.json"
     for candidate in (trajectory_file, legacy_trajectory_file):
@@ -245,10 +256,10 @@ async def get_agent_session_trace(agent_name: str, session_id: Optional[str] = N
     }
 
 
-@app.get("/api/settings/telegram")
+@app.get("/api/settings/telegram", dependencies=[Depends(verify_api_key)])
 async def api_get_telegram_settings() -> Dict[str, Any]:
     """Get current Telegram channel configuration."""
-    config = load_config()
+    config = get_config()
     telegram = (config.get("everbot", {}).get("channels", {}).get("telegram", {}))
 
     bot_token_raw = telegram.get("bot_token", "")
@@ -272,11 +283,11 @@ async def api_get_telegram_settings() -> Dict[str, Any]:
     }
 
 
-@app.post("/api/settings/telegram")
+@app.post("/api/settings/telegram", dependencies=[Depends(verify_api_key)])
 async def api_save_telegram_settings(request: Request) -> Dict[str, Any]:
     """Save Telegram channel configuration (bot_token is read-only)."""
     body = await request.json()
-    config = load_config()
+    config = load_config()  # mutable copy for save_config
 
     everbot = config.setdefault("everbot", {})
     channels = everbot.setdefault("channels", {})
@@ -297,7 +308,7 @@ async def api_save_telegram_settings(request: Request) -> Dict[str, Any]:
     return {"status": "ok", "message": "Telegram 配置已保存，需要重启 daemon 才能生效。"}
 
 
-@app.get("/api/settings/skills")
+@app.get("/api/settings/skills", dependencies=[Depends(verify_api_key)])
 async def api_get_skills_settings() -> Dict[str, Any]:
     """Get all installed skills with their enabled/disabled state."""
     import re
@@ -356,7 +367,7 @@ async def api_get_skills_settings() -> Dict[str, Any]:
     return {"skills": skills}
 
 
-@app.post("/api/settings/skills/{skill_name}/toggle")
+@app.post("/api/settings/skills/{skill_name}/toggle", dependencies=[Depends(verify_api_key)])
 async def api_toggle_skill(skill_name: str, request: Request) -> Dict[str, Any]:
     """Enable or disable a skill."""
     body = await request.json()
@@ -385,10 +396,10 @@ async def api_toggle_skill(skill_name: str, request: Request) -> Dict[str, Any]:
     return {"status": "ok", "skill_name": skill_name, "enabled": enabled}
 
 
-@app.get("/api/logs/heartbeat/stream")
+@app.get("/api/logs/heartbeat/stream", dependencies=[Depends(verify_api_key)])
 async def api_stream_heartbeat_log() -> StreamingResponse:
     """Stream heartbeat logs (SSE)"""
-    user_data = UserDataManager()
+    user_data = get_user_data_manager()
     log_path = user_data.heartbeat_log_file
 
     async def _events():
@@ -411,10 +422,10 @@ async def api_stream_heartbeat_log() -> StreamingResponse:
     return StreamingResponse(_events(), media_type="text/event-stream")
 
 
-@app.get("/api/logs/heartbeat/events/stream")
+@app.get("/api/logs/heartbeat/events/stream", dependencies=[Depends(verify_api_key)])
 async def api_stream_heartbeat_events() -> StreamingResponse:
     """Stream structured heartbeat events (SSE, JSONL source)"""
-    user_data = UserDataManager()
+    user_data = get_user_data_manager()
     events_path = user_data.heartbeat_events_file
 
     async def _events():
@@ -449,6 +460,12 @@ async def websocket_chat(websocket: WebSocket, agent_name: str, session_id: Opti
     Real-time conversation with streaming output
     """
     import sys
+
+    # Authenticate before accepting the WebSocket connection
+    if not await verify_ws_api_key(websocket):
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
     print(f"[WebSocket Endpoint] Received connection request for agent: {agent_name}", flush=True)
     sys.stdout.flush()
     try:

@@ -79,3 +79,39 @@ def save_config(config: Dict[str, Any], config_path: Optional[str] = None):
     except Exception as e:
         logger.error(f"保存配置失败: {e}")
         raise
+
+
+# ---------------------------------------------------------------------------
+# Module-level cached config
+# ---------------------------------------------------------------------------
+
+_cached_config: Optional[Dict[str, Any]] = None
+_cached_config_path: Optional[str] = None
+
+
+def get_config(config_path: Optional[str] = None) -> Dict[str, Any]:
+    """Return a cached config dict, loading from disk on first call.
+
+    If *config_path* differs from the previously cached path the config is
+    reloaded automatically.
+    """
+    global _cached_config, _cached_config_path
+    if _cached_config is None or config_path != _cached_config_path:
+        _cached_config = load_config(config_path)
+        _cached_config_path = config_path
+    return _cached_config
+
+
+def reload_config(config_path: Optional[str] = None) -> Dict[str, Any]:
+    """Force-reload config from disk and update the cache."""
+    global _cached_config, _cached_config_path
+    _cached_config = load_config(config_path)
+    _cached_config_path = config_path
+    return _cached_config
+
+
+def reset_config_cache() -> None:
+    """Clear the cached config (mainly for tests)."""
+    global _cached_config, _cached_config_path
+    _cached_config = None
+    _cached_config_path = None

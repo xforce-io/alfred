@@ -331,7 +331,7 @@ async def test_daemon_start_stop_updates_status_snapshot(monkeypatch, tmp_path: 
 
     monkeypatch.setattr(
         daemon_module,
-        "UserDataManager",
+        "get_user_data_manager",
         lambda: UserDataManager(alfred_home=alfred_home),
     )
     monkeypatch.setattr(daemon_module, "HeartbeatRunner", _FakeRunner)
@@ -382,7 +382,7 @@ async def test_daemon_uses_unified_scheduler_when_runner_supports_tick_mode(monk
 
     monkeypatch.setattr(
         daemon_module,
-        "UserDataManager",
+        "get_user_data_manager",
         lambda: UserDataManager(alfred_home=alfred_home),
     )
     monkeypatch.setattr(daemon_module, "HeartbeatRunner", _FakeTickRunner)
@@ -432,7 +432,7 @@ async def test_daemon_unified_scheduler_routes_isolated_tasks(monkeypatch, tmp_p
 
     monkeypatch.setattr(
         daemon_module,
-        "UserDataManager",
+        "get_user_data_manager",
         lambda: UserDataManager(alfred_home=alfred_home),
     )
     monkeypatch.setattr(daemon_module, "HeartbeatRunner", _FakeSplitRunner)
@@ -484,7 +484,7 @@ async def test_daemon_unified_scheduler_routes_inline_tasks(monkeypatch, tmp_pat
 
     monkeypatch.setattr(
         daemon_module,
-        "UserDataManager",
+        "get_user_data_manager",
         lambda: UserDataManager(alfred_home=alfred_home),
     )
     monkeypatch.setattr(daemon_module, "HeartbeatRunner", _FakeInlineRunner)

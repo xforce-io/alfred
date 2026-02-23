@@ -1,59 +1,8 @@
-# Codex/智能体协作规则（仓库根）
+# 智能体协作规则
 
 本文件对本仓库全局生效（除非子目录有更具体的 `AGENTS.md` 覆盖）。
 
 ## 智能体人设
-
-## 安全操作规范
-
-在执行任何可能造成数据丢失或系统破坏的操作时，必须请求用户确认。
-
-### 需要确认的危险操作包括：
-
-1. **文件删除操作**：
-   - 使用 `rm` 命令删除文件或目录
-   - 使用 `rm -rf` 或 `rm -r` 递归删除
-   - 使用通配符删除（如 `rm *.log`）
-
-2. **系统修改操作**：
-   - 修改系统配置文件（如 `/etc/` 下的文件）
-   - 安装或卸载系统级软件包
-   - 修改环境变量或系统路径
-
-3. **权限变更操作**：
-   - 修改文件权限（`chmod`）
-   - 修改文件所有权（`chown`）
-
-4. **网络操作**：
-   - 开放防火墙端口
-   - 修改网络配置
-
-### 确认流程：
-
-1. **明确说明**：清楚描述要执行的操作及其潜在影响
-2. **提供替代方案**：如果可能，提供更安全的替代方案
-3. **等待确认**：明确询问用户是否确认执行该操作
-4. **记录操作**：在执行后记录已执行的操作
-
-### 示例：
-
-```bash
-# ❌ 不安全的做法：直接执行
-rm -rf /tmp/important_data/
-
-# ✅ 正确的做法：先请求确认
-# 将要删除 /tmp/important_data/ 目录及其所有内容
-# 这是一个不可恢复的操作，请确认是否继续？
-# 用户确认后执行：rm -rf /tmp/important_data/
-```
-## 技能发现 (Skills Discovery)
-
-你拥有强大的扩展技能系统。在处理任务前，请务必阅读根目录下的 [SKILLS.md](./SKILLS.md) 以了解：
-- 如何定位和加载可用技能。
-- 核心内置工具与已安装扩展技能的清单。
-- 技能调用的标准协议。
-
----
 
 你是一个经验丰富的编程大师，专注于高效、可扩展、兼容、可维护、注释良好和低熵的代码。
 
@@ -86,64 +35,33 @@ rm -rf /tmp/important_data/
 - [ ] 命名、目录、风格是否与现有保持一致？
 - [ ] 是否补齐了必要的测试/文档/示例？
 
-## 测试（Tests）
+## Tests
 
-### 目录结构
+- Test directory: `tests/`, organized by test type:
+  - `tests/unit/` — Unit tests (isolated, no external dependencies)
+  - `tests/integration/` — Integration tests (cross-module, may use network/cache)
+  - `tests/web/` — End-to-end tests (Playwright-based, simulating real user interaction with Streamlit pages)
+- Unified entry: `tests/run_tests.sh <test_type> [options]`
+  - `test_type`: `unit` / `integration` / `web` / `all`
+  - Common params: `-v/--verbose`, `--coverage`, `--parallel`, `--fail-fast`
+  - Integration test params: `-f/--filter <pattern>`, `-c/--config <file>`, `--agent-only`, `--regular-only`
+  - Environment params: `--python <version>`, `--sync`, `--clean`
 
-- 测试目录：`tests/`，包含 `tests/unittest/`（单元测试）与 `tests/integration_test/`（集成测试）
-- 统一入口：`tests/run_tests.sh <test_type> [options]`
-  - `test_type`: `unit` / `integration` / `all`
-  - 常用参数：`-v/--verbose`、`--coverage`、`--parallel`、`--fail-fast`
-  - 集成测试参数：`-f/--filter <pattern>`、`-c/--config <file>`、`--agent-only`、`--regular-only`
-  - 环境参数：`--python <version>`、`--sync`、`--clean`
+## Web Application
 
-### 测试编写规范
-
-**详细规范**: 参考 `tests/TEST_STYLE_GUIDE.md`
-
-#### 断言风格
-```python
-# ✅ Use pytest assert
-assert result == expected
-assert "keyword" in text
-assert isinstance(obj, SomeClass)
-
-# ❌ Avoid unittest assertions
-self.assertEqual(result, expected)  # Use assert instead
-```
-
-#### Mock 使用
-```python
-# ✅ Use decorator pattern
-from unittest.mock import patch, AsyncMock
-
-@patch('module.external_api')
-def test_feature(mock_api):
-    mock_api.return_value = "mocked"
-    # Test logic
-
-# ✅ Async mock
-@patch('module.async_func', new_callable=AsyncMock)
-async def test_async(mock_func):
-    mock_func.return_value = "result"
-```
-
-#### 测试命名
-- 清晰描述测试内容: `test_agent_returns_none_when_query_is_empty()`
-- 避免模糊命名: `test_case1()`, `test_bug()`
-
-#### 测试隔离
-- 每个测试独立运行，不依赖其他测试
-- 使用 fixtures 管理测试数据
-- 只 Mock 外部依赖，不 Mock 被测代码
-
-#### 测试提交清单
-- [ ] 使用 pytest assert 而非 unittest 断言
-- [ ] Mock 使用装饰器风格
-- [ ] 测试名称清晰描述测试内容
-- [ ] 每个测试函数只测试一个行为
-- [ ] 异步测试使用 `@pytest.mark.asyncio`
-- [ ] 没有测试间的依赖关系
+- Web platform: Streamlit-based dashboard in `web/`
+- Unified entry: `scripts/run_web.sh {start|stop|restart|status|logs}`
+  - `start` - Start web platform in background
+  - `stop` - Stop web platform
+  - `restart` - Restart web platform
+  - `status` - Show running status
+  - `logs` - Tail log file
+- Access URL: `http://localhost:8501`
+- Main pages:
+  - Home: Overview and navigation
+  - Money Flow: Market and institutional fund flow analysis
+  - Watchlist: Stock watchlist with AI analyst
+  - Ranking: Stock ranking with various metrics
 
 ## 文档约定
 

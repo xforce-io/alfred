@@ -10,7 +10,7 @@ import asyncio
 from typing import Any, Dict
 
 from ...core.runtime.control import get_local_status, run_heartbeat_once
-from ...infra.user_data import UserDataManager
+from ...infra.user_data import get_user_data_manager
 from ...core.agent.factory import create_agent
 from ...infra.dolphin_compat import ensure_continue_chat_compatibility
 
@@ -19,7 +19,7 @@ class AgentService:
     """Service for managing agents and daemon operations."""
 
     def __init__(self):
-        self.user_data = UserDataManager()
+        self.user_data = get_user_data_manager()
 
     def list_agents(self) -> list[str]:
         """List all available agents."""

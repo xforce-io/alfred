@@ -3,7 +3,6 @@
 """
 
 import asyncio
-import hashlib
 import inspect
 import json
 import re
@@ -17,11 +16,19 @@ from types import SimpleNamespace
 from ...infra.dolphin_compat import ensure_continue_chat_compatibility
 from ..models.system_event import build_system_event
 from . import RuntimeDeps, TurnExecutor
+from .heartbeat_file import HeartbeatFileManager
+from .reflection import ReflectionManager
+from .heartbeat_utils import (
+    is_time_reminder_task,
+    try_deterministic_task,
+    task_snapshot,
+    build_job_session_id,
+)
+from .heartbeat_tasks import IsolatedTaskMixin
+from .ports import HeartbeatSessionPort
 from ..tasks.routine_manager import RoutineManager
-from ..session.session import SessionPersistence
 from ..tasks.task_manager import (
     Task,
-    parse_heartbeat_md,
     get_due_tasks,
     claim_task,
     update_task_state,
@@ -29,10 +36,9 @@ from ..tasks.task_manager import (
     purge_stale_tasks,
     TaskList,
     TaskState,
-    ParseResult,
     ParseStatus,
 )
-from ...infra.user_data import UserDataManager
+from ...infra.user_data import get_user_data_manager
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +65,20 @@ _PERMANENT_ERROR_MARKERS: list[str] = [
 
 def _is_permanent_error(exc: BaseException) -> bool:
     """Return True if *exc* looks like a non-retryable error."""
+    # 1. Check HTTP status_code attribute (httpx/aiohttp/requests exceptions)
+    status = (
+        getattr(exc, "status_code", None)
+        or getattr(exc, "status", None)
+        or getattr(getattr(exc, "response", None), "status_code", None)
+    )
+    if isinstance(status, int) and status in {401, 402, 403}:
+        return True
+    # 2. String matching fallback
     text = str(exc).lower()
     return any(marker in text for marker in _PERMANENT_ERROR_MARKERS)
 
 
-class HeartbeatRunner:
+class HeartbeatRunner(IsolatedTaskMixin):
     """
     心跳运行器
 
@@ -104,7 +119,7 @@ If not, reply with `HEARTBEAT_OK`.
         self,
         agent_name: str,
         workspace_path: Path,
-        session_manager: "SessionManager",
+        session_manager: HeartbeatSessionPort,
         agent_factory: Callable,
         interval_minutes: int = 30,
         active_hours: tuple = (8, 22),
@@ -154,17 +169,14 @@ If not, reply with `HEARTBEAT_OK`.
         self.on_result = on_result
         self._heartbeat_max_history = max(1, int(heartbeat_max_history or 10))
         self._reflect_force_interval = timedelta(hours=max(1, int(reflect_force_interval_hours or 24)))
-        self._last_reflect_at: Optional[datetime] = None
-        self._last_reflect_file_hashes: Dict[str, str] = {}
+        self._reflection = ReflectionManager(workspace_path, self._reflect_force_interval)
         if summary_max_chars is not None:
             self.SUMMARY_MAX_CHARS = max(1, int(summary_max_chars))
 
         self._running = False
         self._last_result: Optional[str] = None
-        self._task_list: Optional[TaskList] = None
+        self._file_mgr = HeartbeatFileManager(workspace_path)
         self._current_run_id: Optional[str] = None
-        self._last_parse_result: Optional[ParseResult] = None
-        self._heartbeat_mode: str = "idle"
         self._runtime_workspace_instructions: str = ""
         self._turn_executor = TurnExecutor(
             RuntimeDeps(
@@ -174,10 +186,64 @@ If not, reply with `HEARTBEAT_OK`.
             )
         )
 
+    # --- Backward-compatible accessors for extracted _file_mgr state ---
+
+    @property
+    def _task_list(self):
+        return self._file_mgr.task_list
+
+    @_task_list.setter
+    def _task_list(self, value):
+        self._file_mgr.task_list = value
+
+    @property
+    def _heartbeat_mode(self):
+        return self._file_mgr.heartbeat_mode
+
+    @_heartbeat_mode.setter
+    def _heartbeat_mode(self, value):
+        self._file_mgr.heartbeat_mode = value
+
+    @property
+    def _last_parse_result(self):
+        return self._file_mgr.last_parse_result
+
+    @_last_parse_result.setter
+    def _last_parse_result(self, value):
+        self._file_mgr.last_parse_result = value
+
+    def _read_heartbeat_md(self) -> Optional[str]:
+        return self._file_mgr.read_heartbeat_md()
+
+    def _write_heartbeat_file(self, content: str) -> None:
+        return self._file_mgr.write_heartbeat_file(content)
+
+    def _flush_task_state(self) -> None:
+        """Persist current task_list state to HEARTBEAT.md atomically."""
+        task_list = self._file_mgr.task_list
+        if task_list is None:
+            return
+        hb_path = self.workspace_path / "HEARTBEAT.md"
+        try:
+            purged = purge_stale_tasks(task_list)
+            if purged:
+                logger.info("Purged %d stale task(s) from HEARTBEAT.md", purged)
+            content = hb_path.read_text(encoding="utf-8")
+            updated = write_task_block(content, task_list)
+            self._write_heartbeat_file(updated)
+        except Exception as exc:
+            logger.warning("Failed to update HEARTBEAT.md task state: %s", exc)
+
+    def _write_task_snapshot(self, task_list: TaskList) -> None:
+        return self._file_mgr.write_task_snapshot(task_list)
+
+    def _render_snapshot_summary(self) -> str:
+        return self._file_mgr.render_snapshot_summary()
+
     def _write_heartbeat_event(self, event_type: str, **kwargs: Any) -> None:
         """Write a structured heartbeat event to the JSONL events file."""
         try:
-            user_data = UserDataManager()
+            user_data = get_user_data_manager()
             events_file = user_data.heartbeat_events_file
             events_file.parent.mkdir(parents=True, exist_ok=True)
             event = {
@@ -204,9 +270,7 @@ If not, reply with `HEARTBEAT_OK`.
     @property
     def heartbeat_session_id(self) -> str:
         """Heartbeat-only execution session id."""
-        if hasattr(self.session_manager, "get_heartbeat_session_id"):
-            return self.session_manager.get_heartbeat_session_id(self.agent_name)
-        return f"heartbeat_session_{self.agent_name}"
+        return self.session_manager.get_heartbeat_session_id(self.agent_name)
 
     def _is_active_time(self) -> bool:
         """检查是否在活跃时段"""
@@ -214,85 +278,31 @@ If not, reply with `HEARTBEAT_OK`.
         start, end = self.active_hours
         return start <= hour < end
 
-    def _compute_file_hashes(self) -> Dict[str, str]:
-        """Compute MD5 hashes for MEMORY.md and HEARTBEAT.md."""
-        hashes: Dict[str, str] = {}
-        for name in ("MEMORY.md", "HEARTBEAT.md"):
-            path = self.workspace_path / name
-            try:
-                if path.exists():
-                    hashes[name] = hashlib.md5(path.read_bytes()).hexdigest()
-                else:
-                    hashes[name] = ""
-            except Exception:
-                hashes[name] = ""
-        return hashes
+    @property
+    def _last_reflect_at(self):
+        return self._reflection.last_reflect_at
+
+    @_last_reflect_at.setter
+    def _last_reflect_at(self, value):
+        self._reflection.last_reflect_at = value
+
+    @property
+    def _last_reflect_file_hashes(self):
+        return self._reflection.last_reflect_file_hashes
+
+    @_last_reflect_file_hashes.setter
+    def _last_reflect_file_hashes(self, value):
+        self._reflection.last_reflect_file_hashes = value
 
     def _should_skip_reflection(self) -> bool:
-        """Check whether reflection can be skipped.
-
-        Skip when MEMORY.md and HEARTBEAT.md are unchanged since last
-        reflect AND the force interval has not elapsed.
-        """
-        now = datetime.now()
-        current_hashes = self._compute_file_hashes()
-
-        # Force reflect if we've never reflected or force interval elapsed
-        if self._last_reflect_at is None:
-            return False
-        if (now - self._last_reflect_at) >= self._reflect_force_interval:
-            return False
-
-        # Skip if files haven't changed
-        if current_hashes == self._last_reflect_file_hashes:
-            return True
-
-        return False
+        return self._reflection.should_skip_reflection()
 
     def _update_reflect_state(self) -> None:
-        """Record state after a successful reflect LLM call."""
-        self._last_reflect_at = datetime.now()
-        self._last_reflect_file_hashes = self._compute_file_hashes()
+        return self._reflection.update_reflect_state()
 
-    def _read_heartbeat_md(self) -> Optional[str]:
-        """Read HEARTBEAT.md and decide heartbeat execution mode."""
-        path = self.workspace_path / "HEARTBEAT.md"
-        if not path.exists():
-            self._task_list = None
-            self._last_parse_result = ParseResult(status=ParseStatus.EMPTY)
-            self._heartbeat_mode = "idle"
-            return None
+    def _compute_file_hashes(self) -> Dict[str, str]:
+        return self._reflection.compute_file_hashes()
 
-        try:
-            content = path.read_text(encoding="utf-8")
-            parse_result = parse_heartbeat_md(content)
-            self._last_parse_result = parse_result
-
-            if parse_result.status == ParseStatus.OK and parse_result.task_list is not None:
-                task_list = parse_result.task_list
-                self._task_list = task_list
-                due = get_due_tasks(task_list)
-                if due:
-                    self._heartbeat_mode = "structured_due"
-                    return content
-                self._heartbeat_mode = "structured_reflect"
-                return content
-
-            if parse_result.status == ParseStatus.CORRUPTED:
-                self._task_list = None
-                self._heartbeat_mode = "corrupted"
-                return content
-
-            # No structured JSON block found — treat as idle
-            self._task_list = None
-            self._heartbeat_mode = "idle"
-            return None
-        except Exception as e:
-            logger.error("Failed to read HEARTBEAT.md: %s", e)
-            self._task_list = None
-            self._last_parse_result = None
-            self._heartbeat_mode = "idle"
-            return None
 
     def _should_deliver(self, response: str) -> bool:
         """判断心跳结果是否应推送给用户。
@@ -332,8 +342,6 @@ If not, reply with `HEARTBEAT_OK`.
 
     def _record_timeline_event(self, event_type: str, run_id: str, **payload: Any) -> None:
         """Append heartbeat timeline event with source metadata."""
-        if not hasattr(self.session_manager, "append_timeline_event"):
-            return
         event = {
             "type": event_type,
             "timestamp": datetime.now().isoformat(),
@@ -344,57 +352,9 @@ If not, reply with `HEARTBEAT_OK`.
         self.session_manager.append_timeline_event(self.session_id, event)
 
     def _record_runtime_metric(self, name: str, delta: float = 1.0) -> None:
-        """Record one runtime metric when session manager supports it."""
-        record = getattr(self.session_manager, "record_metric", None)
-        if callable(record):
-            record(name, delta)
+        """Record one runtime metric."""
+        self.session_manager.record_metric(name, delta)
 
-    def _write_heartbeat_file(self, content: str) -> None:
-        """Persist HEARTBEAT.md atomically with .bak rotation."""
-        hb_path = self.workspace_path / "HEARTBEAT.md"
-        SessionPersistence.atomic_save(hb_path, content.encode("utf-8"))
-
-    def _snapshot_path(self) -> Path:
-        return self.workspace_path / ".heartbeat_snapshot.json"
-
-    def _write_task_snapshot(self, task_list: TaskList) -> None:
-        """Persist latest parsed task list as recovery snapshot."""
-        payload = {
-            "saved_at": datetime.now().isoformat(),
-            "task_list": task_list.to_dict(),
-        }
-        serialized = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-        SessionPersistence.atomic_save(self._snapshot_path(), serialized)
-
-    def _load_task_snapshot(self) -> Optional[dict]:
-        """Load task snapshot for corruption-repair context."""
-        snapshot_path = self._snapshot_path()
-        if not snapshot_path.exists():
-            return None
-        try:
-            return json.loads(snapshot_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            logger.warning("Failed to read heartbeat snapshot: %s", exc)
-            return None
-
-    def _render_snapshot_summary(self) -> str:
-        """Render compact task summary from snapshot for prompt injection."""
-        snapshot = self._load_task_snapshot()
-        if not snapshot:
-            return "(no snapshot available)"
-        task_list = snapshot.get("task_list", {})
-        tasks = task_list.get("tasks", []) if isinstance(task_list, dict) else []
-        if not tasks:
-            return "(snapshot exists but contains no tasks)"
-        lines = []
-        for task in tasks[:10]:
-            if not isinstance(task, dict):
-                continue
-            task_id = task.get("id", "unknown")
-            title = task.get("title", "")
-            schedule = task.get("schedule", "")
-            lines.append(f"- {task_id}: {title} ({schedule})")
-        return "\n".join(lines) if lines else "(snapshot has no valid tasks)"
 
     def _merge_heartbeat_instruction(self, current_instruction: str) -> str:
         """Inject heartbeat instruction block once to avoid prompt growth."""
@@ -429,124 +389,18 @@ If not, reply with `HEARTBEAT_OK`.
 
     @staticmethod
     def _extract_reflection_routine_proposals(response: str) -> list[dict[str, Any]]:
-        """Extract routine proposals from reflection response JSON payload."""
-        if not isinstance(response, str) or not response.strip():
-            return []
-
-        def _from_payload(payload: Any) -> list[dict[str, Any]]:
-            if not isinstance(payload, dict):
-                return []
-            routines = payload.get("routines")
-            if not isinstance(routines, list):
-                return []
-            return [item for item in routines if isinstance(item, dict)]
-
-        for match in re.finditer(r"```json\s*(\{.*?\})\s*```", response, re.DOTALL):
-            try:
-                payload = json.loads(match.group(1))
-            except Exception:
-                continue
-            proposals = _from_payload(payload)
-            if proposals:
-                return proposals
-
-        try:
-            payload = json.loads(response.strip())
-        except Exception:
-            return []
-        return _from_payload(payload)
+        return ReflectionManager.extract_routine_proposals(response)
 
     @staticmethod
     def _normalize_reflection_routine(item: dict[str, Any]) -> Optional[dict[str, Any]]:
-        """Normalize one routine proposal into RoutineManager add payload."""
-        title = str(item.get("title") or "").strip()
-        if not title:
-            return None
-        execution_mode = str(item.get("execution_mode") or "auto").strip().lower()
-        if execution_mode not in {"inline", "isolated", "auto"}:
-            execution_mode = "auto"
-        description = str(item.get("description") or "").strip()
-        schedule_raw = item.get("schedule")
-        schedule = None
-        if schedule_raw is not None:
-            schedule_text = str(schedule_raw).strip()
-            schedule = schedule_text or None
-        timezone_name = item.get("timezone")
-        if timezone_name is not None:
-            timezone_name = str(timezone_name).strip() or None
-        timeout_seconds = item.get("timeout_seconds", 120)
-        try:
-            timeout_seconds = max(1, int(timeout_seconds))
-        except Exception:
-            timeout_seconds = 120
-        return {
-            "title": title,
-            "description": description,
-            "schedule": schedule,
-            "execution_mode": execution_mode,
-            "timezone_name": timezone_name,
-            "timeout_seconds": timeout_seconds,
-            "source": "heartbeat_reflect",
-            "allow_duplicate": False,
-        }
+        return ReflectionManager.normalize_routine(item)
 
     def _apply_reflection_routine_proposals(self, response: str, run_id: str) -> str:
         """Apply reflection-proposed routines through framework-side strong constraints."""
-        proposals = self._extract_reflection_routine_proposals(response)
-        if not proposals:
-            return response
-
         manager = RoutineManager(self.workspace_path)
-        added: list[dict[str, Any]] = []
-        skipped_duplicates = 0
-        failed = 0
-
-        for raw in proposals:
-            normalized = self._normalize_reflection_routine(raw)
-            if normalized is None:
-                continue
-            try:
-                created = manager.add_routine(**normalized)
-                added.append(created)
-            except ValueError as exc:
-                detail = str(exc)
-                if "duplicate routine" in detail or "task_id already exists" in detail:
-                    skipped_duplicates += 1
-                else:
-                    failed += 1
-                    logger.warning(
-                        "Reflection routine apply rejected: agent=%s run_id=%s title=%s reason=%s",
-                        self.agent_name,
-                        run_id,
-                        normalized.get("title", ""),
-                        detail,
-                    )
-            except Exception as exc:
-                failed += 1
-                logger.warning(
-                    "Reflection routine apply failed: agent=%s run_id=%s title=%s error=%s",
-                    self.agent_name,
-                    run_id,
-                    normalized.get("title", ""),
-                    str(exc),
-                )
-
-        if not added:
-            return response
-
-        # Refresh in-memory task snapshot after out-of-band task file updates.
-        self._read_heartbeat_md()
-
-        lines = [f"Registered {len(added)} routine(s) from heartbeat reflection."]
-        for item in added[:5]:
-            title = str(item.get("title") or "")
-            schedule = str(item.get("schedule") or "manual")
-            lines.append(f"- {title} ({schedule})")
-        if skipped_duplicates > 0:
-            lines.append(f"Skipped duplicates: {skipped_duplicates}.")
-        if failed > 0:
-            lines.append(f"Failed to apply: {failed}.")
-        return "\n".join(lines)
+        return self._reflection.apply_routine_proposals(
+            response, run_id, self.agent_name, manager, self._read_heartbeat_md,
+        )
 
     async def _deposit_routine_proposals_to_mailbox(
         self, proposals: list[dict[str, Any]], run_id: str,
@@ -575,10 +429,9 @@ If not, reply with `HEARTBEAT_OK`.
             dedupe_key=f"routine_proposal:{self.agent_name}:{run_id}",
         )
         target_session = self.primary_session_id
-        if hasattr(self.session_manager, "deposit_mailbox_event"):
-            await self.session_manager.deposit_mailbox_event(
-                target_session, event, timeout=5.0, blocking=True,
-            )
+        await self.session_manager.deposit_mailbox_event(
+            target_session, event, timeout=5.0, blocking=True,
+        )
         return summary
 
     def _runtime_load_workspace_instructions(self, agent_name: str) -> str:
@@ -591,7 +444,7 @@ If not, reply with `HEARTBEAT_OK`.
         """Return due task snapshots for heartbeat context strategy."""
         if agent_name and agent_name != self.agent_name:
             return []
-        task_list = self._task_list
+        task_list = self._file_mgr.task_list
         if task_list is None:
             return []
         due = get_due_tasks(task_list)
@@ -607,7 +460,7 @@ If not, reply with `HEARTBEAT_OK`.
         target_session = self.primary_session_id
         # Use stable dedupe_key based on heartbeat mode (not run_id) so that
         # same-type heartbeat results auto-deduplicate in the mailbox.
-        mode = self._heartbeat_mode or "unknown"
+        mode = self._file_mgr.heartbeat_mode or "unknown"
         dedupe_key = f"heartbeat:{self.agent_name}:{mode}"
         event = build_system_event(
             event_type="heartbeat_result",
@@ -620,31 +473,15 @@ If not, reply with `HEARTBEAT_OK`.
             dedupe_key=dedupe_key,
         )
 
-        if hasattr(self.session_manager, "deposit_mailbox_event"):
-            ok = await self.session_manager.deposit_mailbox_event(
-                target_session,
-                event,
-                timeout=5.0,
-                blocking=True,
-            )
-            if not ok:
-                logger.warning("[%s] Failed to deposit heartbeat event to mailbox", self.agent_name)
-            return ok
-
-        # Backward-compatible fallback for tests/mocks with update_atomic only.
-        def _mutator(session_data: Any) -> None:
-            mailbox = getattr(session_data, "mailbox", None)
-            if not isinstance(mailbox, list):
-                session_data.mailbox = []
-            session_data.mailbox.append(dict(event))
-
-        updated = await self.session_manager.update_atomic(
+        ok = await self.session_manager.deposit_mailbox_event(
             target_session,
-            _mutator,
+            event,
             timeout=5.0,
             blocking=True,
         )
-        return updated is not None
+        if not ok:
+            logger.warning("[%s] Failed to deposit heartbeat event to mailbox", self.agent_name)
+        return ok
 
     async def _inject_result_to_primary_history(self, result: str, run_id: str) -> bool:
         """Inject heartbeat result as an assistant message in primary session history."""
@@ -657,21 +494,19 @@ If not, reply with `HEARTBEAT_OK`.
                 "injected_at": datetime.now().isoformat(),
             },
         }
-        if hasattr(self.session_manager, "inject_history_message"):
-            ok = await self.session_manager.inject_history_message(
-                self.primary_session_id,
-                message,
-                timeout=5.0,
-                blocking=True,
-            )
-            if not ok:
-                logger.warning("[%s] Failed to inject heartbeat result to history", self.agent_name)
-            return ok
-        return False
+        ok = await self.session_manager.inject_history_message(
+            self.primary_session_id,
+            message,
+            timeout=5.0,
+            blocking=True,
+        )
+        if not ok:
+            logger.warning("[%s] Failed to inject heartbeat result to history", self.agent_name)
+        return ok
 
     def _init_session_trajectory(self, agent: Any, overwrite: bool = False) -> None:
         """Initialize session-scoped trajectory file."""
-        user_data = UserDataManager()
+        user_data = get_user_data_manager()
         trajectory_path = user_data.get_session_trajectory_path(self.agent_name, self.session_id)
         trajectory_path.parent.mkdir(parents=True, exist_ok=True)
         agent.executor.context.init_trajectory(str(trajectory_path), overwrite=overwrite)
@@ -733,8 +568,7 @@ If not, reply with `HEARTBEAT_OK`.
         Uses cross-process file lock (flock) to guarantee mutual exclusion
         with ChatService.  If lock is unavailable (chat in progress), skip.
         """
-        if hasattr(self.session_manager, "migrate_legacy_sessions_for_agent"):
-            await self.session_manager.migrate_legacy_sessions_for_agent(self.agent_name)
+        await self.session_manager.migrate_legacy_sessions_for_agent(self.agent_name)
         run_id = f"heartbeat_{uuid.uuid4().hex[:12]}"
         self._current_run_id = run_id
         post_message: Optional[dict] = None
@@ -761,7 +595,7 @@ If not, reply with `HEARTBEAT_OK`.
                     return "HEARTBEAT_IDLE"
 
                 # Skip agent creation for reflection when not needed
-                if self._heartbeat_mode == "structured_reflect":
+                if self._file_mgr.heartbeat_mode == "structured_reflect":
                     if not self.routine_reflection:
                         logger.info("[%s] Routine reflection disabled by config, skipping agent creation", self.agent_name)
                         self._write_heartbeat_event("reflect_skipped", reason="disabled")
@@ -774,12 +608,12 @@ If not, reply with `HEARTBEAT_OK`.
                         self._record_runtime_metric("heartbeat_reflect_skipped")
                         return "HEARTBEAT_OK"
 
-                logger.info("[%s] heartbeat mode=%s", self.agent_name, self._heartbeat_mode)
+                logger.info("[%s] heartbeat mode=%s", self.agent_name, self._file_mgr.heartbeat_mode)
 
                 # 3. Only create agent when LLM call is actually needed
                 agent = await self._get_or_create_agent()
 
-                if self._heartbeat_mode == "structured_due" and self._task_list is not None:
+                if self._file_mgr.heartbeat_mode == "structured_due" and self._file_mgr.task_list is not None:
                     result = await self._execute_structured_tasks(
                         agent,
                         heartbeat_content,
@@ -787,7 +621,7 @@ If not, reply with `HEARTBEAT_OK`.
                         include_inline=include_inline,
                         include_isolated=include_isolated,
                     )
-                elif self._heartbeat_mode == "structured_reflect":
+                elif self._file_mgr.heartbeat_mode == "structured_reflect":
                     user_message = await self._inject_heartbeat_context(
                         agent,
                         heartbeat_content,
@@ -808,7 +642,7 @@ If not, reply with `HEARTBEAT_OK`.
                         logger.debug("[%s] Reflection produced no proposals, forcing HEARTBEAT_OK", self.agent_name)
                         self._write_heartbeat_event("reflect", result="ok")
                         result = "HEARTBEAT_OK"
-                elif self._heartbeat_mode == "corrupted":
+                elif self._file_mgr.heartbeat_mode == "corrupted":
                     self._write_heartbeat_event("corrupted")
                     user_message = await self._inject_heartbeat_context(
                         agent,
@@ -819,7 +653,7 @@ If not, reply with `HEARTBEAT_OK`.
                 else:
                     logger.warning(
                         "[%s] Unexpected heartbeat mode=%s, skipping",
-                        self.agent_name, self._heartbeat_mode,
+                        self.agent_name, self._file_mgr.heartbeat_mode,
                     )
                     result = "HEARTBEAT_OK"
 
@@ -848,8 +682,8 @@ If not, reply with `HEARTBEAT_OK`.
                 else:
                     self._record_runtime_metric("heartbeat_suppress_count")
                     logger.debug("[%s] Heartbeat result suppressed (HEARTBEAT_OK)", self.agent_name)
-                if self._task_list is not None:
-                    self._write_task_snapshot(self._task_list)
+                if self._file_mgr.task_list is not None:
+                    self._write_task_snapshot(self._file_mgr.task_list)
                 self._record_timeline_event("turn_end", run_id, status="completed", result=result)
                 return result
             except Exception as e:
@@ -857,39 +691,23 @@ If not, reply with `HEARTBEAT_OK`.
                 raise
 
         # 1) In-process lock first (prevents same-process coroutine races)
-        inproc_acquired = False
         result = "HEARTBEAT_SKIPPED"
-        if hasattr(self.session_manager, "acquire_session") and hasattr(self.session_manager, "release_session"):
-            inproc_acquired = await self.session_manager.acquire_session(self.session_id, timeout=0.1)
-            if not inproc_acquired:
-                self._record_runtime_metric("heartbeat_skipped_due_to_lock")
-                self._write_heartbeat_event("skipped", reason="locked")
-                return "HEARTBEAT_SKIPPED"
+        inproc_acquired = await self.session_manager.acquire_session(self.session_id, timeout=0.1)
+        if not inproc_acquired:
+            self._record_runtime_metric("heartbeat_skipped_due_to_lock")
+            self._write_heartbeat_event("skipped", reason="locked")
+            return "HEARTBEAT_SKIPPED"
         try:
             # 2) Cross-process lock (daemon vs web)
-            if hasattr(self.session_manager, "file_lock"):
-                with self.session_manager.file_lock(self.session_id, blocking=False) as acquired:
-                    if not acquired:
-                        logger.info("[%s] Session locked by another process, skipping heartbeat", self.agent_name)
-                        self._record_runtime_metric("heartbeat_skipped_due_to_lock")
-                        self._write_heartbeat_event("skipped", reason="locked")
-                        return "HEARTBEAT_SKIPPED"
-                    result = await _run_locked_body()
-
-            # Compatibility fallback for tests/mocks that only provide session_context.
-            elif hasattr(self.session_manager, "session_context"):
-                async with self.session_manager.session_context(self.session_id, timeout=5.0) as acquired:
-                    if not acquired:
-                        self._record_runtime_metric("heartbeat_skipped_due_to_lock")
-                        self._write_heartbeat_event("skipped", reason="locked")
-                        return "HEARTBEAT_SKIPPED"
-                    result = await _run_locked_body()
-
-            else:
+            with self.session_manager.file_lock(self.session_id, blocking=False) as acquired:
+                if not acquired:
+                    logger.info("[%s] Session locked by another process, skipping heartbeat", self.agent_name)
+                    self._record_runtime_metric("heartbeat_skipped_due_to_lock")
+                    self._write_heartbeat_event("skipped", reason="locked")
+                    return "HEARTBEAT_SKIPPED"
                 result = await _run_locked_body()
         finally:
-            if inproc_acquired:
-                self.session_manager.release_session(self.session_id)
+            self.session_manager.release_session(self.session_id)
 
         if post_message is not None:
             from .events import emit
@@ -916,227 +734,24 @@ If not, reply with `HEARTBEAT_OK`.
             lock_already_held=True,
         )
 
-    def _flush_task_state(self) -> None:
-        """Persist current task_list state to HEARTBEAT.md atomically."""
-        task_list = self._task_list
-        if task_list is None:
-            return
-        hb_path = self.workspace_path / "HEARTBEAT.md"
-        try:
-            purged = purge_stale_tasks(task_list)
-            if purged:
-                logger.info("Purged %d stale task(s) from HEARTBEAT.md", purged)
-            content = hb_path.read_text(encoding="utf-8")
-            updated = write_task_block(content, task_list)
-            self._write_heartbeat_file(updated)
-        except Exception as exc:
-            logger.warning("Failed to update HEARTBEAT.md task state: %s", exc)
 
     @staticmethod
     def _task_snapshot(task: Any) -> dict[str, Any]:
-        """Build one lightweight task snapshot for scheduler handoff."""
-        return {
-            "id": str(getattr(task, "id", "")),
-            "title": str(getattr(task, "title", "")),
-            "description": str(getattr(task, "description", "") or ""),
-            "execution_mode": str(getattr(task, "execution_mode", "inline") or "inline"),
-            "timeout_seconds": int(getattr(task, "timeout_seconds", 120) or 120),
-            "schedule": getattr(task, "schedule", None),
-            "timezone": getattr(task, "timezone", None),
-        }
+        return task_snapshot(task)
 
-    def list_due_isolated_tasks(self, now: Optional[datetime] = None) -> list[dict[str, Any]]:
-        """List due isolated tasks for external scheduler routing."""
-        heartbeat_content = self._read_heartbeat_md()
-        if not heartbeat_content or self._task_list is None:
-            return []
-        due = get_due_tasks(self._task_list, now=now)
-        isolated = []
-        for task in due:
-            mode = str(getattr(task, "execution_mode", "inline") or "inline")
-            if mode != "isolated":
-                continue
-            snapshot = self._task_snapshot(task)
-            if snapshot["id"]:
-                isolated.append(snapshot)
-        return isolated
-
-    def list_due_inline_tasks(self, now: Optional[datetime] = None) -> list[dict[str, Any]]:
-        """List due inline tasks for external scheduler routing."""
-        heartbeat_content = self._read_heartbeat_md()
-        if not heartbeat_content or self._task_list is None:
-            return []
-        due = get_due_tasks(self._task_list, now=now)
-        inline = []
-        for task in due:
-            mode = str(getattr(task, "execution_mode", "inline") or "inline")
-            if mode == "isolated":
-                continue
-            snapshot = self._task_snapshot(task)
-            if snapshot["id"]:
-                inline.append(snapshot)
-        return inline
-
-    def _claim_isolated_task_under_lock(self, task_id: str, now: Optional[datetime] = None) -> bool:
-        """Claim one isolated task while heartbeat lock is held."""
-        heartbeat_content = self._read_heartbeat_md()
-        if not heartbeat_content or self._task_list is None:
-            return False
-        due = get_due_tasks(self._task_list, now=now)
-        for task in due:
-            mode = str(getattr(task, "execution_mode", "inline") or "inline")
-            if mode != "isolated":
-                continue
-            if str(getattr(task, "id", "")) != task_id:
-                continue
-            if not claim_task(task, now=now):
-                return False
-            self._flush_task_state()
-            return True
-        return False
-
-    async def claim_isolated_task(self, task_id: str, now: Optional[datetime] = None) -> bool:
-        """Claim one isolated task with heartbeat session lock protection."""
-        task_id = str(task_id or "").strip()
-        if not task_id:
-            return False
-
-        inproc_acquired = False
-        if hasattr(self.session_manager, "acquire_session") and hasattr(self.session_manager, "release_session"):
-            inproc_acquired = await self.session_manager.acquire_session(self.session_id, timeout=0.1)
-            if not inproc_acquired:
-                return False
-        try:
-            if hasattr(self.session_manager, "file_lock"):
-                with self.session_manager.file_lock(self.session_id, blocking=False) as acquired:
-                    if not acquired:
-                        return False
-                    return self._claim_isolated_task_under_lock(task_id, now=now)
-            if hasattr(self.session_manager, "session_context"):
-                async with self.session_manager.session_context(self.session_id, timeout=5.0) as acquired:
-                    if not acquired:
-                        return False
-                    return self._claim_isolated_task_under_lock(task_id, now=now)
-            return self._claim_isolated_task_under_lock(task_id, now=now)
-        finally:
-            if inproc_acquired:
-                self.session_manager.release_session(self.session_id)
-
-    async def _update_isolated_task_state(
-        self,
-        task_id: str,
-        state: TaskState,
-        *,
-        error_message: Optional[str] = None,
-        now: Optional[datetime] = None,
-    ) -> None:
-        """Update one isolated task state under heartbeat lock and flush file."""
-        inproc_acquired = False
-        if hasattr(self.session_manager, "acquire_session") and hasattr(self.session_manager, "release_session"):
-            inproc_acquired = await self.session_manager.acquire_session(self.session_id, timeout=5.0)
-            if not inproc_acquired:
-                return
-        try:
-            if hasattr(self.session_manager, "file_lock"):
-                with self.session_manager.file_lock(self.session_id, blocking=True) as acquired:
-                    if not acquired:
-                        return
-                    self._apply_isolated_task_state_under_lock(
-                        task_id, state, error_message=error_message, now=now,
-                    )
-                    return
-            if hasattr(self.session_manager, "session_context"):
-                async with self.session_manager.session_context(self.session_id, timeout=5.0) as acquired:
-                    if not acquired:
-                        return
-                    self._apply_isolated_task_state_under_lock(
-                        task_id, state, error_message=error_message, now=now,
-                    )
-                    return
-            self._apply_isolated_task_state_under_lock(
-                task_id, state, error_message=error_message, now=now,
-            )
-        finally:
-            if inproc_acquired:
-                self.session_manager.release_session(self.session_id)
-
-    def _apply_isolated_task_state_under_lock(
-        self,
-        task_id: str,
-        state: TaskState,
-        *,
-        error_message: Optional[str] = None,
-        now: Optional[datetime] = None,
-    ) -> None:
-        """Apply isolated-task state change while heartbeat lock is held."""
-        heartbeat_content = self._read_heartbeat_md()
-        if not heartbeat_content or self._task_list is None:
-            return
-        for task in self._task_list.tasks:
-            if str(getattr(task, "id", "")) != task_id:
-                continue
-            update_task_state(task, state, error_message=error_message, now=now)
-            self._flush_task_state()
-            return
-
-    async def execute_isolated_claimed_task(
-        self,
-        task_snapshot: dict[str, Any],
-        *,
-        run_id: Optional[str] = None,
-        now: Optional[datetime] = None,
-    ) -> None:
-        """Execute one already-claimed isolated task and persist final state."""
-        task_id = str(task_snapshot.get("id") or "").strip()
-        if not task_id:
-            return
-        try:
-            task = Task.from_dict(task_snapshot)
-            task.execution_mode = "isolated"
-            active_run_id = run_id or f"heartbeat_isolated_{uuid.uuid4().hex[:12]}"
-            await self._execute_isolated_task(task, active_run_id)
-            await self._update_isolated_task_state(task_id, TaskState.DONE, now=now)
-        except Exception as exc:
-            await self._update_isolated_task_state(
-                task_id,
-                TaskState.FAILED,
-                error_message=str(exc),
-                now=now,
-            )
-            raise
 
     # ── Deterministic tasks (no LLM, programmatic output) ────────
 
     @staticmethod
     def _is_time_reminder_task(task: Any) -> bool:
-        """Identify time reminder tasks by id/title/description heuristics."""
-        parts = []
-        for attr in ("id", "title", "description"):
-            value = getattr(task, attr, "")
-            if isinstance(value, str) and value.strip():
-                parts.append(value.lower())
-        if not parts:
-            return False
-        joined = " ".join(parts)
-        markers = (
-            "time_reminder",
-            "time reminder",
-            "当前时间",
-            "报时",
-        )
-        return any(marker in joined for marker in markers)
+        return is_time_reminder_task(task)
 
     def _try_deterministic_task(self, task: Any) -> Optional[str]:
-        """Return programmatic output for deterministic tasks, or None to fall through to LLM."""
-        if self._is_time_reminder_task(task):
-            return f"当前时间：{datetime.now().strftime('%Y年%m月%d日 %H:%M')}\nHEARTBEAT_OK"
-        return None
+        return try_deterministic_task(task)
 
     @staticmethod
     def _build_job_session_id(task: Any) -> str:
-        """Build one isolated job session id."""
-        task_id = str(getattr(task, "id", "task"))
-        return f"job_{task_id}_{uuid.uuid4().hex[:8]}"
+        return build_job_session_id(task)
 
     async def _create_job_agent(self, job_session_id: str) -> Any:
         """Create a fresh agent for isolated job execution."""
@@ -1146,7 +761,7 @@ If not, reply with `HEARTBEAT_OK`.
         if hasattr(context, "set_session_id"):
             context.set_session_id(job_session_id)
         context.set_variable("job_session_id", job_session_id)
-        user_data = UserDataManager()
+        user_data = get_user_data_manager()
         trajectory_path = user_data.get_session_trajectory_path(self.agent_name, job_session_id)
         trajectory_path.parent.mkdir(parents=True, exist_ok=True)
         context.init_trajectory(str(trajectory_path), overwrite=True)
@@ -1184,14 +799,12 @@ If not, reply with `HEARTBEAT_OK`.
             suppress_if_stale=False,
             dedupe_key=f"{event_type}:{self.agent_name}:{run_id}:{source_session_id}",
         )
-        if hasattr(self.session_manager, "deposit_mailbox_event"):
-            return await self.session_manager.deposit_mailbox_event(
-                target_session,
-                event,
-                timeout=5.0,
-                blocking=True,
-            )
-        return False
+        return await self.session_manager.deposit_mailbox_event(
+            target_session,
+            event,
+            timeout=5.0,
+            blocking=True,
+        )
 
     async def _execute_isolated_task(self, task: Any, run_id: str) -> str:
         """Execute one isolated task with a dedicated job session and agent."""
@@ -1213,8 +826,7 @@ If not, reply with `HEARTBEAT_OK`.
                 timeout=getattr(task, "timeout_seconds", 120),
             )
             await self.session_manager.save_session(job_session_id, agent)
-            if hasattr(self.session_manager, "mark_session_archived"):
-                await self.session_manager.mark_session_archived(job_session_id)
+            await self.session_manager.mark_session_archived(job_session_id)
             summary = f"{task_title or getattr(task, 'id', 'task')} completed"
             await self._deposit_job_event_to_primary_session(
                 event_type="job_completed",
@@ -1250,8 +862,7 @@ If not, reply with `HEARTBEAT_OK`.
             return result
         except Exception as exc:
             await self.session_manager.save_session(job_session_id, agent)
-            if hasattr(self.session_manager, "mark_session_archived"):
-                await self.session_manager.mark_session_archived(job_session_id)
+            await self.session_manager.mark_session_archived(job_session_id)
             summary = f"{task_title or getattr(task, 'id', 'task')} failed"
             await self._deposit_job_event_to_primary_session(
                 event_type="job_failed",
@@ -1294,7 +905,7 @@ If not, reply with `HEARTBEAT_OK`.
         include_isolated: bool = True,
     ) -> str:
         """Execute due structured tasks with per-task state tracking."""
-        task_list = self._task_list
+        task_list = self._file_mgr.task_list
         if task_list is None:
             return "HEARTBEAT_OK"
         due = get_due_tasks(task_list)
@@ -1428,7 +1039,7 @@ If not, reply with `HEARTBEAT_OK`.
         messages = getattr(session_data, "history_messages", None)
         if not messages:
             return
-        if self._heartbeat_mode == "structured_due":
+        if self._file_mgr.heartbeat_mode == "structured_due":
             max_history = max(self._heartbeat_max_history, 30)
         else:
             max_history = self._heartbeat_max_history
@@ -1442,9 +1053,7 @@ If not, reply with `HEARTBEAT_OK`.
 
     async def _get_or_create_agent(self) -> Any:
         """获取或创建 Agent"""
-        session_data = None
-        if hasattr(self.session_manager, "load_session"):
-            session_data = await self.session_manager.load_session(self.session_id)
+        session_data = await self.session_manager.load_session(self.session_id)
 
         # Trim history before restore to reduce token consumption
         self._trim_session_history(session_data)
@@ -1454,10 +1063,8 @@ If not, reply with `HEARTBEAT_OK`.
         if agent:
             logger.debug(f"从缓存获取 Agent: {self.session_id}")
             if session_data:
-                if hasattr(self.session_manager, "restore_timeline"):
-                    self.session_manager.restore_timeline(self.session_id, session_data.timeline or [])
-                if hasattr(self.session_manager, "restore_to_agent"):
-                    await self.session_manager.restore_to_agent(agent, session_data)
+                self.session_manager.restore_timeline(self.session_id, session_data.timeline or [])
+                await self.session_manager.restore_to_agent(agent, session_data)
             self._bind_session_id_to_context(agent)
             self._init_session_trajectory(agent, overwrite=False)
             return agent
@@ -1493,7 +1100,7 @@ If not, reply with `HEARTBEAT_OK`.
             context = agent.executor.context
             self._bind_session_id_to_context(agent)
 
-            parse_result = self._last_parse_result
+            parse_result = self._file_mgr.last_parse_result
             context.set_variable("heartbeat_mode", mode)
             context.set_variable("heartbeat_time", datetime.now().isoformat())
             context.set_variable("heartbeat_corruption_detected", mode == "corrupted")

@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Unified test runner for EverBot
+#
+# Usage: tests/run_tests.sh <test_type> [options]
+#   test_type: unit | integration | web | all
 
 set -e
 
@@ -11,17 +14,17 @@ shift || true
 
 run_unit() {
     echo "Running Unit Tests..."
-    pytest tests/unittest/ "$@"
+    pytest tests/unit/ "$@"
 }
 
 run_integration() {
     echo "Running Integration Tests..."
-    pytest tests/integration_test/ "$@"
+    pytest tests/integration/ "$@"
 }
 
-run_e2e() {
-    echo "Running E2E Tests..."
-    pytest tests/e2e/ "$@"
+run_web() {
+    echo "Running Web (E2E) Tests..."
+    pytest tests/web/ "$@"
 }
 
 case "${TYPE}" in
@@ -31,16 +34,16 @@ case "${TYPE}" in
     integration)
         run_integration "$@"
         ;;
-    e2e)
-        run_e2e "$@"
+    web)
+        run_web "$@"
         ;;
     all)
         run_unit "$@"
         run_integration "$@"
-        run_e2e "$@"
+        run_web "$@"
         ;;
     *)
-        echo "Usage: $0 {unit|integration|e2e|all} [pytest options]"
+        echo "Usage: $0 {unit|integration|web|all} [pytest options]"
         exit 1
         ;;
 esac
