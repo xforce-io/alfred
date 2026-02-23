@@ -31,6 +31,7 @@ from ...core.runtime.turn_orchestrator import (
 )
 from ...core.session.session import SessionManager
 from ...infra.user_data import UserDataManager
+from ...infra.workspace import WorkspaceLoader
 from ...infra.dolphin_compat import ensure_continue_chat_compatibility
 
 logger = logging.getLogger(__name__)
@@ -171,6 +172,7 @@ class ChannelCoreService:
             self._init_session_trajectory(agent, agent_name, session_id, overwrite=False)
             if agent.state != AgentState.PAUSED:
                 ctx.set_variable("query", effective_message)
+            self._reload_workspace_instructions_if_missing(agent, agent_name)
             self._cache_runtime_workspace_instructions(agent_name, ctx)
             # Refresh current_time so the LLM always knows the actual time
             ctx.set_variable("current_time", datetime.now().strftime("%Y-%m-%d %H:%M"))
@@ -591,6 +593,46 @@ class ChannelCoreService:
         """Load cached workspace instructions for runtime context strategy."""
         self._ensure_runtime_context_strategy()
         return str(self._runtime_workspace_instructions_by_agent.get(agent_name) or "")
+
+    def _reload_workspace_instructions_if_missing(self, agent: Any, agent_name: str) -> None:
+        """Reload workspace_instructions from disk when restore cleared it.
+
+        After session restore, ``_NON_RESTORABLE_VARS`` intentionally strips
+        ``workspace_instructions`` to avoid stale content.  This method detects
+        the missing variable and rebuilds fresh instructions from the workspace
+        files on disk (AGENTS.md, HEARTBEAT.md, MEMORY.md, etc.).
+        """
+        ctx = agent.executor.context
+        get_var = getattr(ctx, "get_var_value", None)
+        if not callable(get_var):
+            return
+        current = get_var("workspace_instructions")
+        if current:
+            return  # still present — nothing to do
+
+        try:
+            workspace_path = self.user_data.get_agent_dir(agent_name)
+            fresh = WorkspaceLoader(workspace_path).build_system_prompt()
+            if fresh:
+                from ...core.agent.factory import AgentFactory
+                fresh = AgentFactory._append_runtime_paths(
+                    None,
+                    workspace_instructions=fresh,
+                    workspace_path=workspace_path,
+                )
+            if fresh:
+                ctx.set_variable("workspace_instructions", fresh)
+                logger.info(
+                    "Reloaded workspace_instructions from disk for agent=%s (%d chars)",
+                    agent_name,
+                    len(fresh),
+                )
+        except Exception:
+            logger.warning(
+                "Failed to reload workspace_instructions for agent=%s",
+                agent_name,
+                exc_info=True,
+            )
 
     def _cache_runtime_workspace_instructions(self, agent_name: str, context: Any) -> None:
         """Cache workspace instructions from agent context for strategy lookup."""
