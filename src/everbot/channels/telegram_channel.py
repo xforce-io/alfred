@@ -212,7 +212,24 @@ class TelegramChannel:
     # ------------------------------------------------------------------
 
     async def _polling_loop(self) -> None:
-        offset = 0
+        # Flush all pending updates so we don't replay stale messages after restart.
+        offset = -1
+        try:
+            resp = await self._client.get(  # type: ignore[union-attr]
+                f"{self._base_url}/getUpdates",
+                params={"offset": offset, "timeout": 0},
+            )
+            result = resp.json()
+            updates = result.get("result", [])
+            if updates:
+                offset = updates[-1]["update_id"] + 1
+                logger.info("Flushed %d pending Telegram update(s), resuming from offset %d", len(updates), offset)
+            else:
+                offset = 0
+        except Exception as exc:
+            logger.warning("Failed to flush pending Telegram updates: %s", exc)
+            offset = 0
+
         while self._running:
             try:
                 resp = await self._client.get(  # type: ignore[union-attr]
