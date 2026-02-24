@@ -145,7 +145,14 @@ class SessionPersistence:
             portable = agent.snapshot.export_portable_session()
             serializable_history = portable.get("history_messages", [])
             if trailing_messages:
-                serializable_history = list(serializable_history) + list(trailing_messages)
+                # Trim any trailing orphan assistant tool_calls before appending
+                # trailing_messages.  This prevents saving a broken tool chain
+                # when an error occurred mid-tool-execution (assistant+tool_calls
+                # was committed to context but the tool response was not).
+                history = list(serializable_history)
+                while history and DolphinStateAdapter._is_assistant_tool_call(history[-1]):
+                    history.pop()
+                serializable_history = history + list(trailing_messages)
             exported_variables = portable.get("variables", {})
             previous = await self.load(session_id)
             next_revision = ((previous.revision if previous else 0) or 0) + 1
@@ -410,7 +417,21 @@ class SessionPersistence:
             }
 
             # 3. Import via SDK (handles history, variables, session_id, and repair)
-            agent.snapshot.import_portable_session(portable_state, repair=True)
+            report = agent.snapshot.import_portable_session(portable_state, repair=True)
+
+            if report and report.get("issues_after"):
+                logger.warning(
+                    "Session restore for %s completed with unresolved issues "
+                    "(history may not have been imported): %s",
+                    session_data.session_id,
+                    report["issues_after"],
+                )
+            if report and report.get("applied_repairs"):
+                logger.info(
+                    "Session restore for %s applied repairs: dropped=%s",
+                    session_data.session_id,
+                    report.get("dropped_fields", []),
+                )
 
             logger.info(f"Session 已恢复: {session_data.session_id}, "
                        f"历史消息: {len(compacted_history)} 条")
