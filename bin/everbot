@@ -4,6 +4,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Source shared secrets/env vars (single source of truth for API keys etc.)
+# ~/.zshrc / ~/.bashrc should also source this file.
+if [[ -f "${HOME}/.env.secrets" ]]; then
+  set -a
+  source "${HOME}/.env.secrets"
+  set +a
+fi
+
 export PYTHONPATH="${PROJECT_ROOT}"
 
 # Activate virtual environment if it exists

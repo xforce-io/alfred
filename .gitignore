@@ -21,6 +21,7 @@ HEARTBEAT.md
 
 # Sensitive config (use example files as templates)
 config/dolphin.yaml
+.env.secrets
 
 # Node.js
 node_modules/
