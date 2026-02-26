@@ -673,8 +673,30 @@ class SessionManager:
         self._agents.pop(session_id, None)
         self._agent_metadata.pop(session_id, None)
         self._timeline_events.pop(session_id, None)
+        # Reset trajectory file so the next turn starts a fresh debug log
+        self._reset_trajectory_file(session_data.agent_name, session_id)
         logger.info("Session history cleared: %s", session_id)
         return True
+
+    def _reset_trajectory_file(self, agent_name: str, session_id: str) -> None:
+        """Archive the current trajectory file and start a fresh one."""
+        try:
+            from ...infra.user_data import get_user_data_manager
+            trajectory_path = get_user_data_manager().get_session_trajectory_path(
+                agent_name, session_id
+            )
+            if trajectory_path.exists() and trajectory_path.stat().st_size > 50:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                archive_path = trajectory_path.with_suffix(f".{ts}.json")
+                trajectory_path.rename(archive_path)
+                logger.debug("Trajectory archived: %s", archive_path)
+            trajectory_path.write_text(
+                '{"trajectory": [], "tools": [], "stages": []}',
+                encoding="utf-8",
+            )
+            logger.debug("Trajectory file reset: %s", trajectory_path)
+        except Exception:
+            logger.debug("Failed to reset trajectory file", exc_info=True)
 
     async def reset_session(self, session_id: str):
         """重置 Session：清除缓存和磁盘文件"""

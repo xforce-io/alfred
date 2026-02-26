@@ -34,6 +34,7 @@ from ..tasks.task_manager import (
     update_task_state,
     write_task_block,
     purge_stale_tasks,
+    heal_stuck_scheduled_tasks,
     TaskList,
     TaskState,
     ParseStatus,
@@ -228,6 +229,9 @@ If not, reply with `HEARTBEAT_OK`.
             purged = purge_stale_tasks(task_list)
             if purged:
                 logger.info("Purged %d stale task(s) from HEARTBEAT.md", purged)
+            healed = heal_stuck_scheduled_tasks(task_list)
+            if healed:
+                logger.info("Healed %d stuck scheduled task(s)", healed)
             content = hb_path.read_text(encoding="utf-8")
             updated = write_task_block(content, task_list)
             self._write_heartbeat_file(updated)

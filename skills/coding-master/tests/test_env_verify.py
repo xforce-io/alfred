@@ -209,6 +209,11 @@ class TestCmdEnvVerify:
         ws_path = str(tmp_path)
         art_dir = tmp_path / ARTIFACT_DIR
         art_dir.mkdir(parents=True)
+        # Create session.json so @requires_workspace passes
+        (art_dir / "session.json").write_text(
+            json.dumps({"ws_path": ws_path, "workspace_name": "ws0",
+                        "task": "t", "engine": "e", "created_at": ""})
+        )
         # Create baseline env_snapshot
         (art_dir / "env_snapshot.json").write_text(
             json.dumps({"modules": [{"name": "d", "recent_errors": ["ERR"]}]})

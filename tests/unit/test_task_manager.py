@@ -14,6 +14,7 @@ from src.everbot.core.tasks.task_manager import (
     claim_task,
     update_task_state,
     write_task_block,
+    heal_stuck_scheduled_tasks,
 )
 
 
@@ -224,6 +225,104 @@ class TestTaskStateTransitions:
         assert task.next_run_at is not None
         assert task.next_run_at.endswith("-08:00")
 
+    def test_scheduled_task_at_max_retry_rearms_for_next_cycle(self):
+        """Scheduled task reaching max_retry should auto-reset, not stay failed.
+
+        Production bug: demo_agent had two 1d-scheduled tasks stuck in 'failed'
+        state with retry=3/3. The code at task_manager.py:287-293 should handle
+        this by resetting retry=0 and re-arming as pending.
+        """
+        task = _sample_task(retry=2, max_retry=3, schedule="1d")
+        task.timezone = "Asia/Shanghai"
+        now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
+        update_task_state(task, TaskState.FAILED, error_message="Request timed out.", now=now)
+        assert task.state == "pending", (
+            f"Scheduled task should re-arm as pending after max_retry, got '{task.state}'"
+        )
+        assert task.retry == 0, (
+            f"Retry counter should reset to 0 for next cycle, got {task.retry}"
+        )
+        assert task.next_run_at is not None, (
+            "next_run_at should be recalculated for next cycle"
+        )
+
+    def test_scheduled_task_at_max_retry_clears_error_on_rearm(self):
+        """After auto-reset, the error_message should still be set (for diagnostics)
+        but the task should be schedulable."""
+        task = _sample_task(retry=2, max_retry=3, schedule="1d")
+        now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
+        update_task_state(task, TaskState.FAILED, error_message="Connection error.", now=now)
+        # Task is re-armed; error_message is preserved for diagnostics
+        assert task.state == "pending"
+        # next_run_at should be ~1 day in the future
+        next_run = datetime.fromisoformat(task.next_run_at)
+        assert next_run > now
+
+    def test_scheduled_task_progressive_retry_then_reset(self):
+        """Full lifecycle: 3 failures → auto-reset → pending for next cycle."""
+        task = _sample_task(retry=0, max_retry=3, schedule="1d")
+        now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
+
+        # Fail 1: re-arm as pending (retry < max)
+        update_task_state(task, TaskState.FAILED, error_message="err1", now=now)
+        assert task.state == "pending"
+        assert task.retry == 1
+
+        # Fail 2: re-arm as pending (retry < max)
+        update_task_state(task, TaskState.FAILED, error_message="err2", now=now)
+        assert task.state == "pending"
+        assert task.retry == 2
+
+        # Fail 3: max_retry reached → scheduled task auto-resets for next cycle
+        update_task_state(task, TaskState.FAILED, error_message="err3", now=now)
+        assert task.state == "pending", "Scheduled task should reset, not stay failed"
+        assert task.retry == 0, "Retry counter should reset after max_retry cycle"
+        assert task.next_run_at is not None
+
+
+# ── _compute_next_run edge cases ─────────────────────────────────
+
+class TestComputeNextRun:
+    """Test interval format parsing used by demo_agent's scheduled tasks."""
+
+    @pytest.mark.parametrize("schedule,expected_unit", [
+        ("30m", "minutes"),
+        ("1h", "hours"),
+        ("1d", "days"),
+        ("7d", "days"),
+        ("14d", "days"),
+    ])
+    def test_interval_formats_produce_valid_next_run(self, schedule, expected_unit):
+        from src.everbot.core.tasks.task_manager import _compute_next_run
+        now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
+        result = _compute_next_run(schedule, now)
+        assert result is not None, f"Schedule '{schedule}' should produce a valid next_run"
+        next_dt = datetime.fromisoformat(result)
+        assert next_dt > now, f"next_run should be in the future for '{schedule}'"
+
+    def test_interval_1d_with_timezone(self):
+        from src.everbot.core.tasks.task_manager import _compute_next_run
+        now = datetime(2026, 2, 25, 4, 0, tzinfo=timezone.utc)  # noon in Asia/Shanghai
+        result = _compute_next_run("1d", now, "Asia/Shanghai")
+        assert result is not None
+        next_dt = datetime.fromisoformat(result)
+        assert next_dt > now
+
+    def test_none_schedule_returns_none(self):
+        from src.everbot.core.tasks.task_manager import _compute_next_run
+        now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
+        assert _compute_next_run(None, now) is None
+
+    def test_empty_schedule_returns_none(self):
+        from src.everbot.core.tasks.task_manager import _compute_next_run
+        now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
+        assert _compute_next_run("", now) is None
+
+    def test_invalid_schedule_returns_none(self):
+        from src.everbot.core.tasks.task_manager import _compute_next_run
+        now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
+        assert _compute_next_run("every tuesday", now) is None
+
 
 # ── Write back ────────────────────────────────────────────────────
 
@@ -267,3 +366,78 @@ class TestRoundTrip:
         tl2 = TaskList.from_dict(d)
         assert len(tl2.tasks) == 2
         assert tl2.tasks[1].id == "t2"
+
+
+# ── heal_stuck_scheduled_tasks ────────────────────────────────────
+
+class TestHealStuckScheduledTasks:
+    """Verify heal_stuck_scheduled_tasks re-arms scheduled tasks stuck in failed.
+
+    Root cause: tasks that exhausted retries before auto-reset logic existed
+    (pre-c2d67b8) remain in state=failed because get_due_tasks skips them.
+    """
+
+    def test_heals_failed_scheduled_task(self):
+        task = _sample_task(
+            state="failed", retry=3, max_retry=3, schedule="1d",
+        )
+        task.timezone = "Asia/Shanghai"
+        task.error_message = "Request timed out."
+        tl = TaskList(tasks=[task])
+        now = datetime(2026, 2, 26, 12, 0, tzinfo=timezone.utc)
+
+        healed = heal_stuck_scheduled_tasks(tl, now=now)
+        assert healed == 1
+        assert task.state == "pending"
+        assert task.retry == 0
+        assert task.error_message is None
+        assert task.next_run_at is not None
+        next_dt = datetime.fromisoformat(task.next_run_at)
+        assert next_dt > now
+
+    def test_does_not_heal_one_shot_failed_task(self):
+        task = _sample_task(
+            state="failed", retry=3, max_retry=3, schedule=None,
+        )
+        tl = TaskList(tasks=[task])
+        healed = heal_stuck_scheduled_tasks(tl)
+        assert healed == 0
+        assert task.state == "failed"
+
+    def test_does_not_heal_pending_task(self):
+        task = _sample_task(
+            state="pending", retry=0, max_retry=3, schedule="1d",
+        )
+        tl = TaskList(tasks=[task])
+        healed = heal_stuck_scheduled_tasks(tl)
+        assert healed == 0
+
+    def test_does_not_heal_running_task(self):
+        task = _sample_task(
+            state="running", retry=1, max_retry=3, schedule="1d",
+        )
+        tl = TaskList(tasks=[task])
+        healed = heal_stuck_scheduled_tasks(tl)
+        assert healed == 0
+
+    def test_does_not_heal_failed_with_retries_remaining(self):
+        """Task with retry < max_retry isn't stuck — it will be retried normally."""
+        task = _sample_task(
+            state="failed", retry=1, max_retry=3, schedule="1d",
+        )
+        tl = TaskList(tasks=[task])
+        healed = heal_stuck_scheduled_tasks(tl)
+        assert healed == 0
+
+    def test_heals_multiple_stuck_tasks(self):
+        t1 = _sample_task(id="t1", state="failed", retry=3, max_retry=3, schedule="1d")
+        t2 = _sample_task(id="t2", state="failed", retry=3, max_retry=3, schedule="7d")
+        t3 = _sample_task(id="t3", state="pending", schedule="1d")
+        tl = TaskList(tasks=[t1, t2, t3])
+        now = datetime(2026, 2, 26, 12, 0, tzinfo=timezone.utc)
+
+        healed = heal_stuck_scheduled_tasks(tl, now=now)
+        assert healed == 2
+        assert t1.state == "pending"
+        assert t2.state == "pending"
+        assert t3.state == "pending"  # unchanged

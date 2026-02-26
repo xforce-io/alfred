@@ -339,6 +339,45 @@ def purge_stale_tasks(
     return removed
 
 
+def heal_stuck_scheduled_tasks(
+    task_list: TaskList,
+    now: Optional[datetime] = None,
+) -> int:
+    """Re-arm scheduled tasks stuck in 'failed' state.
+
+    This handles a legacy edge case: tasks that exhausted retries before the
+    auto-reset logic was added (commit c2d67b8) remain stuck because
+    ``get_due_tasks`` skips non-pending tasks.  Calling this at heartbeat
+    startup resets them so they can be scheduled for the next cycle.
+
+    Returns the number of healed tasks.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    healed = 0
+    for task in task_list.tasks:
+        if (
+            task.schedule
+            and task.state == TaskState.FAILED.value
+            and task.retry >= task.max_retry
+        ):
+            task.retry = 0
+            task.state = TaskState.PENDING.value
+            task.error_message = None
+            next_run = _compute_next_run(task.schedule, now, task.timezone)
+            if next_run:
+                task.next_run_at = next_run
+            healed += 1
+            logger.info(
+                "Healed stuck scheduled task %s (%s): re-armed as pending, next_run=%s",
+                task.id, task.title, task.next_run_at,
+            )
+    return healed
+
+
 def write_task_block(content: str, task_list: TaskList) -> str:
     """Replace the JSON task block in HEARTBEAT.md content, or append one."""
     block_json = json.dumps(task_list.to_dict(), indent=2, ensure_ascii=False)

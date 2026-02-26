@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -102,6 +104,25 @@ def with_lock_update(workspace_path: str, phase: str, fn, *args, **kwargs) -> di
     return result
 
 
+def requires_workspace(fn):
+    """Decorator: enforce workspace-check was called, inject ws_path from session."""
+    @functools.wraps(fn)
+    def wrapper(args):
+        ws_path = _resolve_workspace_path(args)
+        if ws_path is None:
+            return {"ok": False, "error": f"workspace '{args.workspace}' not found",
+                    "error_code": "PATH_NOT_FOUND"}
+        session_path = Path(ws_path) / ARTIFACT_DIR / "session.json"
+        if not session_path.exists():
+            return {"ok": False,
+                    "error": "run workspace-check first to start a session",
+                    "error_code": "NO_SESSION"}
+        session = json.loads(session_path.read_text())
+        args._ws_path = session["ws_path"]
+        return fn(args)
+    return wrapper
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Engine helpers
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -141,18 +162,145 @@ def cmd_config_remove(args) -> dict:
     return ConfigManager().remove(args.kind, args.name)
 
 
-def cmd_workspace_check(args) -> dict:
-    config = ConfigManager()
-    engine = args.engine or config.get_default_engine()
-    mgr = WorkspaceManager(config)
-    return mgr.check_and_acquire(args.workspace, args.task, engine)
+# ── Quick queries (lock-free, read-only) ─────────────────
 
-
-def cmd_env_probe(args) -> dict:
+def cmd_quick_status(args) -> dict:
+    """Workspace overview: git info, runtime, project commands, lock status."""
     ws_path = _resolve_workspace_path(args)
     if ws_path is None:
         return {"ok": False, "error": f"workspace '{args.workspace}' not found",
                 "error_code": "PATH_NOT_FOUND"}
+
+    config = ConfigManager()
+    mgr = WorkspaceManager(config)
+    ws = config.get_workspace(args.workspace)
+
+    git_info = mgr._probe_git(ws_path)
+    runtime = mgr._probe_runtime(ws_path)
+    project = mgr._probe_project(ws_path, ws)
+
+    # Read-only lock peek
+    lock_info = None
+    lock = LockFile(ws_path)
+    if lock.exists():
+        lock.load()
+        lock_info = {
+            "task": lock.data.get("task"),
+            "phase": lock.data.get("phase"),
+            "engine": lock.data.get("engine"),
+            "started_at": lock.data.get("started_at"),
+            "expired": lock.is_expired(),
+        }
+
+    return {
+        "ok": True,
+        "data": {
+            "workspace": args.workspace,
+            "path": ws_path,
+            "git": git_info,
+            "runtime": runtime,
+            "project": project,
+            "lock": lock_info,
+        },
+    }
+
+
+def cmd_quick_test(args) -> dict:
+    """Run tests (and optionally lint) without acquiring a lock."""
+    ws_path = _resolve_workspace_path(args)
+    if ws_path is None:
+        return {"ok": False, "error": f"workspace '{args.workspace}' not found",
+                "error_code": "PATH_NOT_FOUND"}
+
+    config = ConfigManager()
+    runner = TestRunner(config)
+    ws = config.get_workspace(args.workspace)
+    commands = runner._detect_commands(ws_path, ws)
+
+    test_cmd = commands.get("test_command")
+    if test_cmd and args.path:
+        test_cmd = f"{test_cmd} {args.path}"
+
+    test_result = runner._run_test(ws_path, test_cmd)
+
+    from dataclasses import asdict
+    data = {"test": asdict(test_result), "overall": "passed" if test_result.passed else "failed"}
+
+    if args.lint:
+        lint_result = runner._run_lint(ws_path, commands.get("lint_command"))
+        data["lint"] = asdict(lint_result)
+        if not lint_result.passed:
+            data["overall"] = "failed"
+
+    return {"ok": True, "data": data}
+
+
+_QUICK_FIND_MAX = 100
+
+
+def cmd_quick_find(args) -> dict:
+    """Search code in workspace via grep."""
+    ws_path = _resolve_workspace_path(args)
+    if ws_path is None:
+        return {"ok": False, "error": f"workspace '{args.workspace}' not found",
+                "error_code": "PATH_NOT_FOUND"}
+
+    cmd = ["grep", "-rn", args.query, "."]
+    if args.glob:
+        cmd = ["grep", "-rn", f"--include={args.glob}", args.query, "."]
+
+    try:
+        r = subprocess.run(cmd, cwd=ws_path, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "search timed out (30s)", "error_code": "TIMEOUT"}
+
+    lines = r.stdout.strip().split("\n") if r.stdout.strip() else []
+    truncated = len(lines) > _QUICK_FIND_MAX
+    lines = lines[:_QUICK_FIND_MAX]
+
+    return {
+        "ok": True,
+        "data": {
+            "query": args.query,
+            "glob": args.glob,
+            "matches": lines,
+            "count": len(lines),
+            "truncated": truncated,
+        },
+    }
+
+
+def cmd_quick_env(args) -> dict:
+    """Probe env without workspace — pure observation, no artifacts."""
+    config = ConfigManager()
+    prober = EnvProber(config)
+    extra = args.commands if hasattr(args, "commands") and args.commands else None
+    return prober.probe(args.env, extra_commands=extra)
+
+
+def cmd_workspace_check(args) -> dict:
+    config = ConfigManager()
+    engine = args.engine or config.get_default_engine()
+    mgr = WorkspaceManager(config)
+
+    if args.repos:
+        # Repo mode: clone/update repos into workspace
+        repo_names = [r.strip() for r in args.repos.split(",") if r.strip()]
+        return mgr.check_and_acquire_for_repos(
+            repo_names, args.task, engine,
+            workspace_name=args.workspace,
+        )
+
+    # Direct workspace mode (original behavior)
+    if not args.workspace:
+        return {"ok": False, "error": "--workspace is required when --repos is not provided",
+                "error_code": "INVALID_ARGS"}
+    return mgr.check_and_acquire(args.workspace, args.task, engine)
+
+
+@requires_workspace
+def cmd_env_probe(args) -> dict:
+    ws_path = args._ws_path
 
     config = ConfigManager()
     prober = EnvProber(config)
@@ -178,11 +326,9 @@ def cmd_env_probe(args) -> dict:
     return with_lock_update(ws_path, "env-probe", do_probe)
 
 
+@requires_workspace
 def cmd_analyze(args) -> dict:
-    ws_path = _resolve_workspace_path(args)
-    if ws_path is None:
-        return {"ok": False, "error": f"workspace '{args.workspace}' not found",
-                "error_code": "PATH_NOT_FOUND"}
+    ws_path = args._ws_path
 
     config = ConfigManager()
     engine_name = args.engine or config.get_default_engine()
@@ -226,11 +372,9 @@ def cmd_analyze(args) -> dict:
     return with_lock_update(ws_path, "analyzing", do_analyze)
 
 
+@requires_workspace
 def cmd_develop(args) -> dict:
-    ws_path = _resolve_workspace_path(args)
-    if ws_path is None:
-        return {"ok": False, "error": f"workspace '{args.workspace}' not found",
-                "error_code": "PATH_NOT_FOUND"}
+    ws_path = args._ws_path
 
     config = ConfigManager()
     engine_name = args.engine or config.get_default_engine()
@@ -275,11 +419,9 @@ def cmd_develop(args) -> dict:
     return with_lock_update(ws_path, "developing", do_develop)
 
 
+@requires_workspace
 def cmd_test(args) -> dict:
-    ws_path = _resolve_workspace_path(args)
-    if ws_path is None:
-        return {"ok": False, "error": f"workspace '{args.workspace}' not found",
-                "error_code": "PATH_NOT_FOUND"}
+    ws_path = args._ws_path
 
     config = ConfigManager()
     runner = TestRunner(config)
@@ -297,11 +439,9 @@ def cmd_test(args) -> dict:
     return with_lock_update(ws_path, "testing", do_test)
 
 
+@requires_workspace
 def cmd_submit_pr(args) -> dict:
-    ws_path = _resolve_workspace_path(args)
-    if ws_path is None:
-        return {"ok": False, "error": f"workspace '{args.workspace}' not found",
-                "error_code": "PATH_NOT_FOUND"}
+    ws_path = args._ws_path
 
     git = GitOps(ws_path)
 
@@ -323,11 +463,9 @@ def cmd_submit_pr(args) -> dict:
     return with_lock_update(ws_path, "submitted", do_submit)
 
 
+@requires_workspace
 def cmd_env_verify(args) -> dict:
-    ws_path = _resolve_workspace_path(args)
-    if ws_path is None:
-        return {"ok": False, "error": f"workspace '{args.workspace}' not found",
-                "error_code": "PATH_NOT_FOUND"}
+    ws_path = args._ws_path
 
     config = ConfigManager()
     prober = EnvProber(config)
@@ -371,30 +509,24 @@ def cmd_renew_lease(args) -> dict:
 
 # ── Feature management ───────────────────────────────────
 
+@requires_workspace
 def cmd_feature_plan(args) -> dict:
-    ws_path = _resolve_workspace_path(args)
-    if ws_path is None:
-        return {"ok": False, "error": f"workspace '{args.workspace}' not found",
-                "error_code": "PATH_NOT_FOUND"}
+    ws_path = args._ws_path
     fm = FeatureManager(ws_path)
     features = json.loads(args.features)
     return fm.create_plan(args.task, features)
 
 
+@requires_workspace
 def cmd_feature_next(args) -> dict:
-    ws_path = _resolve_workspace_path(args)
-    if ws_path is None:
-        return {"ok": False, "error": f"workspace '{args.workspace}' not found",
-                "error_code": "PATH_NOT_FOUND"}
+    ws_path = args._ws_path
     fm = FeatureManager(ws_path)
     return fm.next_feature()
 
 
+@requires_workspace
 def cmd_feature_done(args) -> dict:
-    ws_path = _resolve_workspace_path(args)
-    if ws_path is None:
-        return {"ok": False, "error": f"workspace '{args.workspace}' not found",
-                "error_code": "PATH_NOT_FOUND"}
+    ws_path = args._ws_path
     fm = FeatureManager(ws_path)
     return fm.mark_done(
         index=args.index,
@@ -412,11 +544,9 @@ def cmd_feature_list(args) -> dict:
     return fm.list_all()
 
 
+@requires_workspace
 def cmd_feature_update(args) -> dict:
-    ws_path = _resolve_workspace_path(args)
-    if ws_path is None:
-        return {"ok": False, "error": f"workspace '{args.workspace}' not found",
-                "error_code": "PATH_NOT_FOUND"}
+    ws_path = args._ws_path
     fm = FeatureManager(ws_path)
     return fm.update(
         index=args.index,
@@ -438,25 +568,44 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("config-list", help="List all config")
 
     ca = sub.add_parser("config-add", help="Add workspace or env")
-    ca.add_argument("kind", choices=["workspace", "env"])
+    ca.add_argument("kind", choices=["repo", "workspace", "env"])
     ca.add_argument("name")
     ca.add_argument("value")
 
     cs = sub.add_parser("config-set", help="Set a field on workspace or env")
-    cs.add_argument("kind", choices=["workspace", "env"])
+    cs.add_argument("kind", choices=["repo", "workspace", "env"])
     cs.add_argument("name")
     cs.add_argument("key")
     cs.add_argument("value")
 
     cr = sub.add_parser("config-remove", help="Remove workspace or env")
-    cr.add_argument("kind", choices=["workspace", "env"])
+    cr.add_argument("kind", choices=["repo", "workspace", "env"])
     cr.add_argument("name")
+
+    # ── Quick queries (lock-free) ────────────────────────────
+    qs = sub.add_parser("quick-status", help="Workspace overview (lock-free)")
+    qs.add_argument("--workspace", required=True)
+
+    qt = sub.add_parser("quick-test", help="Run tests without lock")
+    qt.add_argument("--workspace", required=True)
+    qt.add_argument("--path", default=None, help="Specific test path/directory")
+    qt.add_argument("--lint", action="store_true", help="Also run lint")
+
+    qf = sub.add_parser("quick-find", help="Search code in workspace")
+    qf.add_argument("--workspace", required=True)
+    qf.add_argument("--query", required=True, help="Search pattern (grep)")
+    qf.add_argument("--glob", default=None, help="File pattern filter")
+
+    qe = sub.add_parser("quick-env", help="Probe env without workspace (lock-free)")
+    qe.add_argument("--env", required=True)
+    qe.add_argument("--commands", nargs="*", default=None)
 
     # ── Workflow ────────────────────────────────────────────
     wc = sub.add_parser("workspace-check", help="Check and acquire workspace")
-    wc.add_argument("--workspace", required=True)
+    wc.add_argument("--workspace", default=None, help="Workspace name (required in direct mode, optional with --repos)")
     wc.add_argument("--task", required=True)
     wc.add_argument("--engine", default=None)
+    wc.add_argument("--repos", default=None, help="Comma-separated repo names (auto-allocates workspace if --workspace omitted)")
 
     ep = sub.add_parser("env-probe", help="Probe runtime environment")
     ep.add_argument("--workspace", required=True)
@@ -527,6 +676,10 @@ COMMANDS = {
     "config-add": cmd_config_add,
     "config-set": cmd_config_set,
     "config-remove": cmd_config_remove,
+    "quick-status": cmd_quick_status,
+    "quick-test": cmd_quick_test,
+    "quick-find": cmd_quick_find,
+    "quick-env": cmd_quick_env,
     "workspace-check": cmd_workspace_check,
     "env-probe": cmd_env_probe,
     "analyze": cmd_analyze,

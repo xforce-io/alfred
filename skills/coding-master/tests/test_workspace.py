@@ -10,6 +10,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from workspace import LockFile, WorkspaceManager, LOCK_FILENAME, ARTIFACT_DIR, GITIGNORE_ENTRIES
+from git_ops import GitOps
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -143,6 +144,32 @@ class TestWorkspaceManagerCheckAndAcquire:
         # Artifact dir created
         assert (ws_dir / ARTIFACT_DIR).exists()
 
+    @patch("workspace._run_git", return_value="")
+    @patch("workspace._run_cmd", return_value="Python 3.11.0")
+    def test_session_json_created(self, mock_cmd, mock_git, config_manager, ws_dir):
+        """workspace-check must write session.json with ws_path."""
+        (ws_dir / "pyproject.toml").write_text("[tool.ruff]\n")
+        mgr = WorkspaceManager(config_manager)
+        result = mgr.check_and_acquire("test-ws", "fix bug", "claude")
+        assert result["ok"] is True
+        session_path = ws_dir / ARTIFACT_DIR / "session.json"
+        assert session_path.exists()
+        session = json.loads(session_path.read_text())
+        assert session["ws_path"] == str(ws_dir.resolve())
+        assert session["workspace_name"] == "test-ws"
+        assert session["task"] == "fix bug"
+        assert session["engine"] == "claude"
+
+    @patch("workspace._run_git", return_value="")
+    @patch("workspace._run_cmd", return_value="Python 3.11.0")
+    def test_lock_contains_ws_path(self, mock_cmd, mock_git, config_manager, ws_dir):
+        """LockFile should store resolved ws_path."""
+        (ws_dir / "pyproject.toml").write_text("[tool.ruff]\n")
+        mgr = WorkspaceManager(config_manager)
+        mgr.check_and_acquire("test-ws", "fix bug", "claude")
+        lock = LockFile(str(ws_dir)).load()
+        assert lock.data["ws_path"] == str(ws_dir.resolve())
+
     def test_workspace_not_found(self, config_manager):
         mgr = WorkspaceManager(config_manager)
         result = mgr.check_and_acquire("nonexistent", "t", "e")
@@ -220,6 +247,18 @@ class TestWorkspaceManagerRelease:
         assert not (ws_dir / LOCK_FILENAME).exists()
         assert not art_dir.exists()
 
+    @patch("workspace._run_git")
+    def test_release_cleans_session(self, mock_git, config_manager, ws_dir):
+        """Release must remove session.json along with other artifacts."""
+        LockFile.create(str(ws_dir), task="t", engine="e")
+        art_dir = ws_dir / ARTIFACT_DIR
+        art_dir.mkdir()
+        (art_dir / "session.json").write_text('{"ws_path": "/x"}')
+        mgr = WorkspaceManager(config_manager)
+        result = mgr.release("test-ws")
+        assert result["ok"] is True
+        assert not (art_dir / "session.json").exists()
+
     def test_release_already_released(self, config_manager):
         mgr = WorkspaceManager(config_manager)
         result = mgr.release("test-ws")
@@ -246,3 +285,151 @@ class TestWorkspaceManagerRelease:
         assert any("checkout" in c for c in calls)
         assert any("-D" in c for c in calls)
         assert any("push" in c and "--delete" in c for c in calls)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Repo-based workflow
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class TestFindFreeWorkspace:
+    def test_returns_first_unlocked(self, repo_config_manager):
+        mgr = WorkspaceManager(repo_config_manager)
+        ws = mgr._find_free_workspace()
+        assert ws is not None
+        assert ws["name"] in ("env0", "env1")
+
+    def test_skips_locked_workspace(self, repo_config_manager):
+        mgr = WorkspaceManager(repo_config_manager)
+        # Lock env0
+        ws0 = repo_config_manager.get_workspace("env0")
+        LockFile.create(ws0["path"], task="busy", engine="e")
+        ws = mgr._find_free_workspace()
+        assert ws is not None
+        assert ws["name"] == "env1"
+
+    def test_returns_none_when_all_locked(self, repo_config_manager):
+        mgr = WorkspaceManager(repo_config_manager)
+        for name in ("env0", "env1"):
+            ws = repo_config_manager.get_workspace(name)
+            LockFile.create(ws["path"], task="busy", engine="e")
+        assert mgr._find_free_workspace() is None
+
+    def test_reclaims_expired_lock(self, repo_config_manager):
+        mgr = WorkspaceManager(repo_config_manager)
+        ws0 = repo_config_manager.get_workspace("env0")
+        lf = LockFile.create(ws0["path"], task="old", engine="e")
+        lf.data["lease_expires_at"] = (
+            datetime.now(timezone.utc) - timedelta(minutes=1)
+        ).isoformat()
+        lf.save()
+        ws = mgr._find_free_workspace()
+        assert ws is not None
+        assert ws["name"] == "env0"
+
+
+class TestEnsureRepo:
+    def test_clone_new_repo(self, repo_config_manager, bare_repo):
+        mgr = WorkspaceManager(repo_config_manager)
+        ws = repo_config_manager.get_workspace("env0")
+        rc = repo_config_manager.get_repo("myrepo")
+        path = mgr._ensure_repo(ws["path"], rc)
+        assert path is not None
+        assert (Path(path) / ".git").exists()
+        assert (Path(path) / "README.md").exists()
+
+    def test_update_existing_repo(self, repo_config_manager, bare_repo):
+        mgr = WorkspaceManager(repo_config_manager)
+        ws = repo_config_manager.get_workspace("env0")
+        rc = repo_config_manager.get_repo("myrepo")
+        # Clone first
+        path1 = mgr._ensure_repo(ws["path"], rc)
+        # Run again — should fetch/pull, not re-clone
+        path2 = mgr._ensure_repo(ws["path"], rc)
+        assert path1 == path2
+        assert (Path(path2) / ".git").exists()
+
+    def test_clone_failure_returns_none(self, repo_config_manager):
+        mgr = WorkspaceManager(repo_config_manager)
+        ws = repo_config_manager.get_workspace("env0")
+        rc = {"name": "bad", "url": "file:///nonexistent/repo.git"}
+        path = mgr._ensure_repo(ws["path"], rc)
+        assert path is None
+
+
+class TestCheckAndAcquireForRepos:
+    def test_success_auto_allocate(self, repo_config_manager, bare_repo):
+        mgr = WorkspaceManager(repo_config_manager)
+        result = mgr.check_and_acquire_for_repos(
+            ["myrepo"], "fix bug", "claude"
+        )
+        assert result["ok"] is True
+        snapshot = result["data"]["snapshot"]
+        assert len(snapshot["repos"]) == 1
+        assert snapshot["repos"][0]["name"] == "myrepo"
+        assert snapshot["primary_repo"]["name"] == "myrepo"
+        assert snapshot["repos"][0]["git"]["branch"] is not None
+        assert snapshot["repos"][0]["runtime"]["type"] == "python"
+
+    def test_success_explicit_workspace(self, repo_config_manager, bare_repo):
+        mgr = WorkspaceManager(repo_config_manager)
+        result = mgr.check_and_acquire_for_repos(
+            ["myrepo"], "fix bug", "claude", workspace_name="env1"
+        )
+        assert result["ok"] is True
+        assert result["data"]["snapshot"]["workspace"]["name"] == "env1"
+
+    def test_repo_not_found(self, repo_config_manager):
+        mgr = WorkspaceManager(repo_config_manager)
+        result = mgr.check_and_acquire_for_repos(
+            ["nonexistent"], "task", "claude"
+        )
+        assert result["ok"] is False
+        assert "not found" in result["error"]
+
+    def test_workspace_not_found(self, repo_config_manager):
+        mgr = WorkspaceManager(repo_config_manager)
+        result = mgr.check_and_acquire_for_repos(
+            ["myrepo"], "task", "claude", workspace_name="nosuch"
+        )
+        assert result["ok"] is False
+        assert "not found" in result["error"]
+
+    def test_no_free_workspace(self, repo_config_manager, bare_repo):
+        mgr = WorkspaceManager(repo_config_manager)
+        # Lock all workspaces
+        for name in ("env0", "env1"):
+            ws = repo_config_manager.get_workspace(name)
+            LockFile.create(ws["path"], task="busy", engine="e")
+        result = mgr.check_and_acquire_for_repos(
+            ["myrepo"], "task", "claude"
+        )
+        assert result["ok"] is False
+        assert result["error_code"] == "WORKSPACE_LOCKED"
+
+    def test_lock_and_snapshot_created(self, repo_config_manager, bare_repo):
+        mgr = WorkspaceManager(repo_config_manager)
+        result = mgr.check_and_acquire_for_repos(
+            ["myrepo"], "fix it", "codex"
+        )
+        assert result["ok"] is True
+        ws_path = result["data"]["snapshot"]["workspace"]["path"]
+        # Lock file exists
+        assert (Path(ws_path) / LOCK_FILENAME).exists()
+        # Snapshot artifact exists
+        assert (Path(ws_path) / ARTIFACT_DIR / "workspace_snapshot.json").exists()
+
+    def test_session_json_created_for_repos(self, repo_config_manager, bare_repo):
+        """Repo-based acquire must also write session.json."""
+        mgr = WorkspaceManager(repo_config_manager)
+        result = mgr.check_and_acquire_for_repos(
+            ["myrepo"], "fix it", "codex"
+        )
+        assert result["ok"] is True
+        ws_path = result["data"]["snapshot"]["workspace"]["path"]
+        session_path = Path(ws_path) / ARTIFACT_DIR / "session.json"
+        assert session_path.exists()
+        session = json.loads(session_path.read_text())
+        assert session["ws_path"] == str(Path(ws_path).resolve())
+        assert session["task"] == "fix it"
+        assert session["engine"] == "codex"

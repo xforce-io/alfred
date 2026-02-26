@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from config_manager import ConfigManager
+from git_ops import GitOps
 
 LOCK_FILENAME = ".coding-master.lock"
 ARTIFACT_DIR = ".coding-master"
@@ -110,6 +111,7 @@ class LockFile:
         lf = cls(workspace_path)
         now = _now_iso()
         lf.data = {
+            "ws_path": str(Path(workspace_path).resolve()),
             "task": task,
             "branch": None,
             "engine": engine,
@@ -221,6 +223,19 @@ class WorkspaceManager:
         snap_path = art_dir / "workspace_snapshot.json"
         snap_path.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False))
         lock.add_artifact("workspace_snapshot", f"{ARTIFACT_DIR}/workspace_snapshot.json")
+
+        # Write session context — authoritative ws_path for subsequent commands
+        session = {
+            "ws_path": str(Path(ws_path).resolve()),
+            "workspace_name": name,
+            "task": task,
+            "engine": engine,
+            "created_at": _now_iso(),
+        }
+        session_path = art_dir / "session.json"
+        session_path.write_text(json.dumps(session, indent=2, ensure_ascii=False))
+        lock.add_artifact("session", f"{ARTIFACT_DIR}/session.json")
+
         lock.save()
 
         return {"ok": True, "data": {"snapshot": snapshot}}
@@ -382,6 +397,177 @@ class WorkspaceManager:
                 lint_cmd = "cargo clippy"
 
         return {"test_command": test_cmd, "lint_command": lint_cmd}
+
+    # ── Repo-based workflow ──────────────────────────────────
+
+    def check_and_acquire_for_repos(
+        self,
+        repo_names: list[str],
+        task: str,
+        engine: str,
+        workspace_name: str | None = None,
+    ) -> dict:
+        """Phase 0 (repo mode): resolve repos → find/use workspace → clone/update → probe → snapshot."""
+        # 1. Resolve repo configs
+        repo_configs = []
+        for name in repo_names:
+            rc = self.config.get_repo(name)
+            if rc is None:
+                return {"ok": False, "error": f"repo '{name}' not found in config",
+                        "error_code": "PATH_NOT_FOUND"}
+            repo_configs.append(rc)
+
+        # 2. Find workspace
+        if workspace_name:
+            ws = self.config.get_workspace(workspace_name)
+            if ws is None:
+                return {"ok": False, "error": f"workspace '{workspace_name}' not found in config",
+                        "error_code": "PATH_NOT_FOUND"}
+        else:
+            ws = self._find_free_workspace()
+            if ws is None:
+                return {"ok": False, "error": "no free workspace available",
+                        "error_code": "WORKSPACE_LOCKED"}
+
+        ws_path = ws["path"]
+        if not Path(ws_path).exists():
+            Path(ws_path).mkdir(parents=True, exist_ok=True)
+
+        # 3. Check existing lock
+        lock = LockFile(ws_path)
+        if lock.exists():
+            lock.load()
+            if not lock.is_expired():
+                return {
+                    "ok": False,
+                    "error": f"workspace busy: {lock.data.get('task', '?')} "
+                             f"(phase: {lock.data.get('phase', '?')})",
+                    "error_code": "WORKSPACE_LOCKED",
+                }
+            lock.delete()
+
+        # 4. Ensure .gitignore in workspace root
+        self._ensure_gitignore(ws_path)
+
+        # 5. Acquire lock
+        try:
+            lock = LockFile.create(ws_path, task=task, engine=engine)
+        except FileExistsError:
+            return {
+                "ok": False,
+                "error": "workspace was just acquired by another session",
+                "error_code": "WORKSPACE_LOCKED",
+            }
+
+        # 6. Clone or update each repo
+        repos_info = []
+        for rc in repo_configs:
+            repo_path = self._ensure_repo(ws_path, rc)
+            if repo_path is None:
+                lock.delete()
+                return {
+                    "ok": False,
+                    "error": f"failed to clone/update repo '{rc['name']}'",
+                    "error_code": "GIT_ERROR",
+                }
+            info = self._probe_repo(repo_path, rc)
+            repos_info.append(info)
+
+        # 7. Build snapshot
+        primary_repo = repos_info[0] if repos_info else None
+        snapshot = {
+            "workspace": ws,
+            "repos": repos_info,
+            "primary_repo": primary_repo,
+        }
+
+        # Save artifacts
+        art_dir = Path(ws_path) / ARTIFACT_DIR
+        art_dir.mkdir(exist_ok=True)
+        snap_path = art_dir / "workspace_snapshot.json"
+        snap_path.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False))
+        lock.add_artifact("workspace_snapshot", f"{ARTIFACT_DIR}/workspace_snapshot.json")
+
+        # Write session context
+        ws_name = workspace_name or ws["name"]
+        session = {
+            "ws_path": str(Path(ws_path).resolve()),
+            "workspace_name": ws_name,
+            "task": task,
+            "engine": engine,
+            "created_at": _now_iso(),
+        }
+        session_path = art_dir / "session.json"
+        session_path.write_text(json.dumps(session, indent=2, ensure_ascii=False))
+        lock.add_artifact("session", f"{ARTIFACT_DIR}/session.json")
+
+        lock.save()
+
+        return {"ok": True, "data": {"snapshot": snapshot}}
+
+    def _ensure_repo(self, ws_path: str, repo_config: dict) -> str | None:
+        """Clone or update a repo inside the workspace. Returns repo path or None on failure."""
+        name = repo_config["name"]
+        url = repo_config.get("url", "")
+        branch = repo_config.get("default_branch")
+        repo_path = str(Path(ws_path) / name)
+
+        if (Path(repo_path) / ".git").exists():
+            # Existing repo — fetch + checkout + pull
+            result = GitOps.fetch(repo_path)
+            if not result.get("ok"):
+                return None
+            if branch:
+                result = GitOps.pull(repo_path, branch)
+                if not result.get("ok"):
+                    return None
+        else:
+            # Clone
+            result = GitOps.clone(url, repo_path, branch=branch)
+            if not result.get("ok"):
+                return None
+
+        return repo_path
+
+    def _find_free_workspace(self) -> dict | None:
+        """Iterate all configured workspaces, return first unlocked slot.
+
+        Skips 'direct' workspaces (directories that already contain a .git repo)
+        to avoid cloning repos into someone's source tree.  Only empty-slot
+        workspaces (env0/env1/…) are eligible for auto-allocation.
+        """
+        all_ws = self.config._section().get("workspaces", {})
+        for name in all_ws:
+            ws = self.config.get_workspace(name)
+            if ws is None:
+                continue
+            ws_path = ws["path"]
+            # Skip direct workspaces — they already host a git repo
+            if (Path(ws_path) / ".git").exists():
+                continue
+            # Workspace directory doesn't need to exist yet — we'll create it
+            lock = LockFile(ws_path)
+            if lock.exists():
+                lock.load()
+                if not lock.is_expired():
+                    continue  # busy
+                # stale lock — clean up
+                lock.delete()
+            return ws
+        return None
+
+    def _probe_repo(self, repo_path: str, repo_config: dict) -> dict:
+        """Probe a single repo: git info + runtime + project."""
+        git_info = self._probe_git(repo_path)
+        runtime = self._probe_runtime(repo_path)
+        project = self._probe_project(repo_path, repo_config)
+        return {
+            "name": repo_config["name"],
+            "path": repo_path,
+            "git": git_info,
+            "runtime": runtime,
+            "project": project,
+        }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -238,3 +238,140 @@ class TestCleanupBranch:
         result = git.cleanup_branch("main", "task-branch")
         assert result["ok"] is False
         assert "not found" in result["error"]
+
+
+# ── clone ───────────────────────────────────────────────
+
+
+class TestClone:
+    @patch("subprocess.run", return_value=_run_ok())
+    def test_clone_success(self, mock_run):
+        result = GitOps.clone("https://github.com/o/r.git", "/tmp/target")
+        assert result["ok"] is True
+        assert result["data"]["path"] == "/tmp/target"
+        args = mock_run.call_args[0][0]
+        assert args[:3] == ["git", "clone", "https://github.com/o/r.git"]
+
+    @patch("subprocess.run", return_value=_run_ok())
+    def test_clone_with_branch(self, mock_run):
+        result = GitOps.clone("url", "/tmp/t", branch="develop")
+        assert result["ok"] is True
+        args = mock_run.call_args[0][0]
+        assert "--branch" in args
+        assert "develop" in args
+
+    @patch("subprocess.run", return_value=_run_ok(stderr="fatal: repo not found", rc=128))
+    def test_clone_failure(self, mock_run):
+        result = GitOps.clone("bad-url", "/tmp/t")
+        assert result["ok"] is False
+        assert "clone failed" in result["error"]
+
+    @patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="git", timeout=120))
+    def test_clone_timeout(self, mock_run):
+        result = GitOps.clone("url", "/tmp/t")
+        assert result["ok"] is False
+        assert "timed out" in result["error"]
+
+
+# ── fetch ───────────────────────────────────────────────
+
+
+class TestFetch:
+    @patch("subprocess.run", return_value=_run_ok())
+    def test_fetch_success(self, mock_run):
+        result = GitOps.fetch("/repo")
+        assert result["ok"] is True
+        assert result["data"]["path"] == "/repo"
+
+    @patch("subprocess.run", return_value=_run_ok(stderr="error", rc=1))
+    def test_fetch_failure(self, mock_run):
+        result = GitOps.fetch("/repo")
+        assert result["ok"] is False
+        assert "fetch failed" in result["error"]
+
+    @patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="git", timeout=60))
+    def test_fetch_timeout(self, mock_run):
+        result = GitOps.fetch("/repo")
+        assert result["ok"] is False
+        assert "timed out" in result["error"]
+
+
+# ── pull ────────────────────────────────────────────────
+
+
+class TestPull:
+    @patch("subprocess.run", return_value=_run_ok())
+    def test_pull_success_no_branch(self, mock_run):
+        result = GitOps.pull("/repo")
+        assert result["ok"] is True
+        # Only one call (no checkout)
+        assert mock_run.call_count == 1
+        assert mock_run.call_args[0][0] == ["git", "pull"]
+
+    @patch("subprocess.run")
+    def test_pull_with_branch(self, mock_run):
+        mock_run.side_effect = [
+            _run_ok(),  # checkout
+            _run_ok(),  # pull
+        ]
+        result = GitOps.pull("/repo", branch="develop")
+        assert result["ok"] is True
+        assert result["data"]["branch"] == "develop"
+        assert mock_run.call_count == 2
+
+    @patch("subprocess.run", return_value=_run_ok(stderr="checkout failed", rc=1))
+    def test_pull_checkout_failure(self, mock_run):
+        result = GitOps.pull("/repo", branch="bad")
+        assert result["ok"] is False
+        assert "checkout failed" in result["error"]
+
+    @patch("subprocess.run", return_value=_run_ok(stderr="merge conflict", rc=1))
+    def test_pull_failure(self, mock_run):
+        result = GitOps.pull("/repo")
+        assert result["ok"] is False
+        assert "pull failed" in result["error"]
+
+
+# ── stash ──────────────────────────────────────────────
+
+
+class TestStash:
+    """Tests for stash_save / stash_pop.
+
+    Production context: demo_agent executed 'git stash push' directly via _bash
+    without going through git_ops. These tests ensure the wrapped operations
+    handle success, no-op, and conflict cases properly.
+    """
+
+    @patch("subprocess.run", return_value=_run_ok(stdout="Saved working directory\n"))
+    def test_stash_push_success(self, mock_run, git):
+        result = git.stash_save("temp save")
+        assert result["ok"] is True
+        assert result["data"]["stashed"] is True
+        assert result["data"]["message"] == "temp save"
+        args = mock_run.call_args[0][0]
+        assert args == ["git", "stash", "push", "-m", "temp save"]
+
+    @patch("subprocess.run", return_value=_run_ok(stdout="No local changes to save\n"))
+    def test_stash_push_nothing_to_stash(self, mock_run, git):
+        result = git.stash_save()
+        assert result["ok"] is True
+        assert result["data"]["stashed"] is False
+
+    @patch("subprocess.run", return_value=_run_ok(stderr="error: could not stash", rc=1))
+    def test_stash_push_failure(self, mock_run, git):
+        result = git.stash_save("msg")
+        assert result["ok"] is False
+        assert "stash push failed" in result["error"]
+
+    @patch("subprocess.run", return_value=_run_ok(stdout="On branch main\n"))
+    def test_stash_pop_success(self, mock_run, git):
+        result = git.stash_pop()
+        assert result["ok"] is True
+        assert result["data"]["restored"] is True
+
+    @patch("subprocess.run", return_value=_run_ok(stderr="CONFLICT (content): merge conflict", rc=1))
+    def test_stash_pop_conflict(self, mock_run, git):
+        result = git.stash_pop()
+        assert result["ok"] is False
+        assert "stash pop failed" in result["error"]

@@ -298,6 +298,45 @@ class TestAgentCreationSkip:
         get_agent_mock.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_repeated_idle_cycles_do_not_accumulate_timeline(self, tmp_path: Path, monkeypatch):
+        """Production issue: demo_agent's heartbeat trajectory grew to 516KB
+        with repeated HEARTBEAT_OK cycles. Multiple idle/skip cycles should
+        not cause unbounded timeline growth.
+
+        This test verifies that consecutive skipped cycles don't call
+        append_timeline_event excessively.
+        """
+        runner = _make_runner(workspace_path=tmp_path, routine_reflection=True)
+        _write_heartbeat_md(tmp_path)
+        (tmp_path / "MEMORY.md").write_text("stable", encoding="utf-8")
+
+        # Simulate prior reflect so subsequent cycles skip
+        runner._update_reflect_state()
+
+        get_agent_mock = AsyncMock()
+        monkeypatch.setattr(runner, "_get_or_create_agent", get_agent_mock)
+        timeline_mock = MagicMock()
+        monkeypatch.setattr(runner, "_record_timeline_event", timeline_mock)
+        monkeypatch.setattr(runner, "_record_runtime_metric", MagicMock())
+
+        runner.session_manager.acquire_session = AsyncMock(return_value=True)
+        runner.session_manager.release_session = MagicMock()
+
+        # Run 10 consecutive heartbeat cycles
+        for _ in range(10):
+            result = await runner._execute_once()
+            assert result == "HEARTBEAT_OK"
+
+        # Agent should never be created
+        get_agent_mock.assert_not_awaited()
+        # Timeline events should be bounded (at most 2 per cycle: turn_start + turn_end)
+        # For skipped reflection, only turn_end is recorded
+        assert timeline_mock.call_count <= 20, (
+            f"Expected at most 20 timeline events for 10 cycles, "
+            f"got {timeline_mock.call_count}"
+        )
+
+    @pytest.mark.asyncio
     async def test_reflect_runs_after_file_change(self, tmp_path: Path, monkeypatch):
         """After file change, reflect should run (agent created)."""
         runner = _make_runner(workspace_path=tmp_path, routine_reflection=True)

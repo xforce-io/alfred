@@ -94,6 +94,81 @@ class GitOps:
             return {"ok": False, "error": f"failed to delete branch: {err}"}
         return {"ok": True, "data": {"deleted": task_branch, "on": original_branch}}
 
+    # ── Static repo operations ─────────────────────────────
+
+    @staticmethod
+    def clone(url: str, target_path: str, branch: str | None = None) -> dict:
+        """Clone a repo to target_path. Optionally checkout a specific branch."""
+        cmd = ["git", "clone", url, target_path]
+        if branch:
+            cmd.extend(["--branch", branch])
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "git clone timed out"}
+        if r.returncode != 0:
+            return {"ok": False, "error": f"git clone failed: {r.stderr.strip()}"}
+        return {"ok": True, "data": {"path": target_path}}
+
+    @staticmethod
+    def fetch(repo_path: str) -> dict:
+        """Run git fetch in repo_path."""
+        try:
+            r = subprocess.run(
+                ["git", "fetch"],
+                cwd=repo_path,
+                capture_output=True, text=True, timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "git fetch timed out"}
+        if r.returncode != 0:
+            return {"ok": False, "error": f"git fetch failed: {r.stderr.strip()}"}
+        return {"ok": True, "data": {"path": repo_path}}
+
+    @staticmethod
+    def pull(repo_path: str, branch: str | None = None) -> dict:
+        """Optionally checkout branch, then git pull."""
+        if branch:
+            r = subprocess.run(
+                ["git", "checkout", branch],
+                cwd=repo_path,
+                capture_output=True, text=True, timeout=30,
+            )
+            if r.returncode != 0:
+                return {"ok": False, "error": f"git checkout failed: {r.stderr.strip()}"}
+        try:
+            r = subprocess.run(
+                ["git", "pull"],
+                cwd=repo_path,
+                capture_output=True, text=True, timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "git pull timed out"}
+        if r.returncode != 0:
+            return {"ok": False, "error": f"git pull failed: {r.stderr.strip()}"}
+        return {"ok": True, "data": {"path": repo_path, "branch": branch}}
+
+    # ── Stash operations ──────────────────────────────────────
+
+    def stash_save(self, message: str = "") -> dict:
+        """Save working directory changes to stash."""
+        args = ["stash", "push"]
+        if message:
+            args.extend(["-m", message])
+        out, err, rc = self._git_full(*args)
+        if rc != 0:
+            return {"ok": False, "error": f"git stash push failed: {err}"}
+        if "No local changes" in out:
+            return {"ok": True, "data": {"stashed": False}}
+        return {"ok": True, "data": {"stashed": True, "message": message}}
+
+    def stash_pop(self) -> dict:
+        """Restore most recent stash entry."""
+        out, err, rc = self._git_full("stash", "pop")
+        if rc != 0:
+            return {"ok": False, "error": f"git stash pop failed: {err}"}
+        return {"ok": True, "data": {"restored": True}}
+
     # ── Internals ───────────────────────────────────────────
 
     def _git(self, *args: str) -> str:

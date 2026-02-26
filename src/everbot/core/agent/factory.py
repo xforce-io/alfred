@@ -556,18 +556,18 @@ Current time: $current_time
 
     def _extract_runtime_available_skills(self, global_skills: Any) -> List[Dict[str, Any]]:
         """Extract actually available resource skills from runtime skillkit."""
-        skillkits = getattr(global_skills, "skillkits", []) or []
         resource_skillkit = None
-        for skillkit in skillkits:
-            try:
-                if skillkit.getName() == "resource_skillkit":
-                    resource_skillkit = skillkit
-                    break
-            except Exception:
-                logger.debug("Failed to get name for skillkit %r", skillkit, exc_info=True)
-                continue
+
+        # Locate the ResourceSkillkit via the owner_skillkit binding on
+        # the _load_resource_skill function that it registers.
+        installed = getattr(global_skills, "installedSkillset", None)
+        if installed is not None:
+            loader_skill = installed.getSkill("_load_resource_skill") if hasattr(installed, "getSkill") else None
+            if loader_skill is not None:
+                resource_skillkit = getattr(loader_skill, "owner_skillkit", None)
 
         if resource_skillkit is None:
+            logger.debug("ResourceSkillkit not found via owner_skillkit, skills injection skipped.")
             return []
 
         get_available_skills = getattr(resource_skillkit, "get_available_skills", None)

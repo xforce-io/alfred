@@ -69,14 +69,13 @@ async def test_agent_skills():
     print("\n4. 检查 GlobalSkills...")
     global_skills = agent1.global_skills
 
-    # 尝试获取 ResourceSkillkit
-    skillkits = global_skills.skillkits if hasattr(global_skills, 'skillkits') else []
+    # 通过 installedSkillset → _load_resource_skill → owner_skillkit 获取 ResourceSkillkit
     resource_skillkit = None
-
-    for sk in skillkits:
-        if sk.getName() == "resource_skillkit":
-            resource_skillkit = sk
-            break
+    installed = getattr(global_skills, "installedSkillset", None)
+    if installed is not None:
+        loader_skill = installed.getSkill("_load_resource_skill") if hasattr(installed, "getSkill") else None
+        if loader_skill is not None:
+            resource_skillkit = getattr(loader_skill, "owner_skillkit", None)
 
     if resource_skillkit:
         print(f"✓ ResourceSkillkit 已加载")

@@ -641,7 +641,7 @@ class TestE2EWorkflow:
         assert lock.data["pushed_to_remote"] is True
         assert lock.data["branch"] == "fix/multiply-bug"
         assert set(lock.data["artifacts"].keys()) == {
-            "workspace_snapshot", "env_snapshot", "analysis_report",
+            "workspace_snapshot", "session", "env_snapshot", "analysis_report",
             "test_report", "env_verify_report",
         }
         # Phase history should have all transitions
@@ -722,3 +722,92 @@ class TestE2EWorkflow:
                 lock.add_artifact(k, v)
         lock.renew_lease()
         lock.save()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Repo-based E2E test
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class TestE2ERepoWorkflow:
+    """Repo-based workspace-check: clone into workspace slot, probe, snapshot."""
+
+    def test_repo_workspace_check(self, tmp_path):
+        """Register a bare repo, workspace-check with --repos, verify clone + snapshot."""
+        # Create a bare repo with a calculator project
+        origin = tmp_path / "origin"
+        origin.mkdir()
+        _git(origin, "init", "--bare")
+
+        # Push initial commit via temp clone
+        init_clone = tmp_path / "init_clone"
+        subprocess.run(
+            ["git", "clone", str(origin), str(init_clone)],
+            capture_output=True, text=True,
+            env={**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t",
+                 "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t"},
+        )
+        (init_clone / "calculator.py").write_text(CALCULATOR_PY_BUGGY)
+        (init_clone / "test_calculator.py").write_text(TEST_CALCULATOR_PY)
+        (init_clone / "pyproject.toml").write_text(PYPROJECT_TOML)
+        _git(init_clone, "add", "-A")
+        _git(init_clone, "commit", "-m", "initial")
+        _git(init_clone, "push")
+
+        # Setup config: repo + workspace slot
+        ws_dir = tmp_path / "workspaces" / "env0"
+        ws_dir.mkdir(parents=True)
+
+        cfg_path = tmp_path / "config.yaml"
+        data = {
+            "coding_master": {
+                "repos": {"calc": str(origin)},
+                "workspaces": {"env0": str(ws_dir)},
+                "envs": {},
+                "default_engine": "claude",
+                "max_turns": 5,
+            }
+        }
+        cfg_path.write_text(yaml.dump(data))
+        config = ConfigManager(config_path=cfg_path)
+
+        # Phase 0: workspace-check with repos
+        mgr = WorkspaceManager(config)
+        result = mgr.check_and_acquire_for_repos(
+            ["calc"], "fix multiply bug", "claude"
+        )
+
+        assert result["ok"] is True
+        snapshot = result["data"]["snapshot"]
+
+        # Workspace assigned
+        assert snapshot["workspace"]["name"] == "env0"
+
+        # Repo cloned and probed
+        assert len(snapshot["repos"]) == 1
+        repo_info = snapshot["repos"][0]
+        assert repo_info["name"] == "calc"
+        assert repo_info["git"]["branch"] is not None
+        assert repo_info["runtime"]["type"] == "python"
+        assert repo_info["project"]["test_command"] == "pytest"
+
+        # primary_repo set
+        assert snapshot["primary_repo"]["name"] == "calc"
+
+        # Lock file created in workspace
+        lock = LockFile(str(ws_dir))
+        assert lock.exists()
+        lock.load()
+        assert lock.data["task"] == "fix multiply bug"
+
+        # Snapshot artifact saved
+        snap_path = ws_dir / ARTIFACT_DIR / "workspace_snapshot.json"
+        assert snap_path.exists()
+
+        # Repo actually cloned
+        cloned_path = ws_dir / "calc"
+        assert (cloned_path / ".git").exists()
+        assert (cloned_path / "calculator.py").exists()
+
+        # Release
+        mgr.release("env0")
+        assert not lock.lock_path.exists()

@@ -11,6 +11,7 @@ class TestCommandRegistry:
         # All keys in COMMANDS should be valid subcommands
         expected = {
             "config-list", "config-add", "config-set", "config-remove",
+            "quick-status", "quick-test", "quick-find", "quick-env",
             "workspace-check", "env-probe", "analyze", "develop",
             "test", "submit-pr", "env-verify", "release", "renew-lease",
             "feature-plan", "feature-next", "feature-done",
