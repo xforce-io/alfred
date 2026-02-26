@@ -1,13 +1,12 @@
-"""Tests exposing memory system deduplication and quality issues.
+"""Tests for memory system deduplication and quality.
 
 These tests document real-world problems observed in production:
 - demo_agent's MEMORY.md accumulated 5+ near-identical entries about "dolphin 长期记忆系统"
 - When user asked to "review alfred project", agent went to dolphin because MEMORY.md
   was dominated by dolphin paths and contained zero alfred path references
-- The memory system has no content-level dedup — it relies entirely on LLM to avoid
-  duplicates, which fails in practice (especially across sessions)
 
-Each xfail test describes the DESIRED behavior that is currently NOT implemented.
+The fix: token-level Jaccard similarity in merger.merge() and greedy dedup
+in get_prompt_memories().
 """
 
 import json
@@ -37,7 +36,6 @@ def _mock_llm_response(new_memories: list, reinforced_ids: list) -> str:
 class TestMergerDedup:
     """Merger should reject semantically duplicate new entries."""
 
-    @pytest.mark.xfail(reason="Merger has no content-level dedup — blindly adds all new entries")
     def test_merger_rejects_near_duplicate_content(self):
         """Real-world scenario: LLM returns a rephrased version of an existing memory.
 
@@ -85,7 +83,6 @@ class TestMergerDedup:
             f"Expected 1 entry (reinforced), got {len(result.entries)}"
         )
 
-    @pytest.mark.xfail(reason="Merger has no content-level dedup — blindly adds all new entries")
     def test_merger_deduplicates_within_single_extraction_batch(self):
         """LLM sometimes returns multiple entries that are near-identical in one batch."""
         merger = MemoryMerger()
@@ -119,7 +116,6 @@ class TestMergerDedup:
 class TestPromptMemoryQuality:
     """get_prompt_memories should produce high-quality, diverse output."""
 
-    @pytest.mark.xfail(reason="get_prompt_memories has no diversity/dedup filtering")
     def test_prompt_memories_dedup_near_identical_entries(self, tmp_path: Path):
         """Real-world reproduction: demo_agent's MEMORY.md had 5 near-identical
         [workflow] entries all pointing to the same long_term_memory_design.md,
@@ -162,7 +158,6 @@ class TestPromptMemoryQuality:
             f"got {path_refs} near-duplicates consuming top-k slots"
         )
 
-    @pytest.mark.xfail(reason="get_prompt_memories has no diversity/dedup filtering")
     def test_prompt_memories_ensure_category_diversity(self, tmp_path: Path):
         """If all top-scoring memories are the same category, we lose signal diversity.
 
@@ -205,7 +200,6 @@ class TestEndToEndDuplicateAccumulation:
     """Simulate the real-world scenario where duplicates accumulate across sessions."""
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="No cross-session dedup: LLM keeps extracting rephrased versions")
     async def test_multi_session_duplicate_accumulation(self, tmp_path: Path):
         """Reproduce the exact production bug: user discusses the same topic
         across 3 sessions, and each session's LLM extraction adds a slightly
@@ -307,7 +301,6 @@ class TestEndToEndDuplicateAccumulation:
 class TestMergerContentSimilarity:
     """Test that merger can detect content similarity (when implemented)."""
 
-    @pytest.mark.xfail(reason="No similarity detection in merger")
     def test_high_token_overlap_detected_as_duplicate(self):
         """Two entries sharing >70% tokens about the same path should be considered duplicates."""
         merger = MemoryMerger()

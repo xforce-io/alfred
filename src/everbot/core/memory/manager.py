@@ -52,8 +52,13 @@ class MemoryManager:
             logger.warning("No LLM context; skipping extraction")
             return {"new_count": 0, "updated_count": 0, "total": len(existing)}
 
-        # Only send new (unprocessed) messages to LLM
-        new_messages = messages[last_processed:] if last_processed > 0 else messages
+        # Only send new (unprocessed) messages to LLM.
+        # If last_processed >= len(messages), this is a new session (not a
+        # continuation of the same one), so process all messages.
+        if 0 < last_processed < len(messages):
+            new_messages = messages[last_processed:]
+        else:
+            new_messages = messages
         if not new_messages:
             logger.debug("No new messages since last extraction; skipping")
             return {"new_count": 0, "updated_count": 0, "total": len(existing)}
@@ -87,23 +92,42 @@ class MemoryManager:
         """Return formatted memory text for system prompt injection.
 
         Only includes entries with score >= 0.5, sorted by score descending.
+        Near-duplicate entries are collapsed via greedy dedup so that the
+        top-k slots contain diverse information.
         """
+        from .merger import token_similarity, _SIMILARITY_THRESHOLD
+
         entries = self.store.load()
         if not entries:
             return ""
 
         # Filter and sort
-        qualified = sorted(
+        candidates = sorted(
             [e for e in entries if e.score >= 0.5],
             key=lambda e: e.score,
             reverse=True,
-        )[:top_k]
+        )
 
-        if not qualified:
+        if not candidates:
+            return ""
+
+        # Greedy dedup: pick highest-score first, skip near-duplicates
+        selected: list[MemoryEntry] = []
+        for entry in candidates:
+            if len(selected) >= top_k:
+                break
+            is_dup = any(
+                token_similarity(entry.content, s.content) >= _SIMILARITY_THRESHOLD
+                for s in selected
+            )
+            if not is_dup:
+                selected.append(entry)
+
+        if not selected:
             return ""
 
         lines = ["# 历史记忆", "", "关于用户的关键信息：", ""]
-        for entry in qualified:
+        for entry in selected:
             lines.append(f"- [{entry.category}] {entry.content}")
 
         return "\n".join(lines)

@@ -1,8 +1,9 @@
 """Pure-logic memory merger — scoring, decay, and merge operations."""
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from .models import MemoryEntry, new_id
 
@@ -16,6 +17,43 @@ _IMPORTANCE_SCORES = {
 # Decay parameters
 _PROTECTION_DAYS = 7
 _DECAY_RATE = 0.99
+
+# Dedup parameters
+_SIMILARITY_THRESHOLD = 0.65
+
+
+def _tokenize(text: str) -> Set[str]:
+    """Tokenize text for similarity comparison.
+
+    Chinese characters are treated as individual tokens;
+    Latin words are split on whitespace/punctuation.
+    """
+    tokens: Set[str] = set()
+    buf: list[str] = []
+    for ch in text:
+        if "\u4e00" <= ch <= "\u9fff":
+            # Flush any buffered Latin word
+            if buf:
+                tokens.add("".join(buf).lower())
+                buf.clear()
+            tokens.add(ch)
+        elif ch.isalnum() or ch == "_":
+            buf.append(ch)
+        else:
+            if buf:
+                tokens.add("".join(buf).lower())
+                buf.clear()
+    if buf:
+        tokens.add("".join(buf).lower())
+    return tokens
+
+
+def token_similarity(a: str, b: str) -> float:
+    """Jaccard similarity between two strings based on token overlap."""
+    ta, tb = _tokenize(a), _tokenize(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
 
 
 @dataclass
@@ -107,12 +145,22 @@ class MemoryMerger:
                 self.reinforce(entry_map[rid])
                 updated_count += 1
 
-        # Create new entries
+        # Create new entries (with content-level dedup)
         new_count = 0
         for ext in new_extractions:
+            content = ext.get("content", "")
+            category = ext.get("category", "fact")
+
+            # Check against all existing entries for near-duplicates
+            dup_entry = self._find_duplicate(content, category, entry_map.values())
+            if dup_entry is not None:
+                self.reinforce(dup_entry)
+                updated_count += 1
+                continue
+
             entry = self.create_entry(
-                content=ext.get("content", ""),
-                category=ext.get("category", "fact"),
+                content=content,
+                category=category,
                 importance=ext.get("importance", "medium"),
                 source_session=source_session,
             )
@@ -124,3 +172,25 @@ class MemoryMerger:
             new_count=new_count,
             updated_count=updated_count,
         )
+
+    @staticmethod
+    def _find_duplicate(
+        content: str,
+        category: str,
+        candidates: "Iterable[MemoryEntry]",
+    ) -> Optional[MemoryEntry]:
+        """Find the best matching duplicate among candidates.
+
+        Returns the highest-similarity entry if above threshold, else None.
+        Only matches within the same category.
+        """
+        best_entry: Optional[MemoryEntry] = None
+        best_sim = 0.0
+        for entry in candidates:
+            if entry.category != category:
+                continue
+            sim = token_similarity(content, entry.content)
+            if sim >= _SIMILARITY_THRESHOLD and sim > best_sim:
+                best_sim = sim
+                best_entry = entry
+        return best_entry
