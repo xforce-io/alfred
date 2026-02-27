@@ -610,6 +610,19 @@ class TelegramChannel:
         async def on_event(out: OutboundMessage) -> None:
             if out.msg_type == "delta":
                 chunks.append(out.content)
+            elif out.msg_type == "skill":
+                meta = out.metadata or {}
+                status = (meta.get("status") or "").lower()
+                name = meta.get("skill_name", "")
+                if status in ("processing", "running"):
+                    args = meta.get("skill_args") or ""
+                    args_brief = args[:60] + "..." if len(args) > 60 else args
+                    chunks.append(f"\n🔧 {name}({args_brief})")
+                elif status in ("completed", "failed"):
+                    output = meta.get("skill_output") or ""
+                    output_brief = output[:60] + "..." if len(output) > 60 else output
+                    marker = "❌" if "fail" in status else "→"
+                    chunks.append(f" {marker} {output_brief}\n")
             elif out.msg_type == "text":
                 text_messages.append(out.content)
             elif out.msg_type == "error":

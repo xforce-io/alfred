@@ -233,6 +233,13 @@ def test_extract_tool_intent_signature():
     assert _extract_tool_intent_signature("_bash", "mkdir -p /tmp/bar") == "create_dir:/tmp/bar"
     assert _extract_tool_intent_signature("_read_file", "/tmp/baz.py") == "read_file:/tmp/baz.py"
     assert _extract_tool_intent_signature("", "") is None
+    # _grep tool with JSON args
+    assert _extract_tool_intent_signature("_grep", '{"pattern": "吸引子|attractor", "path": "."}') == "search_grep:吸引子|attractor"
+    assert _extract_tool_intent_signature("_grep", '{"pattern": "TODO"}') == "search_grep:TODO"
+    assert _extract_tool_intent_signature("_grep", 'not json') is None
+    # _bash with grep/rg commands
+    assert _extract_tool_intent_signature("_bash", 'grep -r "attractor" .') == "search_bash:attractor"
+    assert _extract_tool_intent_signature("_bash", "rg -i 'TODO' src/") == "search_bash:TODO"
 
 
 def test_truncate_preview():

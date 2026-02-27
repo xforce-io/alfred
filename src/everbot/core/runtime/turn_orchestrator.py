@@ -9,6 +9,7 @@ execution policies are defined once.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -65,7 +66,7 @@ class TurnPolicy:
     """Configurable knobs consumed by the orchestrator."""
 
     max_attempts: int = 3
-    max_tool_calls: int = 14
+    max_tool_calls: int = 10
     max_failed_tool_outputs: int = 3
     max_same_failure_signature: int = 2
     max_same_tool_intent: int = 3
@@ -172,6 +173,18 @@ def _extract_tool_intent_signature(tool_name: str, args) -> Optional[str]:
                     return f"write_file:{file_path}"
     if tool_name == "_read_file":
         return f"read_file:{args.strip().strip(chr(34) + chr(39))}"
+    if tool_name == "_grep":
+        try:
+            parsed = json.loads(args)
+            pattern = parsed.get("pattern", "")
+            if pattern:
+                return f"search_grep:{pattern}"
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    if tool_name == "_bash":
+        grep_match = re.search(r'(?:grep|rg)\s+(?:-\w+\s+)*["\']?([^"\'|\s]+)', args)
+        if grep_match:
+            return f"search_bash:{grep_match.group(1)}"
     return None
 
 
