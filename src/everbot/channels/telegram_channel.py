@@ -607,8 +607,11 @@ class TelegramChannel:
         # Collect all deltas into a batch reply
         chunks: List[str] = []
         text_messages: List[str] = []
+        tool_call_count = 0
+        tool_call_failures: List[str] = []
 
         async def on_event(out: OutboundMessage) -> None:
+            nonlocal tool_call_count
             if out.msg_type == "delta":
                 chunks.append(out.content)
             elif out.msg_type == "skill":
@@ -621,30 +624,11 @@ class TelegramChannel:
                     return
 
                 if status in ("processing", "running"):
-                    skill_args = meta.get("skill_args") or ""
-                    # Extract cmd for _bash/_python for a cleaner display
-                    if name in ("_bash", "_python"):
-                        import json as _json
-                        try:
-                            parsed = _json.loads(skill_args) if isinstance(skill_args, str) else skill_args
-                            if isinstance(parsed, list) and parsed:
-                                cmd = parsed[0].get("cmd", "") if isinstance(parsed[0], dict) else str(parsed[0])
-                            elif isinstance(parsed, dict):
-                                cmd = parsed.get("cmd", "")
-                            else:
-                                cmd = str(parsed)
-                        except (ValueError, TypeError, AttributeError):
-                            cmd = str(skill_args)
-                        cmd_brief = cmd[:80] + "..." if len(cmd) > 80 else cmd
-                        chunks.append(f"\n🔧 {name}({cmd_brief})")
-                    else:
-                        args_brief = skill_args[:60] + "..." if len(skill_args) > 60 else skill_args
-                        chunks.append(f"\n🔧 {name}({args_brief})")
-                elif status in ("completed", "failed"):
+                    tool_call_count += 1
+                elif status == "failed":
                     output = meta.get("skill_output") or ""
-                    output_brief = output[:60] + "..." if len(output) > 60 else output
-                    marker = "❌" if "fail" in status else "→"
-                    chunks.append(f" {marker} {output_brief}\n")
+                    output_brief = output[:80] + "..." if len(output) > 80 else output
+                    tool_call_failures.append(f"  {name}: {output_brief}")
             elif out.msg_type == "text":
                 text_messages.append(out.content)
             elif out.msg_type == "error":
@@ -676,6 +660,18 @@ class TelegramChannel:
                 full_reply = f"{full_reply}\n\n{extra}" if full_reply else extra
         if not full_reply:
             full_reply = "(no response)"
+
+        # Append tool call summary (compact, at the end)
+        if tool_call_count > 0 or tool_call_failures:
+            summary_parts = []
+            if tool_call_failures:
+                failed = len(tool_call_failures)
+                ok = tool_call_count - failed
+                summary_parts.append(f"🔧 {ok} ok, {failed} failed:")
+                summary_parts.extend(tool_call_failures)
+            else:
+                summary_parts.append(f"🔧 {tool_call_count} commands executed")
+            full_reply = f"{full_reply}\n\n{chr(10).join(summary_parts)}"
 
         converted_text, converted_entities = self._convert_markdown(full_reply)
         sent_any = False

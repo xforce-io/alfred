@@ -606,6 +606,13 @@ class WorkspaceManager:
                     "error_code": "GIT_ERROR",
                 }
 
+        # If source is a local repo, replace origin with its upstream remote URL
+        # so that push/PR operations target GitHub instead of the local path.
+        if Path(url).is_dir():
+            upstream = _run_git(url, ["remote", "get-url", "origin"]).strip()
+            if upstream:
+                _run_git(repo_path, ["remote", "set-url", "origin", upstream])
+
         return repo_path
 
     def _find_free_workspace(self) -> dict | None:
