@@ -76,6 +76,7 @@ class TelegramChannel:
     ) -> None:
         self._bot_token = bot_token
         self._base_url = f"https://api.telegram.org/bot{bot_token}"
+        self._file_base_url = f"https://api.telegram.org/file/bot{bot_token}"
         self._session_manager = session_manager
         self._default_agent = default_agent
         self._allowed_chat_ids: Optional[Set[str]] = (
@@ -873,7 +874,7 @@ class TelegramChannel:
                                file_id, file_size, self._MAX_DOCUMENT_SIZE)
                 return None
 
-            download_url = f"https://api.telegram.org/file/bot{self._bot_token}/{remote_path}"
+            download_url = f"{self._file_base_url}/{remote_path}"
             resp = await self._client.get(download_url)
             resp.raise_for_status()
 
@@ -917,7 +918,7 @@ class TelegramChannel:
                                file_id, file_size, self._MAX_VOICE_SIZE)
                 return None
 
-            download_url = f"https://api.telegram.org/file/bot{self._bot_token}/{remote_path}"
+            download_url = f"{self._file_base_url}/{remote_path}"
             resp = await self._client.get(download_url)
             resp.raise_for_status()
 
@@ -961,7 +962,7 @@ class TelegramChannel:
                                file_id, file_size, self._MAX_PHOTO_SIZE)
                 return None
 
-            download_url = f"https://api.telegram.org/file/bot{self._bot_token}/{remote_path}"
+            download_url = f"{self._file_base_url}/{remote_path}"
             resp = await self._client.get(download_url)
             resp.raise_for_status()
 

@@ -7,6 +7,7 @@ When api_key is empty or unconfigured, authentication is skipped (backward compa
 from __future__ import annotations
 
 import logging
+import secrets
 from typing import Optional
 
 from fastapi import HTTPException, Request, WebSocket, status
@@ -54,7 +55,7 @@ async def verify_api_key(request: Request) -> None:
         return
 
     provided_key = _extract_api_key(request)
-    if not provided_key or provided_key != configured_key:
+    if not provided_key or not secrets.compare_digest(provided_key, configured_key):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API key",
@@ -77,6 +78,6 @@ async def verify_ws_api_key(websocket: WebSocket) -> bool:
         return True
 
     provided_key = websocket.query_params.get("api_key")
-    if not provided_key or provided_key != configured_key:
+    if not provided_key or not secrets.compare_digest(provided_key, configured_key):
         return False
     return True

@@ -10,6 +10,24 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _validate_config(config: Dict[str, Any]) -> None:
+    """Validate that the config has the required structure and types."""
+    if not isinstance(config, dict):
+        raise ValueError("Config must be a dictionary")
+
+    if "everbot" in config:
+        everbot = config["everbot"]
+        if not isinstance(everbot, dict):
+            raise ValueError("'everbot' config section must be a dictionary")
+        if "agents" in everbot and not isinstance(everbot["agents"], dict):
+            raise ValueError("'everbot.agents' must be a dictionary")
+
+    if "logging" in config:
+        logging_cfg = config["logging"]
+        if not isinstance(logging_cfg, dict):
+            raise ValueError("'logging' config section must be a dictionary")
+
+
 def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """
     加载配置文件
@@ -32,6 +50,7 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
+        _validate_config(config)
         logger.info(f"配置已加载: {path}")
         return config
     except Exception as e:
