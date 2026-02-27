@@ -20,7 +20,10 @@ class GitOps:
         current = self.get_current_branch()
         if branch == current:
             return {"ok": True, "data": {"branch": branch, "created": False}}
-        out = self._git("checkout", "-b", branch)
+        _, err, rc = self._git_full("checkout", "-b", branch)
+        if rc != 0:
+            return {"ok": False, "error": f"git checkout -b failed: {err.strip()}",
+                    "error_code": "GIT_ERROR"}
         return {"ok": True, "data": {"branch": branch, "created": True, "from": current}}
 
     def get_diff_summary(self) -> str:
@@ -28,12 +31,18 @@ class GitOps:
 
     def stage_and_commit(self, message: str) -> dict:
         # Stage all changes
-        self._git("add", "-A")
+        _, err, rc = self._git_full("add", "-A")
+        if rc != 0:
+            return {"ok": False, "error": f"git add failed: {err.strip()}",
+                    "error_code": "GIT_ERROR"}
         # Check if there's anything to commit
         status = self._git("status", "--porcelain")
         if not status.strip():
             return {"ok": False, "error": "nothing to commit"}
-        self._git("commit", "-m", message)
+        _, err, rc = self._git_full("commit", "-m", message)
+        if rc != 0:
+            return {"ok": False, "error": f"git commit failed: {err.strip()}",
+                    "error_code": "GIT_ERROR"}
         return {"ok": True, "data": {"message": message}}
 
     def push(self, branch: str | None = None) -> dict:
@@ -88,10 +97,14 @@ class GitOps:
         """Checkout original branch and delete task branch."""
         current = self.get_current_branch()
         if current == task_branch:
-            self._git("checkout", original_branch)
+            _, err, rc = self._git_full("checkout", original_branch)
+            if rc != 0:
+                return {"ok": False, "error": f"checkout failed: {err.strip()}",
+                        "error_code": "GIT_ERROR"}
         _, err, rc = self._git_full("branch", "-D", task_branch)
         if rc != 0:
-            return {"ok": False, "error": f"failed to delete branch: {err}"}
+            return {"ok": False, "error": f"failed to delete branch: {err.strip()}",
+                    "error_code": "GIT_ERROR"}
         return {"ok": True, "data": {"deleted": task_branch, "on": original_branch}}
 
     # ── Static repo operations ─────────────────────────────
@@ -112,10 +125,10 @@ class GitOps:
 
     @staticmethod
     def fetch(repo_path: str) -> dict:
-        """Run git fetch in repo_path."""
+        """Run git fetch --all --prune in repo_path."""
         try:
             r = subprocess.run(
-                ["git", "fetch"],
+                ["git", "fetch", "--all", "--prune"],
                 cwd=repo_path,
                 capture_output=True, text=True, timeout=60,
             )
@@ -147,6 +160,64 @@ class GitOps:
         if r.returncode != 0:
             return {"ok": False, "error": f"git pull failed: {r.stderr.strip()}"}
         return {"ok": True, "data": {"path": repo_path, "branch": branch}}
+
+    @staticmethod
+    def is_dirty(repo_path: str) -> bool:
+        """Check if working tree has uncommitted changes."""
+        r = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_path,
+            capture_output=True, text=True, timeout=15,
+        )
+        return bool(r.stdout.strip())
+
+    @staticmethod
+    def reset_to_remote(repo_path: str, branch: str) -> dict:
+        """Checkout branch and reset to origin/<branch> for deterministic baseline."""
+        r = subprocess.run(
+            ["git", "checkout", branch],
+            cwd=repo_path,
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            return {"ok": False, "error": f"git checkout failed: {r.stderr.strip()}"}
+        r = subprocess.run(
+            ["git", "reset", "--hard", f"origin/{branch}"],
+            cwd=repo_path,
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            return {"ok": False, "error": f"git reset failed: {r.stderr.strip()}"}
+        return {"ok": True, "data": {"path": repo_path, "branch": branch}}
+
+    @staticmethod
+    def force_clean(repo_path: str) -> dict:
+        """Reset working tree and remove untracked files."""
+        r = subprocess.run(
+            ["git", "reset", "--hard"],
+            cwd=repo_path,
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            return {"ok": False, "error": f"git reset --hard failed: {r.stderr.strip()}"}
+        r = subprocess.run(
+            ["git", "clean", "-fd"],
+            cwd=repo_path,
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            return {"ok": False, "error": f"git clean -fd failed: {r.stderr.strip()}"}
+        return {"ok": True, "data": {"path": repo_path}}
+
+    @staticmethod
+    def get_head_sha(repo_path: str) -> str | None:
+        """Return HEAD commit SHA."""
+        r = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_path,
+            capture_output=True, text=True, timeout=10,
+        )
+        return r.stdout.strip() if r.returncode == 0 else None
 
     # ── Stash operations ──────────────────────────────────────
 

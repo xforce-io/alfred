@@ -131,9 +131,18 @@ _bash("python $SKILL_DIR/scripts/dispatch.py workspace-check --repos dolphin --t
 
 # Multiple repos (comma-separated, first is primary; optionally specify workspace)
 _bash("python $SKILL_DIR/scripts/dispatch.py workspace-check --repos dolphin,shared-lib --workspace env0 --task 'cross-repo refactor' --engine claude")
+
+# If workspace slot has leftover dirty changes from a previous task, add --auto-clean
+_bash("python $SKILL_DIR/scripts/dispatch.py workspace-check --repos dolphin --auto-clean --task 'fix: bug' --engine codex")
 ```
 
-**Parse output**: `data.snapshot` contains `repos` array (each with git/runtime/project info) and `primary_repo`.
+**Parse output**: `data.snapshot` contains `repos` array (each with git/runtime/project info, including `base_commit`) and `primary_repo`.
+
+**Workspace reuse semantics**:
+- Repo mode uses `git clone`, NOT file copy — uncommitted changes in the source local repo are NOT brought into the workspace slot.
+- When a workspace slot is reused (e.g., env0 used for task A, then task B), repos are synced to a deterministic baseline (`origin/<branch>`).
+- If the slot has uncommitted changes from a previous task, `workspace-check` returns `error_code: WORKSPACE_GIT_DIRTY`. Add `--auto-clean` to auto-reset (`git reset --hard` + `git clean -fd`) and continue.
+- Without `--auto-clean`, dirty slots require manual cleanup (e.g., `release --cleanup` or direct git commands).
 
 #### Mode B: Direct workspace (legacy)
 
@@ -173,21 +182,33 @@ _bash("python $SKILL_DIR/scripts/dispatch.py env-probe --workspace alfred --env 
 _bash("python $SKILL_DIR/scripts/dispatch.py analyze --workspace alfred --task 'heartbeat 定时任务没触发' --engine codex")
 ```
 
-**Parse output**: `data.summary` is the analysis report. Present location, root cause, proposed fix, and risk assessment to user.
+**Parse output**: `data.summary` is the analysis report. Also extract:
+- `data.complexity`: `trivial` | `standard` | `complex`
+- `data.feature_plan_created`: `true` if a Feature Plan was auto-generated (complex tasks)
+- `data.feature_count`: number of features in the plan (if created)
+
+Present location, root cause, proposed fix, and risk assessment to user.
 
 **If engine requests more env info**: Run additional `env-probe --commands ...` and re-run `analyze` (max 2 iterations).
 
 **Engine fallback**: If `analyze` returns `error_code: ENGINE_ERROR`, retry with the other engine (`--engine claude` or `--engine codex`). If both engines fail, you may perform the analysis yourself using your own capabilities, but all subsequent workflow steps (test, submit-pr, release) **must** still go through `dispatch.py`.
 
-**WAIT for user confirmation of analysis and approach.**
+### Phase 3: Plan Confirmation (complexity-driven)
 
-### Phase 3: Plan Confirmation
+Behavior depends on `data.complexity` from Phase 2:
 
-**User decides**:
+#### trivial
+Skip user confirmation. Auto-proceed to Phase 4 immediately.
+
+#### standard
+**WAIT for user confirmation**:
 - "继续" / "修吧" → proceed to Phase 4 with recommended approach
 - "用方案 2" → proceed with specified approach
 - "再看看日志" → run more `env-probe`, loop back to Phase 2
 - "取消" → run `dispatch.py release --workspace alfred`
+
+#### complex
+Feature Plan was auto-generated in Phase 2. Present the Feature Plan summary to user (use `feature-list` to display). Then enter the **Feature Loop** (see Feature Management section below) instead of Phase 4.
 
 ### Phase 4: Coding Development
 
@@ -270,24 +291,53 @@ _bash("python $SKILL_DIR/scripts/dispatch.py release --workspace alfred")
 
 ## Feature Management (Task Splitting)
 
-When Phase 2 analysis reveals a task is too large for a single develop cycle, split it into features:
+When Phase 2 analysis returns `complexity: complex`, a Feature Plan is auto-generated. You can also manually create one for large tasks:
 
 ### Commands
 
 ```bash
-# Create plan (features is JSON array with title, task, optional depends_on)
-_bash("python $SKILL_DIR/scripts/dispatch.py feature-plan --workspace alfred --task 'refactor auth system' --features '[{\"title\":\"extract auth middleware\",\"task\":\"move auth logic to middleware\"},{\"title\":\"add JWT\",\"task\":\"integrate PyJWT\",\"depends_on\":[0]}]'")
+# Manual plan creation (features is JSON array with title, task, optional depends_on, acceptance_criteria)
+_bash("python $SKILL_DIR/scripts/dispatch.py feature-plan --workspace alfred --task 'refactor auth system' --features '[{\"title\":\"extract auth middleware\",\"task\":\"move auth logic to middleware\",\"acceptance_criteria\":[{\"type\":\"test\",\"target\":\"pytest tests/auth/\",\"description\":\"auth middleware tests pass\"}]},{\"title\":\"add JWT\",\"task\":\"integrate PyJWT\",\"depends_on\":[0]}]'")
 
-# Loop: feature-next → develop → test → submit-pr → feature-done
-_bash("python $SKILL_DIR/scripts/dispatch.py feature-next --workspace alfred")
+# View/append acceptance criteria
+_bash("python $SKILL_DIR/scripts/dispatch.py feature-criteria --workspace alfred --index 0 --action view")
+_bash("python $SKILL_DIR/scripts/dispatch.py feature-criteria --workspace alfred --index 0 --action append --criteria '{\"type\":\"test\",\"target\":\"pytest tests/auth/test_jwt.py\",\"description\":\"JWT integration tests pass\"}'")
+
+# Run feature-level verification (checks all criteria)
+_bash("python $SKILL_DIR/scripts/dispatch.py feature-verify --workspace alfred --index 0")
+# With engine for assert-type criteria:
+_bash("python $SKILL_DIR/scripts/dispatch.py feature-verify --workspace alfred --index 0 --engine codex")
+
+# Mark done (checks criteria; use --force to skip)
 _bash("python $SKILL_DIR/scripts/dispatch.py feature-done --workspace alfred --index 0 --branch feat/auth-middleware --pr '#15'")
+_bash("python $SKILL_DIR/scripts/dispatch.py feature-done --workspace alfred --index 0 --force")
 
 # Adjust: skip/update features, check progress
 _bash("python $SKILL_DIR/scripts/dispatch.py feature-update --workspace alfred --index 1 --status skipped")
 _bash("python $SKILL_DIR/scripts/dispatch.py feature-list --workspace alfred")
 ```
 
-Ask user "Continue with next feature?" before each. When `feature-next` returns `status: all_complete`, call `release`.
+### Criteria Types
+
+| Type | Behavior | Blocks `feature-done`? |
+|------|----------|----------------------|
+| `test` | Runs command via subprocess, checks exit code | Yes (unless `--force`) |
+| `assert` | Calls engine to verify code matches description | Yes (unless `--force`) |
+| `manual` | Marked `passed=null`, reminder only | No |
+
+### Feature Loop
+
+When complexity is `complex`, follow this loop for each feature:
+
+1. `feature-next` → get next executable feature (auto-sets `in_progress`)
+2. `develop` → implement the feature's task
+3. `test` → run workspace-level tests
+4. `feature-verify` → run feature-specific acceptance criteria
+5. If verify fails → loop back to step 2 (max 3 attempts per feature)
+6. `feature-done` → mark complete (checks criteria; `--force` to override)
+7. Ask user "Continue with next feature?" before each iteration
+
+When `feature-next` returns `status: all_complete`, proceed to `submit-pr` (or per-feature PRs if preferred), then `release`.
 
 ---
 
@@ -305,6 +355,7 @@ Default lease is 2 hours. During long pauses, renew proactively: `_bash("python 
 | `PATH_NOT_FOUND` | Ask user to add workspace/env: `config-add ...` |
 | `WORKSPACE_LOCKED` | Report current task and phase, suggest waiting |
 | `GIT_DIRTY` | Ask user to commit or stash first |
+| `WORKSPACE_GIT_DIRTY` | Workspace slot has leftover changes; suggest `--auto-clean` or manual cleanup |
 | `LOCK_NOT_FOUND` | Remind to run `workspace-check` first |
 | `LEASE_EXPIRED` | Lock was cleaned; re-run `workspace-check` |
 | `SSH_UNREACHABLE` | Ask if user wants to skip env probing |

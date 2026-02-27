@@ -616,11 +616,14 @@ Agent (LLM) 负责理解 summary 内容并：
 
 ```json
 {
-  "success": true,
-  "summary": "## 问题定位\nheartbeat.py:142 ...\n## 根因分析\n...\n## 修复方案\n...\n## Complexity: trivial",
-  "complexity": "trivial",
-  "files_changed": [],
-  "error": null
+  "ok": true,
+  "data": {
+    "summary": "## 问题定位\nheartbeat.py:142 ...\n## 根因分析\n...\n## 修复方案\n...\n## Complexity: trivial",
+    "complexity": "trivial",
+    "files_changed": [],
+    "feature_plan_created": false,
+    "feature_count": 0
+  }
 }
 ```
 
@@ -628,22 +631,14 @@ Agent (LLM) 负责理解 summary 内容并：
 
 ```json
 {
-  "success": true,
-  "summary": "## 问题定位\n...\n## 修复方案\n...\n## Complexity: complex\n## Feature Plan\n...",
-  "complexity": "complex",
-  "feature_plan": [
-    {
-      "title": "抽取 auth middleware",
-      "task": "将 app.py 中的认证逻辑抽取为独立 middleware",
-      "depends_on": [],
-      "acceptance_criteria": [
-        {"type": "test", "target": "tests/unit/test_auth.py", "auto": true},
-        {"type": "assert", "description": "middleware registered in app factory", "auto": true}
-      ]
-    }
-  ],
-  "files_changed": [],
-  "error": null
+  "ok": true,
+  "data": {
+    "summary": "## 问题定位\n...\n## 修复方案\n...\n## Complexity: complex\n## Feature Plan\n```json\n[...]\n```",
+    "complexity": "complex",
+    "feature_plan_created": true,
+    "feature_count": 2,
+    "files_changed": []
+  }
 }
 ```
 
@@ -651,10 +646,11 @@ Agent (LLM) 负责理解 summary 内容并：
 
 ```json
 {
-  "success": true,
-  "summary": "统一 timezone-aware datetime，修改 HeartbeatRunner._should_run_task()",
-  "files_changed": ["src/everbot/core/runtime/heartbeat.py"],
-  "error": null
+  "ok": true,
+  "data": {
+    "summary": "统一 timezone-aware datetime，修改 HeartbeatRunner._should_run_task()",
+    "files_changed": ["src/everbot/core/runtime/heartbeat.py"]
+  }
 }
 ```
 
@@ -742,42 +738,51 @@ dispatch.py workspace-check --repos myapp --task "fix: heartbeat bug" --engine c
 dispatch.py workspace-check --repos backend,frontend --task "前后端联调" --engine claude
 # 可选显式指定 workspace
 dispatch.py workspace-check --repos myapp --workspace env0 --task "fix: heartbeat bug" --engine claude
+# 工作槽有残留脏改动时自动清理
+dispatch.py workspace-check --repos myapp --auto-clean --task "fix: bug" --engine claude
 ```
 
 脚本内部**原子完成**以下步骤：
 1. 解析 repo 名称列表 → 逐个查 repos 配置 → 得到 URL
 2. 遍历 workspaces，找第一个未被 lock 的 → 分配（或使用显式指定的 workspace）
 3. acquire lock（写入 lock 文件 + 设置 lease）
-4. 对每个 repo：检查 `workspace/{repo_name}` 是否存在 → clone 或 pull
-5. 对每个 repo：探测 `workspace/{repo_name}` 的 git/runtime/project → 生成快照
+4. 对每个 repo：确保 repo 存在并同步到确定基线（`_ensure_repo`）：
+   - **不存在** → `git clone [--branch <default_branch>] <url> <path>`
+   - **已存在** → 先 `git status --porcelain` 检查工作区是否干净：
+     - **脏** 且无 `--auto-clean` → 返回 `WORKSPACE_GIT_DIRTY`
+     - **脏** 且有 `--auto-clean` → `git reset --hard` + `git clean -fd` 清理
+   - 然后 `git fetch --all --prune` + `git checkout <branch>` + `git reset --hard origin/<branch>` 同步到远端最新
+5. 对每个 repo：探测 `workspace/{repo_name}` 的 git/runtime/project → 生成快照（含 `base_commit`）
 6. 快照落盘到 `.coding-master/workspace_snapshot.json`
 
 返回值：
 ```json
 {
-  "success": true,
-  "snapshot": {
-    "workspace": {"name": "env0", "path": "~/lab/coding_master/env0"},
-    "repos": [
-      {
-        "name": "myapp",
-        "url": "git@github.com:user/myapp.git",
-        "local_path": "~/lab/coding_master/env0/myapp",
-        "git": {"branch": "main", "dirty": false, "...": "..."},
-        "runtime": {"...": "..."},
-        "project": {"...": "..."}
-      }
-    ],
-    "primary_repo": "myapp"
+  "ok": true,
+  "data": {
+    "snapshot": {
+      "workspace": {"name": "env0", "path": "~/lab/coding_master/env0"},
+      "repos": [
+        {
+          "name": "myapp",
+          "url": "git@github.com:user/myapp.git",
+          "local_path": "~/lab/coding_master/env0/myapp",
+          "git": {"branch": "main", "dirty": false, "base_commit": "abc1234", "...": "..."},
+          "runtime": {"...": "..."},
+          "project": {"...": "..."}
+        }
+      ],
+      "primary_repo": "myapp"
+    }
   }
 }
 ```
 
-或 `{"success": false, "error": "..."}`. Agent 不需要理解 lock 细节。
+或 `{"ok": false, "error": "..."}`. Agent 不需要理解 lock 细节。
 
 **后续 Phase 的 --workspace 参数**：Phase 0 返回分配到的 workspace 后，后续命令继续用 `--workspace env0`（因为 workspace 已确定）。内部执行路径：单 repo 时 cwd 为 `ws_path/{repo_name}`，多 repo 时 cwd 为 `ws_path`（workspace 根目录）。
 
-**阻断条件**（脚本内部判定，直接返回 error）：repo 未配置、所有 workspace 被占用、clone 失败、任意 repo 有未提交变更。
+**阻断条件**（脚本内部判定，直接返回 error）：repo 未配置、所有 workspace 被占用、clone 失败、任意 repo 工作区脏（`WORKSPACE_GIT_DIRTY`，可通过 `--auto-clean` 跳过）。
 
 ### 7.3 Phase 1: Env 探测
 
@@ -841,11 +846,14 @@ Engine prompt 模板：
 
 ```json
 {
-  "success": true,
-  "summary": "## 问题定位\n...\n## 修复方案\n...",
-  "complexity": "complex",
-  "feature_plan_created": true,
-  "feature_count": 3
+  "ok": true,
+  "data": {
+    "summary": "## 问题定位\n...\n## 修复方案\n...",
+    "complexity": "complex",
+    "feature_plan_created": true,
+    "feature_count": 3,
+    "files_changed": []
+  }
 }
 ```
 
@@ -1410,6 +1418,15 @@ feature-criteria --workspace env0 --index 2 --action append --type test --target
 | `config-set` | 设置扩展字段 | kind, name, key, value |
 | `config-remove` | 删除 repo/workspace/env | kind, name |
 
+**快速查询域**（lock-free，只读观察和诊断）
+
+| 工具 | 用途 | 关键参数 |
+|------|------|----------|
+| `quick-status` | Workspace 概览（git/runtime/lock） | workspace |
+| `quick-test` | 无 lock 运行测试（可选 lint） | workspace, path?, lint? |
+| `quick-find` | 代码搜索（grep） | workspace, query, glob? |
+| `quick-env` | 无 workspace 的 env 探测 | env, commands? |
+
 **工作流域**（线性 Phase 推进）
 
 | 工具 | 用途 | 关键参数 |
@@ -1446,7 +1463,7 @@ feature-criteria --workspace env0 --index 2 --action append --type test --target
 用户要求添加/修改/删除 workspace 或 env 时使用。不涉及工作流。
 
 ## 工作流
-线性推进 Phase 0→7。每个工具对应一个 Phase，返回 JSON，只需判断 success。
+线性推进 Phase 0→7。每个工具对应一个 Phase，返回 JSON，只需判断 ok。
 Phase 2 (analyze) 返回 complexity 字段：trivial 跳过确认，standard 等待确认，complex 自动生成 Feature Plan。
 Phase 7 (env-verify) 可选：PR 提交后如需部署验证，等用户通知部署完成后调用。
 
@@ -1565,10 +1582,11 @@ dispatch.py config-add env myapp-prod deploy@prod-server:/opt/myapp
 dispatch.py config-set repo myapp test_command "pytest -x"
 dispatch.py config-remove env myapp-staging
 
-# 工作流步骤（每步内部管理 lock，Agent 只看 success/error）
+# 工作流步骤（每步内部管理 lock，Agent 只看 ok/error）
 dispatch.py workspace-check --repos myapp --task "fix: heartbeat bug" --engine claude
 dispatch.py workspace-check --repos backend,frontend --task "前后端联调" --engine claude
 dispatch.py workspace-check --repos myapp --workspace env0 --task "fix: heartbeat bug" --engine claude
+dispatch.py workspace-check --repos myapp --auto-clean --task "fix: bug"  # 脏工作槽自动清理后继续
 dispatch.py env-probe --workspace env0 --env myapp-prod
 dispatch.py env-probe --workspace env0 --env myapp-prod --commands "journalctl -u myapp ..."
 dispatch.py analyze --workspace env0 --task "..." --engine claude
@@ -1591,12 +1609,12 @@ dispatch.py feature-criteria --workspace env0 --index 0 --action append --type t
 dispatch.py feature-verify --workspace env0 --index 0
 ```
 
-所有输出统一 JSON stdout，Agent 只需判断 `success: true/false`。
+所有输出统一 JSON stdout，Agent 只需判断 `ok: true/false`。
 
 **错误输出规范**：
 
 ```json
-{"success": false, "error": "workspace env0 is locked by another session", "error_code": "WORKSPACE_LOCKED"}
+{"ok": false, "error": "workspace env0 is locked by another session", "error_code": "WORKSPACE_LOCKED"}
 ```
 
 标准 error_code 枚举：
@@ -1605,7 +1623,8 @@ dispatch.py feature-verify --workspace env0 --index 0
 |------------|------|---------------|
 | `WORKSPACE_LOCKED` | 被其他会话占用 | 提示用户等待或查看占用任务 |
 | `PATH_NOT_FOUND` | workspace/env 路径不存在 | 提示检查配置 |
-| `GIT_DIRTY` | 有未提交变更 | 提示用户先提交或 stash |
+| `GIT_DIRTY` | 有未提交变更（direct 模式） | 提示用户先提交或 stash |
+| `WORKSPACE_GIT_DIRTY` | repo 模式工作槽有脏改动 | 提示 `--auto-clean` 或手动清理 |
 | `LOCK_NOT_FOUND` | 执行工作流命令但无 lock | 提示先 workspace-check |
 | `LEASE_EXPIRED` | lock 已过期 | 自动清理后重试 |
 | `SSH_UNREACHABLE` | SSH 连接失败 | 提示检查网络/密钥配置 |
@@ -1647,26 +1666,33 @@ class ConfigManager:
 ```python
 class WorkspaceManager:
     def list_workspaces(self) -> list[dict]:    ...
-    def check_and_acquire(self, repos: list[str], task: str, engine: str, workspace: str = None) -> dict:
+    def check_and_acquire(self, repos: list[str], task: str, engine: str,
+                          workspace: str = None, auto_clean: bool = False) -> dict:
         """Phase 0 一步完成：
         1. 逐个查 repo 配置
         2. 分配空闲 workspace（遍历 workspaces，检查 lock）或使用指定 workspace
         3. acquire lock (O_CREAT|O_EXCL)
-        4. 对每个 repo：clone/update 到 workspace
-        5. 对每个 repo：探测 ws_path/{repo_name}
+        4. 对每个 repo：_ensure_repo（含 dirty check + 基线同步）
+        5. 对每个 repo：探测 ws_path/{repo_name} → 生成快照（含 base_commit）
         6. 返回快照（含 repos 列表 + primary_repo）或错误
-        注：.coding-master.lock 和 .coding-master/ 位于 workspace 根目录（repo 外部），无需 .gitignore"""
+        auto_clean: 脏工作槽自动 reset --hard + clean -fd 后继续"""
     def release(self, args) -> dict:
         """释放 lock + 删除 .coding-master/，--cleanup 时同时回滚每个 repo 的 git 分支（含远程）"""
     def renew_lease(self, args) -> dict:
         """显式续期 lease（等待用户输入时调用）"""
     def _find_free_workspace(self) -> dict | None:
         """遍历 workspaces 找第一个未被 lock 的"""
-    def _ensure_repo(self, ws_path: str, repo_config: dict) -> str:
-        """确保 repo 在 workspace 中存在：
-        - 已存在 → git fetch + checkout default_branch + git pull
-        - 不存在 → git clone URL 到 ws_path/{repo_name}
-        返回 repo_path"""
+    def _ensure_repo(self, ws_path: str, repo_config: dict,
+                     auto_clean: bool = False) -> str:
+        """确保 repo 在 workspace 中存在并同步到确定基线：
+        - 不存在 → git clone [--branch <default_branch>] URL 到 ws_path/{repo_name}
+        - 已存在 →
+          1. git status --porcelain 检查脏状态
+             - 脏 + auto_clean=False → 返回 None（调用方返回 WORKSPACE_GIT_DIRTY）
+             - 脏 + auto_clean=True → git reset --hard + git clean -fd
+          2. git fetch --all --prune
+          3. git checkout <branch> + git reset --hard origin/<branch>
+        返回 repo_path 或 None（失败时）"""
     def _check_stale_lock(self, lock_path) -> bool:
         """检测僵尸锁：基于 lease_expires_at 判定是否过期"""
     def _probe(self, repo_path: str) -> dict:
@@ -1712,7 +1738,7 @@ class FeatureManager:
         1. 解析 features 列表（含 title, task, depends_on, acceptance_criteria）
         2. 写入 feature_plan.json（核心字段 + 初始 status/timestamps）
         3. 为每个 feature 创建 features/{index}/criteria.json
-        返回 {success, feature_count}"""
+        返回 {ok, data: {total, features}}"""
         ...
 
     def next_feature(self) -> dict | None:
@@ -2139,7 +2165,19 @@ Agent: ✅ Feature 验证通过:
 
 ### 12.5 .gitignore
 
-`.coding-master.lock` 和 `.coding-master/` 位于 workspace 根目录（而非 repo 内部），不会被 git 跟踪，无需 `.gitignore` 配置。
+`.coding-master.lock` 和 `.coding-master/` 位于 workspace 根目录。当 workspace 本身是 git repo（direct 模式）时，`_ensure_gitignore()` 自动将 lock 文件和产物目录追加到 `.gitignore`，确保不被 git 跟踪。Repo 模式下产物在 repo 外部，无此问题。
+
+### 12.6 Workspace 基线保证
+
+**Repo 模式**：每次 `workspace-check --repos` 都会将工作槽内的 repo 同步到远端最新 commit，确保**可复现基线**：
+- **默认严格**：如果工作槽内的 repo 有未提交改动（上次任务残留），返回 `WORKSPACE_GIT_DIRTY` 并提示使用 `--auto-clean`
+- **`--auto-clean`**：执行 `git reset --hard` + `git clean -fd` 丢弃所有脏改动后继续同步
+- **确定基线**：无论哪种路径，最终都执行 `fetch --all --prune` + `checkout <branch>` + `reset --hard origin/<branch>`，保证与远端完全一致
+- **base_commit**：同步完成后将 `HEAD` commit SHA 写入 workspace snapshot，供后续追溯
+
+**Direct 模式**：用户自己管理的 git repo，仅做 `git status --porcelain` 脏检查，不做 reset/clean。
+
+**源本地 repo 注意**：Repo 模式是 `git clone`，不是文件拷贝 — 源 repo 的未提交改动不会被带入工作槽。
 
 ---
 
@@ -2163,7 +2201,7 @@ Agent: ✅ Feature 验证通过:
 ### v0.2 — 扩展
 
 - [ ] Repo 新建流程（`gh repo create` + 初始化）
-- [ ] engine/codex_runner.py
+- [x] engine/codex_runner.py（已完成）
 - [ ] Engine 选择策略
 - [ ] Git worktree 并行任务
 - [ ] 双 engine 对比模式

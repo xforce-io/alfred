@@ -333,11 +333,15 @@ class WorkspaceManager:
         last_commit = _run_git(
             ws_path, ["log", "-1", "--format=%h %s"]
         ).strip()
+        base_commit = _run_git(
+            ws_path, ["rev-parse", "HEAD"]
+        ).strip()
         return {
             "branch": branch,
             "dirty": dirty,
             "remote_url": remote_url,
             "last_commit": last_commit,
+            "base_commit": base_commit,
         }
 
     def _probe_runtime(self, ws_path: str) -> dict:
@@ -406,6 +410,7 @@ class WorkspaceManager:
         task: str,
         engine: str,
         workspace_name: str | None = None,
+        auto_clean: bool = False,
     ) -> dict:
         """Phase 0 (repo mode): resolve repos → find/use workspace → clone/update → probe → snapshot."""
         # 1. Resolve repo configs
@@ -459,17 +464,15 @@ class WorkspaceManager:
                 "error_code": "WORKSPACE_LOCKED",
             }
 
-        # 6. Clone or update each repo
+        # 6. Clone or update each repo (with dirty check + baseline sync)
         repos_info = []
         for rc in repo_configs:
-            repo_path = self._ensure_repo(ws_path, rc)
-            if repo_path is None:
+            result = self._ensure_repo(ws_path, rc, auto_clean=auto_clean)
+            if isinstance(result, dict):
+                # Error dict returned
                 lock.delete()
-                return {
-                    "ok": False,
-                    "error": f"failed to clone/update repo '{rc['name']}'",
-                    "error_code": "GIT_ERROR",
-                }
+                return result
+            repo_path = result
             info = self._probe_repo(repo_path, rc)
             repos_info.append(info)
 
@@ -505,27 +508,64 @@ class WorkspaceManager:
 
         return {"ok": True, "data": {"snapshot": snapshot}}
 
-    def _ensure_repo(self, ws_path: str, repo_config: dict) -> str | None:
-        """Clone or update a repo inside the workspace. Returns repo path or None on failure."""
+    def _ensure_repo(
+        self, ws_path: str, repo_config: dict, auto_clean: bool = False
+    ) -> str | dict:
+        """Clone or update a repo inside the workspace.
+
+        Returns repo_path (str) on success, or error dict on failure.
+        For existing repos: dirty check → optional auto-clean → fetch → reset to origin/<branch>.
+        """
         name = repo_config["name"]
         url = repo_config.get("url", "")
-        branch = repo_config.get("default_branch")
+        branch = repo_config.get("default_branch", "main")
         repo_path = str(Path(ws_path) / name)
 
         if (Path(repo_path) / ".git").exists():
-            # Existing repo — fetch + checkout + pull
+            # Existing repo — dirty check + baseline sync
+            if GitOps.is_dirty(repo_path):
+                if not auto_clean:
+                    return {
+                        "ok": False,
+                        "error": f"repo '{name}' has uncommitted changes from a previous task; "
+                                 f"use --auto-clean to reset, or manually clean up",
+                        "error_code": "WORKSPACE_GIT_DIRTY",
+                    }
+                # Auto-clean: discard all local changes
+                result = GitOps.force_clean(repo_path)
+                if not result.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": f"auto-clean failed for '{name}': {result.get('error', '?')}",
+                        "error_code": "GIT_ERROR",
+                    }
+
+            # Fetch all remotes
             result = GitOps.fetch(repo_path)
             if not result.get("ok"):
-                return None
-            if branch:
-                result = GitOps.pull(repo_path, branch)
-                if not result.get("ok"):
-                    return None
+                return {
+                    "ok": False,
+                    "error": f"git fetch failed for '{name}': {result.get('error', '?')}",
+                    "error_code": "GIT_ERROR",
+                }
+
+            # Reset to deterministic baseline: origin/<branch>
+            result = GitOps.reset_to_remote(repo_path, branch)
+            if not result.get("ok"):
+                return {
+                    "ok": False,
+                    "error": f"baseline sync failed for '{name}': {result.get('error', '?')}",
+                    "error_code": "GIT_ERROR",
+                }
         else:
-            # Clone
+            # Fresh clone
             result = GitOps.clone(url, repo_path, branch=branch)
             if not result.get("ok"):
-                return None
+                return {
+                    "ok": False,
+                    "error": f"clone failed for '{name}': {result.get('error', '?')}",
+                    "error_code": "GIT_ERROR",
+                }
 
         return repo_path
 

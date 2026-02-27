@@ -47,6 +47,20 @@ Output:
 4. Impact scope
 5. Risk assessment (low / medium / high)
 6. Whether more Env information is needed
+7. Complexity: classify as exactly one of `trivial`, `standard`, or `complex`
+   - trivial: single-file typo/config fix, <10 lines changed
+   - standard: focused bug fix or small feature, 1-3 files
+   - complex: multi-file refactor, new subsystem, or cross-cutting concern requiring task splitting
+8. If Complexity is `complex`, output a Feature Plan as a JSON code block:
+   ```json
+   [
+     {{"title": "...", "task": "...", "depends_on": [], "acceptance_criteria": [
+       {{"type": "test", "target": "pytest tests/...", "description": "..."}},
+       {{"type": "assert", "description": "..."}},
+       {{"type": "manual", "description": "..."}}
+     ]}}
+   ]
+   ```
 """
 
 DEVELOP_PROMPT = """\
@@ -132,6 +146,29 @@ def _get_engine(name: str):
         return ClaudeRunner()
     if name == "codex":
         return CodexRunner()
+    return None
+
+
+import re as _re
+
+
+def _parse_complexity(summary: str) -> str:
+    """Extract complexity classification from engine summary."""
+    m = _re.search(r"Complexity:\s*(trivial|standard|complex)", summary, _re.IGNORECASE)
+    return m.group(1).lower() if m else "standard"
+
+
+def _parse_feature_plan(summary: str) -> list[dict] | None:
+    """Extract feature plan JSON from ```json code block in summary."""
+    m = _re.search(r"```json\s*\n(\[[\s\S]*?\])\s*\n```", summary)
+    if not m:
+        return None
+    try:
+        plan = json.loads(m.group(1))
+        if isinstance(plan, list) and len(plan) > 0:
+            return plan
+    except (json.JSONDecodeError, TypeError):
+        pass
     return None
 
 
@@ -289,6 +326,7 @@ def cmd_workspace_check(args) -> dict:
         return mgr.check_and_acquire_for_repos(
             repo_names, args.task, engine,
             workspace_name=args.workspace,
+            auto_clean=getattr(args, "auto_clean", False),
         )
 
     # Direct workspace mode (original behavior)
@@ -360,11 +398,27 @@ def cmd_analyze(args) -> dict:
                 lock.load()
                 lock.add_artifact("analysis_report", f"{ARTIFACT_DIR}/phase2_analysis.md")
                 lock.save()
+
+        complexity = _parse_complexity(result.summary) if result.success else "standard"
+        feature_plan_created = False
+        feature_count = 0
+
+        if result.success and complexity == "complex":
+            feature_plan = _parse_feature_plan(result.summary)
+            if feature_plan:
+                fm = FeatureManager(ws_path)
+                fm.create_plan_from_analysis(args.task, feature_plan)
+                feature_plan_created = True
+                feature_count = len(feature_plan)
+
         return {
             "ok": result.success,
             "data": {
                 "summary": result.summary,
                 "files_changed": result.files_changed,
+                "complexity": complexity,
+                "feature_plan_created": feature_plan_created,
+                "feature_count": feature_count,
             },
             **({"error": result.error, "error_code": "ENGINE_ERROR"} if result.error else {}),
         }
@@ -392,6 +446,8 @@ def cmd_develop(args) -> dict:
         if args.branch:
             git = GitOps(ws_path)
             br_result = git.create_branch(args.branch)
+            if not br_result.get("ok"):
+                return br_result
             # Update lock with branch name
             lock = LockFile(ws_path)
             if lock.exists():
@@ -532,6 +588,7 @@ def cmd_feature_done(args) -> dict:
         index=args.index,
         branch=getattr(args, "branch", None),
         pr=getattr(args, "pr", None),
+        force=getattr(args, "force", False),
     )
 
 
@@ -542,6 +599,39 @@ def cmd_feature_list(args) -> dict:
                 "error_code": "PATH_NOT_FOUND"}
     fm = FeatureManager(ws_path)
     return fm.list_all()
+
+
+@requires_workspace
+def cmd_feature_criteria(args) -> dict:
+    ws_path = args._ws_path
+    fm = FeatureManager(ws_path)
+    new_criteria = None
+    if getattr(args, "criteria", None):
+        new_criteria = json.loads(args.criteria)
+        if isinstance(new_criteria, dict):
+            new_criteria = [new_criteria]
+    return fm.criteria(
+        index=args.index,
+        action=args.action,
+        new_criteria=new_criteria,
+    )
+
+
+@requires_workspace
+def cmd_feature_verify(args) -> dict:
+    ws_path = args._ws_path
+
+    engine = None
+    engine_name = getattr(args, "engine", None)
+    if engine_name:
+        engine = _get_engine(engine_name)
+
+    fm = FeatureManager(ws_path)
+    return fm.verify(
+        index=args.index,
+        workspace=ws_path,
+        engine=engine,
+    )
 
 
 @requires_workspace
@@ -606,6 +696,7 @@ def _build_parser() -> argparse.ArgumentParser:
     wc.add_argument("--task", required=True)
     wc.add_argument("--engine", default=None)
     wc.add_argument("--repos", default=None, help="Comma-separated repo names (auto-allocates workspace if --workspace omitted)")
+    wc.add_argument("--auto-clean", action="store_true", help="Auto-reset dirty workspace repos (git reset --hard + clean -fd)")
 
     ep = sub.add_parser("env-probe", help="Probe runtime environment")
     ep.add_argument("--workspace", required=True)
@@ -657,6 +748,7 @@ def _build_parser() -> argparse.ArgumentParser:
     fd.add_argument("--index", type=int, required=True)
     fd.add_argument("--branch", default=None)
     fd.add_argument("--pr", default=None)
+    fd.add_argument("--force", action="store_true", help="Skip criteria check")
 
     fl = sub.add_parser("feature-list", help="List all features and status")
     fl.add_argument("--workspace", required=True)
@@ -667,6 +759,17 @@ def _build_parser() -> argparse.ArgumentParser:
     fu.add_argument("--status", default=None, choices=["pending", "in_progress", "done", "skipped"])
     fu.add_argument("--title", default=None)
     fu.add_argument("--task-desc", default=None)
+
+    fc = sub.add_parser("feature-criteria", help="View/append feature acceptance criteria")
+    fc.add_argument("--workspace", required=True)
+    fc.add_argument("--index", type=int, required=True)
+    fc.add_argument("--action", required=True, choices=["view", "append"])
+    fc.add_argument("--criteria", default=None, help="JSON criteria to append (single object or array)")
+
+    fv = sub.add_parser("feature-verify", help="Run feature acceptance criteria verification")
+    fv.add_argument("--workspace", required=True)
+    fv.add_argument("--index", type=int, required=True)
+    fv.add_argument("--engine", default=None, help="Engine for assert-type criteria")
 
     return p
 
@@ -694,6 +797,8 @@ COMMANDS = {
     "feature-done": cmd_feature_done,
     "feature-list": cmd_feature_list,
     "feature-update": cmd_feature_update,
+    "feature-criteria": cmd_feature_criteria,
+    "feature-verify": cmd_feature_verify,
 }
 
 
