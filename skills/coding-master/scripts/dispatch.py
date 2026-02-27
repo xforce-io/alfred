@@ -98,6 +98,44 @@ def _resolve_workspace_path(args) -> str | None:
     return ws["path"]
 
 
+def _resolve_repo_paths(args, config: ConfigManager | None = None) -> dict | list[tuple[str, str]]:
+    """Resolve --repos to list of (name, path) tuples.
+
+    Returns an error dict on failure, or a list of (name, path) on success.
+    """
+    config = config or ConfigManager()
+    repo_names = [r.strip() for r in args.repos.split(",") if r.strip()]
+    if not repo_names:
+        avail = _available_names(config)
+        return {
+            "ok": False,
+            "error": "--repos value is empty. Provide at least one repo name.",
+            "error_code": "INVALID_ARGS",
+            "hint": f"Available repos: {avail['repos']}.",
+        }
+    result = []
+    for name in repo_names:
+        repo = config.get_repo(name)
+        if repo is None:
+            avail = _available_names(config)
+            return {
+                "ok": False,
+                "error": f"repo '{name}' not found. Use config-list to see registered repos.",
+                "error_code": "PATH_NOT_FOUND",
+                "hint": f"Available repos: {avail['repos']}.",
+            }
+        repo_url = repo.get("url", "")
+        repo_path = Path(repo_url).expanduser()
+        if not repo_path.is_dir():
+            return {
+                "ok": False,
+                "error": f"repo '{name}' path '{repo_url}' is not a local directory.",
+                "error_code": "PATH_NOT_FOUND",
+            }
+        result.append((name, str(repo_path)))
+    return result
+
+
 def with_lock_update(workspace_path: str, phase: str, fn, *args, **kwargs) -> dict:
     """Verify lock → run fn → update phase → renew lease → save."""
     lock = LockFile(workspace_path)
@@ -203,12 +241,47 @@ def cmd_config_remove(args) -> dict:
 
 def cmd_quick_status(args) -> dict:
     """Workspace overview: git info, runtime, project commands, lock status."""
+    config = ConfigManager()
+
+    # Validate: at least one of --workspace or --repos must be provided
+    if not getattr(args, "workspace", None) and not getattr(args, "repos", None):
+        avail = _available_names(config)
+        return {
+            "ok": False,
+            "error": "Either --workspace or --repos is required.",
+            "error_code": "INVALID_ARGS",
+            "hint": f"Available workspaces: {avail['workspaces']}. Available repos: {avail['repos']}.",
+        }
+
+    # --repos mode: probe each repo path directly (no lock needed)
+    if getattr(args, "repos", None):
+        resolved = _resolve_repo_paths(args, config)
+        if isinstance(resolved, dict):
+            return resolved  # error
+
+        mgr = WorkspaceManager(config)
+        repos_data = {}
+        for name, repo_path in resolved:
+            repo_cfg = config.get_repo(name)
+            git_info = mgr._probe_git(repo_path)
+            runtime = mgr._probe_runtime(repo_path)
+            project = mgr._probe_project(repo_path, repo_cfg)
+            repos_data[name] = {
+                "path": repo_path,
+                "git": git_info,
+                "runtime": runtime,
+                "project": project,
+            }
+        return {"ok": True, "data": {"repos": repos_data}}
+
+    # --workspace mode (original behavior)
     ws_path = _resolve_workspace_path(args)
     if ws_path is None:
+        avail = _available_names(config)
         return {"ok": False, "error": f"workspace '{args.workspace}' not found",
-                "error_code": "PATH_NOT_FOUND"}
+                "error_code": "PATH_NOT_FOUND",
+                "hint": f"Available workspaces: {avail['workspaces']}. Available repos: {avail['repos']}."}
 
-    config = ConfigManager()
     mgr = WorkspaceManager(config)
     ws = config.get_workspace(args.workspace)
 
@@ -244,12 +317,59 @@ def cmd_quick_status(args) -> dict:
 
 def cmd_quick_test(args) -> dict:
     """Run tests (and optionally lint) without acquiring a lock."""
+    config = ConfigManager()
+
+    # Validate: at least one of --workspace or --repos must be provided
+    if not getattr(args, "workspace", None) and not getattr(args, "repos", None):
+        avail = _available_names(config)
+        return {
+            "ok": False,
+            "error": "Either --workspace or --repos is required.",
+            "error_code": "INVALID_ARGS",
+            "hint": f"Available workspaces: {avail['workspaces']}. Available repos: {avail['repos']}.",
+        }
+
+    # --repos mode: run tests in each repo path directly
+    if getattr(args, "repos", None):
+        resolved = _resolve_repo_paths(args, config)
+        if isinstance(resolved, dict):
+            return resolved  # error
+
+        from dataclasses import asdict
+        runner = TestRunner(config)
+        repos_data = {}
+        overall = "passed"
+
+        for name, repo_path in resolved:
+            repo_cfg = config.get_repo(name)
+            commands = runner._detect_commands(repo_path, repo_cfg)
+            test_cmd = commands.get("test_command")
+            if test_cmd and getattr(args, "path", None):
+                test_cmd = f"{test_cmd} {args.path}"
+
+            test_result = runner._run_test(repo_path, test_cmd)
+            entry = {"test": asdict(test_result), "overall": "passed" if test_result.passed else "failed"}
+
+            if getattr(args, "lint", False):
+                lint_result = runner._run_lint(repo_path, commands.get("lint_command"))
+                entry["lint"] = asdict(lint_result)
+                if not lint_result.passed:
+                    entry["overall"] = "failed"
+
+            if entry["overall"] == "failed":
+                overall = "failed"
+            repos_data[name] = entry
+
+        return {"ok": True, "data": {"repos": repos_data, "overall": overall}}
+
+    # --workspace mode (original behavior)
     ws_path = _resolve_workspace_path(args)
     if ws_path is None:
+        avail = _available_names(config)
         return {"ok": False, "error": f"workspace '{args.workspace}' not found",
-                "error_code": "PATH_NOT_FOUND"}
+                "error_code": "PATH_NOT_FOUND",
+                "hint": f"Available workspaces: {avail['workspaces']}. Available repos: {avail['repos']}."}
 
-    config = ConfigManager()
     runner = TestRunner(config)
     ws = config.get_workspace(args.workspace)
     commands = runner._detect_commands(ws_path, ws)
@@ -317,29 +437,14 @@ def cmd_quick_find(args) -> dict:
 
     # --repos mode: search directly in repo source paths (no lock needed)
     if args.repos:
-        repo_names = [r.strip() for r in args.repos.split(",") if r.strip()]
+        resolved = _resolve_repo_paths(args, config)
+        if isinstance(resolved, dict):
+            return resolved  # error
         all_results: dict = {}
         total_count = 0
 
-        for name in repo_names:
-            repo = config.get_repo(name)
-            if repo is None:
-                avail = _available_names(config)
-                return {
-                    "ok": False,
-                    "error": f"repo '{name}' not found. Use config-list to see registered repos.",
-                    "error_code": "PATH_NOT_FOUND",
-                    "hint": f"Available repos: {avail['repos']}. Use --repos <name> to search a registered repo directly.",
-                }
-            repo_url = repo.get("url", "")
-            repo_path = Path(repo_url).expanduser()
-            if not repo_path.is_dir():
-                return {
-                    "ok": False,
-                    "error": f"repo '{name}' path '{repo_url}' is not a local directory. Only local repos support direct search.",
-                    "error_code": "PATH_NOT_FOUND",
-                }
-            result = _grep_in_path(str(repo_path), args.query, args.glob)
+        for name, repo_path in resolved:
+            result = _grep_in_path(repo_path, args.query, args.glob)
             if not result["ok"]:
                 return result
             all_results[name] = result["lines"]
@@ -756,10 +861,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # ── Quick queries (lock-free) ────────────────────────────
     qs = sub.add_parser("quick-status", help="Workspace overview (lock-free)")
-    qs.add_argument("--workspace", required=True)
+    qs.add_argument("--workspace", default=None, help="Workspace slot name")
+    qs.add_argument("--repos", default=None, help="Comma-separated repo names for direct status check")
 
     qt = sub.add_parser("quick-test", help="Run tests without lock")
-    qt.add_argument("--workspace", required=True)
+    qt.add_argument("--workspace", default=None, help="Workspace slot name")
+    qt.add_argument("--repos", default=None, help="Comma-separated repo names for direct test run")
     qt.add_argument("--path", default=None, help="Specific test path/directory")
     qt.add_argument("--lint", action="store_true", help="Also run lint")
 

@@ -233,7 +233,7 @@ async def test_process_message_stops_on_tool_call_budget_exceeded():
     websocket = _DummyWebSocket()
     events = [
         {"_progress": [{"id": f"p{i}", "status": "running", "stage": "tool_call", "tool_name": "_bash", "args": "echo hi"}]}
-        for i in range(1, 17)
+        for i in range(1, 55)
     ]
     agent = _DummyAgent(events=events)
 
@@ -263,7 +263,7 @@ async def test_process_message_stops_on_repeated_tool_failures():
         {
             "_progress": [
                 {
-                    "id": "p1",
+                    "id": f"p{i}",
                     "status": "done",
                     "stage": "tool_output",
                     "tool_name": "_bash",
@@ -271,19 +271,8 @@ async def test_process_message_stops_on_repeated_tool_failures():
                     "output": "Command exited with code 35\ncurl: (35) SSL_ERROR_SYSCALL",
                 }
             ]
-        },
-        {
-            "_progress": [
-                {
-                    "id": "p2",
-                    "status": "done",
-                    "stage": "tool_output",
-                    "tool_name": "_bash",
-                    "args": "curl -I https://example.com",
-                    "output": "Command exited with code 35\ncurl: (35) SSL_ERROR_SYSCALL",
-                }
-            ]
-        },
+        }
+        for i in range(1, 5)
     ]
     agent = _DummyAgent(events=events)
 

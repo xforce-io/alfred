@@ -24,7 +24,7 @@ def test_ws_chat_stops_when_tool_call_budget_exceeded(client, isolated_web_env):
                 }
             ]
         }
-        for i in range(1, 17)
+        for i in range(1, 55)
     ]
 
     agent = ScriptedAgent(name="budget_agent", script=events)
@@ -33,7 +33,7 @@ def test_ws_chat_stops_when_tool_call_budget_exceeded(client, isolated_web_env):
     with client.websocket_connect("/ws/chat/budget_agent") as ws:
         _welcome = ws.receive_json()
         ws.send_json({"message": "执行一些命令"})
-        payloads = receive_until(ws, lambda msg: msg.get("type") == "end")
+        payloads = receive_until(ws, lambda msg: msg.get("type") == "end", max_messages=200)
 
     assert any(
         p.get("type") == "message" and "工具调用次数过多" in p.get("content", "")

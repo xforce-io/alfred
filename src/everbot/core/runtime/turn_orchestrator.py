@@ -66,9 +66,9 @@ class TurnPolicy:
     """Configurable knobs consumed by the orchestrator."""
 
     max_attempts: int = 3
-    max_tool_calls: int = 10
+    max_tool_calls: int = 50
     max_failed_tool_outputs: int = 3
-    max_same_failure_signature: int = 2
+    max_same_failure_signature: int = 3
     max_same_tool_intent: int = 3
     max_non_progress_events: int = 500
     max_tool_args_preview_chars: int = 500
@@ -85,6 +85,12 @@ class TurnPolicy:
         "connection broken",
         "run_coroutine_failed",
     ])
+    # Internal helper tools excluded from tool-call budget counting.
+    budget_exempt_tools: frozenset = field(default_factory=lambda: frozenset({
+        "_load_resource_skill",
+        "_load_skill_resource",
+        "_get_cached_result_detail",
+    }))
 
 
 # Convenience presets
@@ -372,8 +378,9 @@ class TurnOrchestrator:
                     fail_sig = None  # set in completed/failed branch below
 
                     if status in ("running", "processing"):
-                        # Skill invocation → count as tool call
-                        tool_call_count += 1
+                        # Skill invocation → count as tool call (unless exempt)
+                        if s_name not in policy.budget_exempt_tools:
+                            tool_call_count += 1
                         if tool_call_count > policy.max_tool_calls:
                             yield TurnEvent(
                                 type=TurnEventType.TURN_ERROR,
@@ -453,7 +460,9 @@ class TurnOrchestrator:
                         sent_progress[pid] = status
 
                 elif stage == "tool_call":
-                    tool_call_count += 1
+                    t_name = progress.get("tool_name", "")
+                    if t_name not in policy.budget_exempt_tools:
+                        tool_call_count += 1
                     if tool_call_count > policy.max_tool_calls:
                         yield TurnEvent(
                             type=TurnEventType.TURN_ERROR,
@@ -467,7 +476,6 @@ class TurnOrchestrator:
                         return
                     if pid and sent_progress.get(pid) == status:
                         continue
-                    t_name = progress.get("tool_name", "")
                     t_args_raw = progress.get("args", "")
 
                     # Intent dedup check

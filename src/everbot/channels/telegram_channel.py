@@ -614,10 +614,31 @@ class TelegramChannel:
                 meta = out.metadata or {}
                 status = (meta.get("status") or "").lower()
                 name = meta.get("skill_name", "")
+
+                # Hide internal resource-loading tools entirely
+                if name in ("_load_resource_skill", "_load_skill_resource"):
+                    return
+
                 if status in ("processing", "running"):
-                    args = meta.get("skill_args") or ""
-                    args_brief = args[:60] + "..." if len(args) > 60 else args
-                    chunks.append(f"\n🔧 {name}({args_brief})")
+                    skill_args = meta.get("skill_args") or ""
+                    # Extract cmd for _bash/_python for a cleaner display
+                    if name in ("_bash", "_python"):
+                        import json as _json
+                        try:
+                            parsed = _json.loads(skill_args) if isinstance(skill_args, str) else skill_args
+                            if isinstance(parsed, list) and parsed:
+                                cmd = parsed[0].get("cmd", "") if isinstance(parsed[0], dict) else str(parsed[0])
+                            elif isinstance(parsed, dict):
+                                cmd = parsed.get("cmd", "")
+                            else:
+                                cmd = str(parsed)
+                        except (ValueError, TypeError, AttributeError):
+                            cmd = str(skill_args)
+                        cmd_brief = cmd[:80] + "..." if len(cmd) > 80 else cmd
+                        chunks.append(f"\n🔧 {name}({cmd_brief})")
+                    else:
+                        args_brief = skill_args[:60] + "..." if len(skill_args) > 60 else skill_args
+                        chunks.append(f"\n🔧 {name}({args_brief})")
                 elif status in ("completed", "failed"):
                     output = meta.get("skill_output") or ""
                     output_brief = output[:60] + "..." if len(output) > 60 else output
