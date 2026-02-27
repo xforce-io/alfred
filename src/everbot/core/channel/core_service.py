@@ -340,6 +340,7 @@ class ChannelCoreService:
                     agent,
                     lock_already_held=True,
                 )
+                await self._ack_mailbox_events(session_id, mailbox_ack_ids)
                 await on_event(OutboundMessage(session_id, "", msg_type="end", metadata={"status": "cancelled"}))
             except Exception as e:
                 logger.warning("Failed to save session on cancellation: %s", e)
@@ -435,6 +436,7 @@ class ChannelCoreService:
                             lock_already_held=True,
                             trailing_messages=_trailing,
                         )
+                        await self._ack_mailbox_events(session_id, mailbox_ack_ids)
                     except Exception as save_error:
                         logger.warning("Failed to persist session after error: %s", save_error)
                 else:

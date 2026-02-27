@@ -154,6 +154,7 @@ class SessionPersistence:
                     history.pop()
                 serializable_history = history + list(trailing_messages)
             exported_variables = portable.get("variables", {})
+            exported_variables.pop("_history", None)  # avoid duplicating history_messages
             previous = await self.load(session_id)
             next_revision = ((previous.revision if previous else 0) or 0) + 1
             created_at = (
@@ -403,7 +404,7 @@ class SessionPersistence:
                     )
 
             # 2. Build portable state, filtering non-restorable variables
-            _NON_RESTORABLE_VARS = {"workspace_instructions"}
+            _NON_RESTORABLE_VARS = {"workspace_instructions", "_history"}
             restore_variables = {
                 k: v for k, v in (session_data.variables or {}).items()
                 if k not in _NON_RESTORABLE_VARS and v is not None

@@ -56,6 +56,16 @@ def _tool_output(name: str = "", output: str = "", pid: str = "to1") -> Dict[str
     return {"id": pid, "stage": "tool_output", "tool_name": name, "output": output, "status": "completed"}
 
 
+def _skill_call(name: str, args: str = "", pid: str = "sk1") -> Dict[str, Any]:
+    """Simulate Dolphin skill invocation (status=processing → tool call equivalent)."""
+    return {"id": pid, "stage": "skill", "skill_info": {"name": name, "args": args}, "status": "processing"}
+
+
+def _skill_output(name: str = "", output: str = "", pid: str = "so1", status: str = "completed") -> Dict[str, Any]:
+    """Simulate Dolphin skill result (status=completed/failed → tool output equivalent)."""
+    return {"id": pid, "stage": "skill", "skill_info": {"name": name}, "output": output, "status": status}
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -236,3 +246,80 @@ def test_truncate_preview():
     assert trunc
     assert total == 200
     assert len(text) < 200
+
+
+# ---------------------------------------------------------------------------
+# Skill-stage tests (Dolphin emits "skill" instead of "tool_call"/"tool_output")
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_skill_budget_exceeded():
+    """Exceeding max_tool_calls via skill events yields TURN_ERROR."""
+    calls = [_progress_event(_skill_call(f"_bash", pid=f"sk_{i}")) for i in range(5)]
+    agent = _ScriptedAgent(calls)
+    orch = TurnOrchestrator(TurnPolicy(max_attempts=1, max_tool_calls=3))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "go"):
+        events.append(te)
+
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert len(errors) == 1
+    assert "TOOL_CALL_BUDGET_EXCEEDED" in errors[0].error
+
+
+@pytest.mark.asyncio
+async def test_skill_repeated_failures():
+    """Repeated same failure signature via skill events triggers TURN_ERROR."""
+    script = []
+    for i in range(4):
+        script.append(_progress_event(_skill_call("_bash", pid=f"sk{i}")))
+        script.append(_progress_event(_skill_output("_bash", "Command exited with code 1", pid=f"so{i}")))
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(TurnPolicy(max_attempts=1, max_same_failure_signature=2, max_tool_calls=20))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "go"):
+        events.append(te)
+
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert len(errors) == 1
+    assert "REPEATED_TOOL_FAILURES" in errors[0].error
+
+
+@pytest.mark.asyncio
+async def test_skill_repeated_intent():
+    """Repeated same tool intent via skill events triggers TURN_ERROR."""
+    script = []
+    for i in range(5):
+        script.append(_progress_event(_skill_call("_bash", "cat > /tmp/foo.txt << EOF", pid=f"sk{i}")))
+        script.append(_progress_event(_skill_output("_bash", "ok", pid=f"so{i}")))
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(TurnPolicy(max_attempts=1, max_same_tool_intent=2, max_tool_calls=20))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "go"):
+        events.append(te)
+
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert len(errors) == 1
+    assert "REPEATED_TOOL_INTENT" in errors[0].error
+
+
+@pytest.mark.asyncio
+async def test_skill_counts_in_turn_complete():
+    """Skill events correctly increment tool_call_count and tool_execution_count."""
+    script = [
+        _progress_event(_skill_call("_bash", "echo hi", pid="sk1")),
+        _progress_event(_skill_output("_bash", "hi", pid="so1")),
+        _progress_event(_skill_call("_read_file", "/tmp/x", pid="sk2")),
+        _progress_event(_skill_output("_read_file", "content", pid="so2")),
+        _progress_event(_llm_delta("done")),
+    ]
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(TurnPolicy(max_attempts=1, max_tool_calls=10))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "go"):
+        events.append(te)
+
+    complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
+    assert complete.tool_call_count == 2
+    assert complete.tool_execution_count == 2
+    assert complete.tool_names_executed == ["_bash", "_read_file"]

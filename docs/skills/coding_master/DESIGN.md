@@ -1,8 +1,8 @@
 # Coding Master 技能设计文档
 
-> **文档版本**: rev7
+> **文档版本**: rev8
 > **创建时间**: 2026-02-24
-> **最后更新**: 2026-02-25
+> **最后更新**: 2026-02-27
 > **状态**: 设计中
 
 ---
@@ -82,6 +82,15 @@ workspace (e.g., ~/lab/coding_master/env0)/
 ├── .coding-master/              # 阶段产物
 │   ├── workspace_snapshot.json
 │   ├── env_snapshot.json
+│   ├── feature_plan.json        # 任务拆分索引（complex 任务时生成）
+│   ├── features/                # feature 级别的产物子目录
+│   │   ├── 0/
+│   │   │   ├── analysis.md
+│   │   │   ├── criteria.json
+│   │   │   ├── verification.json
+│   │   │   └── test_report.json
+│   │   └── 1/
+│   │       └── ...
 │   └── ...
 ├── myapp/                       # clone of repos.myapp
 │   ├── .git/
@@ -96,13 +105,13 @@ workspace (e.g., ~/lab/coding_master/env0)/
 ```
 用户任务: "重构认证系统"
          │
-         ▼  Phase 2 分析后发现需要拆分
+         ▼  Phase 2 分析后 complexity=complex，自动生成 feature plan
    ┌─────────────────────────────────┐
    │  Feature Plan (feature_plan.json) │
    │  ┌──────────────────────────┐   │
-   │  │ 0: 抽取 auth middleware  │ ──→ Phase 4→6 → PR #15 ✅
-   │  │ 1: 添加 JWT 验证        │ ──→ Phase 4→6 → PR #16 ✅
-   │  │ 2: 迁移 session 逻辑    │ ──→ Phase 4→6 → (进行中)
+   │  │ 0: 抽取 auth middleware  │ ──→ develop → verify → PR #15 ✅
+   │  │ 1: 添加 JWT 验证        │ ──→ develop → verify → PR #16 ✅
+   │  │ 2: 迁移 session 逻辑    │ ──→ develop → verify → (进行中)
    │  └──────────────────────────┘   │
    └─────────────────────────────────┘
 ```
@@ -349,6 +358,7 @@ dispatch.py 每次通过 `_bash()` 调用都是独立进程，天然读取最新
     "workspace_snapshot": ".coding-master/workspace_snapshot.json",
     "env_snapshot": ".coding-master/env_snapshot.json",
     "analysis_report": ".coding-master/phase2_analysis.md",
+    "feature_plan": ".coding-master/feature_plan.json",
     "test_report": ".coding-master/test_report.json",
     "env_verify_report": ".coding-master/env_verify_report.json"
   },
@@ -597,14 +607,41 @@ class EngineResult:
 
 **Phase 2 (分析) → AnalysisReport**
 
-Engine 的 summary 是自由文本，dispatch.py 不做结构化解析。Agent (LLM) 负责理解 summary 内容并：
+Engine 的 summary 包含自由文本分析和结构化字段。dispatch.py 从 summary 中解析 `complexity` 分类（trivial / standard / complex）。当 complexity 为 complex 时，summary 中还包含结构化的 Feature Plan JSON，dispatch.py 解析后自动调用 `FeatureManager.create_plan()` 写入 `feature_plan.json` 和对应的 criteria 文件。
+
+Agent (LLM) 负责理解 summary 内容并：
 - 格式化后发给用户
 - 透传 summary 全文作为 Phase 4 的上下文
+- 根据 complexity 决定 Phase 3 的交互方式（见 [7.5 节](#75-phase-3-方案确认)）
 
 ```json
 {
   "success": true,
-  "summary": "## 问题定位\nheartbeat.py:142 ...\n## 根因分析\n...\n## 修复方案\n...",
+  "summary": "## 问题定位\nheartbeat.py:142 ...\n## 根因分析\n...\n## 修复方案\n...\n## Complexity: trivial",
+  "complexity": "trivial",
+  "files_changed": [],
+  "error": null
+}
+```
+
+当 complexity=complex 时，返回结果额外包含 feature_plan：
+
+```json
+{
+  "success": true,
+  "summary": "## 问题定位\n...\n## 修复方案\n...\n## Complexity: complex\n## Feature Plan\n...",
+  "complexity": "complex",
+  "feature_plan": [
+    {
+      "title": "抽取 auth middleware",
+      "task": "将 app.py 中的认证逻辑抽取为独立 middleware",
+      "depends_on": [],
+      "acceptance_criteria": [
+        {"type": "test", "target": "tests/unit/test_auth.py", "auto": true},
+        {"type": "assert", "description": "middleware registered in app factory", "auto": true}
+      ]
+    }
+  ],
   "files_changed": [],
   "error": null
 }
@@ -676,16 +713,23 @@ Workspace 确认 → Env 探测   →  问题分析  →   方案确认  →   �
   │                │              │             │             │             │               │             │
   ▼                ▼              ▼             ▼             ▼             ▼               ▼             ▼
 Workspace 快照  Env Snapshot   诊断报告     用户确认      代码变更     测试/lint 报告   PR URL       验证报告
+                               +complexity
 ```
+
+**自适应复杂度**：Phase 2 分析时 Engine 输出 `complexity` 分类（trivial / standard / complex），Phase 3 根据分类决定交互方式：
+
+- **trivial**：跳过 Phase 3 确认，直接进入 Phase 4 开发
+- **standard**：标准流程，等待用户确认
+- **complex**：Phase 2 同时自动生成 Feature Plan，Phase 3 向用户展示拆分方案并建议分步执行
 
 默认在**关键阶段**等待用户确认，避免无意义往返：
 
-- 必须确认：Phase 0（环境确认）、Phase 3（方案确认，Phase 本身即用户决策点）、Phase 5（测试结果）、Phase 6（提交 PR 前）
+- 必须确认：Phase 0（环境确认）、Phase 3（方案确认，Phase 本身即用户决策点；trivial 除外）、Phase 5（测试结果）、Phase 6（提交 PR 前）
 - 自动串行：Phase 4 完成后自动进入 Phase 5
 - 可选阶段：Phase 7（Env 验证）仅在有关联 Env 且用户需要部署验证时触发
-- 可配置：高风险仓库可切换为”每阶段都确认”
+- 可配置：高风险仓库可切换为"每阶段都确认"
 
-**任务拆分分支**：Phase 2 分析后如果发现任务过大，进入 Feature 循环（见[第八节](#八feature-管理)），每个 Feature 独立走 Phase 4→6（Feature 循环中不包含 Phase 7，部署验证在全部 Feature 完成后统一进行）。
+**任务拆分分支**：Phase 2 分析后如果 complexity=complex，自动生成 Feature Plan 并进入 Feature 循环（见[第八节](#八feature-管理)），每个 Feature 独立走 develop → verify → submit-pr（Feature 循环中不包含 Phase 7，部署验证在全部 Feature 完成后统一进行）。
 
 ### 7.2 Phase 0: Workspace 确认
 
@@ -729,7 +773,7 @@ dispatch.py workspace-check --repos myapp --workspace env0 --task "fix: heartbea
 }
 ```
 
-或 `{"success": false, "error": "..."}`。Agent 不需要理解 lock 细节。
+或 `{"success": false, "error": "..."}`. Agent 不需要理解 lock 细节。
 
 **后续 Phase 的 --workspace 参数**：Phase 0 返回分配到的 workspace 后，后续命令继续用 `--workspace env0`（因为 workspace 已确定）。内部执行路径：单 repo 时 cwd 为 `ws_path/{repo_name}`，多 repo 时 cwd 为 `ws_path`（workspace 根目录）。
 
@@ -755,7 +799,7 @@ dispatch.py env-probe --workspace env0 --env myapp-prod
 dispatch.py analyze --workspace env0 --task "heartbeat 定时任务没触发" --engine claude
 ```
 
-脚本内部：读取 `.coding-master/` 下的 workspace_snapshot + env_snapshot → 注入 prompt → 调用 Engine → 结果落盘 `.coding-master/phase2_analysis.md` → 更新 lock phase。
+脚本内部：读取 `.coding-master/` 下的 workspace_snapshot + env_snapshot → 注入 prompt → 调用 Engine → 从 Engine 结果中解析 complexity 和可选的 feature plan → 结果落盘 `.coding-master/phase2_analysis.md` → 当 complexity=complex 时自动调用 `FeatureManager.create_plan()` 写入 `feature_plan.json` 及 criteria 文件 → 更新 lock phase。
 
 Engine prompt 模板：
 
@@ -776,7 +820,33 @@ Engine prompt 模板：
 3. 修复方案（可多个，标注推荐）
 4. 影响范围
 5. 风险评估（低/中/高）
-6. 是否需要更多 Env 信息
+6. 复杂度分类（Complexity）: trivial / standard / complex
+   - trivial: 重命名、typo 修复、添加 import、单行修复
+   - standard: 常规 bug 修复、普通功能开发
+   - complex: 跨模块重构、新子系统
+7. 是否需要更多 Env 信息
+
+如果 complexity 为 complex，还需输出：
+8. Feature Plan (JSON):
+[{"title": "...", "task": "...", "depends_on": [], "acceptance_criteria": [{"type": "test", "target": "...", "auto": true}, {"type": "assert", "description": "...", "auto": true}, {"type": "manual", "description": "...", "auto": false}]}]
+```
+
+**complexity=complex 时的自动处理**：`cmd_analyze` 解析 Engine 返回的 Feature Plan JSON，自动调用 `FeatureManager.create_plan()` 完成以下操作：
+- 写入 `.coding-master/feature_plan.json`（含所有 feature 的核心字段）
+- 为每个 feature 创建 `.coding-master/features/{index}/criteria.json`（acceptance criteria）
+
+无需 Agent 手动构造 JSON 或调用 `feature-plan`。
+
+**analyze 返回值**（增加 complexity 和 feature_plan_created 字段）：
+
+```json
+{
+  "success": true,
+  "summary": "## 问题定位\n...\n## 修复方案\n...",
+  "complexity": "complex",
+  "feature_plan_created": true,
+  "feature_count": 3
+}
 ```
 
 如果 Engine 请求更多 Env 信息，Agent 调用 `env-probe --commands ...` 后再次调用 `analyze`（迭代分析，最多 2 轮）。
@@ -785,9 +855,26 @@ Engine prompt 模板：
 
 **执行者**：用户
 
+根据 Phase 2 返回的 complexity 分三种流程：
+
+**trivial（自动跳过）**：
+- Agent 向用户展示分析摘要（一行总结）
+- 不等待确认，直接进入 Phase 4 开发
+- 示例：`分析完成：typo 修复 (config.py:12)，复杂度: trivial，自动开始修复...`
+
+**standard（标准确认）**：
+- 现有流程不变，等待用户确认
 - "继续" → Phase 4
 - "用方案 2" → 指定方案后 Phase 4
 - "再看看线上日志" → Agent 调用 `env-probe --commands ...` → 补充后重跑 Phase 2
+- "取消" → Agent 调用 `dispatch.py release --workspace env0`
+
+**complex（展示 Feature Plan）**：
+- Agent 向用户展示自动生成的 Feature Plan 拆分方案及各 feature 的 acceptance criteria
+- 建议用户按 Feature Plan 分步执行
+- "按计划推进" → 进入 Feature 循环（见[第八节](#八feature-管理)）
+- "调整计划" → Agent 调用 `feature-update` 等命令修改计划后再确认
+- "不拆分，一次做" → 按 standard 流程走 Phase 4
 - "取消" → Agent 调用 `dispatch.py release --workspace env0`
 
 ### 7.6 Phase 4: 编码开发
@@ -1008,45 +1095,97 @@ release --cleanup                   git cleanup（含远程分支）+ delete loc
 
 ### 8.1 触发时机
 
-Phase 2 分析完成后，Agent 判断任务是否需要拆分：
+Phase 2 分析时 Engine 输出 `complexity` 分类。当 complexity=complex 时，Engine 同时输出结构化的 Feature Plan JSON（含 title、task、depends_on、acceptance_criteria），`cmd_analyze` 自动解析并调用 `FeatureManager.create_plan()` 写入 `feature_plan.json` 和 criteria 文件。
 
-| 情况 | Agent 行为 |
-|------|-----------|
-| 单次可完成 | 正常进入 Phase 3→4→5→6 |
-| 需要多步 | 调用 `feature-plan` 创建拆分计划，进入 Feature 循环 |
+| complexity | Agent 行为 |
+|-----------|-----------|
+| trivial | 跳过 Phase 3 确认，直接进入 Phase 4 |
+| standard | 正常进入 Phase 3→4→5→6 |
+| complex | analyze 自动生成 Feature Plan，Phase 3 向用户展示拆分方案，确认后进入 Feature 循环 |
 
-判断标准由 Agent (LLM) 根据分析报告自行决定，不做硬规则。
+**与 analyze 的集成**：无需 Agent 手动调用 `feature-plan` 创建计划 — analyze 检测到 complexity=complex 时一步完成分析 + 拆分。Agent 只需根据返回的 `feature_plan_created: true` 字段进入 Feature 循环流程。
 
-### 8.2 数据结构
+### 8.2 存储方案
 
-落盘到 `.coding-master/feature_plan.json`：
+采用**单索引 + 产物子目录**方案（Scheme C）：
+
+```
+.coding-master/
+  feature_plan.json          # 轻量索引，所有 feature 核心字段
+  features/
+    0/
+      analysis.md            # feature 级别的分析记录
+      criteria.json          # acceptance criteria 定义
+      verification.json      # 验证执行记录
+      test_report.json       # feature 级别的测试报告
+      notes.md               # 备注（可选）
+    1/
+      analysis.md
+      criteria.json
+      verification.json
+      ...
+```
+
+**设计要点**：
+
+- `feature_plan.json` 是轻量索引文件，包含所有 feature 的核心字段（status、depends_on、timestamps 等），一次读取即可获取全局进度
+- `features/{index}/` 下的产物文件**按需创建**，不预创建空文件
+- criteria.json 在 `create_plan()` 时由 analyze 的 Feature Plan JSON 自动写入
+- verification.json 在 `feature-verify` 执行时创建/更新
+
+### 8.3 数据结构
+
+**feature_plan.json**（索引文件）：
 
 ```json
 {
   "origin_task": "重构认证系统",
-  "created_at": "2026-02-24T10:35:00Z",
+  "created_at": "2026-02-26T10:00:00Z",
   "features": [
     {
       "index": 0,
       "title": "抽取 auth middleware",
-      "task": "将 app.py 中的认证逻辑抽取为独立 middleware ...",
+      "task": "将 app.py 中的认证逻辑抽取为独立 middleware",
       "status": "done",
+      "depends_on": [],
+      "criteria_count": 3,
+      "verified_count": 3,
       "branch": "feat/auth-middleware",
-      "pr": "#15"
+      "pr": "#15",
+      "created_at": "2026-02-26T10:00:00Z",
+      "started_at": "2026-02-26T10:05:00Z",
+      "completed_at": "2026-02-26T11:30:00Z",
+      "attempts": 1
     },
     {
       "index": 1,
       "title": "添加 JWT 验证",
-      "task": "在 auth middleware 中集成 PyJWT ...",
+      "task": "在 auth middleware 中集成 PyJWT，验证 token 签名和有效期",
       "status": "in_progress",
-      "depends_on": [0]
+      "depends_on": [0],
+      "criteria_count": 2,
+      "verified_count": 0,
+      "branch": "feat/jwt-auth",
+      "pr": null,
+      "created_at": "2026-02-26T10:00:00Z",
+      "started_at": "2026-02-26T11:35:00Z",
+      "completed_at": null,
+      "attempts": 1
     },
     {
       "index": 2,
       "title": "迁移 session 逻辑",
-      "task": "将现有 session-based auth 迁移到 JWT ...",
+      "task": "将现有 session-based auth 迁移到 JWT，移除旧 session 代码",
       "status": "pending",
-      "depends_on": [1]
+      "depends_on": [1],
+      "criteria_count": 4,
+      "verified_count": 0,
+      "branch": null,
+      "pr": null,
+      "created_at": "2026-02-26T10:00:00Z",
+      "started_at": null,
+      "completed_at": null,
+      "attempts": 0
     }
   ]
 }
@@ -1054,53 +1193,186 @@ Phase 2 分析完成后，Agent 判断任务是否需要拆分：
 
 字段说明：
 
-- `status`: `pending` → `in_progress` → `done`
+- `status`: `pending` → `in_progress` → `done` / `failed` / `skipped`
 - `depends_on`: 索引数组，被依赖的 feature 必须 `done` 才能开始
+- `criteria_count` / `verified_count`: acceptance criteria 总数和已通过数，从 criteria.json / verification.json 中统计
 - `branch` / `pr`: feature 完成后填入，供后续 feature 参考
+- `created_at` / `started_at` / `completed_at`: 时间戳，`feature-next` 时写入 `started_at`，`feature-done` 时写入 `completed_at`
+- `attempts`: 开发尝试次数，每次调用 develop 时递增。超过阈值（默认 3）时建议用户介入
 
-### 8.3 Feature 循环
+### 8.4 Acceptance Criteria（验收标准）
+
+每个 feature 的 acceptance criteria 存储在 `features/{index}/criteria.json`，由 `create_plan()` 从 Engine 输出的 Feature Plan JSON 自动写入。
+
+**criteria.json 结构**：
+
+```json
+[
+  {
+    "id": "c0",
+    "type": "test",
+    "target": "tests/unit/test_auth.py",
+    "auto": true
+  },
+  {
+    "id": "c1",
+    "type": "assert",
+    "description": "middleware registered in app factory",
+    "auto": true
+  },
+  {
+    "id": "c2",
+    "type": "manual",
+    "description": "login flow works on staging",
+    "auto": false
+  }
+]
+```
+
+**criteria 类型**：
+
+| type | 说明 | 验证方式 | auto |
+|------|------|---------|------|
+| `test` | 运行指定测试文件/路径 | `pytest {target}` 或 `npm test {target}` | true |
+| `assert` | 代码中存在某个行为/结构 | Engine 检查代码是否满足描述 | true |
+| `manual` | 需人工确认的验收项 | 提醒用户确认，不阻塞自动流程 | false |
+
+**追加 criteria**：用户可通过 `feature-criteria` 命令在 feature 执行过程中追加新的验收标准：
+
+```bash
+dispatch.py feature-criteria --workspace env0 --index 0 --action view
+dispatch.py feature-criteria --workspace env0 --index 0 --action append \
+  --type test --target "tests/integration/test_auth_flow.py"
+```
+
+### 8.5 验证机制
+
+验证分为两个层级：
+
+**Workspace 级验证（Phase 5，全量测试）**：
+- 现有的 Phase 5 `test` 命令，运行全量 lint + test
+- 确保代码变更不引入回归
+- 作用于整个 workspace（所有 repo）
+
+**Feature 级验证（嵌入 develop 循环）**：
+- 针对单个 feature 的 acceptance_criteria 定向验证
+- 在每个 feature 的 develop 完成后执行，不是独立的 Phase
+- 验证结果记录到 `features/{index}/verification.json`
+
+**verification.json 结构**：
+
+```json
+[
+  {
+    "id": "c0",
+    "passed": true,
+    "output": "3 passed in 0.12s",
+    "run_at": "2026-02-26T11:00:00Z"
+  },
+  {
+    "id": "c1",
+    "passed": true,
+    "output": "found register_auth_middleware() in create_app()",
+    "run_at": "2026-02-26T11:00:00Z"
+  },
+  {
+    "id": "c2",
+    "passed": null,
+    "note": "awaiting user confirmation"
+  }
+]
+```
+
+**验证流程**（`feature-verify` 内部）：
+
+1. 读取 `features/{index}/criteria.json`
+2. 对每个 `auto: true` 的 criteria 执行验证：
+   - `test`: 运行 `pytest {target}` 或对应的测试命令，检查退出码
+   - `assert`: 构造 Engine prompt，让 Engine 检查代码是否满足描述
+3. 对 `auto: false` 的 criteria（manual 类型），标记为 `passed: null`，提醒用户确认
+4. 结果写入 `features/{index}/verification.json`
+5. 更新 `feature_plan.json` 中的 `verified_count`
+
+### 8.6 生命周期状态机
 
 ```
-feature-plan (创建计划)
+pending → in_progress → [develop → verify → retry if failed] → done / failed / skipped
+```
+
+状态转换规则：
+
+| 当前状态 | 触发 | 目标状态 |
+|---------|------|---------|
+| pending | `feature-next` 选中 | in_progress |
+| in_progress | `feature-done` 且所有 auto criteria 通过 | done |
+| in_progress | `feature-done --force` 跳过未通过的 criteria | done |
+| in_progress | attempts 超限且用户放弃 | failed |
+| pending / in_progress | 用户跳过 | skipped |
+
+**`feature-done` 检查逻辑**：
+
+- 所有 `auto: true` 的 criteria 必须 `passed: true`，否则报错
+- `auto: false` 的 criteria（manual 类型）不阻塞，但在报告中提醒用户待确认
+- 未满足时可用 `--force` 强制完成
+- `attempts` 计数器每次 develop 调用时递增，超过阈值（默认 3）时建议用户介入（但不强制）
+
+### 8.7 Feature 循环
+
+```
+analyze (complexity=complex, auto-generate feature plan)
+     │
+     ▼
+Phase 3: 用户确认 Feature Plan
      │
      ▼
 feature-next ──→ 返回下一个可执行的 feature
      │
      ▼
-  Phase 4 (develop) → Phase 5 (test) → Phase 6 (submit-pr)
+  develop → feature-verify → [retry if failed] → test (workspace 级) → submit-pr
      │
      ▼
 feature-done ──→ 标记完成，记录 branch/pr
      │
      ├── 还有剩余 feature → 回到 feature-next
-     └── 全部完成 → release workspace
+     └── 全部完成 → release workspace（可选 Phase 7 Env 验证）
 ```
 
-每个 feature 复用现有的 develop → test → submit-pr 流程，独立分支、独立 PR。
+与 rev7 的区别：
+- Feature Plan 由 analyze 自动生成，不需要手动调用 `feature-plan`
+- 每个 feature 的 develop 后增加 `feature-verify` 步骤（feature 级定向验证）
+- verify 失败时在 feature 内部重试（develop → verify），不需要重走整个流程
+- workspace 级 `test`（Phase 5）在 feature-verify 通过后执行，确保无回归
 
-### 8.4 Agent 视角
+### 8.8 Agent 视角
 
-Agent 的 SKILL.md 只需要一条简单规则：
+Agent 的 SKILL.md 只需要以下规则：
 
-> Phase 2 分析后，如果任务需要多步实现：
-> 1. 调用 `feature-plan` 拆分
-> 2. 向用户展示拆分方案，等待确认
-> 3. 循环：`feature-next` → `develop` → `test` → `submit-pr` → `feature-done`
+> Phase 2 分析后，根据返回的 complexity 字段决定流程：
+>
+> **trivial**: 展示摘要，跳过确认，直接 develop → test → submit-pr
+>
+> **standard**: 展示分析，等用户确认，develop → test → submit-pr
+>
+> **complex**: analyze 已自动生成 Feature Plan。展示拆分方案，等用户确认后：
+> 1. 循环：`feature-next` → `develop` → `feature-verify` → `test` → `submit-pr` → `feature-done`
+> 2. `feature-verify` 失败时，重试 develop → feature-verify（最多 attempts 阈值次）
+> 3. `feature-done` 检查 criteria，auto 全通过才能完成，manual 提醒用户
 > 4. 每个 feature 完成后询问用户"继续下一个？"
 > 5. 全部完成后 `release`
 
-Agent 不需要管理索引、依赖、状态 — 这些全部由工具内部处理。
+Agent 不需要管理索引、依赖、状态、criteria 文件 — 这些全部由工具内部处理。
 
-### 8.5 中途调整
+### 8.9 中途调整
 
 用户可以在 feature 间隙调整计划：
 
 ```
-Agent: ✅ Feature 0 完成 (PR #15)。下一个: "添加 JWT 验证"，继续？
+Agent: ✅ Feature 0 完成 (PR #15)，3/3 criteria 通过。
+       下一个: "添加 JWT 验证"，继续？
 
 用户: 先等等，JWT 那个不做了，直接做 session 迁移
 
-Agent: (调用 feature-skip/feature-update 调整计划)
+Agent: (调用 feature-update 调整计划)
        好的，跳过 feature 1，开始 feature 2: "迁移 session 逻辑"
 ```
 
@@ -1110,6 +1382,7 @@ Agent: (调用 feature-skip/feature-update 调整计划)
 feature-update --workspace env0 --index 1 --status skipped
 feature-insert --workspace env0 --after 0 --title "..." --task "..."
 feature-reorder --workspace env0 --order "0,2,1"
+feature-criteria --workspace env0 --index 2 --action append --type test --target "..."
 ```
 
 ---
@@ -1143,9 +1416,9 @@ feature-reorder --workspace env0 --order "0,2,1"
 |------|------|----------|
 | `workspace-check` | Phase 0: 确认 + 锁定 + 探测 | repos（必填，逗号分隔）, task, engine, workspace?（可选） |
 | `env-probe` | Phase 1: Env 探测 | workspace, env, commands? |
-| `analyze` | Phase 2: Engine 分析 | workspace, task, engine |
+| `analyze` | Phase 2: Engine 分析 + complexity 分类 | workspace, task, engine |
 | `develop` | Phase 4: Engine 编码 | workspace, task, plan, branch, engine |
-| `test` | Phase 5: 测试验证 | workspace |
+| `test` | Phase 5: 测试验证（workspace 级） | workspace |
 | `submit-pr` | Phase 6: 提交 PR | workspace, title, body |
 | `env-verify` | Phase 7: Env 部署验证 | workspace, env |
 | `release` | 释放 workspace | workspace, cleanup? |
@@ -1155,11 +1428,14 @@ feature-reorder --workspace env0 --order "0,2,1"
 
 | 工具 | 用途 | 关键参数 |
 |------|------|----------|
-| `feature-plan` | 创建拆分计划 | workspace, features |
 | `feature-next` | 获取下一个待执行 feature | workspace |
-| `feature-done` | 标记 feature 完成 | workspace, index, branch?, pr? |
+| `feature-done` | 标记 feature 完成 | workspace, index, branch?, pr?, force? |
 | `feature-list` | 查看全局进度 | workspace |
 | `feature-update` | 调整单个 feature | workspace, index, ... |
+| `feature-criteria` | 查看/追加 feature 的 acceptance criteria | workspace, index, action, type?, target?, description? |
+| `feature-verify` | 执行 feature 级 acceptance criteria 验证 | workspace, index |
+
+注：`feature-plan` 不再作为独立工具暴露 — Feature Plan 由 `analyze` 在 complexity=complex 时自动生成。如需手动创建（极少数情况），可通过 `feature-update` 间接实现。
 
 ### 9.3 SKILL.md 中的工具描述
 
@@ -1171,11 +1447,14 @@ feature-reorder --workspace env0 --order "0,2,1"
 
 ## 工作流
 线性推进 Phase 0→7。每个工具对应一个 Phase，返回 JSON，只需判断 success。
+Phase 2 (analyze) 返回 complexity 字段：trivial 跳过确认，standard 等待确认，complex 自动生成 Feature Plan。
 Phase 7 (env-verify) 可选：PR 提交后如需部署验证，等用户通知部署完成后调用。
 
 ## Feature 管理
-当 analyze 结果显示任务需要多步实现时：
-feature-plan → 循环 (feature-next → develop → test → submit-pr → feature-done) → release
+当 analyze 返回 complexity=complex 时，Feature Plan 已自动生成。
+循环 (feature-next → develop → feature-verify → test → submit-pr → feature-done) → release
+feature-verify 失败时在 feature 内部重试 develop → feature-verify。
+feature-criteria 可在执行过程中查看或追加验收标准。
 ```
 
 ---
@@ -1192,7 +1471,7 @@ skills/coding-master/
 │   ├── workspace.py            # Workspace 管理 + lock
 │   ├── env_probe.py            # Env 探测（本地 + SSH + 自动发现）
 │   ├── config_manager.py       # 配置 CRUD（供对话操作）
-│   ├── feature_manager.py      # Feature Plan 管理（任务拆分）
+│   ├── feature_manager.py      # Feature Plan 管理（任务拆分 + criteria + 验证）
 │   ├── test_runner.py          # 测试 + lint 执行与报告
 │   ├── git_ops.py              # Git 操作（分支、提交、PR）
 │   └── engine/
@@ -1227,7 +1506,7 @@ COMMANDS = {
                             repos=args.repos.split(","), task=args.task, engine=args.engine,
                             workspace=getattr(args, 'workspace', None)),
     "env-probe":        lambda args: with_lock_update("env-probe", EnvProber().probe, args),
-    "analyze":          lambda args: with_lock_update("analyzing", engine_run, "analyze", args),
+    "analyze":          lambda args: with_lock_update("analyzing", cmd_analyze, args),
     "develop":          lambda args: with_lock_update("developing", engine_run, "develop", args),
     "test":             lambda args: with_lock_update("testing", TestRunner().run, args),
     "submit-pr":        lambda args: with_lock_update("submitted", GitOps().submit_pr, args),
@@ -1236,12 +1515,32 @@ COMMANDS = {
     "renew-lease":      lambda args: WorkspaceManager().renew_lease(args),
 
     # Feature 域（任务拆分管理）
-    "feature-plan":     lambda args: FeatureManager(args.workspace).create_plan(args),
     "feature-next":     lambda args: FeatureManager(args.workspace).next_feature(),
     "feature-done":     lambda args: FeatureManager(args.workspace).mark_done(args),
     "feature-list":     lambda args: FeatureManager(args.workspace).list_all(),
     "feature-update":   lambda args: FeatureManager(args.workspace).update(args),
+    "feature-criteria": lambda args: FeatureManager(args.workspace).criteria(args),
+    "feature-verify":   lambda args: with_lock_update("verifying-feature",
+                            FeatureManager(args.workspace).verify, args),
 }
+
+def cmd_analyze(args):
+    """Phase 2 分析：调用 Engine + 解析 complexity + 自动生成 feature plan（如 complex）"""
+    result = engine_run("analyze", args)
+    complexity = result.get("complexity", "standard")
+
+    if complexity == "complex" and "feature_plan" in result:
+        fm = FeatureManager(args.workspace)
+        fm.create_plan_from_analysis(
+            origin_task=args.task,
+            features=result["feature_plan"]
+        )
+        result["feature_plan_created"] = True
+        result["feature_count"] = len(result["feature_plan"])
+    else:
+        result["feature_plan_created"] = False
+
+    return result
 
 def with_lock_update(phase, fn, args):
     """校验 lock 存在且未过期 → 执行 fn → 更新 phase + 续 lease"""
@@ -1280,6 +1579,16 @@ dispatch.py env-verify --workspace env0 --env myapp-staging
 dispatch.py release --workspace env0
 dispatch.py release --workspace env0 --cleanup    # 回滚分支（含远程）+ 释放 lock
 dispatch.py renew-lease --workspace env0           # 等待用户输入时续期
+
+# Feature 管理
+dispatch.py feature-next --workspace env0
+dispatch.py feature-done --workspace env0 --index 0 --branch feat/auth --pr "#15"
+dispatch.py feature-done --workspace env0 --index 0 --force    # 跳过未通过 criteria
+dispatch.py feature-list --workspace env0
+dispatch.py feature-update --workspace env0 --index 1 --status skipped
+dispatch.py feature-criteria --workspace env0 --index 0 --action view
+dispatch.py feature-criteria --workspace env0 --index 0 --action append --type test --target "tests/..."
+dispatch.py feature-verify --workspace env0 --index 0
 ```
 
 所有输出统一 JSON stdout，Agent 只需判断 `success: true/false`。
@@ -1304,6 +1613,7 @@ dispatch.py renew-lease --workspace env0           # 等待用户输入时续期
 | `ENGINE_ERROR` | Engine 内部错误 | 报告错误详情 |
 | `COMMAND_DENIED` | Env 命令不在白名单 | 告知用户该命令被安全策略禁止 |
 | `TEST_FAILED` | 测试未通过（非错误） | 报告详情，提供修复/放弃选项 |
+| `CRITERIA_NOT_MET` | feature-done 时 criteria 未全部通过 | 报告未通过项，提示 --force 或继续修复 |
 
 ### 10.3 config_manager.py
 
@@ -1390,31 +1700,73 @@ class EnvProber:
 
 ```python
 class FeatureManager:
-    """Feature Plan 的 CRUD，管理任务拆分状态"""
+    """Feature Plan 的 CRUD + acceptance criteria + 验证，管理任务拆分状态"""
 
     def __init__(self, workspace: str):
-        self.plan_path = f"{workspace_path}/.coding-master/feature_plan.json"
+        self.ws_path = resolve_workspace_path(workspace)
+        self.plan_path = f"{self.ws_path}/.coding-master/feature_plan.json"
+        self.features_dir = f"{self.ws_path}/.coding-master/features"
 
-    def create_plan(self, args) -> dict:
-        """创建拆分计划，落盘 feature_plan.json"""
+    def create_plan_from_analysis(self, origin_task: str, features: list[dict]) -> dict:
+        """从 analyze 的 Engine 输出创建 Feature Plan。
+        1. 解析 features 列表（含 title, task, depends_on, acceptance_criteria）
+        2. 写入 feature_plan.json（核心字段 + 初始 status/timestamps）
+        3. 为每个 feature 创建 features/{index}/criteria.json
+        返回 {success, feature_count}"""
         ...
 
     def next_feature(self) -> dict | None:
         """返回下一个可执行的 feature（status=pending 且 depends_on 全部 done）
-        自动将其 status 设为 in_progress"""
+        自动将其 status 设为 in_progress，写入 started_at，
+        返回 feature 详情 + criteria 摘要"""
         ...
 
     def mark_done(self, args) -> dict:
-        """标记 feature 完成，记录 branch/pr
-        返回 {completed: N, remaining: M, next: ...}"""
+        """标记 feature 完成，记录 branch/pr。
+        检查 auto criteria 是否全部通过：
+        - 全部通过 → status=done, 写入 completed_at
+        - 未全部通过且无 --force → 返回 error (CRITERIA_NOT_MET)
+        - 未全部通过但有 --force → status=done
+        - auto: false 的 criteria 不阻塞，但在返回中提醒
+        返回 {completed: N, remaining: M, pending_manual: [...], next: ...}"""
         ...
 
     def list_all(self) -> dict:
-        """返回所有 feature 及状态摘要"""
+        """返回所有 feature 及状态摘要，含 criteria 统计"""
         ...
 
     def update(self, args) -> dict:
-        """调整单个 feature（skip/修改 task/插入新 feature）"""
+        """调整单个 feature（skip/修改 task/插入新 feature/调整顺序）"""
+        ...
+
+    def criteria(self, args) -> dict:
+        """查看或追加 feature 的 acceptance criteria。
+        action=view: 返回 criteria.json 内容
+        action=append: 追加新 criteria 条目，更新 criteria_count"""
+        ...
+
+    def verify(self, args) -> dict:
+        """执行 feature 级 acceptance criteria 验证。
+        1. 读取 features/{index}/criteria.json
+        2. 对每个 auto: true 的 criteria 执行验证：
+           - test: 运行 pytest/npm test 指定路径
+           - assert: 调用 Engine 检查代码
+        3. auto: false 的 criteria 标记 passed=null，提醒用户
+        4. 写入 features/{index}/verification.json
+        5. 更新 feature_plan.json 中的 verified_count
+        返回 {all_auto_passed: bool, results: [...], pending_manual: [...]}"""
+        ...
+
+    def _ensure_feature_dir(self, index: int) -> str:
+        """确保 features/{index}/ 目录存在，返回路径"""
+        ...
+
+    def _load_criteria(self, index: int) -> list[dict]:
+        """加载 features/{index}/criteria.json"""
+        ...
+
+    def _load_verification(self, index: int) -> list[dict]:
+        """加载 features/{index}/verification.json，不存在则返回空列表"""
         ...
 ```
 
@@ -1466,6 +1818,7 @@ Agent: 分析完成：
        📍 heartbeat.py:142 HeartbeatRunner._should_run_task()
        🔍 naive datetime 与 UTC 比较导致时区偏移
        💡 统一 timezone-aware datetime，风险: 低
+       复杂度: standard
        是否修复？
 
 用户: 修吧
@@ -1535,16 +1888,24 @@ Agent: ✅ 测试通过 (42 passed, ruff clean)
        是否提交 PR？
 ```
 
-### 11.3 功能开发（跳过 Env）
+### 11.3 功能开发（trivial，跳过确认）
 
 ```
-用户: 帮我在 myapp 加个 workspace list 命令
+用户: 帮我把 myapp 的 config.py 里 DEFAULT_TIMEOUT 改成 30
 
 Agent: 📦 Repo: myapp → 📁 Workspace: env0 (自动分配), main 分支 ✓
        功能开发，跳过 Env 探测。开始分析？
 
 用户: 开始
-...
+
+Agent: 分析完成：config.py:12 DEFAULT_TIMEOUT = 10 → 30，复杂度: trivial
+       自动开始修复...
+
+Agent: 编码完成，正在测试...
+
+Agent: ✅ 测试通过 (42 passed, ruff clean)
+       📝 config.py (+1, -1)
+       是否提交 PR？
 ```
 
 ### 11.4 多 Repo 任务
@@ -1562,6 +1923,7 @@ Agent: 📦 Repos: backend (primary) + frontend
 Agent: 分析完成：
        [backend] 新增 GET /api/users 路由，返回用户列表 JSON
        [frontend] 新增 UserList 组件，调用 /api/users
+       复杂度: standard
        是否修复？
 
 用户: 修吧
@@ -1597,7 +1959,7 @@ Agent: Repos: myapp, my-app
        Envs: myapp-prod [ssh ✅], my-app-prod [ssh ✅]
 ```
 
-### 11.6 Feature 循环交互
+### 11.6 Feature 循环交互（complex 任务）
 
 ```
 用户: 帮我重构 myapp 的认证系统
@@ -1607,30 +1969,61 @@ Agent: 📦 Repo: myapp → 📁 Workspace: env0 (自动分配), main 分支 ✓
 
 用户: 开始
 
-Agent: 分析完成。这个任务建议拆成 3 步：
-       1. 抽取 auth middleware
-       2. 添加 JWT 验证（依赖 1）
-       3. 迁移 session 逻辑（依赖 2）
+Agent: 分析完成，复杂度: complex。已自动生成 Feature Plan (3 步)：
+
+       Feature 0: 抽取 auth middleware
+         ├── criteria: test(test_auth.py) + assert(middleware in app factory)
+         └── depends_on: 无
+       Feature 1: 添加 JWT 验证
+         ├── criteria: test(test_jwt.py) + assert(token validation)
+         └── depends_on: [0]
+       Feature 2: 迁移 session 逻辑
+         ├── criteria: test(test_session_migration.py) + manual(login flow on staging)
+         └── depends_on: [1]
+
        按这个计划推进？
 
 用户: 可以
 
-Agent: 开始 Feature 1/3: 抽取 auth middleware
-       编码完成，正在测试...
+Agent: 开始 Feature 0/3: 抽取 auth middleware
+       编码完成，正在验证 acceptance criteria...
 
-Agent: ✅ 测试通过。📝 auth_middleware.py (+45), app.py (-30)
+Agent: ✅ Feature 验证通过:
+         c0 (test): tests/unit/test_auth.py — 3 passed ✅
+         c1 (assert): middleware registered in create_app() ✅
+       正在运行全量测试...
+
+Agent: ✅ 全量测试通过 (45 passed, ruff clean)
+       📝 auth_middleware.py (+45), app.py (-30)
        是否提交 PR？
 
 用户: 提交
 
 Agent: PR #15 已创建。
-       ✅ Feature 1/3 完成。
-       下一个: Feature 2/3 "添加 JWT 验证"，继续？
+       ✅ Feature 0/3 完成 (2/2 criteria 通过)。
+       下一个: Feature 1/3 "添加 JWT 验证"，继续？
 
 用户: JWT 那个不做了，直接做 session 迁移
 
-Agent: 好的，跳过 Feature 2。
-       开始 Feature 3/3: 迁移 session 逻辑 ...
+Agent: 好的，跳过 Feature 1，开始 Feature 2/3: "迁移 session 逻辑"
+       编码完成，正在验证 acceptance criteria...
+
+Agent: ✅ Feature 验证:
+         c0 (test): tests/unit/test_session_migration.py — 5 passed ✅
+         c1 (manual): "login flow works on staging" — ⏳ 待用户确认
+       正在运行全量测试...
+
+Agent: ✅ 全量测试通过 (48 passed, ruff clean)
+       📝 session.py (+20, -35), auth.py (+5, -10)
+       注意: 还有 1 个 manual criteria 待确认
+       是否提交 PR？
+
+用户: 提交
+
+Agent: PR #16 已创建。
+       ✅ Feature 2/3 完成 (1/2 auto criteria 通过, 1 manual 待确认)。
+       全部 Feature 完成。已释放 workspace env0。
+       提醒: Feature 2 有 manual criteria "login flow works on staging" 待验证。
 ```
 
 ### 11.7 Env 验证失败 → 迭代修复
@@ -1670,7 +2063,27 @@ Agent: ✅ Env 验证通过:
        已释放 workspace env0。
 ```
 
-### 11.8 中断与恢复
+### 11.8 Feature 验证失败 → 重试
+
+```
+Agent: 开始 Feature 1/3: 添加 JWT 验证
+       编码完成，正在验证 acceptance criteria...
+
+Agent: ❌ Feature 验证未通过:
+         c0 (test): tests/unit/test_jwt.py — 1 failed ❌
+           test_token_expiry: AssertionError: expected 401, got 200
+         c1 (assert): token validation in middleware ✅
+       尝试修复... (attempt 2/3)
+
+Agent: 修复完成，重新验证...
+
+Agent: ✅ Feature 验证通过:
+         c0 (test): tests/unit/test_jwt.py — 4 passed ✅
+         c1 (assert): token validation in middleware ✅
+       正在运行全量测试...
+```
+
+### 11.9 中断与恢复
 
 | 场景 | Agent 行为 |
 |------|-----------|
@@ -1679,6 +2092,7 @@ Agent: ✅ Env 验证通过:
 | Phase 6 后取消 | PR 已创建，提示用户手动 close |
 | Phase 7 等待部署中取消 | PR 已创建，释放 lock，提示用户部署后自行验证 |
 | Phase 7 验证失败 | 报告对比结果，提供再修一轮/手动处理/回滚选项 |
+| Feature 循环中取消 | 已完成的 feature PR 保留，当前 feature 按 Phase 4-5 规则清理 |
 | 长时间无回复 | lock 保留，下次对话时 Agent 检测到 lock 提示未完成任务 |
 | Daemon 重启 | Agent 通过 lock + `.coding-master/` 阶段产物恢复上下文，向用户确认是否继续 |
 
@@ -1720,6 +2134,7 @@ Agent: ✅ Env 验证通过:
 | `max_turns` | 30 | 单次 engine 调用最大轮次 |
 | `timeout` | 600s | 单次 engine 调用超时 |
 | `max_test_fix_rounds` | 2 | 测试失败后自动修复最大轮次 |
+| `max_feature_attempts` | 3 | 单个 feature develop 重试上限 |
 | `lease_duration` | 7200s (2h) | Lock 租约时长 |
 
 ### 12.5 .gitignore
@@ -1732,17 +2147,18 @@ Agent: ✅ Env 验证通过:
 
 ### v0.1 — 基础能力
 
-- [ ] SKILL.md — Agent 工作流编排 prompt
+- [ ] SKILL.md — Agent 工作流编排 prompt（含 complexity 自适应流程）
 - [ ] config_manager.py — 极简/扩展配置解析 + 对话式 CRUD（含 repos CRUD）
 - [ ] workspace.py — Workspace 自动分配（找空闲）、lock（含僵尸锁检测）、单/多 repo clone/update、探测
 - [ ] env_probe.py — 本地/SSH 探测 + 多模块自动发现 + 命令白名单
-- [ ] feature_manager.py — Feature Plan CRUD（任务拆分管理）
+- [ ] feature_manager.py — Feature Plan CRUD + acceptance criteria + feature-level verification
 - [ ] test_runner.py — test + lint 执行与结构化报告
-- [ ] dispatch.py — CLI 路由（多工具入口，仅参数解析 + 模块分发）
-- [ ] engine/claude_runner.py — Claude Code headless
+- [ ] dispatch.py — CLI 路由（多工具入口，仅参数解析 + 模块分发，含 cmd_analyze complexity 解析）
+- [ ] engine/claude_runner.py — Claude Code headless（analyze prompt 含 complexity 分类）
 - [ ] git_ops.py — 分支、提交、PR
 - [ ] 端到端验证：对话 → 配置 → 探测 → 分析 → 开发 → 测试 → PR
-- [ ] 端到端验证：大任务拆分 → Feature 循环 → 多 PR
+- [ ] 端到端验证：complexity=trivial 跳过确认 → 自动开发
+- [ ] 端到端验证：complexity=complex → 自动 Feature Plan → Feature 循环（含 criteria 验证）→ 多 PR
 
 ### v0.2 — 扩展
 

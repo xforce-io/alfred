@@ -346,6 +346,68 @@ class TurnOrchestrator:
                     s_name = skill_info.get("name") or progress.get("tool_name") or ""
                     s_args = skill_info.get("args") or progress.get("args") or ""
                     s_output = progress.get("answer") or progress.get("block_answer") or progress.get("output") or ""
+
+                    if status in ("running", "processing"):
+                        # Skill invocation → count as tool call
+                        tool_call_count += 1
+                        if tool_call_count > policy.max_tool_calls:
+                            yield TurnEvent(
+                                type=TurnEventType.TURN_ERROR,
+                                error=f"TOOL_CALL_BUDGET_EXCEEDED: tool_calls={tool_call_count}, limit={policy.max_tool_calls}",
+                                answer=response,
+                                tool_call_count=tool_call_count,
+                                tool_execution_count=tool_execution_count,
+                                tool_names_executed=list(tool_names_executed),
+                                failed_tool_outputs=failed_tool_outputs,
+                            )
+                            return
+
+                        # Intent dedup check
+                        intent_sig = _extract_tool_intent_signature(s_name, s_args)
+                        if intent_sig:
+                            tool_intent_signatures[intent_sig] = tool_intent_signatures.get(intent_sig, 0) + 1
+                            if tool_intent_signatures[intent_sig] > policy.max_same_tool_intent:
+                                yield TurnEvent(
+                                    type=TurnEventType.TURN_ERROR,
+                                    error=(
+                                        f"REPEATED_TOOL_INTENT: intent={intent_sig}, "
+                                        f"count={tool_intent_signatures[intent_sig]}, limit={policy.max_same_tool_intent}"
+                                    ),
+                                    answer=response,
+                                    tool_call_count=tool_call_count,
+                                    tool_execution_count=tool_execution_count,
+                                    tool_names_executed=list(tool_names_executed),
+                                    failed_tool_outputs=failed_tool_outputs,
+                                )
+                                return
+
+                        tool_execution_count += 1
+                        tool_names_executed.append(s_name)
+
+                    elif status in ("completed", "failed"):
+                        # Skill result → track failures
+                        fail_sig = _extract_failure_signature(s_output)
+                        if fail_sig:
+                            failed_tool_outputs += 1
+                            failure_signatures[fail_sig] = failure_signatures.get(fail_sig, 0) + 1
+                            if (
+                                failed_tool_outputs >= policy.max_failed_tool_outputs
+                                or failure_signatures[fail_sig] >= policy.max_same_failure_signature
+                            ):
+                                yield TurnEvent(
+                                    type=TurnEventType.TURN_ERROR,
+                                    error=(
+                                        f"REPEATED_TOOL_FAILURES: failed={failed_tool_outputs}, "
+                                        f"signature={fail_sig}, count={failure_signatures[fail_sig]}"
+                                    ),
+                                    answer=response,
+                                    tool_call_count=tool_call_count,
+                                    tool_execution_count=tool_execution_count,
+                                    tool_names_executed=list(tool_names_executed),
+                                    failed_tool_outputs=failed_tool_outputs,
+                                )
+                                return
+
                     yield TurnEvent(
                         type=TurnEventType.SKILL,
                         pid=pid, status=status,

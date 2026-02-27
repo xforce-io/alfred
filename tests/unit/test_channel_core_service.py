@@ -272,3 +272,33 @@ async def test_process_message_acks_mailbox():
         await core.process_message(agent, "demo_agent", "web_session_demo_agent", "hi", collector)
 
     core.session_manager.ack_mailbox_events.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_message_acks_mailbox_on_error():
+    """Mailbox events must be acked even when the turn fails with an error."""
+    agent = _FailingAgent()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        core = _make_core_service(Path(tmp))
+        # Setup session with mailbox events that should be acked despite error
+        core.session_manager.load_session = AsyncMock(return_value=SimpleNamespace(
+            mailbox=[
+                {"event_id": "evt_err", "event_type": "job_completed",
+                 "summary": "daily news", "detail": "news content"},
+            ],
+            timeline=[],
+        ))
+        # Mock export_portable_session for the error save path
+        agent.snapshot = SimpleNamespace(
+            export_portable_session=lambda: {
+                "history_messages": [],
+                "variables": {},
+            },
+        )
+        collector = _EventCollector()
+
+        await core.process_message(agent, "demo_agent", "web_session_demo_agent", "hi", collector)
+
+    # The turn errored, but mailbox should still be acked
+    core.session_manager.ack_mailbox_events.assert_awaited()

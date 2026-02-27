@@ -579,3 +579,105 @@ class TestRestoreToAgentTruncation:
 
         call_args = agent.snapshot.import_portable_session.call_args
         assert call_args[1].get("repair") is True or (len(call_args[0]) > 1 and call_args[0][1] is True)
+
+
+# ===========================================================================
+# 11. Lock event loop safety
+# ===========================================================================
+
+class TestLockEventLoopSafety:
+
+    def test_get_lock_recreates_on_different_event_loop(self, tmp_path: Path):
+        """Lock created in one event loop must be replaced when accessed from a different loop."""
+        import asyncio
+
+        manager = SessionManager(tmp_path)
+        session_id = "web_session_test_agent"
+
+        # Create a lock in one event loop
+        loop1 = asyncio.new_event_loop()
+        lock1 = loop1.run_until_complete(self._get_lock_async(manager, session_id))
+        loop1.close()
+
+        # Access lock from a different event loop — should NOT return the stale lock
+        loop2 = asyncio.new_event_loop()
+        lock2 = loop2.run_until_complete(self._get_lock_async(manager, session_id))
+        loop2.close()
+
+        assert lock1 is not lock2, "Lock should be recreated when event loop changes"
+
+    @staticmethod
+    async def _get_lock_async(manager: SessionManager, session_id: str) -> "asyncio.Lock":
+        return manager._get_lock(session_id)
+
+    @pytest.mark.asyncio
+    async def test_acquire_session_survives_loop_change(self, tmp_path: Path):
+        """acquire_session should work even after event loop has changed."""
+        import asyncio
+
+        manager = SessionManager(tmp_path)
+        session_id = "web_session_test_agent"
+
+        # Simulate a stale lock from a previous (now-dead) loop by injecting
+        # a tuple with a different loop object directly into the cache.
+        stale_loop = asyncio.new_event_loop()
+        stale_lock = asyncio.Lock()  # created in current loop but paired with stale_loop
+        manager._locks[session_id] = (stale_loop, stale_lock)
+        stale_loop.close()
+
+        # Now acquire in current (different) loop — should not raise
+        acquired = await manager.acquire_session(session_id, timeout=2.0)
+        assert acquired is True
+        manager.release_session(session_id)
+
+
+# ===========================================================================
+# 12. _history variable deduplication
+# ===========================================================================
+
+class TestHistoryVariableDedup:
+
+    @pytest.mark.asyncio
+    async def test_save_strips_history_variable(self, tmp_path: Path):
+        """When dolphin exports _history in variables, persistence.save should strip it."""
+        from src.everbot.core.session.session import SessionPersistence
+
+        persistence = SessionPersistence(tmp_path)
+        session_id = "web_session_test_agent"
+
+        agent = _make_mock_agent(
+            history_messages=[{"role": "user", "content": "hi"}],
+            variables={
+                "_history": [{"role": "user", "content": "hi"}],  # duplicate!
+                "model_name": "gpt-4",
+            },
+        )
+
+        await persistence.save(session_id, agent)
+
+        loaded = await persistence.load(session_id)
+        assert loaded is not None
+        assert "_history" not in loaded.variables, \
+            "_history should not be stored in variables (it duplicates history_messages)"
+
+    @pytest.mark.asyncio
+    async def test_restore_filters_history_variable(self, tmp_path: Path):
+        """restore_to_agent should not pass _history in variables to import_portable_session."""
+        manager = SessionManager(tmp_path)
+
+        session_data = _make_session_data(
+            session_id="web_session_test_agent",
+            history_messages=[{"role": "user", "content": "hi"}],
+            variables={
+                "_history": [{"role": "user", "content": "hi"}],
+                "model_name": "gpt-4",
+            },
+        )
+
+        agent = _make_mock_agent()
+        await manager.restore_to_agent(agent, session_data)
+
+        call_args = agent.snapshot.import_portable_session.call_args
+        portable = call_args[0][0]
+        assert "_history" not in portable["variables"], \
+            "_history should be filtered from restored variables"

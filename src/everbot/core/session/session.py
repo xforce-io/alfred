@@ -76,7 +76,7 @@ class SessionManager:
     def __init__(self, sessions_dir: Path):
         self.persistence = SessionPersistence(sessions_dir)
         self._agents: Dict[str, Any] = {}  # session_id -> DolphinAgent
-        self._locks: Dict[str, asyncio.Lock] = {}  # session_id -> Lock
+        self._locks: Dict[str, tuple] = {}  # session_id -> (event_loop, Lock)
         self._agent_metadata: Dict[str, Dict[str, str]] = {}  # session_id -> metadata
         self._timeline_events: Dict[str, list] = {}  # session_id -> timeline events
         self._timeline_lock = threading.Lock()  # 保护 timeline 操作的线程锁
@@ -143,14 +143,23 @@ class SessionManager:
         return (now_utc - event_ts) > stale_after
 
     def _get_lock(self, session_id: str) -> asyncio.Lock:
-        """获取 Session 锁（懒创建，带 LRU 淘汰）"""
-        if session_id not in self._locks:
-            if len(self._locks) >= self._MAX_CACHED_LOCKS:
-                to_remove = [k for k, v in self._locks.items() if not v.locked()]
-                for k in to_remove[:len(to_remove) // 2]:
-                    del self._locks[k]
-            self._locks[session_id] = asyncio.Lock()
-        return self._locks[session_id]
+        """获取 Session 锁（懒创建，带 LRU 淘汰，event loop 安全）"""
+        current_loop = asyncio.get_running_loop()
+        cached = self._locks.get(session_id)
+        if cached is not None:
+            cached_loop, lock = cached
+            if cached_loop is current_loop:
+                return lock
+            # Event loop changed — discard stale lock
+            logger.debug("Discarding stale lock for %s (event loop changed)", session_id)
+
+        if len(self._locks) >= self._MAX_CACHED_LOCKS:
+            to_remove = [k for k, (_, v) in self._locks.items() if not v.locked()]
+            for k in to_remove[:len(to_remove) // 2]:
+                del self._locks[k]
+        new_lock = asyncio.Lock()
+        self._locks[session_id] = (current_loop, new_lock)
+        return new_lock
 
     async def acquire_session(self, session_id: str, timeout: float = 30.0) -> bool:
         """
@@ -507,6 +516,7 @@ class SessionManager:
         portable = agent.snapshot.export_portable_session()
         serializable_history = portable.get("history_messages", [])
         exported_variables = portable.get("variables", {})
+        exported_variables.pop("_history", None)  # avoid duplicating history_messages
         created_at_hint = context.get_var_value("session_created_at")
 
         # Compress history for primary sessions before entering the lock.
