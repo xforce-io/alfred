@@ -31,6 +31,7 @@ Identify user intent, then load the matching SOP **before** executing any comman
 ## Common Rules
 
 - **Review uses `--repos`**: Review/analysis is read-only — use `analyze --repos <name>` directly. No `workspace-check` or `release` needed. Only bugfix and feature-dev flows require workspace lock.
+- **Engine commands need long timeout**: `analyze` and `develop` take 2-5 minutes. Always use `_bash(cmd="...", timeout=600)` for engine commands. If timeout returns a `command_id`, continue waiting with `_bash(command_id="...", timeout=300)` — do NOT cancel.
 - **Engine fallback**: If `ENGINE_ERROR`, retry with the other engine (`codex`↔`claude`). If both fail, do it yourself, but `test`, `submit-pr`, `release` **must** go through `$D`.
 - **Error handling**: Always check `error_code` + `hint`. `PATH_NOT_FOUND` → run `config-list` for correct names. `WORKSPACE_LOCKED` → use `--repos` for read-only fallback.
 - **Safety**: Never push to main/master. Never force push. Never auto-merge PRs. Always release workspace when done.

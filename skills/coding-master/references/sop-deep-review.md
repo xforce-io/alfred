@@ -21,9 +21,13 @@ Also run in the repo directory:
 
 ### Step 2: Engine Analysis (no lock, direct on repo)
 
+**IMPORTANT**: Engine analysis takes 2-5 minutes. You MUST set `timeout=600` to avoid premature cancellation.
+
 ```bash
-_bash("$D analyze --repos <repo_name> --task 'Full project review: identify high-priority bugs, code quality issues, architecture improvements, and security concerns. Check test coverage, error handling, and documentation gaps.' --engine codex")
+_bash(cmd="$D analyze --repos <repo_name> --task 'Full project review: identify high-priority bugs, code quality issues, architecture improvements, and security concerns. Check test coverage, error handling, and documentation gaps.' --engine codex", timeout=600)
 ```
+
+If the command times out (returns `command_id`), call `_bash(command_id="<id>", timeout=300)` to continue waiting. Do NOT cancel — the engine needs time to analyze the full codebase.
 
 If `ENGINE_ERROR` → retry with `--engine claude`. If both fail → fall back to manual analysis.
 
