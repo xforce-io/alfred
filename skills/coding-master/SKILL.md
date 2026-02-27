@@ -7,380 +7,202 @@ tags: [coding, review, development, bugfix, pr, automation]
 
 # Coding Master Skill
 
-Receive coding tasks through conversation, probe runtime environments, analyze code, develop fixes, run tests, and submit pull requests — all with human-in-the-loop confirmation.
+All commands use: `$D = python $SKILL_DIR/scripts/dispatch.py`
+
+All commands return JSON: `{"ok": true, "data": {...}}` or `{"ok": false, "error": "...", "error_code": "..."}`. Always check `ok`. On error, check `error_code` and `hint` field for actionable recovery.
+
+**Engine fallback** (applies to `analyze` and `develop`): If `ENGINE_ERROR`, retry with the other engine (`claude`↔`codex`). If both fail, you may do analysis/development yourself, but `test`, `submit-pr`, `release` **must** go through `$D`.
 
 ## When to Use
 
-- User asks to review code, check uncommitted changes, or analyze diffs (e.g., "review alfred 项目的修改") → **Quick Query** (`quick-status`)
-- User asks about workspace/test status or wants to search code → **Quick Query** (no lock)
-- User reports a bug (e.g., "heartbeat 定时任务没触发") → **Full Workflow**
-- User requests a feature (e.g., "加个 workspace list 命令") → **Full Workflow**
-- User asks to fix, analyze, or modify code in a registered workspace → **Full Workflow**
-- User wants to manage coding-master configuration (add/remove workspace/env) → **Config commands**
+- "搜索/分析 X 的代码" → `quick-find --repos X` (lock-free, preferred)
+- Review code / check diffs / git status → `quick-status` (lock-free)
+- Run tests / lint → `quick-test` (lock-free)
+- Bug fix / feature / code modification → **Full Workflow** (Phase 0–7)
+- Manage config → `config-list`, `config-add`, `config-set`, `config-remove`
 
-## Configuration Management
-
-Before using the coding workflow, workspaces and environments must be registered.
-
-### List all config
+## Config
 
 ```bash
-_bash("python $SKILL_DIR/scripts/dispatch.py config-list")
+_bash("$D config-list")
+_bash("$D config-add repo dolphin git@github.com:user/dolphin.git")
+_bash("$D config-add workspace my-app ~/dev/my-app")
+_bash("$D config-add env my-app-prod deploy@server:/opt/my-app")
+_bash("$D config-set repo dolphin default_branch develop")
+_bash("$D config-remove env old-env")
 ```
-
-### Add repo, workspace, or env
-
-```bash
-_bash("python $SKILL_DIR/scripts/dispatch.py config-add repo dolphin git@github.com:user/dolphin.git")
-_bash("python $SKILL_DIR/scripts/dispatch.py config-add workspace my-app ~/dev/my-app")
-_bash("python $SKILL_DIR/scripts/dispatch.py config-add env my-app-prod deploy@server:/opt/my-app")
-# Set optional fields: config-set <type> <name> <field> <value>
-_bash("python $SKILL_DIR/scripts/dispatch.py config-set repo dolphin default_branch develop")
-```
-
-### Remove
-
-```bash
-_bash("python $SKILL_DIR/scripts/dispatch.py config-remove env old-env")
-```
-
-### Output format
-
-All commands return JSON: `{"ok": true, "data": {...}}` or `{"ok": false, "error": "...", "error_code": "..."}`. Always check the `ok` field. Use `error_code` for conditional handling (e.g., `WORKSPACE_LOCKED` → suggest waiting, `GIT_DIRTY` → suggest commit/stash).
 
 ---
 
 ## Quick Queries (Lock-Free)
 
-Read-only commands for observation and diagnostic tasks. No workspace lock required — can run even while another task holds the lock.
+Read-only, no workspace lock required. **`--workspace`** = workspace slot name (env0/env1/env2 or registered name). **`--repos`** = registered repo name — searches source path directly, no lock needed.
 
-### When to Use Quick Queries
-
-- "看下 alfred 测试情况" / "跑下测试" → `quick-test`
-- "alfred 什么分支" / "有没有未提交的改动" → `quick-status`
-- "找下 HeartbeatRunner 在哪用了" → `quick-find`
-
-### quick-status — Workspace overview
+### quick-status
 
 ```bash
-_bash("python $SKILL_DIR/scripts/dispatch.py quick-status --workspace alfred")
+_bash("$D quick-status --workspace alfred")
 ```
+Output: `data.git` (branch, dirty, last_commit), `data.runtime`, `data.project` (test/lint commands), `data.lock` (null or {task, phase, expired}).
 
-**Parse output**: `data.git` (branch, dirty, remote_url, last_commit), `data.runtime` (type, version, package_manager), `data.project` (test_command, lint_command), `data.lock` (null if idle, or {task, phase, engine, expired} if active).
+**Code Review**: Never bare `git diff`. Use: (1) `quick-status` + `git diff --stat`, (2) `git diff -- <file>` per file, (3) `_get_cached_result_detail(reference_id, scope='skill', limit=20000)` if truncated.
 
-### Code Review — Reviewing uncommitted changes
-
-**IMPORTANT**: Never run bare `git diff` — large diffs get truncated. Instead: (1) `quick-status` + `git diff --stat` for file list, (2) `git diff -- <file_path>` per file, (3) `_get_cached_result_detail(reference_id, scope='skill', limit=20000)` if still truncated. Summarize by priority.
-
-### quick-test — Run tests (and optionally lint)
+### quick-test
 
 ```bash
-# Run all tests
-_bash("python $SKILL_DIR/scripts/dispatch.py quick-test --workspace alfred")
-
-# Run specific test path
-_bash("python $SKILL_DIR/scripts/dispatch.py quick-test --workspace alfred --path tests/unit/")
-
-# Include lint check
-_bash("python $SKILL_DIR/scripts/dispatch.py quick-test --workspace alfred --lint")
+_bash("$D quick-test --workspace alfred")                        # all tests
+_bash("$D quick-test --workspace alfred --path tests/unit/ --lint")  # specific + lint
 ```
+Output: `data.test` (passed, total, output), `data.overall` ("passed"|"failed"), `data.lint` (if `--lint`).
 
-**Parse output**: `data.test` (passed, total, passed_count, failed_count, output), `data.overall` ("passed" | "failed"). If `--lint` used, also `data.lint` (passed, output).
-
-### quick-find — Search code
+### quick-find
 
 ```bash
-# Search for a pattern
-_bash("python $SKILL_DIR/scripts/dispatch.py quick-find --workspace alfred --query 'HeartbeatRunner'")
-
-# Filter by file type
-_bash("python $SKILL_DIR/scripts/dispatch.py quick-find --workspace alfred --query 'def test_' --glob '*.py'")
+_bash("$D quick-find --repos alfred --query 'HeartbeatRunner'")                    # single repo
+_bash("$D quick-find --repos alfred,dolphin --query 'HeartbeatRunner' --glob '*.py'")  # multi-repo
+_bash("$D quick-find --workspace env0 --query 'def test_' --glob '*.py'")          # workspace
 ```
+Output (`--repos`): `data.repos` (dict by repo name → match lines), `data.count`, `data.truncated`.
+Output (`--workspace`): `data.matches` (list), `data.count`, `data.truncated`.
 
-**Parse output**: `data.matches` (list of "file:line:content"), `data.count`, `data.truncated` (true if >100 matches).
-
-**Escalation**: If quick-test reveals failures and the user wants to fix them, transition to the full workflow by calling `workspace-check`.
-
-### quick-env — Probe environment without workspace (lock-free)
+### quick-env
 
 ```bash
-_bash("python $SKILL_DIR/scripts/dispatch.py quick-env --env alfred-prod")
-# With extra commands:
-_bash("python $SKILL_DIR/scripts/dispatch.py quick-env --env alfred-prod --commands \"tail -50 /var/log/app.log\"")
+_bash("$D quick-env --env alfred-prod")
+_bash("$D quick-env --env alfred-prod --commands \"tail -50 /var/log/app.log\"")
 ```
-
-**Parse output**: Same as `env-probe` — `data.modules` with process status, recent errors, log tail (ephemeral, no artifacts saved). To fix issues found, transition to the full workflow.
+Output: `data.modules` (process status, errors, log tail). To fix issues → transition to Full Workflow.
 
 ---
 
-## Workflow — 8 Phases (Phase 7 optional)
+## Full Workflow (Phase 0–7)
 
-> **Session context**: `workspace-check` creates a session file (`.coding-master/session.json`) that locks in the workspace path. All subsequent workflow commands (`analyze`, `develop`, `test`, `submit-pr`, etc.) **require** this session — calling them without running `workspace-check` first will return `error_code: NO_SESSION`.
+> `workspace-check` creates `.coding-master/session.json`. All subsequent commands require this session (`NO_SESSION` error otherwise).
 
-### Phase 0: Workspace Confirmation
-
-**When**: User mentions a coding task. There are two modes:
-
-#### Mode A: Repo-based (recommended for isolation)
-
-Use `--repos` to clone/update repos into a workspace slot. The workspace is auto-allocated if `--workspace` is omitted.
+### Phase 0: Workspace Check
 
 ```bash
-# Single repo (auto-allocate workspace)
-_bash("python $SKILL_DIR/scripts/dispatch.py workspace-check --repos dolphin --task 'fix: heartbeat bug' --engine codex")
-
-# Multiple repos (comma-separated, first is primary; optionally specify workspace)
-_bash("python $SKILL_DIR/scripts/dispatch.py workspace-check --repos dolphin,shared-lib --workspace env0 --task 'cross-repo refactor' --engine claude")
-
-# If workspace slot has leftover dirty changes from a previous task, add --auto-clean
-_bash("python $SKILL_DIR/scripts/dispatch.py workspace-check --repos dolphin --auto-clean --task 'fix: bug' --engine codex")
+# Repo-based (recommended) — auto-allocates workspace slot
+_bash("$D workspace-check --repos dolphin --task 'fix: heartbeat bug' --engine codex")
+# Multi-repo, specific slot, auto-clean dirty state
+_bash("$D workspace-check --repos dolphin,shared-lib --workspace env0 --auto-clean --task 'cross-repo refactor' --engine claude")
+# Direct workspace (legacy)
+_bash("$D workspace-check --workspace alfred --task 'fix: heartbeat bug' --engine codex")
 ```
+Output: `data.snapshot` (repos array with git/runtime/project info, `base_commit`, `primary_repo`).
 
-**Parse output**: `data.snapshot` contains `repos` array (each with git/runtime/project info, including `base_commit`) and `primary_repo`.
+Repo mode uses `git clone` (not file copy). Reused slots sync to `origin/<branch>`. Dirty slots → `WORKSPACE_GIT_DIRTY`, add `--auto-clean` to reset.
 
-**Workspace reuse semantics**:
-- Repo mode uses `git clone`, NOT file copy — uncommitted changes in the source local repo are NOT brought into the workspace slot.
-- When a workspace slot is reused (e.g., env0 used for task A, then task B), repos are synced to a deterministic baseline (`origin/<branch>`).
-- If the slot has uncommitted changes from a previous task, `workspace-check` returns `error_code: WORKSPACE_GIT_DIRTY`. Add `--auto-clean` to auto-reset (`git reset --hard` + `git clean -fd`) and continue.
-- Without `--auto-clean`, dirty slots require manual cleanup (e.g., `release --cleanup` or direct git commands).
+**WAIT for user confirmation** before proceeding.
 
-#### Mode B: Direct workspace (legacy)
-
-Use `--workspace` alone for an existing git repo registered as a workspace.
+### Phase 1: Env Probing (skip for pure feature dev)
 
 ```bash
-_bash("python $SKILL_DIR/scripts/dispatch.py workspace-check --workspace alfred --task 'fix: heartbeat bug' --engine codex")
+_bash("$D env-probe --workspace alfred --env alfred-prod")
+_bash("$D env-probe --workspace alfred --env alfred-prod --commands \"journalctl -u alfred --since '2 hours ago'\"")
 ```
+Output: `data.modules` (process status, errors, logs).
 
-**Parse output**: If `ok: true`, extract `data.snapshot` — it contains git status, runtime info, and project commands. If `ok: false`, report the error to user (e.g., "workspace has uncommitted changes").
-
-**User interaction**: Present workspace summary (branch, runtime, test/lint commands) and **WAIT for user confirmation before proceeding.**
-
-### Phase 1: Environment Probing
-
-**When**: User reports a runtime issue (bug, error, crash). Skip for pure feature development.
-
-**Identify env**: Use workspace name to find matching envs. If multiple envs match (e.g., alfred-local, alfred-prod), ask user which one based on context ("线上" → prod, "本地" → local).
+### Phase 2: Analysis
 
 ```bash
-_bash("python $SKILL_DIR/scripts/dispatch.py env-probe --workspace alfred --env alfred-prod")
+_bash("$D analyze --workspace alfred --task 'heartbeat 定时任务没触发' --engine codex")
 ```
+Output: `data.summary`, `data.complexity` (trivial|standard|complex), `data.feature_plan_created`, `data.feature_count`.
 
-**Parse output**: Extract `data.modules` — each has process status, recent errors, and log tail. Summarize for user.
+### Phase 3: Plan Confirmation
 
-**Directed probing**: If you need specific info:
+- **trivial** → auto-proceed to Phase 4
+- **standard** → **WAIT**: "继续"→Phase 4, "用方案2"→Phase 4 with alt, "再看看日志"→back to Phase 2, "取消"→release
+- **complex** → Feature Plan auto-generated; enter **Feature Loop** (see below)
+
+### Phase 4: Development
 
 ```bash
-_bash("python $SKILL_DIR/scripts/dispatch.py env-probe --workspace alfred --env alfred-prod --commands \"journalctl -u alfred --since '2 hours ago'\"")
+_bash("$D develop --workspace alfred --task 'fix timezone' --plan 'unify to tz-aware datetime' --branch fix/heartbeat-tz --engine codex")
 ```
+Output: `data.summary`, `data.files_changed`. Auto-proceed to Phase 5.
 
-### Phase 2: Problem Analysis
-
-**When**: After Phase 0 (and optionally Phase 1) are confirmed.
+### Phase 5: Test
 
 ```bash
-_bash("python $SKILL_DIR/scripts/dispatch.py analyze --workspace alfred --task 'heartbeat 定时任务没触发' --engine codex")
+_bash("$D test --workspace alfred")
 ```
-
-**Parse output**: `data.summary` is the analysis report. Also extract:
-- `data.complexity`: `trivial` | `standard` | `complex`
-- `data.feature_plan_created`: `true` if a Feature Plan was auto-generated (complex tasks)
-- `data.feature_count`: number of features in the plan (if created)
-
-Present location, root cause, proposed fix, and risk assessment to user.
-
-**If engine requests more env info**: Run additional `env-probe --commands ...` and re-run `analyze` (max 2 iterations).
-
-**Engine fallback**: If `analyze` returns `error_code: ENGINE_ERROR`, retry with the other engine (`--engine claude` or `--engine codex`). If both engines fail, you may perform the analysis yourself using your own capabilities, but all subsequent workflow steps (test, submit-pr, release) **must** still go through `dispatch.py`.
-
-### Phase 3: Plan Confirmation (complexity-driven)
-
-Behavior depends on `data.complexity` from Phase 2:
-
-#### trivial
-Skip user confirmation. Auto-proceed to Phase 4 immediately.
-
-#### standard
-**WAIT for user confirmation**:
-- "继续" / "修吧" → proceed to Phase 4 with recommended approach
-- "用方案 2" → proceed with specified approach
-- "再看看日志" → run more `env-probe`, loop back to Phase 2
-- "取消" → run `dispatch.py release --workspace alfred`
-
-#### complex
-Feature Plan was auto-generated in Phase 2. Present the Feature Plan summary to user (use `feature-list` to display). Then enter the **Feature Loop** (see Feature Management section below) instead of Phase 4.
-
-### Phase 4: Coding Development
-
-**When**: User confirms the fix plan.
-
-```bash
-_bash("python $SKILL_DIR/scripts/dispatch.py develop --workspace alfred --task 'fix timezone in heartbeat' --plan 'unify to timezone-aware datetime' --branch fix/heartbeat-tz --engine codex")
-```
-
-**Parse output**: `data.summary` describes what was changed, `data.files_changed` lists modified files.
-
-**Engine fallback**: Same as Phase 2 — if `develop` returns `ENGINE_ERROR`, retry with the other engine. If both engines fail, you may write code yourself directly, but testing, PR submission, and release **must** go through `dispatch.py`.
-
-**Auto-proceed to Phase 5** — do NOT wait for user confirmation here.
-
-### Phase 5: Test Verification
-
-**When**: Immediately after Phase 4 completes.
-
-```bash
-_bash("python $SKILL_DIR/scripts/dispatch.py test --workspace alfred")
-```
-
-**Parse output**: Check `data.overall`:
-
-**If "passed"** — report test/lint results and changed files to user. Ask to submit PR.
-
-**If "failed"** — check what failed:
-- **Lint failure only**: Auto-fix via `develop --task 'fix lint errors'`, then re-run `test`. No user confirmation needed.
-- **Test failure**: Report failures to user with options: (1) auto-fix, (2) manual fix, (3) abandon.
-
-**Auto-fix limit**: Maximum **2 rounds** of develop → test. After 2 failures, must ask user.
-
-**WAIT for user confirmation before Phase 6.**
+Passed → report + ask to submit PR. Lint-only fail → auto-fix. Test fail → report to user. Max **2 auto-fix rounds**, then escalate. **WAIT before Phase 6.**
 
 ### Phase 5.5: Self-Review
 
-**When**: Tests pass, before submitting PR. Quick scan of `git diff` (file by file) for unnecessary changes, convention violations, obvious issues, and completeness gaps. Minor issues → auto-fix via `develop`; significant issues → report to user. Include findings in PR body.
+Scan `git diff` file-by-file for unnecessary changes, convention violations. Minor → auto-fix; significant → report. Include in PR body.
 
 ### Phase 6: Submit PR
 
-**When**: User confirms test results and wants to submit.
+```bash
+_bash("$D submit-pr --workspace alfred --title 'fix: heartbeat timezone' --body '...'")
+```
+Output: `data.pr_url`. If env was probed → ask "需要部署验证吗？"; otherwise release immediately.
+
+### Phase 7: Env Verification (optional)
 
 ```bash
-_bash("python $SKILL_DIR/scripts/dispatch.py submit-pr --workspace alfred --title 'fix: heartbeat timezone handling' --body '## Summary\n- Unified timezone-aware datetime in HeartbeatRunner\n\n## Test\n- All 42 tests passing\n- Ruff clean'")
+_bash("$D env-verify --workspace alfred --env alfred-staging")
 ```
+`data.resolved` → true: release; false: offer auto-fix / release / rollback (`release --cleanup`).
 
-**Parse output**: `data.pr_url` — share with user.
-
-**After PR created**:
-
-- **If task has an associated Env** (i.e., Phase 1 was used) → ask user: "需要部署验证吗？"
-  - User says yes → proceed to Phase 7
-  - User says no → release workspace
-- **If no associated Env** (pure feature development) → release workspace immediately
+### Release (mandatory — every task must end here)
 
 ```bash
-_bash("python $SKILL_DIR/scripts/dispatch.py release --workspace alfred")
+_bash("$D release --workspace alfred")              # normal
+_bash("$D release --workspace alfred --cleanup")     # rollback branch
 ```
-
-### Phase 7: Env Verification (Optional)
-
-**When**: After Phase 6, user wants to verify fix in deployment env. WAIT for user to deploy, renew lease periodically (`renew-lease --workspace alfred`), then verify:
-
-```bash
-_bash("python $SKILL_DIR/scripts/dispatch.py env-verify --workspace alfred --env alfred-staging")
-```
-
-**Parse output**: `data.resolved` — if `true`, report and release; if `false`, offer (1) auto-fix (loop to Phase 4), (2) release, (3) rollback (`release --cleanup`). WAIT for user to confirm release.
-
-### Release (mandatory)
-
-**Every task must end with `release`** — whether the task succeeds, is cancelled, or fails at any phase. Unreleased workspaces block future tasks.
-
-```bash
-_bash("python $SKILL_DIR/scripts/dispatch.py release --workspace alfred")
-```
+Lease: 2h default. Renew with `$D renew-lease --workspace alfred`.
 
 ---
 
-## Feature Management (Task Splitting)
+## Feature Management
 
-When Phase 2 analysis returns `complexity: complex`, a Feature Plan is auto-generated. You can also manually create one for large tasks:
-
-### Commands
+For `complexity: complex` tasks. Feature Plan auto-generated in Phase 2, or create manually.
 
 ```bash
-# Manual plan creation (features is JSON array with title, task, optional depends_on, acceptance_criteria)
-_bash("python $SKILL_DIR/scripts/dispatch.py feature-plan --workspace alfred --task 'refactor auth system' --features '[{\"title\":\"extract auth middleware\",\"task\":\"move auth logic to middleware\",\"acceptance_criteria\":[{\"type\":\"test\",\"target\":\"pytest tests/auth/\",\"description\":\"auth middleware tests pass\"}]},{\"title\":\"add JWT\",\"task\":\"integrate PyJWT\",\"depends_on\":[0]}]'")
-
-# View/append acceptance criteria
-_bash("python $SKILL_DIR/scripts/dispatch.py feature-criteria --workspace alfred --index 0 --action view")
-_bash("python $SKILL_DIR/scripts/dispatch.py feature-criteria --workspace alfred --index 0 --action append --criteria '{\"type\":\"test\",\"target\":\"pytest tests/auth/test_jwt.py\",\"description\":\"JWT integration tests pass\"}'")
-
-# Run feature-level verification (checks all criteria)
-_bash("python $SKILL_DIR/scripts/dispatch.py feature-verify --workspace alfred --index 0")
-# With engine for assert-type criteria:
-_bash("python $SKILL_DIR/scripts/dispatch.py feature-verify --workspace alfred --index 0 --engine codex")
-
-# Mark done (checks criteria; use --force to skip)
-_bash("python $SKILL_DIR/scripts/dispatch.py feature-done --workspace alfred --index 0 --branch feat/auth-middleware --pr '#15'")
-_bash("python $SKILL_DIR/scripts/dispatch.py feature-done --workspace alfred --index 0 --force")
-
-# Adjust: skip/update features, check progress
-_bash("python $SKILL_DIR/scripts/dispatch.py feature-update --workspace alfred --index 1 --status skipped")
-_bash("python $SKILL_DIR/scripts/dispatch.py feature-list --workspace alfred")
+_bash("$D feature-plan --workspace alfred --task 'refactor auth' --features '[{\"title\":\"extract middleware\",\"task\":\"...\",\"acceptance_criteria\":[{\"type\":\"test\",\"target\":\"pytest tests/auth/\",\"description\":\"pass\"}]},{\"title\":\"add JWT\",\"task\":\"...\",\"depends_on\":[0]}]'")
+_bash("$D feature-list --workspace alfred")
+_bash("$D feature-criteria --workspace alfred --index 0 --action view")
+_bash("$D feature-criteria --workspace alfred --index 0 --action append --criteria '{\"type\":\"test\",\"target\":\"pytest tests/auth/test_jwt.py\",\"description\":\"pass\"}'")
+_bash("$D feature-verify --workspace alfred --index 0 --engine codex")
+_bash("$D feature-done --workspace alfred --index 0 --branch feat/auth --pr '#15'")
+_bash("$D feature-update --workspace alfred --index 1 --status skipped")
 ```
 
-### Criteria Types
+Criteria types: `test` (subprocess, blocks done), `assert` (engine verify, blocks done), `manual` (reminder only).
 
-| Type | Behavior | Blocks `feature-done`? |
-|------|----------|----------------------|
-| `test` | Runs command via subprocess, checks exit code | Yes (unless `--force`) |
-| `assert` | Calls engine to verify code matches description | Yes (unless `--force`) |
-| `manual` | Marked `passed=null`, reminder only | No |
-
-### Feature Loop
-
-When complexity is `complex`, follow this loop for each feature:
-
-1. `feature-next` → get next executable feature (auto-sets `in_progress`)
-2. `develop` → implement the feature's task
-3. `test` → run workspace-level tests
-4. `feature-verify` → run feature-specific acceptance criteria
-5. If verify fails → loop back to step 2 (max 3 attempts per feature)
-6. `feature-done` → mark complete (checks criteria; `--force` to override)
-7. Ask user "Continue with next feature?" before each iteration
-
-When `feature-next` returns `status: all_complete`, proceed to `submit-pr` (or per-feature PRs if preferred), then `release`.
-
----
-
-## Lease Management
-
-Default lease is 2 hours. During long pauses, renew proactively: `_bash("python $SKILL_DIR/scripts/dispatch.py renew-lease --workspace alfred")`
+**Feature Loop**: `feature-next` → `develop` → `test` → `feature-verify` → `feature-done` (max 3 attempts). Ask user before each feature. When `all_complete` → `submit-pr` → `release`.
 
 ---
 
 ## Error Handling
 
-| error_code | Agent Action |
-|------------|-------------|
-| `NO_SESSION` | Run `workspace-check` first to start a session |
-| `PATH_NOT_FOUND` | Ask user to add workspace/env: `config-add ...` |
-| `WORKSPACE_LOCKED` | Report current task and phase, suggest waiting |
-| `GIT_DIRTY` | Ask user to commit or stash first |
-| `WORKSPACE_GIT_DIRTY` | Workspace slot has leftover changes; suggest `--auto-clean` or manual cleanup |
-| `LOCK_NOT_FOUND` | Remind to run `workspace-check` first |
-| `LEASE_EXPIRED` | Lock was cleaned; re-run `workspace-check` |
-| `SSH_UNREACHABLE` | Ask if user wants to skip env probing |
-| `ENGINE_TIMEOUT` | Release workspace, suggest retry with simpler task |
-| `ENGINE_ERROR` | Release workspace, report error details |
-| `COMMAND_DENIED` | Tell user the env command was blocked by security policy |
-| `TEST_FAILED` | After 2 auto-fix rounds: present options (manual fix / abandon / keep branch) |
+| error_code | Action |
+|------------|--------|
+| `NO_SESSION` / `LOCK_NOT_FOUND` / `LEASE_EXPIRED` | Run `workspace-check` to start/restart session |
+| `PATH_NOT_FOUND` / `INVALID_ARGS` | Check `hint` field; run `config-list` for correct names; try `--repos <name>` |
+| `WORKSPACE_LOCKED` | Use `quick-find --repos` for read-only search; or ask user to release workspace |
+| `GIT_DIRTY` | Ask user to commit or stash |
+| `WORKSPACE_GIT_DIRTY` | Add `--auto-clean` to `workspace-check`, or `release --cleanup` |
+| `SSH_UNREACHABLE` | Ask user whether to skip env probing |
+| `ENGINE_TIMEOUT` / `ENGINE_ERROR` | Release workspace; retry with other engine or simpler task |
+| `COMMAND_DENIED` | Env command blocked by security policy — inform user |
+| `TEST_FAILED` | Max 2 auto-fix rounds, then ask user (manual fix / abandon / keep branch) |
 
-### Cancellation
-
-Use `release --workspace alfred` at any phase. Add `--cleanup` if code changes exist (Phase 4-5) to rollback branch. If PR already created (Phase 6+), tell user to close PR manually first.
+**Cancellation**: `release --workspace <name>` at any phase. Add `--cleanup` to rollback branch (Phase 4-5). If PR exists (Phase 6+), tell user to close PR first.
 
 ---
 
 ## Safety Rules
 
-1. **Never push to main/master** — always work on feature/fix branches
-2. **Never force push** — all pushes are regular pushes
-3. **Never auto-merge PRs** — PRs require human review
-4. **Env probing is read-only** — no writes, restarts, or deployments to runtime environments
-5. **Confirm before proceeding** — wait at Phase 0, Phase 2, Phase 5, and Phase 6
-6. **Respect lock** — if workspace is busy, do not force acquire
-7. **Auto-fix limit** — max 2 rounds of test fix, then escalate to user
-8. **dispatch.py is the sole workflow entry point** — all workflow operations (workspace-check, test, submit-pr, release, etc.) must go through `dispatch.py`. Do not use `_bash`/`_write_file` to directly modify workspace files or perform git operations, except: when engines are unavailable, you may write code directly for analysis/development, but testing, PR submission, and release must always go through `dispatch.py`
-9. **Always release** — every task must end with `dispatch.py release`, whether successful, cancelled, or failed. Forgetting to release blocks the workspace for future tasks
-
----
-
+1. Never push to main/master — always feature/fix branches
+2. Never force push; never auto-merge PRs
+3. Env probing is read-only — no writes, restarts, or deployments
+4. **WAIT for user** at Phase 0, Phase 3 (standard/complex), Phase 5, Phase 6
+5. Respect locks — never force acquire; `WORKSPACE_LOCKED` → use `--repos` for read-only fallback
+6. Max 2 auto-fix rounds, then escalate
+7. `dispatch.py` is the sole workflow entry point — no direct `_bash`/`_write_file` on workspace files (except code authoring when engines unavailable)
+8. Always release — forgetting blocks future tasks

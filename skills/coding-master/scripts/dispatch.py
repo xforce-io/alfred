@@ -275,34 +275,116 @@ def cmd_quick_test(args) -> dict:
 _QUICK_FIND_MAX = 100
 
 
-def cmd_quick_find(args) -> dict:
-    """Search code in workspace via grep."""
-    ws_path = _resolve_workspace_path(args)
-    if ws_path is None:
-        return {"ok": False, "error": f"workspace '{args.workspace}' not found",
-                "error_code": "PATH_NOT_FOUND"}
-
-    cmd = ["grep", "-rn", args.query, "."]
-    if args.glob:
-        cmd = ["grep", "-rn", f"--include={args.glob}", args.query, "."]
+def _grep_in_path(search_path: str, query: str, glob: str | None) -> dict:
+    """Run grep in a directory and return result dict."""
+    cmd = ["grep", "-rn", query, "."]
+    if glob:
+        cmd = ["grep", "-rn", f"--include={glob}", query, "."]
 
     try:
-        r = subprocess.run(cmd, cwd=ws_path, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(cmd, cwd=search_path, capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "search timed out (30s)", "error_code": "TIMEOUT"}
 
     lines = r.stdout.strip().split("\n") if r.stdout.strip() else []
     truncated = len(lines) > _QUICK_FIND_MAX
     lines = lines[:_QUICK_FIND_MAX]
+    return {"ok": True, "lines": lines, "truncated": truncated}
+
+
+def _available_names(config: ConfigManager) -> dict:
+    """Return available workspace and repo names for error hints."""
+    data = config.list_all().get("data", {})
+    return {
+        "workspaces": list(data.get("workspaces", {}).keys()),
+        "repos": list(data.get("repos", {}).keys()),
+    }
+
+
+def cmd_quick_find(args) -> dict:
+    """Search code in workspace or repo source path via grep."""
+    config = ConfigManager()
+
+    # Validate: at least one of --workspace or --repos must be provided
+    if not args.workspace and not args.repos:
+        avail = _available_names(config)
+        return {
+            "ok": False,
+            "error": "Either --workspace or --repos is required.",
+            "error_code": "INVALID_ARGS",
+            "hint": f"Available workspaces: {avail['workspaces']}. Available repos: {avail['repos']}.",
+        }
+
+    # --repos mode: search directly in repo source paths (no lock needed)
+    if args.repos:
+        repo_names = [r.strip() for r in args.repos.split(",") if r.strip()]
+        all_results: dict = {}
+        total_count = 0
+
+        for name in repo_names:
+            repo = config.get_repo(name)
+            if repo is None:
+                avail = _available_names(config)
+                return {
+                    "ok": False,
+                    "error": f"repo '{name}' not found. Use config-list to see registered repos.",
+                    "error_code": "PATH_NOT_FOUND",
+                    "hint": f"Available repos: {avail['repos']}. Use --repos <name> to search a registered repo directly.",
+                }
+            repo_url = repo.get("url", "")
+            repo_path = Path(repo_url).expanduser()
+            if not repo_path.is_dir():
+                return {
+                    "ok": False,
+                    "error": f"repo '{name}' path '{repo_url}' is not a local directory. Only local repos support direct search.",
+                    "error_code": "PATH_NOT_FOUND",
+                }
+            result = _grep_in_path(str(repo_path), args.query, args.glob)
+            if not result["ok"]:
+                return result
+            all_results[name] = result["lines"]
+            total_count += len(result["lines"])
+
+        return {
+            "ok": True,
+            "data": {
+                "query": args.query,
+                "glob": args.glob,
+                "repos": all_results,
+                "count": total_count,
+                "truncated": any(
+                    len(lines) >= _QUICK_FIND_MAX for lines in all_results.values()
+                ),
+            },
+        }
+
+    # --workspace mode (original behavior)
+    ws_path = _resolve_workspace_path(args)
+    if ws_path is None:
+        avail = _available_names(config)
+        return {
+            "ok": False,
+            "error": f"workspace '{args.workspace}' not found.",
+            "error_code": "PATH_NOT_FOUND",
+            "hint": (
+                f"Available workspaces: {avail['workspaces']}. "
+                f"Available repos: {avail['repos']}. "
+                "Use --repos <name> to search a registered repo directly."
+            ),
+        }
+
+    result = _grep_in_path(ws_path, args.query, args.glob)
+    if not result["ok"]:
+        return result
 
     return {
         "ok": True,
         "data": {
             "query": args.query,
             "glob": args.glob,
-            "matches": lines,
-            "count": len(lines),
-            "truncated": truncated,
+            "matches": result["lines"],
+            "count": len(result["lines"]),
+            "truncated": result["truncated"],
         },
     }
 
@@ -681,8 +763,9 @@ def _build_parser() -> argparse.ArgumentParser:
     qt.add_argument("--path", default=None, help="Specific test path/directory")
     qt.add_argument("--lint", action="store_true", help="Also run lint")
 
-    qf = sub.add_parser("quick-find", help="Search code in workspace")
-    qf.add_argument("--workspace", required=True)
+    qf = sub.add_parser("quick-find", help="Search code in workspace or repo")
+    qf.add_argument("--workspace", default=None, help="Workspace slot name (env0/env1/env2)")
+    qf.add_argument("--repos", default=None, help="Comma-separated repo names for direct source search")
     qf.add_argument("--query", required=True, help="Search pattern (grep)")
     qf.add_argument("--glob", default=None, help="File pattern filter")
 

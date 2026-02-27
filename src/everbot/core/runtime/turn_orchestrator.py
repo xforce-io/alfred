@@ -116,7 +116,14 @@ def _extract_failure_signature(output: str) -> Optional[str]:
         return None
     code_match = re.search(r"Command exited with code\s+(\d+)", output)
     if code_match and code_match.group(1) != "0":
-        return f"exit_code:{code_match.group(1)}"
+        exit_code = code_match.group(1)
+        # Try to extract a structured error_code from JSON body for finer
+        # granularity (e.g. "PATH_NOT_FOUND" vs "WORKSPACE_LOCKED"), so that
+        # distinct errors are not collapsed into the same signature.
+        error_code_match = re.search(r'"error_code"\s*:\s*"([^"]+)"', output)
+        if error_code_match:
+            return f"exit_code:{exit_code}:{error_code_match.group(1)}"
+        return f"exit_code:{exit_code}"
     # Match "Error:" only at line start (possibly with leading whitespace or a
     # class-name prefix like "SyntaxError:"), avoiding false positives from
     # legitimate output that happens to contain the word "Error:" mid-sentence.
@@ -139,9 +146,11 @@ _FILE_PATH_PATTERNS = [
 ]
 
 
-def _extract_tool_intent_signature(tool_name: str, args: str) -> Optional[str]:
+def _extract_tool_intent_signature(tool_name: str, args) -> Optional[str]:
     if not tool_name or not args:
         return None
+    if not isinstance(args, str):
+        args = str(args)
     args_lower = args.lower()
     for pattern in _FILE_PATH_PATTERNS:
         match = re.search(pattern, args, re.IGNORECASE)
@@ -347,6 +356,8 @@ class TurnOrchestrator:
                     s_args = skill_info.get("args") or progress.get("args") or ""
                     s_output = progress.get("answer") or progress.get("block_answer") or progress.get("output") or ""
 
+                    fail_sig = None  # set in completed/failed branch below
+
                     if status in ("running", "processing"):
                         # Skill invocation → count as tool call
                         tool_call_count += 1
@@ -408,10 +419,22 @@ class TurnOrchestrator:
                                 )
                                 return
 
+                    # Inject failure count warning for skill outputs
+                    warn_output = s_output
+                    if fail_sig and failed_tool_outputs >= 1:
+                        sig_count = failure_signatures.get(fail_sig, 0)
+                        sig_max = policy.max_same_failure_signature
+                        total_max = policy.max_failed_tool_outputs
+                        warn_output = s_output + (
+                            f"\n[⚠ tool_failure {failed_tool_outputs}/{total_max}"
+                            f" (sig {sig_count}/{sig_max}): {fail_sig}."
+                            f" Switch strategy to avoid circuit break.]"
+                        )
+
                     yield TurnEvent(
                         type=TurnEventType.SKILL,
                         pid=pid, status=status,
-                        skill_name=s_name, skill_args=s_args, skill_output=s_output,
+                        skill_name=s_name, skill_args=s_args, skill_output=warn_output,
                     )
                     if pid:
                         sent_progress[pid] = status
@@ -492,6 +515,19 @@ class TurnOrchestrator:
                             return
 
                     out_preview, out_trunc, out_total = _truncate_preview(t_output_raw, policy.max_tool_output_preview_chars)
+
+                    # Inject failure count warning so LLM can see how close
+                    # it is to the circuit breaker and switch strategy.
+                    if fail_sig and failed_tool_outputs >= 1:
+                        sig_count = failure_signatures.get(fail_sig, 0)
+                        sig_max = policy.max_same_failure_signature
+                        total_max = policy.max_failed_tool_outputs
+                        out_preview += (
+                            f"\n[⚠ tool_failure {failed_tool_outputs}/{total_max}"
+                            f" (sig {sig_count}/{sig_max}): {fail_sig}."
+                            f" Switch strategy to avoid circuit break.]"
+                        )
+
                     yield TurnEvent(
                         type=TurnEventType.TOOL_OUTPUT,
                         pid=pid, status="failed" if fail_sig else "success",

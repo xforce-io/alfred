@@ -179,6 +179,7 @@ class WorkspaceManager:
                     "error": f"workspace busy: {lock.data.get('task', '?')} "
                              f"(phase: {lock.data.get('phase', '?')})",
                     "error_code": "WORKSPACE_LOCKED",
+                    "hint": "Use quick-find --repos <name> for read-only search without workspace lock.",
                 }
             # stale lock — clean up
             lock.delete()
@@ -206,6 +207,7 @@ class WorkspaceManager:
                 "ok": False,
                 "error": "workspace was just acquired by another session",
                 "error_code": "WORKSPACE_LOCKED",
+                "hint": "Use quick-find --repos <name> for read-only search without workspace lock.",
             }
 
         # Build snapshot
@@ -432,7 +434,8 @@ class WorkspaceManager:
             ws = self._find_free_workspace()
             if ws is None:
                 return {"ok": False, "error": "no free workspace available",
-                        "error_code": "WORKSPACE_LOCKED"}
+                        "error_code": "WORKSPACE_LOCKED",
+                        "hint": "Use quick-find --repos <name> for read-only search without workspace lock."}
 
         ws_path = ws["path"]
         if not Path(ws_path).exists():
@@ -448,6 +451,7 @@ class WorkspaceManager:
                     "error": f"workspace busy: {lock.data.get('task', '?')} "
                              f"(phase: {lock.data.get('phase', '?')})",
                     "error_code": "WORKSPACE_LOCKED",
+                    "hint": "Use quick-find --repos <name> for read-only search without workspace lock.",
                 }
             lock.delete()
 
@@ -462,6 +466,7 @@ class WorkspaceManager:
                 "ok": False,
                 "error": "workspace was just acquired by another session",
                 "error_code": "WORKSPACE_LOCKED",
+                "hint": "Use quick-find --repos <name> for read-only search without workspace lock.",
             }
 
         # 6. Clone or update each repo (with dirty check + baseline sync)
