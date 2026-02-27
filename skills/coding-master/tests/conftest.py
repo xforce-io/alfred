@@ -7,6 +7,25 @@ from pathlib import Path
 
 import pytest
 
+
+# ── Live test support ────────────────────────────────────
+
+def pytest_addoption(parser):
+    parser.addoption("--run-live", action="store_true", default=False,
+                     help="Run live tests that call real engines (costs API credits)")
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "live: mark test as live (needs real engine)")
+
+
+def pytest_collection_modifyitems(config, items):
+    if not config.getoption("--run-live"):
+        skip_live = pytest.mark.skip(reason="need --run-live to run")
+        for item in items:
+            if "live" in item.keywords:
+                item.add_marker(skip_live)
+
 # Add scripts/ to sys.path so tests can import skill modules directly
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
