@@ -303,6 +303,35 @@ class WorkspaceManager:
             "lease_expires_at": lock.data["lease_expires_at"],
         }}
 
+    def reclaim_expired(self) -> int:
+        """Reclaim all expired workspace locks. Return count of reclaimed."""
+        count = 0
+        all_ws = self.config._section().get("workspaces", {})
+        for name in all_ws:
+            ws = self.config.get_workspace(name)
+            if ws is None:
+                continue
+            lock = LockFile(ws["path"])
+            if lock.exists():
+                lock.load()
+                if lock.is_expired():
+                    lock.delete()
+                    count += 1
+        return count
+
+    def release_all(self, cleanup: bool = False) -> dict:
+        """Release all workspace locks. Return summary."""
+        released = []
+        errors = []
+        all_ws = self.config._section().get("workspaces", {})
+        for name in all_ws:
+            r = self.release(name, cleanup=cleanup)
+            if r["ok"]:
+                released.append(name)
+            else:
+                errors.append({"workspace": name, "error": r.get("error")})
+        return {"ok": True, "data": {"released": released, "errors": errors}}
+
     # ── .gitignore management ────────────────────────────────
 
     @staticmethod
@@ -432,6 +461,11 @@ class WorkspaceManager:
                         "error_code": "PATH_NOT_FOUND"}
         else:
             ws = self._find_free_workspace()
+            if ws is None:
+                # Try reclaiming expired locks, then retry
+                reclaimed = self.reclaim_expired()
+                if reclaimed:
+                    ws = self._find_free_workspace()
             if ws is None:
                 return {"ok": False, "error": "no free workspace available",
                         "error_code": "WORKSPACE_LOCKED",
@@ -577,18 +611,20 @@ class WorkspaceManager:
     def _find_free_workspace(self) -> dict | None:
         """Iterate all configured workspaces, return first unlocked slot.
 
-        Skips 'direct' workspaces (directories that already contain a .git repo)
-        to avoid cloning repos into someone's source tree.  Only empty-slot
-        workspaces (env0/env1/…) are eligible for auto-allocation.
+        Skips workspaces whose path matches a configured repo (true direct
+        workspaces) to avoid cloning repos into someone's source tree.
+        Workspace slots (env0/env1/…) are eligible even if they contain
+        a .git directory from previous usage.
         """
+        repo_paths = self._repo_paths()
         all_ws = self.config._section().get("workspaces", {})
         for name in all_ws:
             ws = self.config.get_workspace(name)
             if ws is None:
                 continue
             ws_path = ws["path"]
-            # Skip direct workspaces — they already host a git repo
-            if (Path(ws_path) / ".git").exists():
+            # Skip direct workspaces — path matches a configured repo
+            if str(Path(ws_path).resolve()) in repo_paths:
                 continue
             # Workspace directory doesn't need to exist yet — we'll create it
             lock = LockFile(ws_path)
@@ -600,6 +636,18 @@ class WorkspaceManager:
                 lock.delete()
             return ws
         return None
+
+    def _repo_paths(self) -> set[str]:
+        """Return resolved paths of all configured repos."""
+        paths = set()
+        for name in self.config._section().get("repos", {}):
+            rc = self.config.get_repo(name)
+            if rc and rc.get("url"):
+                # Resolve local paths; remote URLs won't resolve meaningfully
+                p = Path(rc["url"])
+                if p.exists():
+                    paths.add(str(p.resolve()))
+        return paths
 
     def _probe_repo(self, repo_path: str, repo_config: dict) -> dict:
         """Probe a single repo: git info + runtime + project."""

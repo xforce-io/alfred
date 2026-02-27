@@ -143,6 +143,7 @@ class TestResolveEnvs:
         data = {
             "coding_master": {
                 "workspaces": {"alfred": "/path/alfred"},
+                "repos": {"alfred": "/path/alfred"},
                 "envs": {
                     "alfred-prod": "deploy@prod:/app",
                     "alfred-staging": "deploy@stg:/app",
@@ -163,6 +164,7 @@ class TestResolveEnvs:
         data = {
             "coding_master": {
                 "workspaces": {"ws": {"path": "/ws", "default_env": "myenv"}},
+                "repos": {"ws": {"url": "/ws", "default_env": "myenv"}},
                 "envs": {"myenv": "/env/path"},
             }
         }
@@ -177,6 +179,7 @@ class TestResolveEnvs:
         data = {
             "coding_master": {
                 "workspaces": {"app": "/app"},
+                "repos": {"app": "/app"},
                 "envs": {
                     "app-prod": "u@h:/p",
                     "app-local": "/local",

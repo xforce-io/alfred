@@ -551,11 +551,19 @@ def cmd_env_probe(args) -> dict:
     return with_lock_update(ws_path, "env-probe", do_probe)
 
 
-@requires_workspace
 def cmd_analyze(args) -> dict:
-    ws_path = args._ws_path
-
     config = ConfigManager()
+
+    # Validate: at least one of --workspace or --repos must be provided
+    if not getattr(args, "workspace", None) and not getattr(args, "repos", None):
+        avail = _available_names(config)
+        return {
+            "ok": False,
+            "error": "Either --workspace or --repos is required.",
+            "error_code": "INVALID_ARGS",
+            "hint": f"Available workspaces: {avail['workspaces']}. Available repos: {avail['repos']}.",
+        }
+
     engine_name = args.engine or config.get_default_engine()
     engine = _get_engine(engine_name)
     if engine is None:
@@ -563,6 +571,69 @@ def cmd_analyze(args) -> dict:
                 "error_code": "ENGINE_ERROR"}
 
     max_turns = config.get_max_turns()
+
+    # --repos mode: lock-free, read-only analysis directly on repo paths
+    if getattr(args, "repos", None):
+        resolved = _resolve_repo_paths(args, config)
+        if isinstance(resolved, dict):
+            return resolved  # error
+
+        mgr = WorkspaceManager(config)
+        repos_data = {}
+        for name, repo_path in resolved:
+            repo_cfg = config.get_repo(name)
+            git_info = mgr._probe_git(repo_path)
+            runtime = mgr._probe_runtime(repo_path)
+            project = mgr._probe_project(repo_path, repo_cfg)
+            repos_data[name] = {
+                "path": repo_path,
+                "git": git_info,
+                "runtime": runtime,
+                "project": project,
+            }
+
+        ws_snapshot = json.dumps(repos_data, indent=2, ensure_ascii=False)
+        env_snapshot = "(not available — repos mode, no env probe)"
+
+        prompt = ANALYZE_PROMPT.format(
+            workspace_snapshot=ws_snapshot,
+            env_snapshot=env_snapshot,
+            task=args.task,
+        )
+
+        # Run engine on the first repo path (primary analysis target)
+        primary_path = resolved[0][1]
+        result = engine.run(primary_path, prompt, max_turns=max_turns)
+
+        complexity = _parse_complexity(result.summary) if result.success else "standard"
+
+        return {
+            "ok": result.success,
+            "data": {
+                "summary": result.summary,
+                "files_changed": result.files_changed,
+                "complexity": complexity,
+                "feature_plan_created": False,
+                "feature_count": 0,
+            },
+            **({"error": result.error, "error_code": "ENGINE_ERROR"} if result.error else {}),
+        }
+
+    # --workspace mode (original behavior, requires session/lock)
+    ws_path = _resolve_workspace_path(args)
+    if ws_path is None:
+        avail = _available_names(config)
+        return {"ok": False, "error": f"workspace '{args.workspace}' not found",
+                "error_code": "PATH_NOT_FOUND",
+                "hint": f"Available workspaces: {avail['workspaces']}. Available repos: {avail['repos']}."}
+    session_path = Path(ws_path) / ARTIFACT_DIR / "session.json"
+    if not session_path.exists():
+        return {"ok": False,
+                "error": "run workspace-check first to start a session",
+                "error_code": "NO_SESSION"}
+    session = json.loads(session_path.read_text())
+    ws_path = session["ws_path"]
+
     ws_snapshot = _load_artifact(ws_path, "workspace_snapshot.json")
     env_snapshot = _load_artifact(ws_path, "env_snapshot.json")
 
@@ -741,6 +812,11 @@ def cmd_release(args) -> dict:
     config = ConfigManager()
     mgr = WorkspaceManager(config)
     cleanup = getattr(args, "cleanup", False)
+    if getattr(args, "all", False):
+        return mgr.release_all(cleanup=cleanup)
+    if not args.workspace:
+        return {"ok": False, "error": "--workspace or --all is required",
+                "error_code": "INVALID_ARGS"}
     return mgr.release(args.workspace, cleanup=cleanup)
 
 
@@ -894,7 +970,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ep.add_argument("--commands", nargs="*", default=None)
 
     az = sub.add_parser("analyze", help="Analyze issue with coding engine")
-    az.add_argument("--workspace", required=True)
+    az.add_argument("--workspace", default=None, help="Workspace slot name (required for workspace mode)")
+    az.add_argument("--repos", default=None, help="Comma-separated repo names for lock-free direct analysis")
     az.add_argument("--task", required=True)
     az.add_argument("--engine", default=None)
 
@@ -918,7 +995,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--env", required=True)
 
     rl = sub.add_parser("release", help="Release workspace lock")
-    rl.add_argument("--workspace", required=True)
+    rl.add_argument("--workspace", default=None, help="Workspace name (required unless --all)")
+    rl.add_argument("--all", action="store_true", help="Release all workspace locks")
     rl.add_argument("--cleanup", action="store_true")
 
     rn = sub.add_parser("renew-lease", help="Renew workspace lock lease")

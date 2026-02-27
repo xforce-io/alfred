@@ -67,8 +67,8 @@ class TurnPolicy:
 
     max_attempts: int = 3
     max_tool_calls: int = 50
-    max_failed_tool_outputs: int = 3
-    max_same_failure_signature: int = 3
+    max_failed_tool_outputs: int = 6
+    max_same_failure_signature: int = 4
     max_same_tool_intent: int = 3
     max_non_progress_events: int = 500
     max_tool_args_preview_chars: int = 500
@@ -105,6 +105,7 @@ HEARTBEAT_POLICY = TurnPolicy(
 JOB_POLICY = TurnPolicy(
     max_attempts=1,
     max_tool_calls=20,
+    max_failed_tool_outputs=5,
     max_tool_output_preview_chars=12000,
 )
 

@@ -354,7 +354,7 @@ class TestEnsureRepo:
         ws = repo_config_manager.get_workspace("env0")
         rc = {"name": "bad", "url": "file:///nonexistent/repo.git"}
         path = mgr._ensure_repo(ws["path"], rc)
-        assert path is None
+        assert isinstance(path, dict) and path["ok"] is False and path["error_code"] == "GIT_ERROR"
 
 
 class TestCheckAndAcquireForRepos:

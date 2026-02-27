@@ -416,7 +416,7 @@ class TestQuickFind:
     def test_success(self, MockCM, mock_sub):
         MockCM.return_value.get_workspace.return_value = {"path": "/ws"}
         mock_sub.run.return_value = MagicMock(stdout="./file.py:10:match_line\n./file.py:20:another\n")
-        args = SimpleNamespace(workspace="ws0", query="match", glob=None)
+        args = SimpleNamespace(workspace="ws0", query="match", glob=None, repos=None)
         result = cmd_quick_find(args)
         assert result["ok"] is True
         assert result["data"]["count"] == 2
@@ -427,7 +427,7 @@ class TestQuickFind:
     def test_with_glob(self, MockCM, mock_sub):
         MockCM.return_value.get_workspace.return_value = {"path": "/ws"}
         mock_sub.run.return_value = MagicMock(stdout="./a.py:1:hit\n")
-        args = SimpleNamespace(workspace="ws0", query="hit", glob="*.py")
+        args = SimpleNamespace(workspace="ws0", query="hit", glob="*.py", repos=None)
         result = cmd_quick_find(args)
         assert result["ok"] is True
         # Verify --include flag was used
@@ -439,7 +439,7 @@ class TestQuickFind:
     def test_no_matches(self, MockCM, mock_sub):
         MockCM.return_value.get_workspace.return_value = {"path": "/ws"}
         mock_sub.run.return_value = MagicMock(stdout="")
-        args = SimpleNamespace(workspace="ws0", query="nonexistent", glob=None)
+        args = SimpleNamespace(workspace="ws0", query="nonexistent", glob=None, repos=None)
         result = cmd_quick_find(args)
         assert result["ok"] is True
         assert result["data"]["count"] == 0
@@ -452,7 +452,7 @@ class TestQuickFind:
         import subprocess as real_sub
         mock_sub.run.side_effect = real_sub.TimeoutExpired(cmd="grep", timeout=30)
         mock_sub.TimeoutExpired = real_sub.TimeoutExpired
-        args = SimpleNamespace(workspace="ws0", query="pattern", glob=None)
+        args = SimpleNamespace(workspace="ws0", query="pattern", glob=None, repos=None)
         result = cmd_quick_find(args)
         assert result["ok"] is False
         assert result["error_code"] == "TIMEOUT"
@@ -460,7 +460,7 @@ class TestQuickFind:
     @patch("dispatch.ConfigManager")
     def test_workspace_not_found(self, MockCM):
         MockCM.return_value.get_workspace.return_value = None
-        args = SimpleNamespace(workspace="nope", query="x", glob=None)
+        args = SimpleNamespace(workspace="nope", query="x", glob=None, repos=None)
         result = cmd_quick_find(args)
         assert result["ok"] is False
         assert result["error_code"] == "PATH_NOT_FOUND"

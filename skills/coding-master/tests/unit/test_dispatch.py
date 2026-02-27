@@ -16,6 +16,7 @@ class TestCommandRegistry:
             "test", "submit-pr", "env-verify", "release", "renew-lease",
             "feature-plan", "feature-next", "feature-done",
             "feature-list", "feature-update",
+            "feature-criteria", "feature-verify",
         }
         assert set(COMMANDS.keys()) == expected
 
