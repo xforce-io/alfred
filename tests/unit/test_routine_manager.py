@@ -2,10 +2,14 @@
 
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from src.everbot.core.tasks.routine_manager import RoutineManager
+from src.everbot.core.tasks.routine_manager import (
+    RoutineManager,
+    _detect_local_iana_timezone,
+)
 from src.everbot.core.tasks.task_manager import ParseStatus, parse_heartbeat_md
 
 
@@ -141,3 +145,76 @@ def test_add_routine_one_shot_with_next_run_at_no_schedule(tmp_path: Path):
     )
     assert created["next_run_at"] == explicit_time
     assert created["schedule"] is None
+
+
+# ===========================================================================
+# _detect_local_iana_timezone
+# ===========================================================================
+
+
+class TestDetectLocalIanaTimezone:
+    def test_macos_symlink(self):
+        """Resolves /etc/localtime → .../zoneinfo/Asia/Shanghai."""
+        fake_path = Path("/var/db/timezone/zoneinfo/Asia/Shanghai")
+        with patch.object(Path, "resolve", return_value=fake_path):
+            assert _detect_local_iana_timezone() == "Asia/Shanghai"
+
+    def test_linux_symlink(self):
+        """Resolves /etc/localtime → /usr/share/zoneinfo/US/Eastern."""
+        fake_path = Path("/usr/share/zoneinfo/US/Eastern")
+        with patch.object(Path, "resolve", return_value=fake_path):
+            assert _detect_local_iana_timezone() == "US/Eastern"
+
+    def test_zoneinfo_default_variant(self):
+        """Handles zoneinfo.default or similar prefixed dirs."""
+        fake_path = Path("/var/db/timezone/zoneinfo.default/Europe/London")
+        with patch.object(Path, "resolve", return_value=fake_path):
+            assert _detect_local_iana_timezone() == "Europe/London"
+
+    def test_fallback_utc_offset(self):
+        """Falls back to UTC offset when symlink has no zoneinfo component."""
+        fake_path = Path("/some/random/path")
+        with patch.object(Path, "resolve", return_value=fake_path):
+            result = _detect_local_iana_timezone()
+            # Should be a UTC+HH:MM or UTC-HH:MM string
+            assert result.startswith("UTC")
+
+    def test_all_fail_returns_utc(self):
+        """Returns 'UTC' when everything fails."""
+        with patch.object(Path, "resolve", side_effect=OSError("no file")):
+            with patch("src.everbot.core.tasks.routine_manager.datetime") as mock_dt:
+                mock_dt.now.side_effect = Exception("boom")
+                assert _detect_local_iana_timezone() == "UTC"
+
+
+# ===========================================================================
+# add_routine default timezone
+# ===========================================================================
+
+
+def test_add_routine_defaults_timezone_when_schedule_set(tmp_path: Path):
+    """When schedule is provided but timezone_name is empty, auto-detect timezone."""
+    manager = RoutineManager(tmp_path)
+    with patch(
+        "src.everbot.core.tasks.routine_manager._detect_local_iana_timezone",
+        return_value="Asia/Shanghai",
+    ):
+        created = manager.add_routine(
+            title="Auto tz test",
+            description="should get default tz",
+            schedule="1h",
+            now=datetime(2026, 2, 20, 12, 0, tzinfo=timezone.utc),
+        )
+    assert created["timezone"] == "Asia/Shanghai"
+
+
+def test_add_routine_no_default_timezone_without_schedule(tmp_path: Path):
+    """One-shot tasks (no schedule) should NOT get a default timezone."""
+    manager = RoutineManager(tmp_path)
+    created = manager.add_routine(
+        title="One-shot no tz",
+        description="no schedule, no tz",
+        next_run_at="2026-03-01T09:00:00+00:00",
+    )
+    # timezone should remain unset (None or empty)
+    assert not created.get("timezone")

@@ -31,16 +31,35 @@ python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROO
 python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROOT" list --include-disabled
 ```
 
-### add_routine (periodic)
+### add_routine (periodic — fixed time of day, use cron)
+
+For tasks that must run at a **specific time each day**, use a cron expression with `--timezone`:
+
+```bash
+python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROOT" add \
+  --title "Daily attractor push" \
+  --description "Push attractor case at 15:00 daily" \
+  --schedule "0 15 * * *" \
+  --timezone "Asia/Shanghai" \
+  --execution-mode "isolated" \
+  --source "manual"
+```
+
+### add_routine (periodic — fixed interval, use interval string)
+
+For tasks that repeat every N hours/days **regardless of wall-clock time**, use an interval string:
 
 ```bash
 python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROOT" add \
   --title "Daily digest" \
   --description "Summarize key updates" \
   --schedule "1d" \
+  --timezone "Asia/Shanghai" \
   --execution-mode "auto" \
   --source "heartbeat_reflect"
 ```
+
+> **Important**: Always pass `--timezone` for recurring tasks. If omitted, the system defaults to the local timezone and logs a warning. For fixed-time schedules (e.g., "每日15:00"), always use cron expressions (`0 15 * * *`), NOT interval strings (`1d`).
 
 ### add_routine (one-shot with relative delay — preferred)
 

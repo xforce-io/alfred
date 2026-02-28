@@ -49,19 +49,17 @@
 
 ## Web Application
 
-- Web platform: Streamlit-based dashboard in `web/`
-- Unified entry: `scripts/run_web.sh {start|stop|restart|status|logs}`
-  - `start` - Start web platform in background
-  - `stop` - Stop web platform
-  - `restart` - Restart web platform
-  - `status` - Show running status
-  - `logs` - Tail log file
-- Access URL: `http://localhost:8501`
-- Main pages:
-  - Home: Overview and navigation
-  - Money Flow: Market and institutional fund flow analysis
-  - Watchlist: Stock watchlist with AI analyst
-  - Ranking: Stock ranking with various metrics
+- Web platform: FastAPI + WebSocket in `src/everbot/web/`
+- Managed via EverBot daemon: `./bin/everbot start` (includes web server)
+  - `./bin/everbot start` - Start daemon + web in background
+  - `./bin/everbot start --no-web` - Start daemon only (no web)
+  - `./bin/everbot stop` - Stop all services
+  - `./bin/everbot status` - Show running status
+- Access URL: `http://0.0.0.0:8765`
+- Key APIs:
+  - Chat: WebSocket real-time conversation with agents
+  - Agent/Session management REST APIs
+  - API Key authentication (`src/everbot/web/auth.py`)
 
 ## 文档约定
 

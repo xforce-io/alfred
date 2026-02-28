@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import uuid
+
+logger = logging.getLogger(__name__)
 
 from ..session.session import SessionPersistence
 from .task_manager import (
@@ -16,6 +19,32 @@ from .task_manager import (
     write_task_block,
     _compute_next_run,
 )
+
+
+def _detect_local_iana_timezone() -> str:
+    """Best-effort detection of local IANA timezone name (e.g. 'Asia/Shanghai').
+
+    Tries /etc/localtime symlink (macOS/Linux), then falls back to UTC offset string.
+    """
+    # macOS: /etc/localtime -> /var/db/timezone/zoneinfo/Asia/Shanghai
+    # Linux: /etc/localtime -> /usr/share/zoneinfo/Asia/Shanghai
+    # resolve() may follow to zoneinfo.default/ — match any zoneinfo* directory
+    try:
+        target = Path("/etc/localtime").resolve()
+        parts = target.parts
+        for i, part in enumerate(parts):
+            if part.startswith("zoneinfo") and i + 1 < len(parts):
+                return "/".join(parts[i + 1 :])
+    except Exception:
+        pass
+    # Fallback: UTC offset like "UTC+08:00"
+    try:
+        offset = datetime.now().astimezone().strftime("%z")  # e.g. "+0800"
+        h, m = int(offset[:3]), int(offset[0] + offset[3:5])
+        sign = "+" if h >= 0 else "-"
+        return f"UTC{sign}{abs(h):02d}:{abs(m):02d}"
+    except Exception:
+        return "UTC"
 
 
 class RoutineManager:
@@ -130,6 +159,15 @@ class RoutineManager:
         now_dt = now or datetime.now(timezone.utc)
         if now_dt.tzinfo is None:
             now_dt = now_dt.replace(tzinfo=timezone.utc)
+
+        # Default timezone to local system timezone when not specified for scheduled tasks
+        if schedule and not timezone_name:
+            timezone_name = _detect_local_iana_timezone()
+            logger.warning(
+                "No timezone specified for scheduled routine '%s'; "
+                "defaulting to '%s'. Pass --timezone explicitly for reliability.",
+                title, timezone_name,
+            )
 
         content, task_list = self._load_task_list()
         if any(str(task.id) == task_id for task in task_list.tasks):

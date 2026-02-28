@@ -601,6 +601,9 @@ class TelegramChannel:
                 await self._send_message(chat_id, f"Failed to create agent: {exc}")
                 return
 
+        # Register Telegram skillkit so the agent can send files/photos
+        self._ensure_telegram_skillkit(agent)
+
         # Start typing indicator
         typing_task = asyncio.create_task(self._typing_loop(chat_id))
 
@@ -717,6 +720,27 @@ class TelegramChannel:
             else:
                 result.append(line)
         return '\n'.join(result), None
+
+    # ------------------------------------------------------------------
+    # Telegram Skillkit registration
+    # ------------------------------------------------------------------
+
+    def _ensure_telegram_skillkit(self, agent: Any) -> None:
+        """Register TelegramSkillkit on the agent if not already present."""
+        gs = getattr(agent, "global_skills", None)
+        if gs is None:
+            return
+        installed = getattr(gs, "installedSkillset", None)
+        if installed is None:
+            return
+        if installed.hasSkill("_tg_send_file"):
+            return
+
+        from .telegram_skillkit import TelegramSkillkit
+
+        tg_skillkit = TelegramSkillkit(bot_token=self._bot_token)
+        installed.addSkillkit(tg_skillkit)
+        logger.info("Registered TelegramSkillkit on agent")
 
     # ------------------------------------------------------------------
     # Typing indicator
