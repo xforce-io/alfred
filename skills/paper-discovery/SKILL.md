@@ -46,6 +46,12 @@ python skills/paper-discovery/scripts/fetch_papers.py --source both --limit 5 --
 python skills/paper-discovery/scripts/fetch_papers.py --source arxiv --category cs.CL --limit 5 --format json
 ```
 
+### Formatted report output (daily digest)
+
+```bash
+python skills/paper-discovery/scripts/fetch_papers.py --source both --limit 5 --format report
+```
+
 ### Human-readable output
 
 ```bash
@@ -58,7 +64,7 @@ python skills/paper-discovery/scripts/fetch_papers.py --source huggingface --lim
 |-------------|-----------------------------------|---------------|----------------------------|
 | `--source`  | `huggingface`, `arxiv`, `both`    | `huggingface` | Paper source               |
 | `--limit`   | integer                           | `5`           | Number of papers           |
-| `--format`  | `text`, `json`                    | `text`        | Output format              |
+| `--format`  | `text`, `json`, `report`          | `text`        | Output format              |
 | `--sort`    | `heat`, `date`, `upvotes`         | `heat`        | Sort order                 |
 | `--category`| arXiv category string             | `cs.AI`       | arXiv category (arXiv only)|
 
