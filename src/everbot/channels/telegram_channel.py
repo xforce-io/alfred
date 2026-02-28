@@ -213,23 +213,34 @@ class TelegramChannel:
     # ------------------------------------------------------------------
 
     async def _polling_loop(self) -> None:
-        # Flush all pending updates so we don't replay stale messages after restart.
-        offset = -1
+        # Drain all pending updates so they are processed immediately after restart
+        # instead of waiting for the first long-poll cycle.
+        offset = 0
         try:
+            # Fetch all pending updates without waiting (timeout=0).
+            # No offset means Telegram returns from the earliest unconfirmed update.
             resp = await self._client.get(  # type: ignore[union-attr]
                 f"{self._base_url}/getUpdates",
-                params={"offset": offset, "timeout": 0},
+                params={"timeout": 0},
             )
             result = resp.json()
-            updates = result.get("result", [])
-            if updates:
-                offset = updates[-1]["update_id"] + 1
-                logger.info("Flushed %d pending Telegram update(s), resuming from offset %d", len(updates), offset)
-            else:
-                offset = 0
+            pending = result.get("result", [])
+            for upd in pending:
+                offset = upd["update_id"] + 1
+                try:
+                    self._inbound_queue.put_nowait(upd)
+                except asyncio.QueueFull:
+                    logger.warning(
+                        "Inbound queue full during drain, dropping update %s",
+                        upd.get("update_id"),
+                    )
+            if pending:
+                logger.info(
+                    "Drained %d pending Telegram update(s) after restart, resuming from offset %d",
+                    len(pending), offset,
+                )
         except Exception as exc:
-            logger.warning("Failed to flush pending Telegram updates: %s", exc)
-            offset = 0
+            logger.warning("Failed to drain pending Telegram updates: %s", exc)
 
         while self._running:
             try:
@@ -553,7 +564,12 @@ class TelegramChannel:
             return
 
         session_id = ChannelSessionResolver.resolve("telegram", agent_name, chat_id)
-        cleared = await self._session_manager.clear_session_history(session_id)
+        try:
+            cleared = await self._session_manager.clear_session_history(session_id)
+        except Exception as exc:
+            logger.error("Failed to clear session %s: %s", session_id, exc)
+            await self._send_message(chat_id, "Failed to clear conversation. Please try again.")
+            return
         if cleared:
             await self._send_message(chat_id, "Conversation cleared. Starting fresh.")
         else:
