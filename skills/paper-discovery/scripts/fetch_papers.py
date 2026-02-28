@@ -15,6 +15,50 @@ from typing import List, Dict, Any
 import requests
 
 
+def generate_one_line_summary(abstract: str) -> str:
+    """Generate a one-line Chinese summary for a paper using LLM."""
+    if not abstract:
+        return ""
+
+    try:
+        import asyncio
+        from dolphin.core.llm.llm_client import LLMClient
+        from dolphin.core.common.enums import Messages as DolphinMessages, MessageRole
+        from dolphin.core.context import Context
+
+        context = Context()
+        llm_client = LLMClient(context)
+        msgs = DolphinMessages()
+        prompt = (
+            "请用一句简洁的中文概括以下论文摘要的核心贡献或发现，不超过50个字：\n\n"
+            f"{abstract}"
+        )
+        msgs.append_message(MessageRole.USER, prompt)
+
+        config = context.get_config()
+        model = getattr(config, "fast_llm", None) or "qwen-turbo"
+
+        async def _call():
+            result = ""
+            async for chunk in llm_client.mf_chat_stream(
+                messages=msgs,
+                model=model,
+                temperature=0.3,
+                no_cache=True,
+            ):
+                result = chunk.get("content") or ""
+            return result.strip()
+
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_call())
+        finally:
+            loop.close()
+    except Exception as e:
+        print(f"Warning: Failed to generate summary: {e}", file=sys.stderr)
+        return ""
+
+
 def fetch_huggingface_papers(limit: int = 10) -> List[Dict[str, Any]]:
     """Fetch trending papers from HuggingFace Daily Papers JSON API."""
     url = f"https://huggingface.co/api/daily_papers?limit={limit}"
@@ -222,6 +266,10 @@ def display_report(papers: List[Dict[str, Any]]) -> None:
         if stats:
             print(f"   {' | '.join(stats)}")
 
+        # One-line summary
+        if paper.get("one_line_summary"):
+            print(f"   💡 {paper['one_line_summary']}")
+
         # Summary or abstract
         if paper.get("ai_summary"):
             summary = paper["ai_summary"][:200] + "..." if len(paper["ai_summary"]) > 200 else paper["ai_summary"]
@@ -283,6 +331,9 @@ def display_papers(papers: List[Dict[str, Any]], fmt: str = "text") -> None:
         if paper.get("published_date"):
             print(f"   📅 Published: {paper['published_date']}")
 
+        if paper.get("one_line_summary"):
+            print(f"   💡 一句话摘要: {paper['one_line_summary']}")
+
         if paper.get("ai_summary"):
             summary = paper["ai_summary"][:200] + "..." if len(paper["ai_summary"]) > 200 else paper["ai_summary"]
             print(f"   🤖 AI Summary: {summary}")
@@ -314,6 +365,8 @@ def main():
                         help="Output format: text, json, or report (default: text)")
     parser.add_argument("--sort", choices=["heat", "date", "upvotes"], default="heat",
                         help="Sort order (default: heat)")
+    parser.add_argument("--with-summary", action="store_true", default=False,
+                        help="Generate one-line Chinese summary for each paper using LLM")
 
     args = parser.parse_args()
 
@@ -352,6 +405,13 @@ def main():
         papers.sort(key=lambda x: x.get("upvotes", 0), reverse=True)
 
     papers = papers[:args.limit]
+
+    # Generate one-line summaries if requested
+    if args.with_summary:
+        for paper in papers:
+            summary = generate_one_line_summary(paper.get("abstract", ""))
+            if summary:
+                paper["one_line_summary"] = summary
 
     display_papers(papers, fmt=args.format)
 

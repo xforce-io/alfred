@@ -52,6 +52,12 @@ python skills/paper-discovery/scripts/fetch_papers.py --source arxiv --category 
 python skills/paper-discovery/scripts/fetch_papers.py --source both --limit 5 --format report
 ```
 
+### With one-line Chinese summary (requires LLM)
+
+```bash
+python skills/paper-discovery/scripts/fetch_papers.py --source both --limit 5 --format report --with-summary
+```
+
 ### Human-readable output
 
 ```bash
@@ -67,6 +73,7 @@ python skills/paper-discovery/scripts/fetch_papers.py --source huggingface --lim
 | `--format`  | `text`, `json`, `report`          | `text`        | Output format              |
 | `--sort`    | `heat`, `date`, `upvotes`         | `heat`        | Sort order                 |
 | `--category`| arXiv category string             | `cs.AI`       | arXiv category (arXiv only)|
+| `--with-summary`| flag                          | off           | Generate one-line Chinese summary via LLM |
 
 ## JSON Output Fields
 
@@ -83,6 +90,7 @@ Each paper in JSON output includes:
 | `ai_keywords`   | huggingface | AI-generated keywords               |
 | `github_repo`   | huggingface | GitHub repository URL               |
 | `github_stars`  | huggingface | GitHub stars count                  |
+| `one_line_summary`| both (opt) | LLM-generated one-line Chinese summary (requires `--with-summary`) |
 | `heat_index`    | both        | Computed heat score (0-100)         |
 | `heat_level`    | both        | Heat level (1-5)                    |
 | `published_date`| both        | Publication date (YYYY-MM-DD)       |
@@ -120,6 +128,7 @@ Format the report for the user with:
 
 1. 🔥🔥🔥🔥🔥 Paper Title Here
    👍 142 upvotes | ⭐ 1.2k GitHub stars
+   💡 提出了一种新型多模态推理框架，显著提升了复杂任务的准确率
    🤖 AI-generated summary of the paper...
    🏷️ Keywords: LLM, reasoning, benchmark
    🔗 arXiv | PDF | HuggingFace | GitHub
