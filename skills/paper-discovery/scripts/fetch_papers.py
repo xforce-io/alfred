@@ -31,12 +31,12 @@ def fetch_huggingface_papers(limit: int = 10) -> List[Dict[str, Any]]:
     for item in data[:limit]:
         paper = item.get("paper", {})
         paper_id = paper.get("id", "")
-        title = paper.get("title", "")
+        title = paper.get("title", "").strip().replace("\n", " ")
         if not paper_id or not title:
             continue
 
-        authors = [a.get("name", "") for a in paper.get("authors", []) if a.get("name")]
-        abstract = paper.get("summary", "")
+        authors = [a.get("name", "").strip() for a in paper.get("authors", []) if a.get("name")]
+        abstract = paper.get("summary", "").strip().replace("\n", " ")
         published_date = (paper.get("publishedAt") or "")[:10]
 
         entry = {
@@ -44,7 +44,7 @@ def fetch_huggingface_papers(limit: int = 10) -> List[Dict[str, Any]]:
             "title": title,
             "authors": authors,
             "abstract": abstract[:500] + "..." if len(abstract) > 500 else abstract,
-            "upvotes": item.get("paper", {}).get("upvotes", 0),
+            "upvotes": paper.get("upvotes", 0),
             "hf_url": f"https://huggingface.co/papers/{paper_id}",
             "arxiv_url": f"https://arxiv.org/abs/{paper_id}",
             "pdf_url": f"https://arxiv.org/pdf/{paper_id}",
@@ -72,7 +72,12 @@ def fetch_huggingface_papers(limit: int = 10) -> List[Dict[str, Any]]:
 
 def fetch_arxiv_papers(category: str = "cs.AI", limit: int = 10) -> List[Dict[str, Any]]:
     """Fetch recent papers from arXiv Atom API (fallback source)."""
-    from bs4 import BeautifulSoup
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        print("Error: beautifulsoup4 is required for arXiv fetching. "
+              "Install it with: pip install beautifulsoup4 lxml", file=sys.stderr)
+        return []
 
     api_url = (
         f"https://export.arxiv.org/api/query?search_query=cat:{category}"
@@ -86,7 +91,11 @@ def fetch_arxiv_papers(category: str = "cs.AI", limit: int = 10) -> List[Dict[st
         print(f"Error fetching arXiv papers: {e}", file=sys.stderr)
         return []
 
-    soup = BeautifulSoup(response.text, "xml")
+    try:
+        soup = BeautifulSoup(response.text, "xml")
+    except Exception as e:
+        print(f"Error parsing arXiv XML response: {e}", file=sys.stderr)
+        return []
     entries = soup.find_all("entry")
     papers = []
 
@@ -162,7 +171,7 @@ def calculate_heat_index(paper: Dict[str, Any]) -> float:
                 score += 10
             else:
                 score += 5
-        except ValueError:
+        except (ValueError, TypeError):
             score += 15
     else:
         score += 25
@@ -190,10 +199,65 @@ def calculate_heat_level(heat_index: float) -> int:
         return 1
 
 
+def display_report(papers: List[Dict[str, Any]]) -> None:
+    """Display papers in structured daily-digest report format."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    print(f"📚 今日 AI 论文热榜 ({today})")
+    print()
+
+    for i, paper in enumerate(papers, 1):
+        heat_level = paper.get("heat_level", calculate_heat_level(paper.get("heat_index", 0)))
+        heat_emoji = "🔥" * heat_level
+
+        print(f"{i}. {heat_emoji} {paper['title']}")
+
+        # Stats line
+        stats = []
+        if paper.get("upvotes", 0) > 0:
+            stats.append(f"👍 {paper['upvotes']} upvotes")
+        if paper.get("github_stars", 0) > 0:
+            stars = paper["github_stars"]
+            stars_str = f"{stars/1000:.1f}k" if stars >= 1000 else str(stars)
+            stats.append(f"⭐ {stars_str} GitHub stars")
+        if stats:
+            print(f"   {' | '.join(stats)}")
+
+        # Summary or abstract
+        if paper.get("ai_summary"):
+            summary = paper["ai_summary"][:200] + "..." if len(paper["ai_summary"]) > 200 else paper["ai_summary"]
+            print(f"   🤖 {summary}")
+        elif paper.get("abstract"):
+            abstract = paper["abstract"][:150] + "..." if len(paper["abstract"]) > 150 else paper["abstract"]
+            print(f"   📝 {abstract}")
+
+        # Keywords
+        if paper.get("ai_keywords"):
+            print(f"   🏷️ Keywords: {', '.join(paper['ai_keywords'][:5])}")
+
+        # Links line
+        links = []
+        if paper.get("arxiv_url"):
+            links.append(f"arXiv: {paper['arxiv_url']}")
+        if paper.get("pdf_url"):
+            links.append(f"PDF: {paper['pdf_url']}")
+        if paper.get("hf_url"):
+            links.append(f"HF: {paper['hf_url']}")
+        if paper.get("github_repo"):
+            links.append(f"GitHub: {paper['github_repo']}")
+        if links:
+            print(f"   🔗 {' | '.join(links)}")
+
+        print()
+
+
 def display_papers(papers: List[Dict[str, Any]], fmt: str = "text") -> None:
     """Display papers in specified format."""
     if fmt == "json":
         print(json.dumps(papers, indent=2, ensure_ascii=False))
+        return
+
+    if fmt == "report":
+        display_report(papers)
         return
 
     for i, paper in enumerate(papers, 1):
@@ -246,8 +310,8 @@ def main():
                         help="arXiv category (default: cs.AI)")
     parser.add_argument("--limit", type=int, default=5,
                         help="Number of papers to fetch (default: 5)")
-    parser.add_argument("--format", choices=["text", "json"], default="text",
-                        help="Output format (default: text)")
+    parser.add_argument("--format", choices=["text", "json", "report"], default="text",
+                        help="Output format: text, json, or report (default: text)")
     parser.add_argument("--sort", choices=["heat", "date", "upvotes"], default="heat",
                         help="Sort order (default: heat)")
 
@@ -292,18 +356,18 @@ def main():
     display_papers(papers, fmt=args.format)
 
     # Print summary to stderr so it doesn't pollute JSON output
-    if args.format == "text":
-        print(f"\n📊 Summary: Found {len(papers)} papers")
+    if args.format in ("text", "report"):
+        print(f"\n📊 Summary: Found {len(papers)} papers", file=sys.stderr)
         if papers:
             avg_heat = sum(p["heat_index"] for p in papers) / len(papers)
-            print(f"   Average Heat Index: {avg_heat:.1f}/100")
+            print(f"   Average Heat Index: {avg_heat:.1f}/100", file=sys.stderr)
 
             sources = {}
             for p in papers:
                 src = p.get("source", "unknown")
                 sources[src] = sources.get(src, 0) + 1
             if sources:
-                print(f"   Sources: {', '.join(f'{k}: {v}' for k, v in sources.items())}")
+                print(f"   Sources: {', '.join(f'{k}: {v}' for k, v in sources.items())}", file=sys.stderr)
 
 
 if __name__ == "__main__":
