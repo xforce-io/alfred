@@ -15,8 +15,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dolphin.core.common.constants import KEY_HISTORY
+from src.everbot.core.channel.core_service import ChannelCoreService
 from src.everbot.core.session.session import SessionManager
-from src.everbot.infra.user_data import UserDataManager
+from src.everbot.infra.user_data import UserDataManager, reset_user_data_manager
 from src.everbot.web import app as web_app
 
 
@@ -154,6 +155,7 @@ def receive_until(ws, stop_predicate, max_messages: int = 50) -> list[dict[str, 
 @pytest.fixture
 def isolated_web_env(monkeypatch, tmp_path):
     """Isolate global web service singletons to a temporary .alfred home."""
+    reset_user_data_manager()
     alfred_home = tmp_path / ".alfred"
     user_data = UserDataManager(alfred_home=alfred_home)
     user_data.ensure_directories()
@@ -164,13 +166,25 @@ def isolated_web_env(monkeypatch, tmp_path):
     web_app.chat_service.agent_service = SimpleNamespace(
         create_agent_instance=AsyncMock()
     )
+    web_app.chat_service._core = ChannelCoreService(
+        web_app.chat_service.session_manager,
+        web_app.chat_service.agent_service,
+        web_app.chat_service.user_data,
+    )
 
-    monkeypatch.setattr(web_app, "get_user_data_manager", lambda: UserDataManager(alfred_home=alfred_home))
-    return SimpleNamespace(
+    monkeypatch.setattr(web_app, "get_user_data_manager", lambda: user_data)
+    monkeypatch.setattr("src.everbot.web.services.chat_service.get_user_data_manager", lambda: user_data)
+    monkeypatch.setattr("src.everbot.infra.user_data.get_user_data_manager", lambda alfred_home=None: user_data)
+
+    env = SimpleNamespace(
         alfred_home=alfred_home,
         user_data=user_data,
         session_manager=session_manager,
     )
+    try:
+        yield env
+    finally:
+        reset_user_data_manager()
 
 
 @pytest.fixture

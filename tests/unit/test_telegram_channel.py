@@ -997,7 +997,97 @@ class TestHandleUpdateMedia:
 
 
 # ===========================================================================
-# 14. _extract_text_from_message (core_service helper)
+# 14. Message handling — error and timeout resilience
+# ===========================================================================
+
+class TestMessageHandlingResilience:
+    """Tests that _handle_message properly handles slow/failing LLM calls,
+    cancels typing loop, and still delivers an error reply."""
+
+    @pytest.fixture
+    def channel(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._bindings = {"111": "test_agent"}
+        ch._send_message = AsyncMock(return_value=True)
+        ch._send_chat_action = AsyncMock()
+        ch._send_plain_message = AsyncMock(return_value=True)
+        mock_agent = MagicMock()
+        ch._session_manager.get_cached_agent.return_value = mock_agent
+        return ch
+
+    @pytest.mark.asyncio
+    async def test_process_message_exception_cancels_typing_and_sends_error(self, channel):
+        """When process_message raises, typing_loop is cancelled and error is sent."""
+        async def exploding_process(agent, agent_name, session_id, message, on_event):
+            await asyncio.sleep(0.05)
+            raise RuntimeError("LLM exploded")
+
+        channel._core.process_message = exploding_process
+        await channel._handle_message("111", "test", {})
+
+        # Should still send an error message, not hang forever
+        channel._send_message.assert_awaited()
+        msg = channel._send_message.call_args[0][1]
+        assert "Processing error" in msg or "LLM exploded" in msg
+
+    @pytest.mark.asyncio
+    async def test_typing_loop_runs_during_slow_processing(self, channel):
+        """During slow processing, typing indicator is actively sent."""
+        async def slow_process(agent, agent_name, session_id, message, on_event):
+            from src.everbot.core.channel.models import OutboundMessage
+            await asyncio.sleep(0.3)  # Simulate slow LLM
+            await on_event(OutboundMessage(session_id, "done", msg_type="text"))
+
+        channel._core.process_message = slow_process
+        await channel._handle_message("111", "test", {})
+
+        # typing indicator should have been called multiple times during 0.3s wait
+        # (typing loop fires every 4s, but with sleep(0.3) we get at least 1)
+        assert channel._send_chat_action.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_typing_loop_cancelled_after_completion(self, channel):
+        """After process_message completes, typing loop must be stopped."""
+        typing_task_ref = {}
+
+        original_create_task = asyncio.create_task
+
+        def track_typing_task(coro, **kwargs):
+            task = original_create_task(coro, **kwargs)
+            # The typing loop coro name contains '_typing_loop'
+            if '_typing_loop' in repr(coro):
+                typing_task_ref['task'] = task
+            return task
+
+        async def fast_process(agent, agent_name, session_id, message, on_event):
+            from src.everbot.core.channel.models import OutboundMessage
+            await on_event(OutboundMessage(session_id, "quick", msg_type="text"))
+
+        channel._core.process_message = fast_process
+
+        with patch('asyncio.create_task', side_effect=track_typing_task):
+            await channel._handle_message("111", "test", {})
+
+        # After _handle_message returns, typing task should be done/cancelled
+        if 'task' in typing_task_ref:
+            assert typing_task_ref['task'].done() or typing_task_ref['task'].cancelled()
+
+    @pytest.mark.asyncio
+    async def test_no_response_sends_fallback(self, channel):
+        """When LLM produces no output at all, '(no response)' is sent."""
+        async def empty_process(agent, agent_name, session_id, message, on_event):
+            pass  # No events emitted
+
+        channel._core.process_message = empty_process
+        await channel._handle_message("111", "test", {})
+
+        channel._send_message.assert_awaited()
+        msg = channel._send_message.call_args[0][1]
+        assert "(no response)" in msg
+
+
+# ===========================================================================
+# 15. _extract_text_from_message (core_service helper)
 # ===========================================================================
 
 class TestExtractTextFromMessage:

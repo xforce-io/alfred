@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +73,8 @@ class TurnPolicy:
     max_failed_tool_outputs: int = 6
     max_same_failure_signature: int = 4
     max_same_tool_intent: int = 3
+    max_same_readonly_intent: int = 6
+    max_consecutive_empty_llm_rounds: int = 3
     max_non_progress_events: int = 500
     max_tool_args_preview_chars: int = 500
     max_tool_output_preview_chars: int = 8000
@@ -86,15 +91,14 @@ class TurnPolicy:
         "run_coroutine_failed",
     ])
     # Internal helper tools excluded from tool-call budget counting.
-    budget_exempt_tools: frozenset = field(default_factory=lambda: frozenset({
-        "_load_resource_skill",
-        "_load_skill_resource",
-        "_get_cached_result_detail",
-    }))
+    budget_exempt_tools: frozenset = field(default_factory=frozenset)
 
 
 # Convenience presets
-CHAT_POLICY = TurnPolicy()
+CHAT_POLICY = TurnPolicy(
+    max_tool_calls=20,
+    timeout_seconds=300,
+)
 
 HEARTBEAT_POLICY = TurnPolicy(
     max_attempts=3,
@@ -107,6 +111,7 @@ JOB_POLICY = TurnPolicy(
     max_tool_calls=20,
     max_failed_tool_outputs=5,
     max_tool_output_preview_chars=12000,
+    timeout_seconds=600,
 )
 
 
@@ -115,6 +120,10 @@ JOB_POLICY = TurnPolicy(
 # ---------------------------------------------------------------------------
 
 def _is_retryable(exc: Exception, markers: List[str]) -> bool:
+    # Turn-level timeouts are NOT transient network errors — retrying would
+    # repeat the same expensive work that already timed out.
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return False
     error_str = str(exc).lower()
     return any(m in error_str for m in markers)
 
@@ -193,6 +202,14 @@ def _extract_tool_intent_signature(tool_name: str, args) -> Optional[str]:
         if grep_match:
             return f"search_bash:{grep_match.group(1)}"
     return None
+
+
+_READ_ONLY_INTENT_PREFIXES = frozenset({"read_file:", "search_grep:", "search_bash:"})
+
+
+def _is_read_only_intent(intent_sig: str) -> bool:
+    """Return True if the intent signature represents a read-only operation."""
+    return any(intent_sig.startswith(p) for p in _READ_ONLY_INTENT_PREFIXES)
 
 
 def _truncate_preview(text: str, max_chars: int) -> tuple[str, bool, int]:
@@ -292,6 +309,42 @@ class TurnOrchestrator:
                 yield TurnEvent(type=TurnEventType.TURN_ERROR, error=str(exc))
                 return
 
+    # -- intent dedup helper ------------------------------------------------
+
+    def _check_intent_dedup(
+        self,
+        intent_sig: Optional[str],
+        tool_intent_signatures: Dict[str, int],
+        response: str,
+        tool_call_count: int,
+        tool_execution_count: int,
+        tool_names_executed: list,
+        failed_tool_outputs: int,
+    ) -> Optional[TurnEvent]:
+        """Check for repeated tool intent; return a TURN_ERROR event or None."""
+        if not intent_sig:
+            return None
+        tool_intent_signatures[intent_sig] = tool_intent_signatures.get(intent_sig, 0) + 1
+        limit = (
+            self.policy.max_same_readonly_intent
+            if _is_read_only_intent(intent_sig)
+            else self.policy.max_same_tool_intent
+        )
+        if tool_intent_signatures[intent_sig] > limit:
+            return TurnEvent(
+                type=TurnEventType.TURN_ERROR,
+                error=(
+                    f"REPEATED_TOOL_INTENT: intent={intent_sig}, "
+                    f"count={tool_intent_signatures[intent_sig]}, limit={limit}"
+                ),
+                answer=response,
+                tool_call_count=tool_call_count,
+                tool_execution_count=tool_execution_count,
+                tool_names_executed=list(tool_names_executed),
+                failed_tool_outputs=failed_tool_outputs,
+            )
+        return None
+
     # -- single attempt -----------------------------------------------------
 
     async def _run_attempt(
@@ -332,6 +385,14 @@ class TurnOrchestrator:
         sent_progress: Dict[str, str] = {}
         non_progress_count = 0
         llm_started = False
+        # Empty-output loop detection: track whether LLM produced any text
+        # delta between consecutive tool invocations.  If the LLM triggers
+        # tool calls N times in a row without emitting any visible output,
+        # the model has likely degraded (e.g. high-context collapse) and we
+        # should stop early rather than burning tokens in a loop.
+        llm_had_output_this_round = False
+        consecutive_empty_llm_rounds = 0
+        last_successful_tool_output = ""  # fallback when LLM returns empty
 
         async for event in event_stream:
             # External cancellation
@@ -358,15 +419,28 @@ class TurnOrchestrator:
                 if stage == "llm":
                     delta = progress.get("delta", "")
                     answer = progress.get("answer", "")
+                    think = progress.get("think", "")
                     if delta:
                         if not llm_started:
                             llm_started = True
+                        llm_had_output_this_round = True
+                        consecutive_empty_llm_rounds = 0
                         response += delta
                         yield TurnEvent(type=TurnEventType.LLM_DELTA, content=delta)
                     if answer and not response:
                         response = answer
                         if not llm_started:
                             llm_started = True
+                        llm_had_output_this_round = True
+                        consecutive_empty_llm_rounds = 0
+                    # Reasoning output (think) indicates the model is actively
+                    # working, even when it produces no user-visible text
+                    # (e.g. deciding to call a tool).  Treat it as valid output
+                    # so multi-step tool-call flows are not mistaken for a
+                    # degraded model.
+                    if think and not llm_had_output_this_round:
+                        llm_had_output_this_round = True
+                        consecutive_empty_llm_rounds = 0
 
                 elif stage == "skill":
                     if pid and sent_progress.get(pid) == status:
@@ -379,6 +453,25 @@ class TurnOrchestrator:
                     fail_sig = None  # set in completed/failed branch below
 
                     if status in ("running", "processing"):
+                        # Empty-output loop detection
+                        if not llm_had_output_this_round and tool_execution_count > 0:
+                            consecutive_empty_llm_rounds += 1
+                            if consecutive_empty_llm_rounds >= policy.max_consecutive_empty_llm_rounds:
+                                yield TurnEvent(
+                                    type=TurnEventType.TURN_ERROR,
+                                    error=(
+                                        f"EMPTY_OUTPUT_LOOP: {consecutive_empty_llm_rounds} consecutive "
+                                        f"tool calls with no LLM text output (model likely degraded)"
+                                    ),
+                                    answer=response,
+                                    tool_call_count=tool_call_count,
+                                    tool_execution_count=tool_execution_count,
+                                    tool_names_executed=list(tool_names_executed),
+                                    failed_tool_outputs=failed_tool_outputs,
+                                )
+                                return
+                        llm_had_output_this_round = False
+
                         # Skill invocation → count as tool call (unless exempt)
                         if s_name not in policy.budget_exempt_tools:
                             tool_call_count += 1
@@ -396,22 +489,14 @@ class TurnOrchestrator:
 
                         # Intent dedup check
                         intent_sig = _extract_tool_intent_signature(s_name, s_args)
-                        if intent_sig:
-                            tool_intent_signatures[intent_sig] = tool_intent_signatures.get(intent_sig, 0) + 1
-                            if tool_intent_signatures[intent_sig] > policy.max_same_tool_intent:
-                                yield TurnEvent(
-                                    type=TurnEventType.TURN_ERROR,
-                                    error=(
-                                        f"REPEATED_TOOL_INTENT: intent={intent_sig}, "
-                                        f"count={tool_intent_signatures[intent_sig]}, limit={policy.max_same_tool_intent}"
-                                    ),
-                                    answer=response,
-                                    tool_call_count=tool_call_count,
-                                    tool_execution_count=tool_execution_count,
-                                    tool_names_executed=list(tool_names_executed),
-                                    failed_tool_outputs=failed_tool_outputs,
-                                )
-                                return
+                        err = self._check_intent_dedup(
+                            intent_sig, tool_intent_signatures,
+                            response, tool_call_count, tool_execution_count,
+                            tool_names_executed, failed_tool_outputs,
+                        )
+                        if err:
+                            yield err
+                            return
 
                         tool_execution_count += 1
                         tool_names_executed.append(s_name)
@@ -462,6 +547,26 @@ class TurnOrchestrator:
 
                 elif stage == "tool_call":
                     t_name = progress.get("tool_name", "")
+
+                    # Empty-output loop detection
+                    if not llm_had_output_this_round and tool_execution_count > 0:
+                        consecutive_empty_llm_rounds += 1
+                        if consecutive_empty_llm_rounds >= policy.max_consecutive_empty_llm_rounds:
+                            yield TurnEvent(
+                                type=TurnEventType.TURN_ERROR,
+                                error=(
+                                    f"EMPTY_OUTPUT_LOOP: {consecutive_empty_llm_rounds} consecutive "
+                                    f"tool calls with no LLM text output (model likely degraded)"
+                                ),
+                                answer=response,
+                                tool_call_count=tool_call_count,
+                                tool_execution_count=tool_execution_count,
+                                tool_names_executed=list(tool_names_executed),
+                                failed_tool_outputs=failed_tool_outputs,
+                            )
+                            return
+                    llm_had_output_this_round = False
+
                     if t_name not in policy.budget_exempt_tools:
                         tool_call_count += 1
                     if tool_call_count > policy.max_tool_calls:
@@ -481,22 +586,14 @@ class TurnOrchestrator:
 
                     # Intent dedup check
                     intent_sig = _extract_tool_intent_signature(t_name, t_args_raw)
-                    if intent_sig:
-                        tool_intent_signatures[intent_sig] = tool_intent_signatures.get(intent_sig, 0) + 1
-                        if tool_intent_signatures[intent_sig] > policy.max_same_tool_intent:
-                            yield TurnEvent(
-                                type=TurnEventType.TURN_ERROR,
-                                error=(
-                                    f"REPEATED_TOOL_INTENT: intent={intent_sig}, "
-                                    f"count={tool_intent_signatures[intent_sig]}, limit={policy.max_same_tool_intent}"
-                                ),
-                                answer=response,
-                                tool_call_count=tool_call_count,
-                                tool_execution_count=tool_execution_count,
-                                tool_names_executed=list(tool_names_executed),
-                                failed_tool_outputs=failed_tool_outputs,
-                            )
-                            return
+                    err = self._check_intent_dedup(
+                        intent_sig, tool_intent_signatures,
+                        response, tool_call_count, tool_execution_count,
+                        tool_names_executed, failed_tool_outputs,
+                    )
+                    if err:
+                        yield err
+                        return
 
                     args_preview, args_trunc, args_total = _truncate_preview(t_args_raw, policy.max_tool_args_preview_chars)
                     tool_execution_count += 1
@@ -558,8 +655,16 @@ class TurnOrchestrator:
                         output_truncated=out_trunc, output_total_chars=out_total,
                         reference_id=progress.get("reference_id", ""),
                     )
+                    if not fail_sig and t_output_raw:
+                        last_successful_tool_output = t_output_raw
                     if pid:
                         sent_progress[pid] = status
+
+        # Fallback: if LLM produced no text but the last tool returned
+        # substantial output, use that output as the response so the user
+        # doesn't get an empty "(无响应)".
+        if not response and last_successful_tool_output:
+            response = last_successful_tool_output
 
         # Stream exhausted without error → success
         yield TurnEvent(

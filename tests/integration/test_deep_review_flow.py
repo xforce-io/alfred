@@ -151,8 +151,16 @@ def _skill_done(name: str, output: str = "", pid: str = "s1"):
     }
 
 
-def _llm(text: str, pid: str = "llm1"):
-    return {"id": pid, "stage": "llm", "delta": text, "status": "running"}
+def _llm(text: str, pid: str = "llm1", think: str = ""):
+    d = {"id": pid, "stage": "llm", "delta": text, "status": "running"}
+    if think:
+        d["think"] = think
+    return d
+
+
+def _llm_think(think: str, pid: str = "llm1"):
+    """LLM progress with reasoning only (no user-visible text)."""
+    return {"id": pid, "stage": "llm", "delta": "", "think": think, "status": "running"}
 
 
 def _p(*items):
@@ -219,6 +227,7 @@ def _build_deep_review_script():
     """
     return [
         # Step 1: Agent loads coding-master gateway
+        _p(_llm_think("用户要求 review alfred 项目，先加载 coding-master 技能")),
         _p(_skill("_load_resource_skill",
                    '{"skill_name": "coding-master"}',
                    pid="sk1")),
@@ -227,6 +236,7 @@ def _build_deep_review_script():
                        pid="sk1")),
 
         # Step 2: Agent loads deep-review SOP
+        _p(_llm_think("加载 deep-review SOP")),
         _p(_skill("_load_skill_resource",
                    '{"skill_name": "coding-master", "resource_path": "references/sop-deep-review.md"}',
                    pid="sk2")),
@@ -235,6 +245,7 @@ def _build_deep_review_script():
                        pid="sk2")),
 
         # Step 3: Gather context - quick-status
+        _p(_llm_think("获取项目状态")),
         _p(_skill("_bash",
                    '{"cmd": "python dispatch.py quick-status --repos alfred"}',
                    pid="sk3")),
@@ -243,12 +254,14 @@ def _build_deep_review_script():
                        pid="sk3")),
 
         # Step 4: Acquire workspace
+        _p(_llm_think("获取 workspace")),
         _p(_skill("_bash",
                    '{"cmd": "python dispatch.py workspace-check --repos alfred --task \'review: review alfred\' --engine codex"}',
                    pid="sk4")),
         _p(_skill_done("_bash", output=WORKSPACE_CHECK_OUTPUT, pid="sk4")),
 
         # Step 5: Engine-powered analysis (the key step)
+        _p(_llm_think("执行引擎分析")),
         _p(_skill("_bash",
                    '{"cmd": "python dispatch.py analyze --workspace env0 --task \'Full project review\' --engine codex"}',
                    pid="sk5")),

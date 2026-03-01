@@ -1,7 +1,8 @@
 """IsolatedTaskMixin — isolated task lifecycle management for HeartbeatRunner."""
 
+import asyncio
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Any
 import logging
 
@@ -11,6 +12,7 @@ from ..tasks.task_manager import (
     claim_task,
     update_task_state,
     TaskState,
+    _parse_iso_datetime,
 )
 from .heartbeat_utils import task_snapshot
 
@@ -31,10 +33,18 @@ class IsolatedTaskMixin:
     """
 
     def list_due_isolated_tasks(self, now: Optional[datetime] = None) -> list[dict[str, Any]]:
-        """List due isolated tasks for external scheduler routing."""
+        """List due isolated tasks for external scheduler routing.
+
+        Also recovers tasks stuck in 'running' state beyond 2x their timeout
+        (e.g. due to process crash or lock failure during state update).
+        """
         heartbeat_content = self._read_heartbeat_md()
         if not heartbeat_content or self._file_mgr.task_list is None:
             return []
+
+        # Recover stuck running tasks
+        self._recover_stuck_running_tasks(now=now)
+
         due = get_due_tasks(self._file_mgr.task_list, now=now)
         isolated = []
         for task in due:
@@ -45,6 +55,41 @@ class IsolatedTaskMixin:
             if snapshot["id"]:
                 isolated.append(snapshot)
         return isolated
+
+    def _recover_stuck_running_tasks(self, now: Optional[datetime] = None) -> None:
+        """Reset isolated tasks stuck in 'running' beyond 2x timeout to 'pending'."""
+        if self._file_mgr.task_list is None:
+            return
+        if now is None:
+            now = datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+
+        recovered_any = False
+        for task in self._file_mgr.task_list.tasks:
+            if task.state != TaskState.RUNNING.value:
+                continue
+            mode = str(getattr(task, "execution_mode", "inline") or "inline")
+            if mode != "isolated":
+                continue
+            last_run = _parse_iso_datetime(task.last_run_at) if task.last_run_at else None
+            if last_run is None:
+                continue
+            timeout = max(int(getattr(task, "timeout_seconds", 600) or 600), 60)
+            stuck_threshold = timedelta(seconds=timeout * 2)
+            if now - last_run > stuck_threshold:
+                logger.warning(
+                    "Recovering stuck task %s (%s): running since %s, "
+                    "threshold=%ss exceeded",
+                    task.id, task.title, task.last_run_at, timeout * 2,
+                )
+                update_task_state(task, TaskState.FAILED,
+                                  error_message="recovered: stuck in running state",
+                                  now=now)
+                recovered_any = True
+
+        if recovered_any:
+            self._flush_task_state()
 
     def list_due_inline_tasks(self, now: Optional[datetime] = None) -> list[dict[str, Any]]:
         """List due inline tasks for external scheduler routing."""
@@ -105,19 +150,49 @@ class IsolatedTaskMixin:
         error_message: Optional[str] = None,
         now: Optional[datetime] = None,
     ) -> None:
-        """Update one isolated task state under heartbeat lock and flush file."""
-        inproc_acquired = await self.session_manager.acquire_session(self.session_id, timeout=5.0)
-        if not inproc_acquired:
-            return
-        try:
-            with self.session_manager.file_lock(self.session_id, blocking=True) as acquired:
-                if not acquired:
-                    return
-                self._apply_isolated_task_state_under_lock(
-                    task_id, state, error_message=error_message, now=now,
+        """Update one isolated task state under heartbeat lock and flush file.
+
+        Retries lock acquisition up to 3 times with backoff to avoid leaving
+        tasks permanently stuck in 'running' state.
+        """
+        max_retries = 3
+        for attempt in range(max_retries):
+            inproc_acquired = await self.session_manager.acquire_session(
+                self.session_id, timeout=5.0,
+            )
+            if not inproc_acquired:
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        "Failed to acquire session lock for task %s state update "
+                        "(attempt %d/%d), retrying...",
+                        task_id, attempt + 1, max_retries,
+                    )
+                    await asyncio.sleep(1.0 * (attempt + 1))
+                    continue
+                raise RuntimeError(
+                    f"Failed to acquire session lock for task {task_id} "
+                    f"state update after {max_retries} attempts"
                 )
-        finally:
-            self.session_manager.release_session(self.session_id)
+            try:
+                with self.session_manager.file_lock(self.session_id, blocking=True) as acquired:
+                    if not acquired:
+                        if attempt < max_retries - 1:
+                            logger.warning(
+                                "Failed to acquire file lock for task %s state update "
+                                "(attempt %d/%d), retrying...",
+                                task_id, attempt + 1, max_retries,
+                            )
+                            continue
+                        raise RuntimeError(
+                            f"Failed to acquire file lock for task {task_id} "
+                            f"state update after {max_retries} attempts"
+                        )
+                    self._apply_isolated_task_state_under_lock(
+                        task_id, state, error_message=error_message, now=now,
+                    )
+                    return  # success
+            finally:
+                self.session_manager.release_session(self.session_id)
 
     def _apply_isolated_task_state_under_lock(
         self,

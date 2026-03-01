@@ -231,10 +231,12 @@ async def test_process_message_followup_turn_uses_continue_chat_with_runtime_sys
 @pytest.mark.asyncio
 async def test_process_message_stops_on_tool_call_budget_exceeded():
     websocket = _DummyWebSocket()
-    events = [
-        {"_progress": [{"id": f"p{i}", "status": "running", "stage": "tool_call", "tool_name": "_bash", "args": "echo hi"}]}
-        for i in range(1, 55)
-    ]
+    events = []
+    for i in range(1, 55):
+        # Each tool call is preceded by LLM reasoning so EMPTY_OUTPUT_LOOP
+        # does not fire before TOOL_CALL_BUDGET_EXCEEDED.
+        events.append({"_progress": [{"id": f"llm{i}", "status": "running", "stage": "llm", "delta": "", "think": f"step {i}"}]})
+        events.append({"_progress": [{"id": f"p{i}", "status": "running", "stage": "tool_call", "tool_name": "_bash", "args": "echo hi"}]})
     agent = _DummyAgent(events=events)
 
     with tempfile.TemporaryDirectory() as tmp:

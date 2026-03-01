@@ -55,6 +55,12 @@ logger = logging.getLogger(__name__)
 _tasks: Dict[str, str] = {}
 
 
+def _has_trajectory_messages(payload: Dict[str, Any]) -> bool:
+    """Return True if trajectory payload has at least one message."""
+    messages = payload.get("trajectory")
+    return isinstance(messages, list) and len(messages) > 0
+
+
 # ============================================================================
 # HTML Routes
 # ============================================================================
@@ -221,8 +227,14 @@ async def get_agent_session_trace(agent_name: str, session_id: Optional[str] = N
         if not candidate.is_file():
             continue
         try:
-            trajectory = json.loads(candidate.read_text(encoding="utf-8"))
-            break
+            parsed = json.loads(candidate.read_text(encoding="utf-8"))
+            if not isinstance(parsed, dict):
+                continue
+            trajectory = parsed
+            # Session-scoped trajectory files may exist but still be empty.
+            # In that case, continue and try legacy shared trajectory as fallback.
+            if candidate == legacy_trajectory_file or _has_trajectory_messages(parsed):
+                break
         except Exception:
             trajectory = {}
 

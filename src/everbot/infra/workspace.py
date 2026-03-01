@@ -2,6 +2,8 @@
 工作区加载器
 """
 
+import json
+import re
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
@@ -94,6 +96,29 @@ class WorkspaceLoader:
 
         return WorkspaceInstructions(**contents)
 
+    @staticmethod
+    def _slim_heartbeat(raw: str) -> str:
+        """Extract only id/title/description/schedule from HEARTBEAT.md tasks."""
+        m = re.search(r"```json\s*(\{.*?\})\s*```", raw, re.DOTALL)
+        if not m:
+            return raw
+        try:
+            data = json.loads(m.group(1))
+        except (json.JSONDecodeError, ValueError):
+            return raw
+
+        tasks = data.get("tasks", [])
+        if not tasks:
+            return raw
+
+        _KEEP = {"id", "title", "description", "schedule", "enabled"}
+        slim_tasks = [
+            {k: v for k, v in t.items() if k in _KEEP}
+            for t in tasks
+            if t.get("enabled", True)
+        ]
+        return json.dumps(slim_tasks, indent=2, ensure_ascii=False)
+
     def build_system_prompt(self) -> str:
         """
         构建系统提示
@@ -115,7 +140,7 @@ class WorkspaceLoader:
         # 用 MemoryManager 加载结构化记忆
         try:
             from ..core.memory.manager import MemoryManager
-            memory_prompt = MemoryManager(self.workspace_path / "MEMORY.md").get_prompt_memories()
+            memory_prompt = MemoryManager(self.workspace_path / "MEMORY.md").get_prompt_memories(top_k=15)
             if memory_prompt:
                 parts.append(memory_prompt)
             elif instructions.memory_md:
@@ -128,7 +153,7 @@ class WorkspaceLoader:
                 parts.append(f"# 历史记忆\n\n" + '\n'.join(memory_lines))
 
         if instructions.heartbeat_md:
-            parts.append(f"# 心跳任务\n\n{instructions.heartbeat_md}")
+            parts.append(f"# 心跳任务\n\n{self._slim_heartbeat(instructions.heartbeat_md)}")
 
         if not parts:
             return ""

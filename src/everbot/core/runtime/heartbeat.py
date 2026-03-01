@@ -216,6 +216,16 @@ If not, reply with `HEARTBEAT_OK`.
     def _read_heartbeat_md(self) -> Optional[str]:
         return self._file_mgr.read_heartbeat_md()
 
+    def _read_memory_md(self) -> Optional[str]:
+        """Read MEMORY.md from workspace, returning content or None."""
+        memory_path = self.workspace_path / "MEMORY.md"
+        try:
+            if memory_path.exists():
+                return memory_path.read_text(encoding="utf-8")
+        except Exception as e:
+            logger.warning("Failed to read MEMORY.md: %s", e)
+        return None
+
     def _write_heartbeat_file(self, content: str) -> None:
         return self._file_mgr.write_heartbeat_file(content)
 
@@ -1138,6 +1148,8 @@ If not, reply with `HEARTBEAT_OK`.
 """
 
             if mode == "reflect":
+                memory_content = self._read_memory_md()
+                memory_section = f"\n当前 MEMORY.md 内容：\n{memory_content}" if memory_content else ""
                 return f"""
 {header}
 
@@ -1146,7 +1158,7 @@ If not, reply with `HEARTBEAT_OK`.
 2. 识别尚未注册的 routine
 3. 若发现可注册 routine，使用可用工具进行注册
 4. 若无可执行动作，回复 "HEARTBEAT_OK"
-
+{memory_section}
 当前 HEARTBEAT.md 内容：
 {heartbeat_content}
 """

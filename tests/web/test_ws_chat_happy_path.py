@@ -66,9 +66,9 @@ def test_ws_chat_happy_path_and_history_replay(client, isolated_web_env):
     # Reconnect and verify history is replayed.
     with client.websocket_connect("/ws/chat/demo_agent") as ws:
         first_payload = ws.receive_json()
-        assert first_payload["type"] == "message"
+        assert first_payload["type"] in {"message", "history"}
         assert first_payload["session_id"] == session_id
-        # History replay is optional; we just ensure the connection works.
+        # After reconnect, server may send welcome or replayed history first.
 
 
 def test_ws_chat_reconnect_keeps_session_trajectory_file(client, isolated_web_env):

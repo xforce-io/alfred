@@ -216,8 +216,21 @@ class TestGetPromptMemories:
 
     def test_respects_top_k(self, tmp_path: Path):
         md = tmp_path / "MEMORY.md"
+        # Use distinct content per entry so greedy dedup doesn't collapse them
+        topics = [
+            "用户喜欢使用 Python 编程语言进行开发",
+            "用户在工作中频繁使用 Docker 容器技术",
+            "用户关注美股价值投资和宏观经济数据",
+            "用户偏好使用 VS Code 作为主力编辑器",
+            "用户习惯用 Git 进行版本控制和分支管理",
+            "用户对 AI 论文发现和分析有明确需求",
+            "用户重视代码审查流程和工程质量",
+            "用户在本地环境维护多个自动化技能模块",
+            "用户对信息冗余敏感，偏好简洁输出",
+            "用户关注地缘政治事件和全球宏观风险",
+        ]
         entries = [
-            {"id": f"e{i}", "content": f"记忆 {i}", "category": "fact", "score": 0.9 - i * 0.01}
+            {"id": f"e{i}", "content": topics[i % len(topics)] + f" ({i})", "category": "fact", "score": 0.9 - i * 0.01}
             for i in range(30)
         ]
         _seed_memory(md, entries)

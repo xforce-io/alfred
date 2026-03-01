@@ -170,6 +170,7 @@ class ChannelCoreService:
             ctx = agent.executor.context
             self._bind_session_id_to_context(agent, session_id)
             self._init_session_trajectory(agent, agent_name, session_id, overwrite=False)
+
             if agent.state != AgentState.PAUSED:
                 ctx.set_variable("query", effective_message)
             self._reload_workspace_instructions_if_missing(agent, agent_name)

@@ -12,20 +12,11 @@ from .conftest import ScriptedAgent, receive_until
 def test_ws_chat_stops_when_tool_call_budget_exceeded(client, isolated_web_env):
     from src.everbot.web import app as web_app
 
-    events = [
-        {
-            "_progress": [
-                {
-                    "id": f"tool-{i}",
-                    "status": "running",
-                    "stage": "tool_call",
-                    "tool_name": "_bash",
-                    "args": "echo hello",
-                }
-            ]
-        }
-        for i in range(1, 55)
-    ]
+    events = []
+    for i in range(1, 55):
+        # LLM think before each tool call prevents EMPTY_OUTPUT_LOOP
+        events.append({"_progress": [{"id": f"llm-{i}", "status": "running", "stage": "llm", "delta": "", "think": f"step {i}"}]})
+        events.append({"_progress": [{"id": f"tool-{i}", "status": "running", "stage": "tool_call", "tool_name": "_bash", "args": "echo hello"}]})
 
     agent = ScriptedAgent(name="budget_agent", script=events)
     web_app.chat_service.agent_service.create_agent_instance.return_value = agent

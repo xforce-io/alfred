@@ -381,6 +381,80 @@ class TestAgentCreationSkip:
 
 
 # ============================================================
+# Reflect prompt inlines MEMORY.md content
+# ============================================================
+
+
+class TestReflectPromptInlinesMemory:
+    """Verify reflect prompt includes MEMORY.md content inline,
+    so the agent does not need to call _read_file with a bare path."""
+
+    @pytest.mark.asyncio
+    async def test_reflect_prompt_contains_memory_content(self, tmp_path: Path):
+        """Reflect prompt should inline MEMORY.md content."""
+        runner = _make_runner(workspace_path=tmp_path)
+        _write_heartbeat_md(tmp_path)
+        (tmp_path / "MEMORY.md").write_text("important-memory-payload", encoding="utf-8")
+
+        fake_agent = SimpleNamespace(
+            executor=SimpleNamespace(
+                context=SimpleNamespace(
+                    set_variable=MagicMock(),
+                    get_var_value=MagicMock(return_value=""),
+                    set_session_id=MagicMock(),
+                )
+            ),
+            name="test_agent",
+        )
+
+        heartbeat_content = (tmp_path / "HEARTBEAT.md").read_text(encoding="utf-8")
+        prompt = await runner._inject_heartbeat_context(
+            fake_agent, heartbeat_content, mode="reflect"
+        )
+
+        assert "important-memory-payload" in prompt
+        assert "MEMORY.md" in prompt
+
+    @pytest.mark.asyncio
+    async def test_reflect_prompt_works_without_memory_file(self, tmp_path: Path):
+        """Reflect prompt should not fail when MEMORY.md doesn't exist."""
+        runner = _make_runner(workspace_path=tmp_path)
+        _write_heartbeat_md(tmp_path)
+        # No MEMORY.md
+
+        fake_agent = SimpleNamespace(
+            executor=SimpleNamespace(
+                context=SimpleNamespace(
+                    set_variable=MagicMock(),
+                    get_var_value=MagicMock(return_value=""),
+                    set_session_id=MagicMock(),
+                )
+            ),
+            name="test_agent",
+        )
+
+        heartbeat_content = (tmp_path / "HEARTBEAT.md").read_text(encoding="utf-8")
+        prompt = await runner._inject_heartbeat_context(
+            fake_agent, heartbeat_content, mode="reflect"
+        )
+
+        # Should still produce a valid prompt
+        assert "routine 反思阶段" in prompt
+        assert "HEARTBEAT.md" in prompt or heartbeat_content in prompt
+
+    def test_read_memory_md_returns_content(self, tmp_path: Path):
+        """_read_memory_md should return file content when file exists."""
+        runner = _make_runner(workspace_path=tmp_path)
+        (tmp_path / "MEMORY.md").write_text("test-content", encoding="utf-8")
+        assert runner._read_memory_md() == "test-content"
+
+    def test_read_memory_md_returns_none_when_missing(self, tmp_path: Path):
+        """_read_memory_md should return None when file doesn't exist."""
+        runner = _make_runner(workspace_path=tmp_path)
+        assert runner._read_memory_md() is None
+
+
+# ============================================================
 # Integration: _compute_file_hashes
 # ============================================================
 

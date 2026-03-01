@@ -724,6 +724,205 @@ class TestExecuteIsolatedClaimedTask:
 
 
 # ============================================================
+# 10b. _update_isolated_task_state — lock failure leaves task stuck
+# ============================================================
+
+
+class TestUpdateIsolatedTaskStateLockFailure:
+    """Tests for _update_isolated_task_state when lock acquisition fails.
+
+    After fix: the method retries 3 times and raises RuntimeError on failure,
+    preventing tasks from being silently stuck in 'running' forever.
+    """
+
+    @pytest.mark.asyncio
+    async def test_acquire_session_fails_raises_error(self, tmp_path: Path):
+        """When acquire_session fails all retries, RuntimeError is raised."""
+        sm = _make_session_manager_with_locks(acquire_returns=False)
+        runner = _make_runner(workspace_path=tmp_path, session_manager=sm)
+
+        tasks = [{
+            "id": "stuck_1", "title": "Stuck Task", "state": "running",
+            "schedule": "1d", "enabled": True, "execution_mode": "isolated",
+        }]
+        (tmp_path / "HEARTBEAT.md").write_text(
+            _build_structured_md(tasks), encoding="utf-8"
+        )
+        runner._read_heartbeat_md()
+
+        with pytest.raises(RuntimeError, match="Failed to acquire session lock"):
+            await runner._update_isolated_task_state("stuck_1", TaskState.DONE)
+
+    @pytest.mark.asyncio
+    async def test_file_lock_fails_raises_error(self, tmp_path: Path):
+        """When file_lock fails all retries, RuntimeError is raised."""
+        sm = _make_session_manager_with_locks(
+            acquire_returns=True, file_lock_acquired=False,
+        )
+        runner = _make_runner(workspace_path=tmp_path, session_manager=sm)
+
+        tasks = [{
+            "id": "stuck_2", "title": "Stuck Task 2", "state": "running",
+            "schedule": "1d", "enabled": True, "execution_mode": "isolated",
+        }]
+        (tmp_path / "HEARTBEAT.md").write_text(
+            _build_structured_md(tasks), encoding="utf-8"
+        )
+        runner._read_heartbeat_md()
+
+        with pytest.raises(RuntimeError, match="Failed to acquire file lock"):
+            await runner._update_isolated_task_state("stuck_2", TaskState.FAILED,
+                                                      error_message="timed out")
+
+
+# ============================================================
+# 10c. End-to-end: execute succeeds but state update lock fails
+# ============================================================
+
+
+class TestExecuteIsolatedE2ELockFailure:
+    """E2E test: isolated task executes but state update lock fails.
+
+    After fix: lock failure raises RuntimeError which propagates to caller,
+    making the failure visible instead of silently leaving task stuck.
+    """
+
+    @pytest.mark.asyncio
+    async def test_execution_ok_but_state_update_lock_fails_raises(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """Task executes successfully, but lock failure in DONE state update
+        raises RuntimeError — caught by except branch which also fails to
+        update FAILED state, re-raising the lock error."""
+        sm = _make_session_manager_with_locks(acquire_returns=False)
+        runner = _make_runner(workspace_path=tmp_path, session_manager=sm)
+
+        monkeypatch.setattr(
+            runner, "_execute_isolated_task",
+            AsyncMock(return_value="result ok"),
+        )
+
+        tasks = [{
+            "id": "e2e_1", "title": "E2E Task", "state": "running",
+            "schedule": "1d", "enabled": True, "execution_mode": "isolated",
+        }]
+        (tmp_path / "HEARTBEAT.md").write_text(
+            _build_structured_md(tasks), encoding="utf-8"
+        )
+
+        task_snapshot = {
+            "id": "e2e_1", "title": "E2E Task", "execution_mode": "isolated",
+        }
+        # After fix: the lock failure in _update_isolated_task_state raises
+        with pytest.raises(RuntimeError, match="Failed to acquire session lock"):
+            await runner.execute_isolated_claimed_task(task_snapshot)
+
+    @pytest.mark.asyncio
+    async def test_execution_fails_and_state_update_lock_also_fails(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """Task execution fails AND state update lock fails.
+        The lock error from FAILED update is raised (wrapping the original)."""
+        sm = _make_session_manager_with_locks(acquire_returns=False)
+        runner = _make_runner(workspace_path=tmp_path, session_manager=sm)
+
+        monkeypatch.setattr(
+            runner, "_execute_isolated_task",
+            AsyncMock(side_effect=RuntimeError("LLM crashed")),
+        )
+
+        tasks = [{
+            "id": "e2e_2", "title": "E2E Fail Task", "state": "running",
+            "schedule": "1d", "enabled": True, "execution_mode": "isolated",
+        }]
+        (tmp_path / "HEARTBEAT.md").write_text(
+            _build_structured_md(tasks), encoding="utf-8"
+        )
+
+        task_snapshot = {
+            "id": "e2e_2", "title": "E2E Fail Task",
+            "execution_mode": "isolated",
+        }
+        # The FAILED state update also fails with lock error, which is raised
+        with pytest.raises(RuntimeError):
+            await runner.execute_isolated_claimed_task(task_snapshot)
+
+
+# ============================================================
+# 10d. _recover_stuck_running_tasks
+# ============================================================
+
+
+class TestRecoverStuckRunningTasks:
+    """Tests for stuck task auto-recovery in list_due_isolated_tasks."""
+
+    def test_stuck_running_task_recovered(self, tmp_path: Path):
+        """Task stuck in 'running' beyond 2x timeout is reset to pending."""
+        now = datetime.now(timezone.utc)
+        # last_run_at was 30 minutes ago, timeout is 600s → 2x = 1200s = 20min
+        long_ago = (now - timedelta(minutes=30)).isoformat()
+        tasks = [{
+            "id": "stuck_1", "title": "Stuck Task", "state": "running",
+            "schedule": "1d", "enabled": True, "execution_mode": "isolated",
+            "timeout_seconds": 600, "last_run_at": long_ago,
+            "retry": 0, "max_retry": 3,
+        }]
+        (tmp_path / "HEARTBEAT.md").write_text(
+            _build_structured_md(tasks), encoding="utf-8"
+        )
+
+        runner = _make_runner(workspace_path=tmp_path)
+        runner.list_due_isolated_tasks(now=now)
+
+        # Re-read to check — task should be recovered to pending
+        runner._read_heartbeat_md()
+        task = runner._file_mgr.task_list.tasks[0]
+        assert task.state == "pending"
+        assert task.error_message == "recovered: stuck in running state"
+
+    def test_recently_running_task_not_recovered(self, tmp_path: Path):
+        """Task running within 2x timeout is left alone."""
+        now = datetime.now(timezone.utc)
+        # last_run_at was 5 minutes ago, timeout is 600s → 2x = 1200s = 20min
+        recent = (now - timedelta(minutes=5)).isoformat()
+        tasks = [{
+            "id": "active_1", "title": "Active Task", "state": "running",
+            "schedule": "1d", "enabled": True, "execution_mode": "isolated",
+            "timeout_seconds": 600, "last_run_at": recent,
+        }]
+        (tmp_path / "HEARTBEAT.md").write_text(
+            _build_structured_md(tasks), encoding="utf-8"
+        )
+
+        runner = _make_runner(workspace_path=tmp_path)
+        runner.list_due_isolated_tasks(now=now)
+
+        runner._read_heartbeat_md()
+        task = runner._file_mgr.task_list.tasks[0]
+        assert task.state == "running"  # Not recovered
+
+    def test_inline_running_task_not_recovered(self, tmp_path: Path):
+        """Only isolated tasks are recovered, not inline."""
+        now = datetime.now(timezone.utc)
+        long_ago = (now - timedelta(minutes=30)).isoformat()
+        tasks = [{
+            "id": "inline_stuck", "title": "Inline Stuck", "state": "running",
+            "schedule": "1d", "enabled": True, "execution_mode": "inline",
+            "timeout_seconds": 600, "last_run_at": long_ago,
+        }]
+        (tmp_path / "HEARTBEAT.md").write_text(
+            _build_structured_md(tasks), encoding="utf-8"
+        )
+
+        runner = _make_runner(workspace_path=tmp_path)
+        runner.list_due_isolated_tasks(now=now)
+
+        runner._read_heartbeat_md()
+        task = runner._file_mgr.task_list.tasks[0]
+        assert task.state == "running"  # Not recovered (inline)
+
+
+# ============================================================
 # 11. _is_permanent_error — status code + string matching
 # ============================================================
 

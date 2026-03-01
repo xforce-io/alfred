@@ -141,6 +141,27 @@ async def test_trace_api_uses_requested_session_id_for_trajectory(monkeypatch, t
 
 
 @pytest.mark.asyncio
+async def test_trace_api_falls_back_to_legacy_when_session_trajectory_is_empty(monkeypatch, tmp_path: Path):
+    agent_name = "demo_agent"
+    session_id = f"web_session_{agent_name}"
+    empty_session_trajectory = {"trajectory": [], "stages": []}
+    legacy_trajectory = {"trajectory": [{"role": "assistant", "content": "legacy"}], "stages": []}
+
+    session_file = tmp_path / "agents" / agent_name / "tmp" / f"trajectory_{session_id}.json"
+    session_file.parent.mkdir(parents=True, exist_ok=True)
+    session_file.write_text(json.dumps(empty_session_trajectory), encoding="utf-8")
+
+    legacy_file = tmp_path / "agents" / agent_name / "tmp" / "trajectory.json"
+    legacy_file.write_text(json.dumps(legacy_trajectory), encoding="utf-8")
+
+    web_app.chat_service.session_manager = _StrictSessionManager(None)
+    monkeypatch.setattr(web_app, "get_user_data_manager", lambda: _FakeUserDataManager(tmp_path))
+
+    result = await web_app.get_agent_session_trace(agent_name, session_id=session_id)
+    assert result["trajectory"] == legacy_trajectory
+
+
+@pytest.mark.asyncio
 async def test_trace_api_rejects_invalid_session_id(monkeypatch, tmp_path: Path):
     agent_name = "demo_agent"
     invalid_session_id = "web_session_demo_agent/../../etc/passwd"

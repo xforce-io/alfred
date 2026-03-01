@@ -13,6 +13,10 @@ import re
 
 from dolphin.sdk import DolphinAgent, Env, GlobalSkills
 from dolphin.core.config.global_config import GlobalConfig
+from dolphin.core.common.constants import (
+    KEY_HISTORY_COMPACT_ON_PERSIST,
+    KEY_HISTORY_COMPACT_RECENT_TURNS,
+)
 
 from ...infra.workspace import WorkspaceLoader
 from ...infra.user_data import get_user_data_manager
@@ -250,6 +254,14 @@ class AgentFactory:
             context.set_variable(key, value)
         context.set_variable("session_created_at", datetime.now().isoformat())
 
+        # Enable history compaction: drop tool chains from old turns before
+        # persisting so that context doesn't grow unboundedly across turns.
+        # recent_turns=0 means ALL previous turns are trimmed to
+        # user + pinned + assistant_final (no tool chains).  The current
+        # turn's full tool chain lives in SCRATCHPAD, not in history.
+        context.set_variable(KEY_HISTORY_COMPACT_ON_PERSIST, True)
+        context.set_variable(KEY_HISTORY_COMPACT_RECENT_TURNS, 0)
+
         return agent
 
     def _ensure_compatible_agent_dph(
@@ -417,6 +429,7 @@ Current time: $current_time
                     f"- Alfred home: {safe_path(user_data.alfred_home)}",
                     f"- Sessions dir: {safe_path(user_data.sessions_dir)}",
                     f"- Logs dir: {safe_path(user_data.logs_dir)}",
+                    "- Path rule: `~/.alfred/...` is already rooted at home after expansion. Never prepend the repository path to it.",
                     "",
                     "If you need to read these files, prefer a file-reading tool if available (e.g. read_file). Otherwise use a shell tool to run `cat`.",
                 ]

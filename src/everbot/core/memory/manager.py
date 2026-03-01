@@ -1,6 +1,7 @@
 """High-level memory manager — orchestrates the memory lifecycle."""
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -10,6 +11,42 @@ from .models import MemoryEntry
 from .store import MemoryStore
 
 logger = logging.getLogger(__name__)
+
+# System-managed files that should not appear in prompt-injected memories.
+# Mentioning these files reinforces the LLM's tendency to read/write them
+# directly, which conflicts with agent-level prohibitions.
+# Note: Python 3 treats CJK chars as \w, so \b won't fire between "md" and
+# a Chinese char.  We use a lookahead that accepts either a non-alnum ASCII
+# char, a CJK char, or end-of-string as the right boundary.
+_BOUNDARY = r"(?=[^a-zA-Z0-9_]|$)"
+_INTERNAL_FILE_PATTERN = re.compile(
+    rf"HEARTBEAT\.md{_BOUNDARY}"
+    rf"|MEMORY\.md{_BOUNDARY}"
+    rf"|AGENTS\.md{_BOUNDARY}"
+    rf"|USER\.md{_BOUNDARY}",
+    re.IGNORECASE,
+)
+
+
+_INTERNAL_CONTENT_PATTERN = re.compile(
+    r"智能体长期记忆系统"
+    r"|知识网络的核心功能"
+    r"|记忆提取器"
+    r"|记忆合并器"
+    r"|heartbeat.*记忆"
+    r"|memory.*merger"
+    r"|memory.*extractor",
+    re.IGNORECASE,
+)
+
+
+def _is_internal_content(content: str) -> bool:
+    """Check if memory content references internal files or architecture."""
+    if _INTERNAL_FILE_PATTERN.search(content):
+        return True
+    if _INTERNAL_CONTENT_PATTERN.search(content):
+        return True
+    return False
 
 
 class MemoryManager:
@@ -75,6 +112,7 @@ class MemoryManager:
             new_extractions=extract_result.new_memories,
             reinforcements=extract_result.reinforced_ids,
             source_session=session_id,
+            content_filter=_is_internal_content,
         )
 
         # 5. Save (record how many messages we've processed)
@@ -103,7 +141,8 @@ class MemoryManager:
 
         # Filter and sort
         candidates = sorted(
-            [e for e in entries if e.score >= 0.5],
+            [e for e in entries if e.score >= 0.5
+             and not _is_internal_content(e.content)],
             key=lambda e: e.score,
             reverse=True,
         )

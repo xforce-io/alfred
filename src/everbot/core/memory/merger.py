@@ -3,7 +3,7 @@
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from .models import MemoryEntry, new_id
 
@@ -19,7 +19,7 @@ _PROTECTION_DAYS = 7
 _DECAY_RATE = 0.99
 
 # Dedup parameters
-_SIMILARITY_THRESHOLD = 0.65
+_SIMILARITY_THRESHOLD = 0.45
 
 
 def _tokenize(text: str) -> Set[str]:
@@ -124,6 +124,7 @@ class MemoryMerger:
         new_extractions: List[dict],
         reinforcements: List[str],
         source_session: str = "",
+        content_filter: Optional[Callable[[str], bool]] = None,
     ) -> MergeResult:
         """Merge new extractions and reinforcements into existing entries.
 
@@ -132,6 +133,9 @@ class MemoryMerger:
             new_extractions: List of dicts with content/category/importance.
             reinforcements: List of existing entry IDs to reinforce.
             source_session: Session ID for provenance.
+            content_filter: Optional predicate — if it returns *True* for an
+                entry's content the entry is considered "internal" and will be
+                blocked (new), skipped (reinforce) or suppressed (existing).
 
         Returns:
             MergeResult with merged entries and stats.
@@ -139,9 +143,11 @@ class MemoryMerger:
         entry_map: Dict[str, MemoryEntry] = {e.id: e for e in existing}
         updated_count = 0
 
-        # Apply reinforcements
+        # Apply reinforcements (skip entries that match the content filter)
         for rid in reinforcements:
             if rid in entry_map:
+                if content_filter and content_filter(entry_map[rid].content):
+                    continue
                 self.reinforce(entry_map[rid])
                 updated_count += 1
 
@@ -150,6 +156,10 @@ class MemoryMerger:
         for ext in new_extractions:
             content = ext.get("content", "")
             category = ext.get("category", "fact")
+
+            # Block new entries that match the content filter
+            if content_filter and content_filter(content):
+                continue
 
             # Check against all existing entries for near-duplicates
             dup_entry = self._find_duplicate(content, category, entry_map.values())
@@ -166,6 +176,12 @@ class MemoryMerger:
             )
             entry_map[entry.id] = entry
             new_count += 1
+
+        # Suppress existing entries that match the content filter (accelerate decay)
+        if content_filter:
+            for entry in entry_map.values():
+                if content_filter(entry.content):
+                    entry.score *= 0.5
 
         return MergeResult(
             entries=list(entry_map.values()),
