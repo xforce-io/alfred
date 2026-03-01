@@ -189,9 +189,13 @@ class TelegramChannel:
                 tg_session_id = ChannelSessionResolver.resolve(
                     "telegram", agent_name, chat_id,
                 )
+                prefixed_detail = (
+                    "[此消息由心跳系统自动执行例行任务生成]\n\n"
+                    + detail
+                )
                 msg = {
                     "role": "assistant",
-                    "content": detail,
+                    "content": prefixed_detail,
                     "metadata": {
                         "source": "heartbeat_delivery",
                         "run_id": run_id,

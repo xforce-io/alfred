@@ -207,7 +207,8 @@ class TestEventFiltering:
         injected_msg = call_args[0][1]
         assert injected_session_id == "tg_session_my_agent__111"
         assert injected_msg["role"] == "assistant"
-        assert injected_msg["content"] == "Task completed"
+        assert "Task completed" in injected_msg["content"]
+        assert injected_msg["content"].startswith("[此消息由心跳系统自动执行例行任务生成]")
         assert injected_msg["metadata"]["source"] == "heartbeat_delivery"
 
     @pytest.mark.asyncio

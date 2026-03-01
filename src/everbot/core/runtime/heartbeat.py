@@ -220,11 +220,12 @@ If not, reply with `HEARTBEAT_OK`.
         """Read MEMORY.md from workspace, returning content or None."""
         memory_path = self.workspace_path / "MEMORY.md"
         try:
-            if memory_path.exists():
-                return memory_path.read_text(encoding="utf-8")
+            return memory_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
         except Exception as e:
             logger.warning("Failed to read MEMORY.md: %s", e)
-        return None
+            return None
 
     def _write_heartbeat_file(self, content: str) -> None:
         return self._file_mgr.write_heartbeat_file(content)
@@ -499,9 +500,13 @@ If not, reply with `HEARTBEAT_OK`.
 
     async def _inject_result_to_primary_history(self, result: str, run_id: str) -> bool:
         """Inject heartbeat result as an assistant message in primary session history."""
+        prefixed_content = (
+            "[此消息由心跳系统自动执行例行任务生成]\n\n"
+            + result
+        )
         message = {
             "role": "assistant",
-            "content": result,
+            "content": prefixed_content,
             "metadata": {
                 "source": "heartbeat",
                 "run_id": run_id,
