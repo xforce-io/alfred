@@ -453,7 +453,7 @@ async def test_timeout_not_triggered_when_fast():
 
 def test_chat_policy_has_timeout():
     """CHAT_POLICY must have a timeout to prevent infinite LLM loops in Telegram."""
-    assert CHAT_POLICY.timeout_seconds == 300
+    assert CHAT_POLICY.timeout_seconds == 600
 
 
 def test_heartbeat_policy_has_timeout():

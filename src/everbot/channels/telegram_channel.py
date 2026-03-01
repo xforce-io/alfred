@@ -160,11 +160,11 @@ class TelegramChannel:
     async def _on_background_event(
         self, session_id: str, data: Dict[str, Any]
     ) -> None:
-        """Filter heartbeat_delivery events and push to Telegram."""
+        """Filter heartbeat_delivery / deferred_result events and push to Telegram."""
         if data.get("deliver") is False:
             return
         source_type = data.get("source_type")
-        if source_type != "heartbeat_delivery":
+        if source_type not in ("heartbeat_delivery", "deferred_result"):
             return
 
         agent_name = data.get("agent_name")
@@ -175,8 +175,16 @@ class TelegramChannel:
         detail = str(data.get("detail") or data.get("summary") or "").strip()
         if not detail:
             return
+
+        if source_type == "deferred_result":
+            msg_prefix = "[Deferred Result]"
+            history_prefix = "[此消息由超时后台任务完成后自动生成]\n\n"
+        else:
+            msg_prefix = "[Heartbeat]"
+            history_prefix = "[此消息由心跳系统自动执行例行任务生成]\n\n"
+
         text, entities = self._convert_markdown(
-            f"[Heartbeat] {agent_name}\n\n{detail}"
+            f"{msg_prefix} {agent_name}\n\n{detail}"
         )
 
         # Push to all chats bound to this agent and inject into session history
@@ -185,19 +193,16 @@ class TelegramChannel:
             if bound_agent == agent_name:
                 await self._send_message(chat_id, text, entities)
                 # Inject the delivered message into the Telegram session history
-                # so follow-up questions have the heartbeat result in context.
+                # so follow-up questions have the result in context.
                 tg_session_id = ChannelSessionResolver.resolve(
                     "telegram", agent_name, chat_id,
                 )
-                prefixed_detail = (
-                    "[此消息由心跳系统自动执行例行任务生成]\n\n"
-                    + detail
-                )
+                prefixed_detail = history_prefix + detail
                 msg = {
                     "role": "assistant",
                     "content": prefixed_detail,
                     "metadata": {
-                        "source": "heartbeat_delivery",
+                        "source": source_type,
                         "run_id": run_id,
                         "injected_at": datetime.now(timezone.utc).isoformat(),
                     },
@@ -208,8 +213,8 @@ class TelegramChannel:
                     )
                     if not ok:
                         logger.warning(
-                            "Failed to inject heartbeat result into tg session %s",
-                            tg_session_id,
+                            "Failed to inject %s result into tg session %s",
+                            source_type, tg_session_id,
                         )
 
     # ------------------------------------------------------------------

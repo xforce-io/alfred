@@ -79,6 +79,7 @@ class TurnPolicy:
     max_tool_args_preview_chars: int = 500
     max_tool_output_preview_chars: int = 8000
     timeout_seconds: Optional[float] = None
+    drain_extra_seconds: Optional[float] = 300
     retryable_markers: List[str] = field(default_factory=lambda: [
         "incomplete chunked read",
         "peer closed connection",
@@ -97,7 +98,7 @@ class TurnPolicy:
 # Convenience presets
 CHAT_POLICY = TurnPolicy(
     max_tool_calls=20,
-    timeout_seconds=300,
+    timeout_seconds=600,
 )
 
 HEARTBEAT_POLICY = TurnPolicy(
@@ -254,6 +255,7 @@ class TurnOrchestrator:
         is_first_turn: bool = False,
         cancel_event: Optional[asyncio.Event] = None,
         on_before_retry: Optional[Callable[[int, Exception], Any]] = None,
+        on_deferred_result: Optional[Callable] = None,
     ) -> AsyncIterator[TurnEvent]:
         """Execute one LLM turn and yield normalised :class:`TurnEvent` s.
 
@@ -286,6 +288,7 @@ class TurnOrchestrator:
                     stream_mode=stream_mode,
                     is_first_turn=is_first_turn,
                     cancel_event=cancel_event,
+                    on_deferred_result=on_deferred_result,
                 ):
                     yield event
                     if event.type == TurnEventType.TURN_ERROR:
@@ -309,7 +312,36 @@ class TurnOrchestrator:
                 yield TurnEvent(type=TurnEventType.TURN_ERROR, error=str(exc))
                 return
 
-    # -- intent dedup helper ------------------------------------------------
+    # -- guard helpers ------------------------------------------------------
+
+    def _check_empty_output_loop(
+        self,
+        llm_had_output_this_round: bool,
+        tool_execution_count: int,
+        consecutive_empty_llm_rounds: int,
+        response: str,
+        tool_call_count: int,
+        tool_names_executed: list,
+        failed_tool_outputs: int,
+    ) -> Optional[TurnEvent]:
+        """Return a TURN_ERROR event if too many consecutive tool calls had no LLM output."""
+        if llm_had_output_this_round or tool_execution_count == 0:
+            return None
+        consecutive_empty_llm_rounds += 1
+        if consecutive_empty_llm_rounds >= self.policy.max_consecutive_empty_llm_rounds:
+            return TurnEvent(
+                type=TurnEventType.TURN_ERROR,
+                error=(
+                    f"EMPTY_OUTPUT_LOOP: {consecutive_empty_llm_rounds} consecutive "
+                    f"tool calls with no LLM text output (model likely degraded)"
+                ),
+                answer=response,
+                tool_call_count=tool_call_count,
+                tool_execution_count=tool_execution_count,
+                tool_names_executed=list(tool_names_executed),
+                failed_tool_outputs=failed_tool_outputs,
+            )
+        return None
 
     def _check_intent_dedup(
         self,
@@ -356,6 +388,7 @@ class TurnOrchestrator:
         stream_mode: str,
         is_first_turn: bool,
         cancel_event: Optional[asyncio.Event],
+        on_deferred_result: Optional[Callable] = None,
     ) -> AsyncIterator[TurnEvent]:
         policy = self.policy
 
@@ -372,7 +405,12 @@ class TurnOrchestrator:
 
         # Optionally wrap with timeout
         if policy.timeout_seconds:
-            event_stream = _timeout_wrapper(event_stream, policy.timeout_seconds)
+            event_stream = _timeout_wrapper(
+                event_stream,
+                policy.timeout_seconds,
+                on_timeout_drain=on_deferred_result,
+                drain_extra_seconds=policy.drain_extra_seconds or 300,
+            )
 
         # Tracking state
         response = ""
@@ -454,22 +492,16 @@ class TurnOrchestrator:
 
                     if status in ("running", "processing"):
                         # Empty-output loop detection
+                        err = self._check_empty_output_loop(
+                            llm_had_output_this_round, tool_execution_count,
+                            consecutive_empty_llm_rounds, response,
+                            tool_call_count, tool_names_executed, failed_tool_outputs,
+                        )
+                        if err:
+                            yield err
+                            return
                         if not llm_had_output_this_round and tool_execution_count > 0:
                             consecutive_empty_llm_rounds += 1
-                            if consecutive_empty_llm_rounds >= policy.max_consecutive_empty_llm_rounds:
-                                yield TurnEvent(
-                                    type=TurnEventType.TURN_ERROR,
-                                    error=(
-                                        f"EMPTY_OUTPUT_LOOP: {consecutive_empty_llm_rounds} consecutive "
-                                        f"tool calls with no LLM text output (model likely degraded)"
-                                    ),
-                                    answer=response,
-                                    tool_call_count=tool_call_count,
-                                    tool_execution_count=tool_execution_count,
-                                    tool_names_executed=list(tool_names_executed),
-                                    failed_tool_outputs=failed_tool_outputs,
-                                )
-                                return
                         llm_had_output_this_round = False
 
                         # Skill invocation → count as tool call (unless exempt)
@@ -549,22 +581,16 @@ class TurnOrchestrator:
                     t_name = progress.get("tool_name", "")
 
                     # Empty-output loop detection
+                    err = self._check_empty_output_loop(
+                        llm_had_output_this_round, tool_execution_count,
+                        consecutive_empty_llm_rounds, response,
+                        tool_call_count, tool_names_executed, failed_tool_outputs,
+                    )
+                    if err:
+                        yield err
+                        return
                     if not llm_had_output_this_round and tool_execution_count > 0:
                         consecutive_empty_llm_rounds += 1
-                        if consecutive_empty_llm_rounds >= policy.max_consecutive_empty_llm_rounds:
-                            yield TurnEvent(
-                                type=TurnEventType.TURN_ERROR,
-                                error=(
-                                    f"EMPTY_OUTPUT_LOOP: {consecutive_empty_llm_rounds} consecutive "
-                                    f"tool calls with no LLM text output (model likely degraded)"
-                                ),
-                                answer=response,
-                                tool_call_count=tool_call_count,
-                                tool_execution_count=tool_execution_count,
-                                tool_names_executed=list(tool_names_executed),
-                                failed_tool_outputs=failed_tool_outputs,
-                            )
-                            return
                     llm_had_output_this_round = False
 
                     if t_name not in policy.budget_exempt_tools:
@@ -656,7 +682,7 @@ class TurnOrchestrator:
                         reference_id=progress.get("reference_id", ""),
                     )
                     if not fail_sig and t_output_raw:
-                        last_successful_tool_output = t_output_raw
+                        last_successful_tool_output = t_output_raw[:policy.max_tool_output_preview_chars]
                     if pid:
                         sent_progress[pid] = status
 
@@ -681,10 +707,95 @@ class TurnOrchestrator:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-async def _timeout_wrapper(stream: AsyncIterator, timeout: float) -> AsyncIterator:
-    """Wrap an async iterator with a total timeout."""
+async def _timeout_wrapper(
+    stream: AsyncIterator,
+    timeout: float,
+    *,
+    on_timeout_drain: Optional[Callable] = None,
+    drain_extra_seconds: float = 300,
+) -> AsyncIterator:
+    """Wrap an async iterator with a total timeout.
+
+    Uses manual ``__anext__()`` instead of ``async for`` so that when a
+    timeout occurs the underlying iterator is **not** closed via
+    ``athrow()``—it can be handed off to a background drain task.
+    """
     deadline = asyncio.get_event_loop().time() + timeout
-    async for item in stream:
+    aiter = stream.__aiter__()
+    while True:
+        try:
+            item = await aiter.__anext__()
+        except StopAsyncIteration:
+            return
         if asyncio.get_event_loop().time() > deadline:
+            if on_timeout_drain is not None:
+                asyncio.create_task(
+                    _drain_after_timeout(aiter, on_timeout_drain, drain_extra_seconds),
+                    name="deferred-drain",
+                )
+            else:
+                try:
+                    await aiter.aclose()
+                except Exception:
+                    pass
             raise asyncio.TimeoutError(f"Turn exceeded {timeout}s timeout")
         yield item
+
+
+async def _drain_after_timeout(
+    aiter: AsyncIterator,
+    on_result: Callable,
+    extra_timeout: float,
+) -> None:
+    """Continue consuming an event stream after timeout and deliver collected results."""
+    deadline = asyncio.get_event_loop().time() + extra_timeout
+    collected_outputs: list[str] = []
+    final_response = ""
+    try:
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                item = await asyncio.wait_for(aiter.__anext__(), timeout=60)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                continue
+            if not isinstance(item, dict) or "_progress" not in item:
+                continue
+            for progress in item.get("_progress", []):
+                stage = progress.get("stage")
+                status = progress.get("status", "")
+                if stage == "skill" and status in ("completed", "failed"):
+                    output = (
+                        progress.get("answer")
+                        or progress.get("block_answer")
+                        or progress.get("output")
+                        or ""
+                    )
+                    if output:
+                        collected_outputs.append(output)
+                elif stage == "llm":
+                    delta = progress.get("delta", "")
+                    answer = progress.get("answer", "")
+                    if delta:
+                        final_response += delta
+                    elif answer:
+                        final_response = answer
+    except Exception as e:
+        logger.warning("Deferred drain error: %s", e)
+    finally:
+        try:
+            await aiter.aclose()
+        except Exception:
+            pass
+
+    result = final_response or "\n".join(collected_outputs)
+    if not result.strip():
+        return
+    if len(result) > 8000:
+        result = result[:8000] + f"\n\n... [truncated, total {len(result)} chars]"
+    try:
+        res = on_result(result)
+        if asyncio.iscoroutine(res):
+            await res
+    except Exception as e:
+        logger.warning("Failed to deliver deferred result: %s", e)

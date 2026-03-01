@@ -14,7 +14,7 @@ import os
 import time
 import traceback
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Union
 
@@ -29,6 +29,7 @@ from ...core.runtime.turn_orchestrator import (
     TurnEventType,
     TurnOrchestrator,
 )
+from ...core.runtime import events
 from ...core.session.session import SessionManager
 from ...infra.user_data import UserDataManager
 from ...infra.workspace import WorkspaceLoader
@@ -199,12 +200,62 @@ class ChannelCoreService:
                 await on_event(OutboundMessage(session_id, msg, msg_type="status"))
                 await on_event(OutboundMessage(session_id, "", msg_type="end"))
 
+            async def _deliver_deferred_result(result_text: str) -> None:
+                """Deliver deferred result from a timed-out turn via mailbox + events."""
+                try:
+                    msg = {
+                        "role": "assistant",
+                        "content": (
+                            "[此消息由超时后台任务完成后自动生成]\n\n"
+                            + result_text
+                        ),
+                        "metadata": {
+                            "source": "deferred_result",
+                            "run_id": run_id,
+                            "injected_at": datetime.now(timezone.utc).isoformat(),
+                        },
+                    }
+                    if hasattr(self.session_manager, "inject_history_message"):
+                        await self.session_manager.inject_history_message(
+                            session_id, msg, timeout=5.0, blocking=False,
+                        )
+                    if hasattr(self.session_manager, "deposit_mailbox_event"):
+                        await self.session_manager.deposit_mailbox_event(
+                            session_id,
+                            {
+                                "event_id": f"deferred:{run_id}",
+                                "dedupe_key": f"deferred:{run_id}",
+                                "summary": f"超时任务已完成",
+                                "detail": result_text,
+                                "source_type": "deferred_result",
+                                "run_id": run_id,
+                            },
+                            timeout=5.0,
+                            blocking=False,
+                        )
+                    await events.emit(
+                        session_id,
+                        {
+                            "detail": result_text,
+                            "source_type": "deferred_result",
+                            "run_id": run_id,
+                            "agent_name": agent_name,
+                            "deliver": True,
+                        },
+                        agent_name=agent_name,
+                        source_type="deferred_result",
+                        run_id=run_id,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to deliver deferred result: %s", exc)
+
             async for te in self._orchestrator.run_turn(
                 agent,
                 effective_message,
                 system_prompt=system_prompt_override,
                 is_first_turn=is_first_turn,
                 on_before_retry=_on_before_retry,
+                on_deferred_result=_deliver_deferred_result,
             ):
                 if te.type == TurnEventType.LLM_DELTA:
                     if not llm_started:
@@ -373,6 +424,10 @@ class ChannelCoreService:
                     await on_event(OutboundMessage(session_id, (
                         "我已停止本轮自动重试：检测到重复失败（同类错误连续出现）。"
                         "请确认是否切换策略：1) 更换站点/接口 2) 你先人工完成验证后我继续。"
+                    ), msg_type="text"))
+                elif "timeout" in err_msg.lower():
+                    await on_event(OutboundMessage(session_id, (
+                        "本轮执行超时，但后台任务仍在继续。如果任务完成，我会自动推送结果给你。"
                     ), msg_type="text"))
                 else:
                     await on_event(OutboundMessage(session_id, (
