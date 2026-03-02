@@ -12,7 +12,7 @@ from ..tasks.task_manager import (
     claim_task,
     update_task_state,
     TaskState,
-    _parse_iso_datetime,
+    parse_iso_datetime,
 )
 from .heartbeat_utils import task_snapshot
 
@@ -72,7 +72,7 @@ class IsolatedTaskMixin:
             mode = str(getattr(task, "execution_mode", "inline") or "inline")
             if mode != "isolated":
                 continue
-            last_run = _parse_iso_datetime(task.last_run_at) if task.last_run_at else None
+            last_run = parse_iso_datetime(task.last_run_at) if task.last_run_at else None
             if last_run is None:
                 continue
             timeout = max(int(getattr(task, "timeout_seconds", 600) or 600), 60)

@@ -413,6 +413,7 @@ Current time: $current_time
                 return "~" + path_str[len(home_dir):]
             return path_str
 
+        bundled_skills_dir = Path(__file__).resolve().parents[4] / "skills"
         parts.append(
             "\n".join(
                 [
@@ -429,6 +430,8 @@ Current time: $current_time
                     f"- Alfred home: {safe_path(user_data.alfred_home)}",
                     f"- Sessions dir: {safe_path(user_data.sessions_dir)}",
                     f"- Logs dir: {safe_path(user_data.logs_dir)}",
+                    f"- Global skills dir: {safe_path(user_data.skills_dir)}",
+                    f"- Built-in skills dir: {safe_path(bundled_skills_dir)}",
                     "- Path rule: `~/.alfred/...` is already rooted at home after expansion. Never prepend the repository path to it.",
                     "",
                     "If you need to read these files, prefer a file-reading tool if available (e.g. read_file). Otherwise use a shell tool to run `cat`.",
