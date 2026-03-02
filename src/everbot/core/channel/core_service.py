@@ -369,7 +369,7 @@ class ChannelCoreService:
                 agent,
                 lock_already_held=True,
             )
-            await self._ack_mailbox_events(session_id, mailbox_ack_ids)
+            await self._ack_mailbox_events(session_id, mailbox_ack_ids, lock_already_held=True)
             logger.debug("Session persisted: %s", session_id)
 
         except asyncio.CancelledError:
@@ -392,7 +392,7 @@ class ChannelCoreService:
                     agent,
                     lock_already_held=True,
                 )
-                await self._ack_mailbox_events(session_id, mailbox_ack_ids)
+                await self._ack_mailbox_events(session_id, mailbox_ack_ids, lock_already_held=True)
                 await on_event(OutboundMessage(session_id, "", msg_type="end", metadata={"status": "cancelled"}))
             except Exception as e:
                 logger.warning("Failed to save session on cancellation: %s", e)
@@ -492,7 +492,7 @@ class ChannelCoreService:
                             lock_already_held=True,
                             trailing_messages=_trailing,
                         )
-                        await self._ack_mailbox_events(session_id, mailbox_ack_ids)
+                        await self._ack_mailbox_events(session_id, mailbox_ack_ids, lock_already_held=True)
                     except Exception as save_error:
                         logger.warning("Failed to persist session after error: %s", save_error)
                 else:
@@ -728,11 +728,11 @@ class ChannelCoreService:
         session_view = self._session_context_view(session_data, agent_name)
         return self._primary_context_strategy.build_system_prompt(session_view, self._runtime_deps)
 
-    async def _ack_mailbox_events(self, session_id: str, event_ids: list[str]) -> None:
+    async def _ack_mailbox_events(self, session_id: str, event_ids: list[str], *, lock_already_held: bool = False) -> None:
         """Acknowledge consumed mailbox events after successful turn."""
         if not event_ids:
             return
-        await self.session_manager.ack_mailbox_events(session_id, event_ids)
+        await self.session_manager.ack_mailbox_events(session_id, event_ids, lock_already_held=lock_already_held)
 
     def _record_timeline_event(self, session_id: str, event_type: str, **payload) -> None:
         """Record one timeline event with an ISO timestamp."""

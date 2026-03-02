@@ -796,7 +796,8 @@ async def _drain_after_timeout(
         except Exception:
             pass
 
-    result = final_response or "\n".join(collected_outputs)
+    parts = [p for p in [final_response, "\n".join(collected_outputs)] if p.strip()]
+    result = "\n\n".join(parts)
     if not result.strip():
         return
     if len(result) > 8000:

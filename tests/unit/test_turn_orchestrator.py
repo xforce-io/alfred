@@ -15,6 +15,7 @@ from src.everbot.core.runtime.turn_orchestrator import (
     TurnEventType,
     TurnOrchestrator,
     TurnPolicy,
+    _drain_after_timeout,
     _extract_failure_signature,
     _extract_tool_intent_signature,
     _is_read_only_intent,
@@ -584,3 +585,112 @@ async def test_empty_output_loop_not_triggered_when_think_present():
     errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
     assert len(errors) == 0
     assert any(e.type == TurnEventType.TURN_COMPLETE for e in events)
+
+
+# ---------------------------------------------------------------------------
+# _drain_after_timeout tests (Bug 2 — incomplete drain results)
+# ---------------------------------------------------------------------------
+
+class _FakeAsyncIter:
+    """Async iterator that yields scripted progress items then stops."""
+
+    def __init__(self, items):
+        self._items = list(items)
+        self._index = 0
+        self._closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._index >= len(self._items):
+            raise StopAsyncIteration
+        item = self._items[self._index]
+        self._index += 1
+        return item
+
+    async def aclose(self):
+        self._closed = True
+
+
+@pytest.mark.asyncio
+async def test_drain_combines_llm_and_tool_outputs():
+    """When both LLM text and tool output are present, drain merges them."""
+    items = [
+        {"_progress": [{"stage": "llm", "delta": "Analysis: looks good."}]},
+        {"_progress": [{"stage": "skill", "status": "completed", "output": "Tool result: pass"}]},
+    ]
+    results = []
+    await _drain_after_timeout(
+        _FakeAsyncIter(items),
+        on_result=lambda r: results.append(r),
+        extra_timeout=5.0,
+    )
+    assert len(results) == 1
+    assert "Analysis: looks good." in results[0]
+    assert "Tool result: pass" in results[0]
+
+
+@pytest.mark.asyncio
+async def test_drain_llm_only():
+    """Drain with only LLM text works correctly."""
+    items = [
+        {"_progress": [{"stage": "llm", "delta": "Only LLM."}]},
+    ]
+    results = []
+    await _drain_after_timeout(
+        _FakeAsyncIter(items),
+        on_result=lambda r: results.append(r),
+        extra_timeout=5.0,
+    )
+    assert len(results) == 1
+    assert results[0] == "Only LLM."
+
+
+@pytest.mark.asyncio
+async def test_drain_tool_only():
+    """Drain with only tool output works correctly."""
+    items = [
+        {"_progress": [{"stage": "skill", "status": "completed", "output": "Tool only."}]},
+    ]
+    results = []
+    await _drain_after_timeout(
+        _FakeAsyncIter(items),
+        on_result=lambda r: results.append(r),
+        extra_timeout=5.0,
+    )
+    assert len(results) == 1
+    assert results[0] == "Tool only."
+
+
+@pytest.mark.asyncio
+async def test_drain_truncates_long_result():
+    """Results exceeding 8000 chars are truncated."""
+    long_text = "x" * 9000
+    items = [
+        {"_progress": [{"stage": "llm", "delta": long_text}]},
+    ]
+    results = []
+    await _drain_after_timeout(
+        _FakeAsyncIter(items),
+        on_result=lambda r: results.append(r),
+        extra_timeout=5.0,
+    )
+    assert len(results) == 1
+    assert len(results[0]) < 9000
+    assert "truncated" in results[0]
+
+
+@pytest.mark.asyncio
+async def test_drain_empty_skips_callback():
+    """When there is no content, on_result is never called."""
+    items = [
+        {"_progress": [{"stage": "llm", "delta": ""}]},
+    ]
+    results = []
+    await _drain_after_timeout(
+        _FakeAsyncIter(items),
+        on_result=lambda r: results.append(r),
+        extra_timeout=5.0,
+    )
+    assert len(results) == 0

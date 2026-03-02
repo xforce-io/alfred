@@ -368,6 +368,7 @@ class SessionManager:
         *,
         timeout: float = 5.0,
         blocking: bool = True,
+        lock_already_held: bool = False,
     ) -> bool:
         """Remove consumed mailbox events by event_id atomically."""
         ids = {str(eid).strip() for eid in event_ids if str(eid).strip()}
@@ -382,7 +383,12 @@ class SessionManager:
                 if not isinstance(e, dict) or str(e.get("event_id") or "").strip() not in ids
             ]
 
-        updated = await self.update_atomic(session_id, _mutator, timeout=timeout, blocking=blocking)
+        if lock_already_held:
+            updated = await self.persistence.update_atomic(
+                session_id, _mutator, timeout=timeout, blocking=blocking,
+            )
+        else:
+            updated = await self.update_atomic(session_id, _mutator, timeout=timeout, blocking=blocking)
         if updated is not None:
             self.record_metric("mailbox_drain_count", float(len(ids)))
         return updated is not None

@@ -1,5 +1,6 @@
 """Unit tests for session mailbox atomic operations."""
 
+import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -111,3 +112,52 @@ async def test_deposit_mailbox_event_drops_stale_suppressed_event(tmp_path: Path
     assert loaded.mailbox == []
     metrics = manager.get_metrics_snapshot()
     assert metrics.get("mailbox_stale_drop_count", 0) >= 1
+
+
+@pytest.mark.asyncio
+async def test_ack_with_lock_already_held(tmp_path: Path):
+    """ack_mailbox_events with lock_already_held=True succeeds even when
+    the asyncio lock is already held by the caller (Bug 3 fix)."""
+    manager = SessionManager(tmp_path)
+    session_id = "web_session_demo_agent"
+    event = {"event_id": "evt_lock", "event_type": "heartbeat_result", "summary": "x"}
+    await manager.deposit_mailbox_event(session_id, event)
+
+    # Acquire the in-process asyncio lock, simulating process_message() context
+    lock = manager._get_lock(session_id)
+    await lock.acquire()
+    try:
+        ok = await manager.ack_mailbox_events(
+            session_id, ["evt_lock"], lock_already_held=True,
+        )
+        assert ok is True
+        loaded = await manager.load_session(session_id)
+        assert loaded is not None
+        assert loaded.mailbox == []
+    finally:
+        lock.release()
+
+
+@pytest.mark.asyncio
+async def test_ack_deadlocks_without_flag(tmp_path: Path):
+    """Without lock_already_held=True, ack_mailbox_events times out when
+    the asyncio lock is already held (regression proof for Bug 3)."""
+    manager = SessionManager(tmp_path)
+    session_id = "web_session_demo_agent"
+    event = {"event_id": "evt_dl", "event_type": "heartbeat_result", "summary": "x"}
+    await manager.deposit_mailbox_event(session_id, event)
+
+    lock = manager._get_lock(session_id)
+    await lock.acquire()
+    try:
+        # Default path tries to acquire the same lock → timeout
+        ok = await manager.ack_mailbox_events(
+            session_id, ["evt_dl"], timeout=0.1, blocking=False,
+        )
+        assert ok is False
+        # Event should still be present
+        loaded = await manager.load_session(session_id)
+        assert loaded is not None
+        assert len(loaded.mailbox) == 1
+    finally:
+        lock.release()

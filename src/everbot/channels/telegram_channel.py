@@ -207,7 +207,9 @@ class TelegramChannel:
                         "injected_at": datetime.now(timezone.utc).isoformat(),
                     },
                 }
-                if hasattr(self._session_manager, "inject_history_message"):
+                # For deferred_result, core_service already injected into
+                # the primary session history — skip here to avoid duplicates.
+                if source_type != "deferred_result" and hasattr(self._session_manager, "inject_history_message"):
                     ok = await self._session_manager.inject_history_message(
                         tg_session_id, msg, timeout=5.0, blocking=False,
                     )
