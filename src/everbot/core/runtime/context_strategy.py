@@ -98,6 +98,17 @@ class JobContextStrategy:
         return BuildMessageResult(message=trigger)
 
 
+class WorkflowContextStrategy:
+    """Workflow strategy: system prompt and message from session variables."""
+
+    def build_system_prompt(self, session: Any, deps: RuntimeDeps) -> str:
+        variables = getattr(session, "variables", {}) or {}
+        return str(variables.get("workflow_system_prompt") or "")
+
+    def build_message(self, session: Any, trigger: str, deps: RuntimeDeps) -> BuildMessageResult:
+        return BuildMessageResult(message=trigger)
+
+
 def build_default_context_strategies() -> Dict[str, ContextStrategy]:
     """Build default strategy registry keyed by session type."""
     return {
@@ -105,5 +116,6 @@ def build_default_context_strategies() -> Dict[str, ContextStrategy]:
         "heartbeat": HeartbeatContextStrategy(),
         "job": JobContextStrategy(),
         "sub": PrimaryContextStrategy(),
+        "workflow": WorkflowContextStrategy(),
     }
 

@@ -115,6 +115,14 @@ JOB_POLICY = TurnPolicy(
     timeout_seconds=600,
 )
 
+WORKFLOW_POLICY = TurnPolicy(
+    max_attempts=2,
+    max_tool_calls=60,
+    max_failed_tool_outputs=8,
+    max_tool_output_preview_chars=12000,
+    timeout_seconds=300,
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers (stateless, extracted from ChatService)

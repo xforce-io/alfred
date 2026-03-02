@@ -18,6 +18,8 @@ def get_primary_session_id(agent_name: str) -> str:
 def infer_session_type(session_id: str) -> str:
     """Infer runtime session type from session id."""
     sid = str(session_id or "")
+    if sid.startswith("workflow_"):
+        return "workflow"
     if sid.startswith("heartbeat_session_"):
         return "heartbeat"
     if sid.startswith("job_"):
