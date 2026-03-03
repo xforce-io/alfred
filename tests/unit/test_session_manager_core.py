@@ -681,3 +681,347 @@ class TestHistoryVariableDedup:
         portable = call_args[0][0]
         assert "_history" not in portable["variables"], \
             "_history should be filtered from restored variables"
+
+
+# ===========================================================================
+# 13. inject_history_message deduplication by run_id
+# ===========================================================================
+
+class TestUserMessageContentDedup:
+    """Issue 1: User messages without run_id (e.g. from frontend) can be
+    submitted multiple times and each copy is blindly appended because the
+    dedup logic only checks metadata.run_id.  These tests prove the bug."""
+
+    @pytest.mark.asyncio
+    async def test_identical_user_messages_without_run_id_deduplicated(self, tmp_path: Path):
+        """Submitting the same user message 10 times (no metadata.run_id)
+        should NOT create 10 entries — at minimum consecutive duplicates
+        with identical content should be collapsed."""
+        manager = SessionManager(tmp_path)
+        session_id = "web_session_test_agent"
+
+        for _ in range(10):
+            await manager.inject_history_message(
+                session_id, {"role": "user", "content": "你好"}
+            )
+
+        loaded = await manager.load_session(session_id)
+        assert loaded is not None
+        user_messages = [
+            m for m in loaded.history_messages if m.get("role") == "user"
+        ]
+        assert len(user_messages) <= 2, (
+            f"Expected at most 2 user messages (with placeholders), got {len(user_messages)}. "
+            "inject_history_message does not deduplicate user messages without run_id — "
+            "identical '你好' was appended 10 times."
+        )
+
+    @pytest.mark.asyncio
+    async def test_consecutive_identical_user_messages_collapsed(self, tmp_path: Path):
+        """Two consecutive user messages with the exact same content should be
+        collapsed into one (the second is a frontend re-submit)."""
+        manager = SessionManager(tmp_path)
+        session_id = "web_session_test_agent"
+
+        # Normal flow: user → assistant → user (same content = re-submit)
+        await manager.inject_history_message(
+            session_id, {"role": "user", "content": "帮我搜索一下 Anthropic 最新的新闻"}
+        )
+        await manager.inject_history_message(
+            session_id, {"role": "assistant", "content": "好的，正在搜索..."}
+        )
+        # Frontend re-submits the same message (network glitch, double-click, etc.)
+        await manager.inject_history_message(
+            session_id, {"role": "user", "content": "帮我搜索一下 Anthropic 最新的新闻"}
+        )
+        await manager.inject_history_message(
+            session_id, {"role": "user", "content": "帮我搜索一下 Anthropic 最新的新闻"}
+        )
+
+        loaded = await manager.load_session(session_id)
+        assert loaded is not None
+        search_messages = [
+            m for m in loaded.history_messages
+            if m.get("role") == "user" and m.get("content") == "帮我搜索一下 Anthropic 最新的新闻"
+        ]
+        # The first one after assistant reply is valid; the immediate duplicate is not
+        assert len(search_messages) <= 2, (
+            f"Expected at most 2 user messages for the same query, got {len(search_messages)}. "
+            "Consecutive identical user messages should be collapsed."
+        )
+
+
+class TestInjectHistoryMessageDedup:
+    """inject_history_message should deduplicate messages with the same
+    metadata.run_id.  Currently it does NOT, so these tests are expected to
+    FAIL – proving the bug exists."""
+
+    @pytest.mark.asyncio
+    async def test_duplicate_deferred_result_not_appended(self, tmp_path: Path):
+        """Injecting the same deferred result (same run_id) twice should NOT
+        create two entries in history_messages."""
+        manager = SessionManager(tmp_path)
+        session_id = "web_session_test_agent"
+
+        msg = {
+            "role": "assistant",
+            "content": "[此消息由超时后台任务完成后自动生成]\n\n每日投资信号推送 completed",
+            "metadata": {
+                "source": "deferred_result",
+                "run_id": "run_abc123",
+                "injected_at": "2024-06-01T00:00:00+00:00",
+            },
+        }
+
+        await manager.inject_history_message(session_id, msg)
+        await manager.inject_history_message(session_id, msg)
+        await manager.inject_history_message(session_id, msg)
+
+        loaded = await manager.load_session(session_id)
+        assert loaded is not None
+        matching = [
+            m for m in loaded.history_messages
+            if isinstance(m.get("metadata"), dict)
+            and m["metadata"].get("run_id") == "run_abc123"
+        ]
+        assert len(matching) == 1, (
+            f"Expected 1 message with run_id=run_abc123, got {len(matching)}. "
+            "inject_history_message lacks deduplication by run_id."
+        )
+
+    @pytest.mark.asyncio
+    async def test_duplicate_heartbeat_result_not_appended(self, tmp_path: Path):
+        """Injecting the same heartbeat result (same run_id) multiple times
+        should only keep one copy."""
+        manager = SessionManager(tmp_path)
+        session_id = "web_session_test_agent"
+
+        for i in range(5):
+            msg = {
+                "role": "assistant",
+                "content": "[此消息由心跳系统自动执行例行任务生成]\n\n每日投资信号推送 completed",
+                "metadata": {
+                    "source": "heartbeat",
+                    "run_id": "hb_run_001",
+                    "injected_at": f"2024-06-01T00:00:0{i}+00:00",
+                },
+            }
+            await manager.inject_history_message(session_id, msg)
+
+        loaded = await manager.load_session(session_id)
+        assert loaded is not None
+        matching = [
+            m for m in loaded.history_messages
+            if isinstance(m.get("metadata"), dict)
+            and m["metadata"].get("run_id") == "hb_run_001"
+        ]
+        assert len(matching) == 1, (
+            f"Expected 1 message with run_id=hb_run_001, got {len(matching)}. "
+            "Heartbeat result was injected {len(matching)} times without dedup."
+        )
+
+    @pytest.mark.asyncio
+    async def test_different_run_ids_both_kept(self, tmp_path: Path):
+        """Messages with different run_ids should both be kept."""
+        manager = SessionManager(tmp_path)
+        session_id = "web_session_test_agent"
+
+        for run_id in ["run_aaa", "run_bbb"]:
+            msg = {
+                "role": "assistant",
+                "content": f"Result from {run_id}",
+                "metadata": {"source": "deferred_result", "run_id": run_id},
+            }
+            await manager.inject_history_message(session_id, msg)
+
+        loaded = await manager.load_session(session_id)
+        assert loaded is not None
+        assert len(loaded.history_messages) == 2
+
+
+# ===========================================================================
+# 14. Consecutive user messages need assistant placeholder
+# ===========================================================================
+
+class TestConsecutiveUserMessageGuard:
+    """When a user-role message is injected into history and the last message
+    is also user-role, inject_history_message should insert a placeholder
+    assistant message in between.  Currently it does NOT, so these tests
+    are expected to FAIL."""
+
+    @pytest.mark.asyncio
+    async def test_no_consecutive_user_messages_after_injection(self, tmp_path: Path):
+        """Injecting a user-role message right after another user-role message
+        must insert an assistant placeholder to avoid consecutive user messages."""
+        manager = SessionManager(tmp_path)
+        session_id = "web_session_test_agent"
+
+        # First inject a user message
+        await manager.inject_history_message(
+            session_id, {"role": "user", "content": "Hello"}
+        )
+        # Then inject another user message (e.g. a Background Updates notification)
+        await manager.inject_history_message(
+            session_id,
+            {
+                "role": "user",
+                "content": "## Background Updates\n- [job_completed] 每日投资信号推送 completed",
+            },
+        )
+
+        loaded = await manager.load_session(session_id)
+        assert loaded is not None
+        messages = loaded.history_messages
+        for i in range(len(messages) - 1):
+            if messages[i].get("role") == "user" and messages[i + 1].get("role") == "user":
+                pytest.fail(
+                    f"Consecutive user messages at index [{i},{i+1}]: "
+                    f"'{messages[i].get('content', '')[:40]}' → "
+                    f"'{messages[i+1].get('content', '')[:40]}'. "
+                    "A placeholder assistant message should be inserted between them."
+                )
+
+    @pytest.mark.asyncio
+    async def test_history_alternation_after_multiple_injections(self, tmp_path: Path):
+        """After multiple mixed-role injections, no two consecutive messages
+        should have the same role (user-user or assistant-assistant without
+        tool_calls)."""
+        manager = SessionManager(tmp_path)
+        session_id = "web_session_test_agent"
+
+        # Simulate: user msg → heartbeat assistant → user msg → another user
+        # (the last pair is the problematic one)
+        injections = [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "你好！有什么可以帮助你的？"},
+            {"role": "user", "content": "查看今日新闻"},
+            {"role": "user", "content": "## Background Updates\n- [job_completed] 每日投资信号推送 completed"},
+        ]
+        for msg in injections:
+            await manager.inject_history_message(session_id, msg)
+
+        loaded = await manager.load_session(session_id)
+        assert loaded is not None
+        messages = loaded.history_messages
+        for i in range(len(messages) - 1):
+            curr_role = messages[i].get("role")
+            next_role = messages[i + 1].get("role")
+            if curr_role == "user" and next_role == "user":
+                pytest.fail(
+                    f"Consecutive user messages at index [{i},{i+1}]. "
+                    "inject_history_message should insert an assistant placeholder."
+                )
+
+
+# ===========================================================================
+# 15. Heartbeat assistant response must not appear as reply to user question
+# ===========================================================================
+
+class TestHeartbeatResponseDoesNotPollutePrimaryConversation:
+    """Issue 2: When heartbeat injects an assistant message into the primary
+    session's history_messages, it can appear immediately after a user message,
+    making the LLM think the heartbeat output is the response to that user
+    question.  The injected heartbeat message must NOT break the user→assistant
+    reply pairing.
+
+    Example from production:
+        [60] user: 帮我搜索一下 Anthropic 最新的新闻
+        [61] assistant: [此消息由心跳系统自动执行例行任务生成] Heartbeat reflection...
+    """
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_injection_after_unanswered_user_message(self, tmp_path: Path):
+        """If the last message is a user question and a heartbeat assistant
+        message is injected, the heartbeat should NOT be placed directly after
+        the user question (it would look like the answer)."""
+        manager = SessionManager(tmp_path)
+        session_id = "web_session_test_agent"
+
+        # User asked a question
+        await manager.inject_history_message(
+            session_id,
+            {"role": "user", "content": "帮我搜索一下 Anthropic 最新的新闻"},
+        )
+
+        # Heartbeat injects its result (assistant role) into the same session
+        heartbeat_msg = {
+            "role": "assistant",
+            "content": "[此消息由心跳系统自动执行例行任务生成] Heartbeat reflection proposed 1 routine(s)",
+            "metadata": {
+                "source": "heartbeat",
+                "run_id": "hb_run_999",
+            },
+        }
+        await manager.inject_history_message(session_id, heartbeat_msg)
+
+        loaded = await manager.load_session(session_id)
+        assert loaded is not None
+        messages = loaded.history_messages
+
+        # Find the user question
+        user_q_idx = None
+        for i, m in enumerate(messages):
+            if m.get("content", "").startswith("帮我搜索"):
+                user_q_idx = i
+                break
+        assert user_q_idx is not None
+
+        # The message immediately after the user question should NOT be the
+        # heartbeat message — it would confuse the LLM into thinking heartbeat
+        # output is the search result.
+        next_msg = messages[user_q_idx + 1] if user_q_idx + 1 < len(messages) else None
+        assert next_msg is not None, "Expected a message after the user question"
+        is_heartbeat = (
+            isinstance(next_msg.get("metadata"), dict)
+            and next_msg["metadata"].get("source") == "heartbeat"
+        )
+        assert not is_heartbeat, (
+            "Heartbeat assistant message was injected directly after an unanswered "
+            "user question. This makes the LLM think the heartbeat output is the "
+            "reply to the user's question. Heartbeat injection must defer or insert "
+            "a separator when the last message is an unanswered user message."
+        )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_injection_preserves_conversation_coherence(self, tmp_path: Path):
+        """Simulates the production scenario: user asks → before the chat agent
+        can reply, heartbeat injects an assistant message → next chat turn sees
+        the heartbeat message as the 'reply' to the user's question."""
+        manager = SessionManager(tmp_path)
+        session_id = "web_session_test_agent"
+
+        # Build a conversation history
+        history = [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "你好！有什么可以帮助你的？"},
+            {"role": "user", "content": "帮我搜索一下 Anthropic 最新的新闻"},
+            # At this point, the chat agent hasn't replied yet.
+            # Heartbeat runs and injects its result:
+        ]
+        for msg in history:
+            await manager.inject_history_message(session_id, msg)
+
+        # Heartbeat injects
+        await manager.inject_history_message(session_id, {
+            "role": "assistant",
+            "content": "[此消息由心跳系统自动执行例行任务生成] Heartbeat reflection proposed 1 routine(s)",
+            "metadata": {"source": "heartbeat", "run_id": "hb_coherence_test"},
+        })
+
+        loaded = await manager.load_session(session_id)
+        messages = loaded.history_messages
+
+        # Check: the assistant message after "帮我搜索" should not be heartbeat
+        for i in range(len(messages) - 1):
+            if (
+                messages[i].get("role") == "user"
+                and "搜索" in messages[i].get("content", "")
+            ):
+                next_msg = messages[i + 1]
+                if next_msg.get("role") == "assistant":
+                    content = next_msg.get("content", "")
+                    assert "心跳" not in content and "Heartbeat" not in content, (
+                        f"Heartbeat response at index [{i+1}] appears as reply to "
+                        f"user question at [{i}]. This breaks conversation coherence."
+                    )
+                break

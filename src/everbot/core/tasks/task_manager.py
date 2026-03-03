@@ -273,11 +273,15 @@ def update_task_state(
         task.last_run_at = now.isoformat()
         task.retry = 0
         task.error_message = None
-        # Schedule next run
-        next_run = _compute_next_run(task.schedule, now, task.timezone)
-        if next_run:
-            task.next_run_at = next_run
+        # Re-arm scheduled tasks unconditionally.  Previously the state
+        # reset was inside `if next_run:`, so when _compute_next_run
+        # failed (e.g. croniter unavailable) the task stayed in "done"
+        # and get_due_tasks never picked it up again.
+        if task.schedule:
             task.state = TaskState.PENDING.value  # re-arm for next cycle
+            next_run = _compute_next_run(task.schedule, now, task.timezone)
+            if next_run:
+                task.next_run_at = next_run
     elif new_state == TaskState.FAILED:
         task.error_message = error_message
         task.retry += 1
@@ -373,6 +377,18 @@ def heal_stuck_scheduled_tasks(
             healed += 1
             logger.info(
                 "Healed stuck scheduled task %s (%s): re-armed as pending, next_run=%s",
+                task.id, task.title, task.next_run_at,
+            )
+        elif task.schedule and task.state == TaskState.DONE.value:
+            # Safety net: a scheduled task should never stay in "done"
+            # (update_task_state re-arms it).  If it does, recover here.
+            task.state = TaskState.PENDING.value
+            next_run = _compute_next_run(task.schedule, now, task.timezone)
+            if next_run:
+                task.next_run_at = next_run
+            healed += 1
+            logger.info(
+                "Healed stuck done task %s (%s): re-armed as pending, next_run=%s",
                 task.id, task.title, task.next_run_at,
             )
     return healed

@@ -139,6 +139,46 @@ async def test_ack_with_lock_already_held(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_ack_with_flock_already_held(tmp_path: Path):
+    """ack_mailbox_events with lock_already_held=True succeeds even when
+    the caller already holds the cross-process flock on the session file.
+
+    This reproduces the production bug: core_service holds flock(fd1),
+    then _ack_mailbox_events → persistence.update_atomic tries flock(fd2)
+    on the same lock file → EWOULDBLOCK on macOS → ACK silently fails.
+    """
+    import fcntl
+    import os
+
+    manager = SessionManager(tmp_path)
+    persistence = manager.persistence
+    session_id = "web_session_demo_agent"
+    event = {"event_id": "evt_flock", "event_type": "heartbeat_result", "summary": "x"}
+    await manager.deposit_mailbox_event(session_id, event)
+
+    # Simulate core_service holding the flock (exactly as process_message does)
+    lock_path = persistence._get_lock_path(session_id)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        ok = await manager.ack_mailbox_events(
+            session_id, ["evt_flock"], lock_already_held=True,
+        )
+        assert ok is True, (
+            "ack_mailbox_events failed while caller holds flock — "
+            "persistence.update_atomic tried to re-acquire the same flock"
+        )
+        loaded = await manager.load_session(session_id)
+        assert loaded is not None
+        assert loaded.mailbox == [], (
+            f"Mailbox should be empty after ACK, but has {len(loaded.mailbox)} events"
+        )
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+@pytest.mark.asyncio
 async def test_ack_deadlocks_without_flag(tmp_path: Path):
     """Without lock_already_held=True, ack_mailbox_events times out when
     the asyncio lock is already held (regression proof for Bug 3)."""
