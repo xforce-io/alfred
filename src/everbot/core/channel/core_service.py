@@ -28,6 +28,7 @@ from ...core.runtime.turn_orchestrator import (
     CHAT_POLICY,
     TurnEventType,
     TurnOrchestrator,
+    build_chat_policy,
 )
 from ...core.runtime import events
 from ...core.session.session import SessionManager
@@ -63,7 +64,7 @@ class ChannelCoreService:
             load_workspace_instructions=self._runtime_load_workspace_instructions,
         )
         self._runtime_workspace_instructions_by_agent: Dict[str, str] = {}
-        self._orchestrator = TurnOrchestrator(CHAT_POLICY)
+        self._default_orchestrator = TurnOrchestrator(CHAT_POLICY)
 
     # ------------------------------------------------------------------
     # Public API
@@ -196,7 +197,7 @@ class ChannelCoreService:
                         await agent.initialize()
                     except Exception:
                         raise exc
-                msg = f"检测到网络异常 ({str(exc)[:50]}...)，正在重试 ({attempt + 1}/{self._orchestrator.policy.max_attempts})..."
+                msg = f"检测到网络异常 ({str(exc)[:50]}...)，正在重试 ({attempt + 1}/{CHAT_POLICY.max_attempts})..."
                 await on_event(OutboundMessage(session_id, msg, msg_type="status"))
                 await on_event(OutboundMessage(session_id, "", msg_type="end"))
 
@@ -249,7 +250,12 @@ class ChannelCoreService:
                 except Exception as exc:
                     logger.warning("Failed to deliver deferred result: %s", exc)
 
-            async for te in self._orchestrator.run_turn(
+            # Build per-turn policy with config overrides (agent > global > default)
+            from ...infra.config import get_config
+            _turn_policy = build_chat_policy(get_config(), agent_name=agent_name)
+            _turn_orchestrator = TurnOrchestrator(_turn_policy)
+
+            async for te in _turn_orchestrator.run_turn(
                 agent,
                 effective_message,
                 system_prompt=system_prompt_override,
@@ -644,8 +650,8 @@ class ChannelCoreService:
             )
         if not hasattr(self, "_runtime_workspace_instructions_by_agent"):
             self._runtime_workspace_instructions_by_agent = {}
-        if not hasattr(self, "_orchestrator"):
-            self._orchestrator = TurnOrchestrator(CHAT_POLICY)
+        if not hasattr(self, "_default_orchestrator"):
+            self._default_orchestrator = TurnOrchestrator(CHAT_POLICY)
 
     def _runtime_load_workspace_instructions(self, agent_name: str) -> str:
         """Load cached workspace instructions for runtime context strategy."""
