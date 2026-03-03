@@ -194,6 +194,27 @@ class TestTaskStateTransitions:
         assert task.state == "pending"
         assert task.next_run_at is not None
 
+    def test_done_with_schedule_rearms_pending_even_when_next_run_fails(self):
+        """When _compute_next_run returns None (e.g. croniter unavailable),
+        a scheduled task must still be re-armed as pending.  Without this,
+        the task stays in 'done' forever and get_due_tasks never picks it up.
+
+        Production bug: routine_7dcfa7a9 (cron '0 15 * * *') stuck in
+        state='done' with stale next_run_at for 3+ days.
+        """
+        from unittest.mock import patch
+        task = _sample_task(state="running", schedule="0 15 * * *")
+        task.timezone = "Asia/Shanghai"
+        now = datetime(2026, 3, 1, 7, 0, tzinfo=timezone.utc)
+
+        with patch("src.everbot.core.tasks.task_manager._compute_next_run", return_value=None):
+            update_task_state(task, TaskState.DONE, now=now)
+
+        assert task.state == "pending", (
+            f"Scheduled task should be re-armed as pending even when "
+            f"_compute_next_run fails, got '{task.state}'"
+        )
+
     def test_failed_with_retry_rearms_pending(self):
         task = _sample_task(retry=0, max_retry=3)
         update_task_state(task, TaskState.FAILED, error_message="timeout")
@@ -428,6 +449,26 @@ class TestHealStuckScheduledTasks:
         tl = TaskList(tasks=[task])
         healed = heal_stuck_scheduled_tasks(tl)
         assert healed == 0
+
+    def test_heals_done_scheduled_task(self):
+        """A scheduled task stuck in 'done' with a stale next_run_at should
+        be healed back to pending.  This is the safety net for the
+        update_task_state bug where _compute_next_run fails silently."""
+        task = _sample_task(
+            state="done", retry=0, max_retry=3, schedule="0 15 * * *",
+        )
+        task.timezone = "Asia/Shanghai"
+        task.next_run_at = "2026-02-28T15:00:00+08:00"  # stale
+        tl = TaskList(tasks=[task])
+        now = datetime(2026, 3, 3, 7, 0, tzinfo=timezone.utc)
+
+        healed = heal_stuck_scheduled_tasks(tl, now=now)
+        assert healed == 1
+        assert task.state == "pending"
+        # next_run_at should be updated if croniter is available
+        if task.next_run_at != "2026-02-28T15:00:00+08:00":
+            next_dt = datetime.fromisoformat(task.next_run_at)
+            assert next_dt > now
 
     def test_heals_multiple_stuck_tasks(self):
         t1 = _sample_task(id="t1", state="failed", retry=3, max_retry=3, schedule="1d")

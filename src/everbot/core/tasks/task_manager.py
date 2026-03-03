@@ -199,7 +199,7 @@ def _compute_next_run(
         return None
 
 
-def _parse_iso_datetime(s: str) -> Optional[datetime]:
+def parse_iso_datetime(s: str) -> Optional[datetime]:
     """Parse an ISO-8601 datetime string to a timezone-aware datetime."""
     try:
         dt = datetime.fromisoformat(s)
@@ -225,7 +225,7 @@ def get_due_tasks(task_list: TaskList, now: Optional[datetime] = None) -> List[T
         if task.next_run_at is None:
             due.append(task)
             continue
-        next_run_dt = _parse_iso_datetime(task.next_run_at)
+        next_run_dt = parse_iso_datetime(task.next_run_at)
         if next_run_dt is not None and next_run_dt <= now:
             due.append(task)
     return due
@@ -246,7 +246,7 @@ def claim_task(task: Task, now: Optional[datetime] = None) -> bool:
     if task.state != TaskState.PENDING.value:
         return False
     if task.next_run_at:
-        next_run_dt = _parse_iso_datetime(task.next_run_at)
+        next_run_dt = parse_iso_datetime(task.next_run_at)
         if next_run_dt is not None and next_run_dt > now:
             return False
 
@@ -273,11 +273,15 @@ def update_task_state(
         task.last_run_at = now.isoformat()
         task.retry = 0
         task.error_message = None
-        # Schedule next run
-        next_run = _compute_next_run(task.schedule, now, task.timezone)
-        if next_run:
-            task.next_run_at = next_run
+        # Re-arm scheduled tasks unconditionally.  Previously the state
+        # reset was inside `if next_run:`, so when _compute_next_run
+        # failed (e.g. croniter unavailable) the task stayed in "done"
+        # and get_due_tasks never picked it up again.
+        if task.schedule:
             task.state = TaskState.PENDING.value  # re-arm for next cycle
+            next_run = _compute_next_run(task.schedule, now, task.timezone)
+            if next_run:
+                task.next_run_at = next_run
     elif new_state == TaskState.FAILED:
         task.error_message = error_message
         task.retry += 1
@@ -324,12 +328,12 @@ def purge_stale_tasks(
 
     for task in task_list.tasks:
         if task.schedule is None and task.state == TaskState.DONE.value:
-            last_run = _parse_iso_datetime(task.last_run_at) if task.last_run_at else None
+            last_run = parse_iso_datetime(task.last_run_at) if task.last_run_at else None
             if last_run is not None and last_run < cutoff:
                 removed += 1
                 continue
         elif task.schedule is None and task.state == TaskState.FAILED.value and task.retry >= task.max_retry:
-            last_run = _parse_iso_datetime(task.last_run_at) if task.last_run_at else None
+            last_run = parse_iso_datetime(task.last_run_at) if task.last_run_at else None
             if last_run is not None and last_run < cutoff:
                 removed += 1
                 continue
@@ -373,6 +377,18 @@ def heal_stuck_scheduled_tasks(
             healed += 1
             logger.info(
                 "Healed stuck scheduled task %s (%s): re-armed as pending, next_run=%s",
+                task.id, task.title, task.next_run_at,
+            )
+        elif task.schedule and task.state == TaskState.DONE.value:
+            # Safety net: a scheduled task should never stay in "done"
+            # (update_task_state re-arms it).  If it does, recover here.
+            task.state = TaskState.PENDING.value
+            next_run = _compute_next_run(task.schedule, now, task.timezone)
+            if next_run:
+                task.next_run_at = next_run
+            healed += 1
+            logger.info(
+                "Healed stuck done task %s (%s): re-armed as pending, next_run=%s",
                 task.id, task.title, task.next_run_at,
             )
     return healed

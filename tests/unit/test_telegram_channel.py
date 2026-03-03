@@ -261,6 +261,25 @@ class TestEventFiltering:
         assert channel._send_message.await_count == 1
         assert channel._send_message.call_args[0][0] == "111"
 
+    @pytest.mark.asyncio
+    async def test_deferred_result_skips_history_injection(self, channel):
+        """deferred_result events should NOT call inject_history_message
+        because core_service already handles injection (Bug 1 fix)."""
+        await channel._on_background_event("session_1", {
+            "source_type": "deferred_result",
+            "agent_name": "my_agent",
+            "detail": "Deferred task completed",
+            "deliver": True,
+        })
+        # Message should still be sent to Telegram chat
+        channel._send_message.assert_awaited_once()
+        msg = channel._send_message.call_args[0][1]
+        assert "Deferred Result" in msg
+        assert "Deferred task completed" in msg
+        # But inject_history_message should NOT be called (core_service already did it)
+        sm = channel._session_manager
+        sm.inject_history_message.assert_not_awaited()
+
 
 # ===========================================================================
 # 4. Message handling (chat)

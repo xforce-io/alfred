@@ -11,22 +11,48 @@ All commands use: `$D = python $SKILL_DIR/scripts/dispatch.py`
 
 All commands return JSON: `{"ok": true, "data": {...}}` or `{"ok": false, "error": "...", "error_code": "..."}`. Always check `ok`. On error, check `error_code` and `hint` field for actionable recovery.
 
-## Intent Routing (mandatory)
+## Available Operations
 
-Identify user intent, then load the matching SOP **before** executing any command. **Do NOT skip SOP loading.**
+根据用户意图自主选择操作并组合执行，不强制走预定义流程。参数不确定时先跑 `$D <command> --help`。
 
-| User Intent | SOP | Load Command |
-|-------------|-----|--------------|
-| Search code, view git status/diff, run tests, quick check | Quick Queries | `_load_skill_resource("coding-master", "references/sop-quick-queries.md")` |
-| Review / 审查 / 分析项目 / "看看有什么问题" | Deep Review | `_load_skill_resource("coding-master", "references/sop-deep-review.md")` |
-| Fix bug / 修复 / 排查报错 / "不工作了" | Bugfix Workflow | `_load_skill_resource("coding-master", "references/sop-bugfix-workflow.md")` |
-| New feature / 开发 / 重构 / add functionality | Feature Dev | `_load_skill_resource("coding-master", "references/sop-feature-dev.md")` |
+### 只读操作（无需 workspace lock）
 
-**Intent keywords**:
-- "review" / "审查" / "分析项目" / "code review" / "看看有什么问题" / "改进项" → **Deep Review**
-- "fix" / "修复" / "bug" / "报错" / "不工作" / "出错" → **Bugfix Workflow**
-- "添加" / "实现" / "开发" / "重构" / "新功能" / "feature" → **Feature Dev**
-- "搜索" / "查找" / "status" / "diff" / "测试" / "test" → **Quick Queries**
+| 命令 | 说明 |
+|------|------|
+| `$D quick-status --repos <name>` | git 状态/diff |
+| `$D quick-test --repos <name> [--path PATH] [--lint]` | 跑测试 |
+| `$D quick-find --repos <name> --query <pattern> [--glob GLOB]` | 搜索代码 |
+| `$D analyze --repos <name> --task "<desc>" [--engine ENGINE]` | 引擎深度分析（timeout=600） |
+
+### 写入操作（需要 workspace lock）
+
+流程：`workspace-check` → 写入操作 → `release`。workspace-check 返回的 `data.snapshot.workspace.name` 即 `<ws>`。
+
+| 命令 | 说明 |
+|------|------|
+| `$D workspace-check --repos <name> --task "<desc>" [--engine ENGINE]` | 获取锁，返回 workspace |
+| `$D develop --workspace <ws> --task "<desc>" [--engine ENGINE]` | 引擎写代码（timeout=600） |
+| `$D test --workspace <ws>` | 工作区内跑测试 |
+| `$D submit-pr --workspace <ws> --title "<title>" [--body "<body>"]` | 提交 PR |
+| `$D release --workspace <ws>` | 释放锁（必须） |
+
+### 复杂度判断
+
+**直接组合操作**（多数场景）：单步或明确指令，直接组合上面的命令
+- "提交 pr" → workspace-check + submit-pr + release
+- "跑下测试" → quick-test --repos
+- "看看有什么问题" → analyze --repos
+
+**启动 workflow**（复杂任务）：需要 research→plan→implement→verify 闭环、预计超 20 次工具调用、多文件修改+测试验证 → 加载 SOP 后按流程执行
+
+### 参考文档（复杂任务时加载）
+
+| 文档 | 加载命令 |
+|------|---------|
+| sop-quick-queries.md | `_load_skill_resource("coding-master", "references/sop-quick-queries.md")` |
+| sop-deep-review.md | `_load_skill_resource("coding-master", "references/sop-deep-review.md")` |
+| sop-bugfix-workflow.md | `_load_skill_resource("coding-master", "references/sop-bugfix-workflow.md")` |
+| sop-feature-dev.md | `_load_skill_resource("coding-master", "references/sop-feature-dev.md")` |
 
 ## Common Rules
 

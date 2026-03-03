@@ -62,6 +62,7 @@ class TurnEvent:
     tool_execution_count: int = 0
     tool_names_executed: List[str] = field(default_factory=list)
     failed_tool_outputs: int = 0
+    output_tokens: int = 0
 
 
 @dataclass
@@ -91,13 +92,19 @@ class TurnPolicy:
         "connection broken",
         "run_coroutine_failed",
     ])
+    # Alias for max_same_failure_signature (used by quota-error detection).
+    repeated_failure_limit: Optional[int] = None
     # Internal helper tools excluded from tool-call budget counting.
     budget_exempt_tools: frozenset = field(default_factory=frozenset)
+    # Directory patterns to exclude from grep-like tool searches.
+    grep_exclude_patterns: List[str] = field(default_factory=lambda: [
+        ".venv", "node_modules", "__pycache__", ".git", "site-packages",
+    ])
 
 
 # Convenience presets
 CHAT_POLICY = TurnPolicy(
-    max_tool_calls=20,
+    max_tool_calls=100,
     timeout_seconds=600,
 )
 
@@ -114,6 +121,120 @@ JOB_POLICY = TurnPolicy(
     max_tool_output_preview_chars=12000,
     timeout_seconds=600,
 )
+
+WORKFLOW_POLICY = TurnPolicy(
+    max_attempts=2,
+    max_tool_calls=60,
+    max_failed_tool_outputs=8,
+    max_tool_output_preview_chars=12000,
+    timeout_seconds=300,
+)
+
+
+# ---------------------------------------------------------------------------
+# Config-aware policy factories
+# ---------------------------------------------------------------------------
+
+_POLICY_DEFAULTS: Dict[str, TurnPolicy] = {
+    "chat": CHAT_POLICY,
+    "heartbeat": HEARTBEAT_POLICY,
+    "job": JOB_POLICY,
+    "workflow": WORKFLOW_POLICY,
+}
+
+
+def _resolve_timeout(
+    policy_key: str,
+    config: Optional[Dict] = None,
+    agent_name: Optional[str] = None,
+) -> float:
+    """Resolve timeout_seconds with priority: agent-level > global > hardcoded.
+
+    Config paths checked:
+      - ``everbot.agents.<agent_name>.turn_timeout.<policy_key>``
+      - ``everbot.runtime.turn_timeout.<policy_key>``
+      - hardcoded default from ``_POLICY_DEFAULTS[policy_key]``
+    """
+    default = _POLICY_DEFAULTS[policy_key].timeout_seconds
+    if config is None:
+        return default
+
+    everbot = config.get("everbot", {})
+    if not isinstance(everbot, dict):
+        return default
+
+    # Global override
+    timeout = (everbot.get("runtime", {})
+               .get("turn_timeout", {})
+               .get(policy_key))
+
+    # Per-agent override (takes precedence)
+    if agent_name:
+        agent_timeout = (everbot.get("agents", {})
+                         .get(agent_name, {})
+                         .get("turn_timeout", {})
+                         .get(policy_key))
+        if agent_timeout is not None:
+            timeout = agent_timeout
+
+    if timeout is not None:
+        return float(timeout)
+    return default
+
+
+def build_chat_policy(
+    config: Optional[Dict] = None,
+    agent_name: Optional[str] = None,
+) -> TurnPolicy:
+    """Build a chat TurnPolicy with optional config overrides."""
+    timeout = _resolve_timeout("chat", config, agent_name)
+    return TurnPolicy(
+        max_tool_calls=CHAT_POLICY.max_tool_calls,
+        timeout_seconds=timeout,
+    )
+
+
+def build_heartbeat_policy(
+    config: Optional[Dict] = None,
+    agent_name: Optional[str] = None,
+) -> TurnPolicy:
+    """Build a heartbeat TurnPolicy with optional config overrides."""
+    timeout = _resolve_timeout("heartbeat", config, agent_name)
+    return TurnPolicy(
+        max_attempts=HEARTBEAT_POLICY.max_attempts,
+        max_tool_calls=HEARTBEAT_POLICY.max_tool_calls,
+        timeout_seconds=timeout,
+    )
+
+
+def build_job_policy(
+    config: Optional[Dict] = None,
+    agent_name: Optional[str] = None,
+) -> TurnPolicy:
+    """Build a job TurnPolicy with optional config overrides."""
+    timeout = _resolve_timeout("job", config, agent_name)
+    return TurnPolicy(
+        max_attempts=JOB_POLICY.max_attempts,
+        max_tool_calls=JOB_POLICY.max_tool_calls,
+        max_failed_tool_outputs=JOB_POLICY.max_failed_tool_outputs,
+        max_tool_output_preview_chars=JOB_POLICY.max_tool_output_preview_chars,
+        timeout_seconds=timeout,
+    )
+
+
+def build_workflow_policy(
+    config: Optional[Dict] = None,
+    agent_name: Optional[str] = None,
+) -> TurnPolicy:
+    """Build a workflow TurnPolicy with optional config overrides."""
+    timeout = _resolve_timeout("workflow", config, agent_name)
+    return TurnPolicy(
+        max_attempts=WORKFLOW_POLICY.max_attempts,
+        max_tool_calls=WORKFLOW_POLICY.max_tool_calls,
+        max_failed_tool_outputs=WORKFLOW_POLICY.max_failed_tool_outputs,
+        max_tool_output_preview_chars=WORKFLOW_POLICY.max_tool_output_preview_chars,
+        timeout_seconds=timeout,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +315,13 @@ def _extract_tool_intent_signature(tool_name: str, args) -> Optional[str]:
         try:
             parsed = json.loads(args)
             pattern = parsed.get("pattern", "")
+            path = parsed.get("path", "")
+            # Flag searches targeting .venv or site-packages directories
+            if path and any(
+                excl in path
+                for excl in (".venv", "site-packages", "node_modules")
+            ):
+                return f"search_grep_excluded:{pattern}:{path}"
             if pattern:
                 return f"search_grep:{pattern}"
         except (json.JSONDecodeError, AttributeError):
@@ -391,6 +519,12 @@ class TurnOrchestrator:
         on_deferred_result: Optional[Callable] = None,
     ) -> AsyncIterator[TurnEvent]:
         policy = self.policy
+        # Apply repeated_failure_limit alias if set
+        effective_same_failure_limit = (
+            policy.repeated_failure_limit
+            if policy.repeated_failure_limit is not None
+            else policy.max_same_failure_signature
+        )
 
         # Choose entry point.
         # Always use continue_chat when a user message is present so it is
@@ -431,11 +565,23 @@ class TurnOrchestrator:
         llm_had_output_this_round = False
         consecutive_empty_llm_rounds = 0
         last_successful_tool_output = ""  # fallback when LLM returns empty
+        output_chars = 0  # approximate output token tracking (chars produced by LLM)
 
         async for event in event_stream:
-            # External cancellation
+            # External cancellation — emit partial results instead of
+            # discarding all work done so far.
             if cancel_event is not None and cancel_event.is_set():
-                yield TurnEvent(type=TurnEventType.TURN_ERROR, error="cancelled")
+                estimated_tokens = max(1, output_chars // 4) if output_chars > 0 else 0
+                yield TurnEvent(
+                    type=TurnEventType.TURN_COMPLETE,
+                    answer=response or last_successful_tool_output,
+                    tool_call_count=tool_call_count,
+                    tool_execution_count=tool_execution_count,
+                    tool_names_executed=list(tool_names_executed),
+                    failed_tool_outputs=failed_tool_outputs,
+                    output_tokens=estimated_tokens,
+                    status="cancelled",
+                )
                 return
 
             if not isinstance(event, dict) or "_progress" not in event:
@@ -458,6 +604,7 @@ class TurnOrchestrator:
                     delta = progress.get("delta", "")
                     answer = progress.get("answer", "")
                     think = progress.get("think", "")
+                    output_chars += len(delta) + len(think)
                     if delta:
                         if not llm_started:
                             llm_started = True
@@ -541,7 +688,7 @@ class TurnOrchestrator:
                             failure_signatures[fail_sig] = failure_signatures.get(fail_sig, 0) + 1
                             if (
                                 failed_tool_outputs >= policy.max_failed_tool_outputs
-                                or failure_signatures[fail_sig] >= policy.max_same_failure_signature
+                                or failure_signatures[fail_sig] >= effective_same_failure_limit
                             ):
                                 yield TurnEvent(
                                     type=TurnEventType.TURN_ERROR,
@@ -557,11 +704,16 @@ class TurnOrchestrator:
                                 )
                                 return
 
+                    # Track last successful skill output for fallback
+                    # Check both: no failure signature AND status is not explicitly "failed"
+                    if not fail_sig and s_output and status != "failed":
+                        last_successful_tool_output = s_output[:policy.max_tool_output_preview_chars]
+
                     # Inject failure count warning for skill outputs
                     warn_output = s_output
                     if fail_sig and failed_tool_outputs >= 1:
                         sig_count = failure_signatures.get(fail_sig, 0)
-                        sig_max = policy.max_same_failure_signature
+                        sig_max = effective_same_failure_limit
                         total_max = policy.max_failed_tool_outputs
                         warn_output = s_output + (
                             f"\n[⚠ tool_failure {failed_tool_outputs}/{total_max}"
@@ -643,7 +795,7 @@ class TurnOrchestrator:
                         failure_signatures[fail_sig] = failure_signatures.get(fail_sig, 0) + 1
                         if (
                             failed_tool_outputs >= policy.max_failed_tool_outputs
-                            or failure_signatures[fail_sig] >= policy.max_same_failure_signature
+                            or failure_signatures[fail_sig] >= effective_same_failure_limit
                         ):
                             yield TurnEvent(
                                 type=TurnEventType.TURN_ERROR,
@@ -665,7 +817,7 @@ class TurnOrchestrator:
                     # it is to the circuit breaker and switch strategy.
                     if fail_sig and failed_tool_outputs >= 1:
                         sig_count = failure_signatures.get(fail_sig, 0)
-                        sig_max = policy.max_same_failure_signature
+                        sig_max = effective_same_failure_limit
                         total_max = policy.max_failed_tool_outputs
                         out_preview += (
                             f"\n[⚠ tool_failure {failed_tool_outputs}/{total_max}"
@@ -693,6 +845,9 @@ class TurnOrchestrator:
             response = last_successful_tool_output
 
         # Stream exhausted without error → success
+        # Estimate output tokens from total chars produced by LLM.
+        # This is an approximation (≈ chars / 4 for English, fewer for CJK).
+        estimated_tokens = max(1, output_chars // 4) if output_chars > 0 else 0
         yield TurnEvent(
             type=TurnEventType.TURN_COMPLETE,
             answer=response,
@@ -700,6 +855,7 @@ class TurnOrchestrator:
             tool_execution_count=tool_execution_count,
             tool_names_executed=list(tool_names_executed),
             failed_tool_outputs=failed_tool_outputs,
+            output_tokens=estimated_tokens,
         )
 
 
@@ -720,14 +876,29 @@ async def _timeout_wrapper(
     timeout occurs the underlying iterator is **not** closed via
     ``athrow()``—it can be handed off to a background drain task.
     """
-    deadline = asyncio.get_event_loop().time() + timeout
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
     aiter = stream.__aiter__()
     while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            # Already past deadline
+            if on_timeout_drain is not None:
+                asyncio.create_task(
+                    _drain_after_timeout(aiter, on_timeout_drain, drain_extra_seconds),
+                    name="deferred-drain",
+                )
+            else:
+                try:
+                    await aiter.aclose()
+                except Exception:
+                    pass
+            raise asyncio.TimeoutError(f"Turn exceeded {timeout}s timeout")
         try:
-            item = await aiter.__anext__()
+            item = await asyncio.wait_for(aiter.__anext__(), timeout=remaining)
         except StopAsyncIteration:
             return
-        if asyncio.get_event_loop().time() > deadline:
+        except asyncio.TimeoutError:
             if on_timeout_drain is not None:
                 asyncio.create_task(
                     _drain_after_timeout(aiter, on_timeout_drain, drain_extra_seconds),
@@ -788,7 +959,8 @@ async def _drain_after_timeout(
         except Exception:
             pass
 
-    result = final_response or "\n".join(collected_outputs)
+    parts = [p for p in [final_response, "\n".join(collected_outputs)] if p.strip()]
+    result = "\n\n".join(parts)
     if not result.strip():
         return
     if len(result) > 8000:

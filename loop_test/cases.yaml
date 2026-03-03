@@ -1,0 +1,5 @@
+cases:
+  - id: coding 
+    query: "先帮我审查下quantitative_trading代码，昨天加了 etf ranking 相关的逻辑（1）前端总有问题（2）数据似乎有问题"
+    expectation: "任务成功"
+    max_loops: 3

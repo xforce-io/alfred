@@ -13,7 +13,7 @@ def test_ws_chat_stops_when_tool_call_budget_exceeded(client, isolated_web_env):
     from src.everbot.web import app as web_app
 
     events = []
-    for i in range(1, 55):
+    for i in range(1, 105):
         # LLM think before each tool call prevents EMPTY_OUTPUT_LOOP
         events.append({"_progress": [{"id": f"llm-{i}", "status": "running", "stage": "llm", "delta": "", "think": f"step {i}"}]})
         events.append({"_progress": [{"id": f"tool-{i}", "status": "running", "stage": "tool_call", "tool_name": "_bash", "args": "echo hello"}]})
@@ -24,7 +24,7 @@ def test_ws_chat_stops_when_tool_call_budget_exceeded(client, isolated_web_env):
     with client.websocket_connect("/ws/chat/budget_agent") as ws:
         _welcome = ws.receive_json()
         ws.send_json({"message": "执行一些命令"})
-        payloads = receive_until(ws, lambda msg: msg.get("type") == "end", max_messages=200)
+        payloads = receive_until(ws, lambda msg: msg.get("type") == "end", max_messages=400)
 
     assert any(
         p.get("type") == "message" and "工具调用次数过多" in p.get("content", "")

@@ -114,6 +114,27 @@ class SessionPersistence:
             return False
         return bool(cls.SESSION_ID_PATTERN.fullmatch(session_id))
 
+    @staticmethod
+    def _filter_empty_assistant_messages(messages: list) -> list:
+        """Remove bare empty assistant messages that have no tool_calls.
+
+        An assistant message with content="" and no tool_calls is an artifact
+        from failed/timed-out tool executions.  These cause API errors on
+        providers like DeepSeek (400: "assistant must not be empty").
+
+        Messages with empty content BUT valid tool_calls are preserved —
+        these are legitimate tool-only responses.
+        """
+        return [
+            m for m in messages
+            if not (
+                isinstance(m, dict)
+                and m.get("role") == "assistant"
+                and not (m.get("content") or "").strip()
+                and not m.get("tool_calls")
+            )
+        ]
+
     def _get_session_path(self, session_id: str) -> Path:
         """获取 Session 文件路径"""
         if not self.is_safe_session_id(session_id):
@@ -153,6 +174,7 @@ class SessionPersistence:
                 while history and DolphinStateAdapter._is_assistant_tool_call(history[-1]):
                     history.pop()
                 serializable_history = history + list(trailing_messages)
+            serializable_history = self._filter_empty_assistant_messages(serializable_history)
             exported_variables = portable.get("variables", {})
             exported_variables.pop("_history", None)  # avoid duplicating history_messages
             previous = await self.load(session_id)
@@ -326,6 +348,7 @@ class SessionPersistence:
         *,
         timeout: float = 10.0,
         blocking: bool = True,
+        lock_already_held: bool = False,
     ) -> Optional[SessionData]:
         """Atomic read-modify-write for a session.
 
@@ -336,41 +359,55 @@ class SessionPersistence:
             mutator: Callable that modifies SessionData in-place.
             timeout: Max seconds to wait for file lock.
             blocking: If False, return None immediately when lock unavailable.
+            lock_already_held: If True, skip flock acquisition (caller already
+                holds the cross-process file lock).  Without this flag, calling
+                update_atomic while holding a flock causes self-deadlock on
+                macOS where flock is per open-file-description.
 
         Returns:
             Updated SessionData on success, None if lock was not acquired.
         """
+        if lock_already_held:
+            return await self._update_atomic_inner(session_id, mutator)
+
         with self.file_lock(session_id, timeout=timeout, blocking=blocking) as acquired:
             if not acquired:
                 return None
-            # Read latest from disk (single source of truth)
-            current = await self.load(session_id)
-            if current is None:
-                current = SessionData(
-                    session_id=session_id,
-                    agent_name="",
-                    model_name="",
-                    session_type=_sid.infer_session_type(session_id),
-                    history_messages=[],
-                    mailbox=[],
-                    variables={},
-                    created_at=datetime.now().isoformat(),
-                    updated_at=datetime.now().isoformat(),
-                    state="active",
-                    archived_at=None,
-                    revision=0,
-                )
-            # Apply mutation
-            mutator(current)
-            # Bump revision and timestamp
-            current.revision = (current.revision or 0) + 1
-            current.updated_at = datetime.now().isoformat()
-            # Atomic write
-            session_path = self._get_session_path(session_id)
-            serialized = self._serialize_session(current.to_dict())
-            self.atomic_save(session_path, serialized)
-            logger.debug("Session updated atomically: %s (rev=%d)", session_id, current.revision)
-            return current
+            return await self._update_atomic_inner(session_id, mutator)
+
+    async def _update_atomic_inner(
+        self,
+        session_id: str,
+        mutator: Callable[[SessionData], None],
+    ) -> SessionData:
+        """Read-mutate-write without lock acquisition (caller must ensure exclusivity)."""
+        current = await self.load(session_id)
+        if current is None:
+            current = SessionData(
+                session_id=session_id,
+                agent_name="",
+                model_name="",
+                session_type=_sid.infer_session_type(session_id),
+                history_messages=[],
+                mailbox=[],
+                variables={},
+                created_at=datetime.now().isoformat(),
+                updated_at=datetime.now().isoformat(),
+                state="active",
+                archived_at=None,
+                revision=0,
+            )
+        # Apply mutation
+        mutator(current)
+        # Bump revision and timestamp
+        current.revision = (current.revision or 0) + 1
+        current.updated_at = datetime.now().isoformat()
+        # Atomic write
+        session_path = self._get_session_path(session_id)
+        serialized = self._serialize_session(current.to_dict())
+        self.atomic_save(session_path, serialized)
+        logger.debug("Session updated atomically: %s (rev=%d)", session_id, current.revision)
+        return current
 
     async def delete(self, session_id: str):
         """删除 Session 文件"""
@@ -388,6 +425,13 @@ class SessionPersistence:
             session_data: Session 数据
         """
         try:
+            # 0. Strip bare empty assistant messages (content="" with no tool_calls).
+            #    These are artifacts from failed/timed-out tool executions and will
+            #    cause API errors (e.g. DeepSeek 400 "assistant must not be empty").
+            session_data.history_messages = self._filter_empty_assistant_messages(
+                session_data.history_messages or []
+            )
+
             # 1. Compact history (SDK has no max_messages truncation)
             compacted_history = session_data.history_messages or []
             if compacted_history:

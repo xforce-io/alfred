@@ -100,6 +100,9 @@ def compose_message_with_mailbox_updates(
         lines.append(f"- [{event_type}] {summary}")
         detail = str(event.get("detail") or "").strip()
         if detail:
+            # Cap detail length to avoid drowning out the user's message.
+            if len(detail) > 200:
+                detail = detail[:200] + "..."
             lines.append(f"  Detail: {detail}")
         _append_unique_event_id(ack_ids, event_id)
         included_count += 1

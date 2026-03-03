@@ -28,6 +28,7 @@ from ...core.runtime.turn_orchestrator import (
     CHAT_POLICY,
     TurnEventType,
     TurnOrchestrator,
+    build_chat_policy,
 )
 from ...core.runtime import events
 from ...core.session.session import SessionManager
@@ -63,7 +64,7 @@ class ChannelCoreService:
             load_workspace_instructions=self._runtime_load_workspace_instructions,
         )
         self._runtime_workspace_instructions_by_agent: Dict[str, str] = {}
-        self._orchestrator = TurnOrchestrator(CHAT_POLICY)
+        self._default_orchestrator = TurnOrchestrator(CHAT_POLICY)
 
     # ------------------------------------------------------------------
     # Public API
@@ -196,7 +197,7 @@ class ChannelCoreService:
                         await agent.initialize()
                     except Exception:
                         raise exc
-                msg = f"检测到网络异常 ({str(exc)[:50]}...)，正在重试 ({attempt + 1}/{self._orchestrator.policy.max_attempts})..."
+                msg = f"检测到网络异常 ({str(exc)[:50]}...)，正在重试 ({attempt + 1}/{CHAT_POLICY.max_attempts})..."
                 await on_event(OutboundMessage(session_id, msg, msg_type="status"))
                 await on_event(OutboundMessage(session_id, "", msg_type="end"))
 
@@ -249,7 +250,12 @@ class ChannelCoreService:
                 except Exception as exc:
                     logger.warning("Failed to deliver deferred result: %s", exc)
 
-            async for te in self._orchestrator.run_turn(
+            # Build per-turn policy with config overrides (agent > global > default)
+            from ...infra.config import get_config
+            _turn_policy = build_chat_policy(get_config(), agent_name=agent_name)
+            _turn_orchestrator = TurnOrchestrator(_turn_policy)
+
+            async for te in _turn_orchestrator.run_turn(
                 agent,
                 effective_message,
                 system_prompt=system_prompt_override,
@@ -369,7 +375,7 @@ class ChannelCoreService:
                 agent,
                 lock_already_held=True,
             )
-            await self._ack_mailbox_events(session_id, mailbox_ack_ids)
+            await self._ack_mailbox_events(session_id, mailbox_ack_ids, lock_already_held=True)
             logger.debug("Session persisted: %s", session_id)
 
         except asyncio.CancelledError:
@@ -392,7 +398,7 @@ class ChannelCoreService:
                     agent,
                     lock_already_held=True,
                 )
-                await self._ack_mailbox_events(session_id, mailbox_ack_ids)
+                await self._ack_mailbox_events(session_id, mailbox_ack_ids, lock_already_held=True)
                 await on_event(OutboundMessage(session_id, "", msg_type="end", metadata={"status": "cancelled"}))
             except Exception as e:
                 logger.warning("Failed to save session on cancellation: %s", e)
@@ -492,7 +498,7 @@ class ChannelCoreService:
                             lock_already_held=True,
                             trailing_messages=_trailing,
                         )
-                        await self._ack_mailbox_events(session_id, mailbox_ack_ids)
+                        await self._ack_mailbox_events(session_id, mailbox_ack_ids, lock_already_held=True)
                     except Exception as save_error:
                         logger.warning("Failed to persist session after error: %s", save_error)
                 else:
@@ -644,8 +650,8 @@ class ChannelCoreService:
             )
         if not hasattr(self, "_runtime_workspace_instructions_by_agent"):
             self._runtime_workspace_instructions_by_agent = {}
-        if not hasattr(self, "_orchestrator"):
-            self._orchestrator = TurnOrchestrator(CHAT_POLICY)
+        if not hasattr(self, "_default_orchestrator"):
+            self._default_orchestrator = TurnOrchestrator(CHAT_POLICY)
 
     def _runtime_load_workspace_instructions(self, agent_name: str) -> str:
         """Load cached workspace instructions for runtime context strategy."""
@@ -728,11 +734,11 @@ class ChannelCoreService:
         session_view = self._session_context_view(session_data, agent_name)
         return self._primary_context_strategy.build_system_prompt(session_view, self._runtime_deps)
 
-    async def _ack_mailbox_events(self, session_id: str, event_ids: list[str]) -> None:
+    async def _ack_mailbox_events(self, session_id: str, event_ids: list[str], *, lock_already_held: bool = False) -> None:
         """Acknowledge consumed mailbox events after successful turn."""
         if not event_ids:
             return
-        await self.session_manager.ack_mailbox_events(session_id, event_ids)
+        await self.session_manager.ack_mailbox_events(session_id, event_ids, lock_already_held=lock_already_held)
 
     def _record_timeline_event(self, session_id: str, event_type: str, **payload) -> None:
         """Record one timeline event with an ISO timestamp."""

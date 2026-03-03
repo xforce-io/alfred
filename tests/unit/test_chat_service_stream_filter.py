@@ -232,7 +232,7 @@ async def test_process_message_followup_turn_uses_continue_chat_with_runtime_sys
 async def test_process_message_stops_on_tool_call_budget_exceeded():
     websocket = _DummyWebSocket()
     events = []
-    for i in range(1, 55):
+    for i in range(1, 105):
         # Each tool call is preceded by LLM reasoning so EMPTY_OUTPUT_LOOP
         # does not fire before TOOL_CALL_BUDGET_EXCEEDED.
         events.append({"_progress": [{"id": f"llm{i}", "status": "running", "stage": "llm", "delta": "", "think": f"step {i}"}]})

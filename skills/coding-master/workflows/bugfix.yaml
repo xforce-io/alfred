@@ -1,0 +1,45 @@
+name: bugfix
+description: Bug 修复工作流
+
+phases:
+  - name: research
+    instruction_ref: references/sop-bugfix-workflow.md
+    max_turns: 5
+    max_tool_calls: 30
+    allowed_tools: [_bash, _read_file, _read_folder]
+
+  - name: plan
+    instruction_ref: references/sop-bugfix-workflow.md
+    max_turns: 3
+    checkpoint: true
+    allowed_tools: [_read_file, _read_folder]
+    input_artifacts: [research]
+
+  - name: regression_test
+    instruction_ref: references/sop-bugfix-workflow.md
+    max_turns: 5
+    max_tool_calls: 30
+    allowed_tools: [_bash, _python, _read_file, _read_folder]
+    input_artifacts: [plan]
+
+  - group: implement_verify
+    action_phase: implement
+    verify_phase: verify
+    max_iterations: 5
+    on_exhausted: rollback
+    rollback_target: plan
+    phases:
+      - name: implement
+        instruction_ref: references/sop-bugfix-workflow.md
+        max_turns: 15
+        max_tool_calls: 60
+        allowed_tools: [_bash, _python, _read_file, _read_folder]
+        input_artifacts: [plan, regression_test]
+      - name: verify
+        verification_cmd:
+          cmd: "python $SKILL_DIR/scripts/dispatch.py test"
+          timeout_seconds: 120
+
+total_timeout_seconds: 1200
+total_max_tool_calls: 200
+max_rollback_retries: 2
