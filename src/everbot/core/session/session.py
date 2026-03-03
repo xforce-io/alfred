@@ -354,6 +354,61 @@ class SessionManager:
         def _mutator(session_data: SessionData) -> None:
             if not isinstance(session_data.history_messages, list):
                 session_data.history_messages = []
+
+            # --- Dedup by run_id ---
+            run_id = (msg_obj.get("metadata") or {}).get("run_id")
+            if run_id:
+                for existing in session_data.history_messages:
+                    if (
+                        isinstance(existing, dict)
+                        and isinstance(existing.get("metadata"), dict)
+                        and existing["metadata"].get("run_id") == run_id
+                    ):
+                        return  # already injected
+
+            msg_role = msg_obj.get("role")
+            last_msg = (
+                session_data.history_messages[-1]
+                if session_data.history_messages
+                and isinstance(session_data.history_messages[-1], dict)
+                else None
+            )
+
+            # --- Content-based dedup for consecutive identical user messages ---
+            if (
+                msg_role == "user"
+                and last_msg is not None
+                and last_msg.get("role") == "user"
+                and last_msg.get("content") == msg_obj.get("content")
+            ):
+                return  # duplicate user message, skip
+
+            # --- Heartbeat/deferred assistant after unanswered user question ---
+            msg_source = (msg_obj.get("metadata") or {}).get("source", "")
+            if (
+                msg_role == "assistant"
+                and msg_source in ("heartbeat", "deferred_result")
+                and last_msg is not None
+                and last_msg.get("role") == "user"
+            ):
+                # Insert placeholder so heartbeat doesn't look like a reply
+                session_data.history_messages.append(
+                    {"role": "assistant", "content": "(acknowledged)"}
+                )
+                session_data.history_messages.append(
+                    {"role": "user", "content": "[Background notification follows]"}
+                )
+
+            # --- Consecutive user message guard ---
+            elif (
+                msg_role == "user"
+                and last_msg is not None
+                and last_msg.get("role") == "user"
+            ):
+                session_data.history_messages.append(
+                    {"role": "assistant", "content": "(acknowledged)"}
+                )
+
             session_data.history_messages.append(msg_obj)
 
         updated = await self.update_atomic(session_id, _mutator, timeout=timeout, blocking=blocking)
@@ -384,8 +439,13 @@ class SessionManager:
             ]
 
         if lock_already_held:
+            # Pass lock_already_held to persistence so it skips flock
+            # acquisition.  Without this, the flock self-deadlocks on
+            # macOS when the caller already holds a flock via a
+            # separate fd (e.g. core_service.process_message).
             updated = await self.persistence.update_atomic(
                 session_id, _mutator, timeout=timeout, blocking=blocking,
+                lock_already_held=True,
             )
         else:
             updated = await self.update_atomic(session_id, _mutator, timeout=timeout, blocking=blocking)
@@ -538,6 +598,13 @@ class SessionManager:
         # Append trailing messages (e.g. failed turn context) to history
         if trailing_messages:
             serializable_history = list(serializable_history) + list(trailing_messages)
+
+        # Strip bare empty assistant messages (content="" with no tool_calls).
+        # These are artifacts from failed/timed-out tool executions and cause
+        # API errors on providers like DeepSeek.
+        serializable_history = self.persistence._filter_empty_assistant_messages(
+            serializable_history
+        )
 
         def _mutator(session_data: SessionData) -> None:
             session_data.session_id = session_id
@@ -715,12 +782,36 @@ class SessionManager:
             logger.debug("Failed to reset trajectory file", exc_info=True)
 
     async def reset_session(self, session_id: str):
-        """重置 Session：清除缓存和磁盘文件"""
-        self._agents.pop(session_id, None)
+        """重置 Session：清除缓存、Dolphin context 和磁盘文件。
+
+        Clears the agent's in-memory Dolphin context (history + variables)
+        before removing from cache, so that any stale reference cannot leak
+        old conversation history into a new session.
+        """
+        agent = self._agents.pop(session_id, None)
+        if agent is not None:
+            self._clear_agent_context(agent)
         self._agent_metadata.pop(session_id, None)
         self._timeline_events.pop(session_id, None)
         await self.persistence.delete(session_id)
         logger.info(f"Session 已重置: {session_id}")
+
+    @staticmethod
+    def _clear_agent_context(agent: Any) -> None:
+        """Clear an agent's Dolphin context to prevent stale history leaks."""
+        try:
+            ctx = getattr(getattr(agent, "executor", None), "context", None)
+            if ctx is None:
+                return
+            from dolphin.core.common.constants import KEY_HISTORY
+            if hasattr(ctx, "set_variable"):
+                ctx.set_variable(KEY_HISTORY, [])
+            if hasattr(ctx, "_history"):
+                ctx._history = []
+            if hasattr(ctx, "set_history_bucket"):
+                ctx.set_history_bucket([])
+        except Exception:
+            logger.debug("Failed to clear agent context", exc_info=True)
 
     async def reset_agent_sessions(self, agent_name: str) -> int:
         """Reset all sessions for one agent and return removed count.
@@ -752,7 +843,9 @@ class SessionManager:
         for session_id in list(self._agent_metadata.keys()):
             meta = self._agent_metadata.get(session_id) or {}
             if meta.get("agent_name") == agent_name:
-                self._agents.pop(session_id, None)
+                agent = self._agents.pop(session_id, None)
+                if agent is not None:
+                    self._clear_agent_context(agent)
                 self._agent_metadata.pop(session_id, None)
                 self._timeline_events.pop(session_id, None)
         return removed
