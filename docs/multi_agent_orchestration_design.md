@@ -1051,60 +1051,86 @@ total_max_tool_calls: 80
 
 ### 6.3 SKILL 触发
 
-Workflow 嵌入已有的 SKILL 意图识别链路，采用**框架 hint + LLM 判断**双层机制：
+SKILL 通过两层机制决定执行路径：
 
-```
-当前（单轮）:
-  用户消息 → Agent 加载 SKILL → LLM 匹配意图
-    → _load_skill_resource("coding-master", "references/sop-bugfix.md")
-    → 在单个 turn 内按 SOP 执行
+#### 层 1：操作目录（Operation Catalog）
 
-扩展（多阶段）:
-  用户消息 → Agent 加载 SKILL → LLM 匹配意图 + 判断复杂度
-    → 简单: _load_skill_resource(...) + 单轮执行（不变）
-    → 复杂: start_workflow("bugfix", context)
-```
+SKILL.md 不再按 SOP 分类做意图路由，而是列出所有可用操作，按是否需要 workspace lock 分两类：
 
-#### 触发决策的双层保障
+| 类型 | 命令 | 说明 | 典型场景 |
+|------|------|------|---------|
+| 只读（无锁） | `quick-status --repos` | git 状态 | "看下状态" |
+| 只读（无锁） | `quick-test --repos` | 跑测试 | "跑下测试" |
+| 只读（无锁） | `quick-find --repos` | 搜索代码 | "找下这个函数" |
+| 只读（无锁） | `analyze --repos` | 引擎深度分析 | "review 下代码" |
+| 写入（需锁） | `workspace-check` | 获取工作区锁 | 所有写操作前置 |
+| 写入（需锁） | `develop` | 引擎写代码 | "修一下这个 bug" |
+| 写入（需锁） | `test` | 工作区内跑测试 | 开发后验证 |
+| 写入（需锁） | `submit-pr` | 提交 PR | "提交 pr" |
+| 写入（需锁） | `release` | 释放锁 | 写操作结束后必须 |
 
-**层 1：SKILL YAML hint（框架侧）**
+LLM 根据用户意图自主选择需要的操作并组合执行，不强制走完某个预定义流程。
 
-SKILL 可声明 `prefer_workflow` 和 `workflow_hint_rules`，框架在 LLM 调用前评估：
+#### 层 2：复杂度判断 — 单轮 vs Workflow
 
-```yaml
-# SKILL.md 意图路由表新增
-workflows:
-  bugfix:
-    prefer_workflow: false              # 默认不强制
-    workflow_hint_rules:                # 结构化规则，满足任一条则建议 workflow
-      - match_any: ["修复", "fix", "bug", "排查"]      # 匹配任一关键词即满足本条
-      - match_any: ["测试", "验证", "test"]
-        match_all: ["多个文件"]                          # 可选：要求所有关键词都匹配
-        # 多个字段之间是 AND 关系：本条 = match_any 中命中至少一个 AND match_all 中全部命中
-```
+LLM 根据上下文判断复杂度：
 
-框架通过关键词匹配评估 hint rules（不依赖 LLM），满足时在 system prompt 中注入建议（如 "根据任务复杂度，建议使用 bugfix workflow"），但最终决策权仍在 LLM。
+- **单步/简单操作** → 直接执行对应命令（不需要 SOP 或 workflow）
+  - 例："提交 pr" → `workspace-check` + `submit-pr` + `release`
+  - 例："跑下测试" → `quick-test --repos`
+  - 例："看看有什么问题" → `analyze --repos`
 
-> **设计选择**：hint rules 使用结构化关键词匹配而非自然语言描述。自然语言规则（如"用户消息包含'修复'且提到多个文件"）无法被框架代码可靠解析，要么需要 LLM 评估（成本高、不确定），要么需要 NLP 解析器（复杂度高）。关键词匹配虽然粗糙，但**确定性 + 零成本**，且 hint 只是建议——误判由 LLM 层 2 兜底。
+- **多步复杂任务** → 启动 workflow
+  - 例："修一下登录 500 错误" → `start_workflow("bugfix", ctx)`
+  - 例："加个用户认证模块" → `start_workflow("feature-dev", ctx)`
 
-**层 2：LLM 判断（已有）**
+判断标准（在 SKILL.md 中以自然语言告知 LLM）：
+  - 需要 research + plan + implement + verify 闭环 → workflow
+  - 预计超过 20 次工具调用 → workflow
+  - 涉及多文件修改且需要测试验证 → workflow
+  - 其余 → 单轮直接执行
 
-LLM 根据 SKILL.md 意图路由表和注入的框架建议，决定走单轮还是 workflow。
+#### SOP 文件的角色变化
 
-SKILL.md 意图路由表新增 workflow 触发列：
+SOP 从"必须加载的执行流程"变为"可选参考文档"：
+- workflow 的 `instruction_ref` 引用 SOP 作为 Phase 指令（不变）
+- 单轮执行时，LLM 可选择加载 SOP 作为参考，但不强制
+- SOP 文件内容不变，只是使用方式从"强制 → 可选"
+
+#### SKILL.md 示例
 
 ```markdown
-## Intent Routing
+## Available Operations
 
-| User Intent | SOP | Load Command | Workflow (复杂时) |
-|-------------|-----|--------------|-------------------|
-| Search code, quick check | Quick Queries | `_load_skill_resource(...)` | — |
-| Fix bug / 修复 / 排查报错 | Bugfix | `_load_skill_resource(...)` | `start_workflow("bugfix", ctx)` |
-| New feature / 开发 / 重构 | Feature Dev | `_load_skill_resource(...)` | `start_workflow("feature-dev", ctx)` |
+### 只读操作（无需 workspace lock）
+| 命令 | 说明 |
+|------|------|
+| `quick-status --repos` | 查看 git 状态 |
+| `quick-test --repos` | 快速跑测试 |
+| `quick-find --repos` | 搜索代码 |
+| `analyze --repos` | 深度分析/review |
 
-### 何时使用 workflow vs 单轮处理
-- **用 workflow**: 任务涉及多文件修改、需要测试验证、预计超过 20 次工具调用
-- **不用 workflow**: 简单查询、单文件小修改、快速 review
+### 写入操作（需要 workspace lock）
+执行顺序：workspace-check → 写入操作 → release
+| 命令 | 说明 |
+|------|------|
+| `workspace-check` | 获取工作区锁（写操作前必须） |
+| `develop` | 引擎写代码 |
+| `test` | 工作区内跑测试 |
+| `submit-pr` | 提交 PR |
+| `release` | 释放工作区锁（写操作后必须） |
+
+### 复杂度判断：直接执行 vs 启动 Workflow
+根据用户意图判断复杂度，选择执行方式：
+- **直接组合操作**：单步操作、明确指令、不需要 research-plan-implement-verify 闭环
+- **启动 workflow**（`start_workflow("bugfix"|"feature-dev", ctx)`）：
+  需要多文件修改 + 测试验证、预计超过 20 次工具调用、需要完整闭环
+
+### 参考文档（可选加载）
+| 文档 | 用途 |
+|------|------|
+| `references/sop-bugfix.md` | bugfix 流程参考 |
+| `references/sop-feature-dev.md` | feature 开发流程参考 |
 ```
 
 ### 6.4 与现有执行路径的兼容
