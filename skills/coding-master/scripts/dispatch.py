@@ -757,7 +757,23 @@ def cmd_test(args) -> dict:
 def cmd_submit_pr(args) -> dict:
     ws_path = args._ws_path
 
-    git = GitOps(ws_path)
+    # When --repo is provided, operate on the repo subdirectory within the workspace
+    repo_name = getattr(args, "repo", None)
+    if repo_name:
+        config = ConfigManager()
+        repo_info = config.get_repo(repo_name)
+        if repo_info is None:
+            return {"ok": False, "error": f"repo '{repo_name}' not found in config",
+                    "error_code": "REPO_NOT_FOUND"}
+        # Repo lives as a subdirectory inside the workspace
+        repo_path = str(Path(ws_path) / repo_name)
+        if not Path(repo_path).is_dir():
+            return {"ok": False, "error": f"repo directory not found: {repo_path}",
+                    "error_code": "PATH_NOT_FOUND",
+                    "hint": f"Expected repo '{repo_name}' at {repo_path}. Check workspace layout."}
+        git = GitOps(repo_path)
+    else:
+        git = GitOps(ws_path)
 
     def do_submit():
         result = git.submit_pr(
@@ -987,6 +1003,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("submit-pr", help="Commit, push, create PR")
     sp.add_argument("--workspace", required=True)
+    sp.add_argument("--repo", default=None, help="Repo name within workspace (e.g. 'alfred'). Uses workspace root if omitted.")
     sp.add_argument("--title", required=True)
     sp.add_argument("--body", default="")
 
