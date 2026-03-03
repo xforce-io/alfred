@@ -33,7 +33,7 @@ All commands return JSON: `{"ok": true, "data": {...}}` or `{"ok": false, "error
 | `$D workspace-check --repos <name> --task "<desc>" [--engine ENGINE]` | 获取锁，返回 workspace |
 | `$D develop --workspace <ws> --task "<desc>" [--engine ENGINE]` | 引擎写代码（timeout=600） |
 | `$D test --workspace <ws>` | 工作区内跑测试 |
-| `$D submit-pr --workspace <ws> --title "<title>" [--body "<body>"]` | 提交 PR |
+| `$D submit-pr --workspace <ws> [--repo <name>] --title "<title>" [--body "<body>"]` | 提交 PR（多 repo workspace 须指定 `--repo`） |
 | `$D release --workspace <ws>` | 释放锁（必须） |
 
 ### 复杂度判断

@@ -78,11 +78,14 @@ class GitOps:
         if branch in PROTECTED_BRANCHES:
             return {"ok": False, "error": f"cannot submit PR from protected branch: {branch}"}
 
-        # commit
+        # commit (skip if working tree is clean)
         msg = commit_message or title
         commit_result = self.stage_and_commit(msg)
         if not commit_result.get("ok"):
-            return commit_result
+            err = commit_result.get("error", "")
+            if "nothing to commit" not in err:
+                return commit_result
+            # Clean tree is fine — just push existing commits
 
         # push
         push_result = self.push(branch)
