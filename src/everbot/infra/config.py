@@ -28,6 +28,15 @@ def _validate_config(config: Dict[str, Any]) -> None:
             raise ValueError("'logging' config section must be a dictionary")
 
 
+def _default_config_path() -> Path:
+    """Return the default config.yaml path, respecting ALFRED_HOME."""
+    import os
+    alfred_home = os.environ.get("ALFRED_HOME")
+    if alfred_home:
+        return Path(alfred_home).expanduser() / "config.yaml"
+    return Path("~/.alfred/config.yaml").expanduser()
+
+
 def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """
     加载配置文件
@@ -41,7 +50,7 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     if config_path:
         path = Path(config_path).expanduser()
     else:
-        path = Path("~/.alfred/config.yaml").expanduser()
+        path = _default_config_path()
 
     if not path.exists():
         logger.warning(f"配置文件不存在: {path}，使用默认配置")
@@ -88,7 +97,7 @@ def save_config(config: Dict[str, Any], config_path: Optional[str] = None):
     if config_path:
         path = Path(config_path).expanduser()
     else:
-        path = Path("~/.alfred/config.yaml").expanduser()
+        path = _default_config_path()
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

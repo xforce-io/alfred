@@ -110,7 +110,7 @@ def collect_doctor_report(
                     level="WARN",
                     title="EverBot enabled",
                     details="everbot.enabled is false.",
-                    hint="Edit ~/.alfred/config.yaml and set everbot.enabled: true",
+                    hint=f"Edit {user_data.config_path} and set everbot.enabled: true",
                 )
             )
     else:
@@ -119,7 +119,7 @@ def collect_doctor_report(
                 level="WARN",
                 title="EverBot config",
                 details=f"Config not found: {user_data.config_path}",
-                hint="Create ~/.alfred/config.yaml (copy from config/everbot.example.yaml).",
+                hint=f"Create {user_data.config_path} (copy from config/everbot.example.yaml).",
             )
         )
 
@@ -131,7 +131,7 @@ def collect_doctor_report(
                 level="WARN",
                 title="Dolphin config",
                 details="No Dolphin YAML config found; using Dolphin defaults.",
-                hint="Create ~/.alfred/dolphin.yaml (copy from config/dolphin.yaml).",
+                hint=f"Create {user_data.dolphin_config_path} (copy from config/dolphin.yaml).",
             )
         )
         dolphin_cfg: Dict[str, Any] = {}
