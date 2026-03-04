@@ -35,6 +35,7 @@ from ..tasks.task_manager import (
     write_task_block,
     purge_stale_tasks,
     heal_stuck_scheduled_tasks,
+    parse_iso_datetime,
     TaskList,
     TaskState,
     ParseStatus,
@@ -914,6 +915,108 @@ If not, reply with `HEARTBEAT_OK`.
             )
             raise
 
+    # ── Skill task execution (reflection skills) ─────────────────
+
+    def _get_scanner(self, scanner_type: Optional[str]) -> Optional[Any]:
+        """Get scanner instance by type name."""
+        if not scanner_type:
+            return None
+        if scanner_type == "session":
+            from ..scanners.session_scanner import SessionScanner
+            user_data = get_user_data_manager()
+            return SessionScanner(user_data.sessions_dir)
+        logger.warning("Unknown scanner type: %s", scanner_type)
+        return None
+
+    def _get_workspace_path(self) -> Path:
+        """Get the agent workspace path."""
+        return self.workspace_path
+
+    def _build_skill_context(self, scan_result=None):
+        """Build SkillContext for reflection skill execution."""
+        from .skill_context import SkillContext, MailboxAdapter
+        from ..memory.manager import MemoryManager
+
+        memory_path = self._get_workspace_path() / "MEMORY.md"
+        user_data = get_user_data_manager()
+        return SkillContext(
+            sessions_dir=user_data.sessions_dir,
+            workspace_path=self._get_workspace_path(),
+            agent_name=self.agent_name,
+            memory_manager=MemoryManager(memory_path),
+            mailbox=MailboxAdapter(self.session_manager, self.primary_session_id, self.agent_name),
+            llm=self._create_skill_llm_client(),
+            scan_result=scan_result,
+        )
+
+    def _create_skill_llm_client(self):
+        """Create a lightweight LLM client for skill usage."""
+        return _SkillLLMClient()
+
+    def _check_min_execution_interval(self, task: Any) -> bool:
+        """Check if minimum execution interval has elapsed since last run."""
+        min_interval = getattr(task, "min_execution_interval", None)
+        if not min_interval:
+            return True
+        last_run = getattr(task, "last_run_at", None)
+        if not last_run:
+            return True
+        last_dt = parse_iso_datetime(last_run)
+        if last_dt is None:
+            return True
+        interval_match = re.fullmatch(r"(\d+)([mhd])", str(min_interval).strip())
+        if not interval_match:
+            return True
+        amount = int(interval_match.group(1))
+        unit = interval_match.group(2)
+        delta = {"m": timedelta(minutes=amount), "h": timedelta(hours=amount), "d": timedelta(days=amount)}[unit]
+        now = datetime.now(timezone.utc)
+        return now >= last_dt + delta
+
+    async def _invoke_skill_task(self, task: Any, scan_result, run_id: str) -> str:
+        """Execute a reflection skill task."""
+        import importlib
+        import time as _time
+
+        skill_name = task.skill
+        start_ms = int(_time.time() * 1000)
+
+        self._write_heartbeat_event(
+            "skill_started", skill=skill_name,
+            scan_summary=scan_result.change_summary if scan_result else "",
+        )
+
+        try:
+            context = self._build_skill_context(scan_result)
+
+            # Import and run skill
+            skill_module = importlib.import_module(f"everbot.core.skills.{skill_name.replace('-', '_')}")
+            result = await skill_module.run(context)
+
+            duration_ms = int(_time.time() * 1000) - start_ms
+            self._write_heartbeat_event(
+                "skill_completed", skill=skill_name,
+                duration_ms=duration_ms, result=str(result)[:200],
+            )
+            return str(result)
+        except Exception as exc:
+            duration_ms = int(_time.time() * 1000) - start_ms
+            self._write_heartbeat_event(
+                "skill_failed", skill=skill_name,
+                duration_ms=duration_ms, error=str(exc)[:200],
+            )
+            logger.error("Skill %s failed: %s", skill_name, exc, exc_info=True)
+            raise
+
+    @staticmethod
+    def _rearm_skill_task(task: Any) -> None:
+        """Re-arm a skill task to PENDING for next scan cycle.
+
+        update_task_state(DONE) handles re-arm for skill tasks
+        (task.skill is set) by resetting state to PENDING automatically.
+        """
+        update_task_state(task, TaskState.DONE)
+
     async def _execute_structured_tasks(
         self,
         agent: Any,
@@ -944,6 +1047,45 @@ If not, reply with `HEARTBEAT_OK`.
                 )
 
                 try:
+                    # Skill tasks: scanner gate + skill execution, no LLM agent
+                    if task.skill:
+                        scanner = self._get_scanner(task.scanner)
+                        scan_result = None
+                        if scanner:
+                            from ..scanners.reflection_state import ReflectionState
+                            state = ReflectionState.load(self._get_workspace_path())
+                            try:
+                                scan_result = scanner.check(state.get_watermark(task.skill), self.agent_name)
+                            except Exception as scan_exc:
+                                self._write_heartbeat_event("scanner_error", scanner=task.scanner, error=str(scan_exc)[:200])
+                                # Re-arm to PENDING so next cycle retries (skill tasks have no schedule)
+                                self._rearm_skill_task(task)
+                                results.append(f"SCANNER_ERROR:{task.id}")
+                                continue
+                            self._write_heartbeat_event(
+                                "scanner_check", scanner=task.scanner,
+                                has_changes=scan_result.has_changes,
+                                change_summary=scan_result.change_summary,
+                            )
+                            if not scan_result.has_changes:
+                                self._write_heartbeat_event("skill_skipped", skill=task.skill, reason="no_changes")
+                                self._rearm_skill_task(task)
+                                results.append(f"SKILL_SKIPPED:{task.id}")
+                                continue
+                        if not self._check_min_execution_interval(task):
+                            self._write_heartbeat_event("skill_skipped", skill=task.skill, reason="interval_not_met")
+                            self._rearm_skill_task(task)
+                            results.append(f"SKILL_SKIPPED:{task.id}")
+                            continue
+                        result = await asyncio.wait_for(
+                            self._invoke_skill_task(task, scan_result, run_id),
+                            timeout=task.timeout_seconds,
+                        )
+                        self._rearm_skill_task(task)
+                        self._write_heartbeat_event("task_done", task_id=task.id, title=task.title)
+                        results.append(result)
+                        continue
+
                     # Deterministic tasks: programmatic output, skip LLM
                     deterministic_result = self._try_deterministic_task(task)
                     if deterministic_result is not None:
@@ -1043,6 +1185,7 @@ If not, reply with `HEARTBEAT_OK`.
         _STATUS_PREFIXES = (
             "ISOLATED_DONE:", "ISOLATED_TIMEOUT:", "ISOLATED_FAILED:",
             "TASK_FAILED:", "TASK_TIMEOUT:",
+            "SKILL_SKIPPED:", "SCANNER_ERROR:",
         )
         meaningful = [r for r in results if not any(r.startswith(p) for p in _STATUS_PREFIXES)]
         return "; ".join(meaningful) if meaningful else "HEARTBEAT_OK"
@@ -1397,3 +1540,38 @@ If not, reply with `HEARTBEAT_OK`.
         """停止心跳"""
         self._running = False
         logger.info(f"[{self.agent_name}] 心跳已停止")
+
+
+class _SkillLLMClient:
+    """Lightweight LLM client for reflection skills.
+
+    Uses litellm for direct completion calls without full agent setup.
+    """
+
+    def __init__(self, model: str = ""):
+        self._model = model
+
+    async def complete(self, prompt: str, system: str = "") -> str:
+        """Single-turn LLM completion."""
+        try:
+            import litellm
+        except ImportError:
+            raise RuntimeError("litellm is required for skill LLM calls")
+
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        model = self._model
+        if not model:
+            import os
+            model = os.environ.get("ALFRED_SKILL_MODEL", "deepseek/deepseek-chat")
+
+        response = await litellm.acompletion(
+            model=model,
+            messages=messages,
+            temperature=0.3,
+            max_tokens=2000,
+        )
+        return response.choices[0].message.content or ""

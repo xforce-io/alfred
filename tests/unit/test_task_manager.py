@@ -470,6 +470,60 @@ class TestHealStuckScheduledTasks:
             next_dt = datetime.fromisoformat(task.next_run_at)
             assert next_dt > now
 
+    def test_heal_done_cron_task_without_croniter_prevents_infinite_loop(self):
+        """Production bug: routine_7dcfa7a9 (cron '0 15 * * *') ran every tick
+        because croniter was not installed, _compute_next_run returned None,
+        and next_run_at stayed at a stale past value. After heal, the task
+        must not remain due (next_run_at must be in the future or None)."""
+        from unittest.mock import patch
+
+        task = _sample_task(
+            state="done", retry=0, max_retry=3, schedule="0 15 * * *",
+        )
+        task.timezone = "Asia/Shanghai"
+        task.next_run_at = "2026-02-28T15:00:00+08:00"  # stale past value
+        tl = TaskList(tasks=[task])
+        now = datetime(2026, 3, 4, 7, 0, tzinfo=timezone.utc)
+
+        with patch("src.everbot.core.tasks.task_manager._compute_next_run", return_value=None):
+            healed = heal_stuck_scheduled_tasks(tl, now=now)
+
+        assert healed == 1
+        assert task.state == "pending"
+        # Critical: next_run_at must NOT remain as a past timestamp
+        # Otherwise get_due_tasks will fire it every tick
+        if task.next_run_at is not None:
+            next_dt = datetime.fromisoformat(task.next_run_at)
+            if next_dt.tzinfo is None:
+                next_dt = next_dt.replace(tzinfo=timezone.utc)
+            assert next_dt >= now, (
+                f"next_run_at must not be in the past after heal, got {task.next_run_at}"
+            )
+
+    def test_update_done_cron_task_without_croniter_prevents_infinite_loop(self):
+        """Same as above but via update_task_state(DONE) path.
+        When _compute_next_run returns None, next_run_at must not retain
+        a stale past value that causes the task to be perpetually due."""
+        from unittest.mock import patch
+
+        task = _sample_task(state="running", schedule="0 15 * * *")
+        task.timezone = "Asia/Shanghai"
+        task.next_run_at = "2026-02-28T15:00:00+08:00"  # stale
+        now = datetime(2026, 3, 4, 7, 0, tzinfo=timezone.utc)
+
+        with patch("src.everbot.core.tasks.task_manager._compute_next_run", return_value=None):
+            update_task_state(task, TaskState.DONE, now=now)
+
+        assert task.state == "pending"
+        # Critical: next_run_at must not be a past timestamp
+        if task.next_run_at is not None:
+            next_dt = datetime.fromisoformat(task.next_run_at)
+            if next_dt.tzinfo is None:
+                next_dt = next_dt.replace(tzinfo=timezone.utc)
+            assert next_dt >= now, (
+                f"next_run_at must not be in the past after DONE, got {task.next_run_at}"
+            )
+
     def test_heals_multiple_stuck_tasks(self):
         t1 = _sample_task(id="t1", state="failed", retry=3, max_retry=3, schedule="1d")
         t2 = _sample_task(id="t2", state="failed", retry=3, max_retry=3, schedule="7d")
