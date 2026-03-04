@@ -445,3 +445,55 @@ def test_min_execution_interval_validation(tmp_path: Path):
     assert created["min_execution_interval"] == "2h"
     assert created["skill"] == "memory-review"
     assert created["scanner"] == "session"
+
+
+# ===========================================================================
+# High-frequency schedule constraint (< 30m requires skill + scanner)
+# ===========================================================================
+
+
+class TestHighFrequencyConstraint:
+    """schedule < 30m without skill+scanner should be rejected."""
+
+    @pytest.mark.parametrize("schedule", ["2m", "5m", "15m", "29m"])
+    def test_rejects_high_frequency_without_skill_scanner(self, tmp_path, schedule):
+        mgr = RoutineManager(tmp_path)
+        with pytest.raises(ValueError, match="High-frequency"):
+            mgr.add_routine(title=f"test {schedule}", schedule=schedule)
+
+    def test_allows_high_frequency_with_skill_and_scanner(self, tmp_path):
+        mgr = RoutineManager(tmp_path)
+        result = mgr.add_routine(
+            title="test 2m with gate",
+            schedule="2m",
+            skill="memory-review",
+            scanner="session",
+        )
+        assert result["skill"] == "memory-review"
+        assert result["scanner"] == "session"
+
+    def test_allows_30m_boundary(self, tmp_path):
+        mgr = RoutineManager(tmp_path)
+        result = mgr.add_routine(title="test 30m", schedule="30m")
+        assert result["schedule"] == "30m"
+
+    @pytest.mark.parametrize("schedule", ["1h", "2h", "1d"])
+    def test_allows_low_frequency(self, tmp_path, schedule):
+        mgr = RoutineManager(tmp_path)
+        result = mgr.add_routine(title=f"test {schedule}", schedule=schedule)
+        assert result["schedule"] == schedule
+
+    def test_cron_expression_not_affected(self, tmp_path):
+        mgr = RoutineManager(tmp_path)
+        result = mgr.add_routine(title="test cron", schedule="*/5 * * * *")
+        assert result["schedule"] == "*/5 * * * *"
+
+    def test_rejects_skill_without_scanner(self, tmp_path):
+        mgr = RoutineManager(tmp_path)
+        with pytest.raises(ValueError, match="High-frequency"):
+            mgr.add_routine(title="test", schedule="5m", skill="memory-review")
+
+    def test_rejects_scanner_without_skill(self, tmp_path):
+        mgr = RoutineManager(tmp_path)
+        with pytest.raises(ValueError, match="High-frequency"):
+            mgr.add_routine(title="test", schedule="5m", scanner="session")

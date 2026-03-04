@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Callable, Any, Dict
 import uuid
@@ -40,6 +40,7 @@ from ..tasks.task_manager import (
     TaskState,
     ParseStatus,
 )
+from ..tasks.execution_gate import TaskExecutionGate
 from ...infra.user_data import get_user_data_manager
 
 logger = logging.getLogger(__name__)
@@ -137,6 +138,7 @@ If not, reply with `HEARTBEAT_OK`.
         summary_max_chars: Optional[int] = None,
         heartbeat_max_history: int = 10,
         reflect_force_interval_hours: int = 24,
+        idle_cooldown_minutes: int = 15,
     ):
         """
         初始化心跳运行器
@@ -173,6 +175,7 @@ If not, reply with `HEARTBEAT_OK`.
         self.on_result = on_result
         self._heartbeat_max_history = max(1, int(heartbeat_max_history or 10))
         self._reflect_force_interval = timedelta(hours=max(1, int(reflect_force_interval_hours or 24)))
+        self._idle_cooldown_seconds = max(0, int(idle_cooldown_minutes or 15)) * 60
         self._reflection = ReflectionManager(workspace_path, self._reflect_force_interval)
         if summary_max_chars is not None:
             self.SUMMARY_MAX_CHARS = max(1, int(summary_max_chars))
@@ -295,6 +298,14 @@ If not, reply with `HEARTBEAT_OK`.
         hour = datetime.now().hour
         start, end = self.active_hours
         return start <= hour < end
+
+    def _is_user_idle(self) -> bool:
+        """Return True if enough time has elapsed since the last user conversation activity."""
+        last_activity = self.session_manager.get_last_activity_time(self.agent_name)
+        if last_activity is None:
+            return True
+        import time
+        return (time.time() - last_activity) >= self._idle_cooldown_seconds
 
     @property
     def _last_reflect_at(self):
@@ -615,6 +626,15 @@ If not, reply with `HEARTBEAT_OK`.
                                agent_name=self.agent_name, scope=self.broadcast_scope,
                                source_type="heartbeat", run_id=run_id)
                     return "HEARTBEAT_IDLE"
+
+                # Recover tasks stuck in 'running' (crash/timeout) before
+                # mode dispatch. Without this, stuck tasks cause reflect mode
+                # where LLM executes autonomously, bypassing scanner gates.
+                if self._file_mgr.heartbeat_mode == "structured_reflect":
+                    self._recover_stuck_running_tasks()
+                    # Re-evaluate: recovered tasks may now be due
+                    if self._file_mgr.task_list and get_due_tasks(self._file_mgr.task_list):
+                        self._file_mgr.heartbeat_mode = "structured_due"
 
                 # Skip agent creation for reflection when not needed
                 if self._file_mgr.heartbeat_mode == "structured_reflect":
@@ -1010,6 +1030,20 @@ If not, reply with `HEARTBEAT_OK`.
             logger.error("Skill %s failed: %s", skill_name, exc, exc_info=True)
             raise
 
+    def _advance_skill_watermark(self, skill_name: str) -> None:
+        """Advance watermark to current time after successful skill execution.
+
+        Uses current time (not scan-time session updated_at) because skill
+        execution itself may update the monitored data source (e.g. injecting
+        results into primary session updates its updated_at). Using scan-time
+        watermark would create a self-triggering loop.
+        """
+        from ..scanners.reflection_state import ReflectionState
+
+        state = ReflectionState.load(self._get_workspace_path())
+        state.set_watermark(skill_name, datetime.now(timezone.utc).isoformat())
+        state.save(self._get_workspace_path())
+
     @staticmethod
     def _rearm_skill_task(task: Any) -> None:
         """Re-arm a skill task to PENDING for next scan cycle.
@@ -1049,40 +1083,32 @@ If not, reply with `HEARTBEAT_OK`.
                 )
 
                 try:
-                    # Skill tasks: scanner gate + skill execution, no LLM agent
+                    # Skill tasks: unified gate check + skill execution, no LLM agent
                     if task.skill:
-                        scanner = self._get_scanner(task.scanner)
-                        scan_result = None
-                        if scanner:
-                            from ..scanners.reflection_state import ReflectionState
-                            state = ReflectionState.load(self._get_workspace_path())
-                            try:
-                                scan_result = scanner.check(state.get_watermark(task.skill), self.agent_name)
-                            except Exception as scan_exc:
-                                self._write_heartbeat_event("scanner_error", scanner=task.scanner, error=str(scan_exc)[:200])
-                                # Re-arm to PENDING so next cycle retries (skill tasks have no schedule)
-                                self._rearm_skill_task(task)
-                                results.append(f"SCANNER_ERROR:{task.id}")
-                                continue
+                        gate = TaskExecutionGate(self._get_workspace_path(), self.agent_name, self._get_scanner)
+                        verdict = gate.check(task)
+                        # Log scanner check result when scanner was consulted
+                        if verdict.scan_result is not None:
                             self._write_heartbeat_event(
                                 "scanner_check", scanner=task.scanner,
-                                has_changes=scan_result.has_changes,
-                                change_summary=scan_result.change_summary,
+                                has_changes=verdict.scan_result.has_changes,
+                                change_summary=verdict.scan_result.change_summary,
                             )
-                            if not scan_result.has_changes:
-                                self._write_heartbeat_event("skill_skipped", skill=task.skill, reason="no_changes")
-                                self._rearm_skill_task(task)
-                                results.append(f"SKILL_SKIPPED:{task.id}")
-                                continue
-                        if not self._check_min_execution_interval(task):
-                            self._write_heartbeat_event("skill_skipped", skill=task.skill, reason="interval_not_met")
+                        if not verdict.allowed:
+                            if verdict.skip_reason == "scanner_error":
+                                self._write_heartbeat_event("scanner_error", scanner=task.scanner, error="gate check failed")
+                            else:
+                                self._write_heartbeat_event("skill_skipped", skill=task.skill, reason=verdict.skip_reason)
                             self._rearm_skill_task(task)
-                            results.append(f"SKILL_SKIPPED:{task.id}")
+                            results.append(f"SKILL_SKIPPED:{task.id}" if verdict.skip_reason != "scanner_error" else f"SCANNER_ERROR:{task.id}")
+                            self._flush_task_state()
                             continue
                         result = await asyncio.wait_for(
-                            self._invoke_skill_task(task, scan_result, run_id),
+                            self._invoke_skill_task(task, verdict.scan_result, run_id),
                             timeout=task.timeout_seconds,
                         )
+                        if verdict.scan_result:
+                            gate.commit(task, verdict)
                         self._rearm_skill_task(task)
                         self._write_heartbeat_event("task_done", task_id=task.id, title=task.title)
                         results.append(result)
@@ -1146,6 +1172,28 @@ If not, reply with `HEARTBEAT_OK`.
             for task in isolated_due:
                 if not claim_task(task):
                     continue
+
+                # Unified gate check for isolated skill tasks
+                verdict = None
+                if task.skill:
+                    gate = TaskExecutionGate(self._get_workspace_path(), self.agent_name, self._get_scanner)
+                    verdict = gate.check(task)
+                    if verdict.scan_result is not None:
+                        self._write_heartbeat_event(
+                            "scanner_check", scanner=task.scanner,
+                            has_changes=verdict.scan_result.has_changes,
+                            change_summary=verdict.scan_result.change_summary,
+                        )
+                    if not verdict.allowed:
+                        if verdict.skip_reason == "scanner_error":
+                            self._write_heartbeat_event("scanner_error", scanner=task.scanner, error="gate check failed")
+                        else:
+                            self._write_heartbeat_event("skill_skipped", skill=task.skill, reason=verdict.skip_reason)
+                        self._rearm_skill_task(task)
+                        results.append(f"SKILL_SKIPPED:{task.id}" if verdict.skip_reason != "scanner_error" else f"SCANNER_ERROR:{task.id}")
+                        self._flush_task_state()
+                        continue
+
                 # Persist claim before execution so concurrent ticks/processes observe running state.
                 self._flush_task_state()
                 self._write_heartbeat_event("task_start", task_id=task.id, title=task.title, execution_mode="isolated")
@@ -1154,6 +1202,9 @@ If not, reply with `HEARTBEAT_OK`.
                 )
                 try:
                     result = await self._execute_isolated_task(task, run_id)
+                    # Advance watermark after successful isolated skill execution
+                    if verdict and verdict.scan_result:
+                        gate.commit(task, verdict)
                     update_task_state(task, TaskState.DONE)
                     self._write_heartbeat_event("task_done", task_id=task.id, title=task.title)
                     self._record_timeline_event(
@@ -1488,6 +1539,11 @@ If not, reply with `HEARTBEAT_OK`.
             logger.debug(f"[{self.agent_name}] 非活跃时段，跳过")
             self._write_heartbeat_event("skipped", reason="inactive")
             return "HEARTBEAT_SKIPPED_INACTIVE"
+
+        if (not force) and (not self._is_user_idle()):
+            logger.debug(f"[{self.agent_name}] 用户近期有活跃对话，跳过心跳")
+            self._write_heartbeat_event("skipped", reason="user_active")
+            return "HEARTBEAT_SKIPPED_USER_ACTIVE"
 
         logger.info(f"[{self.agent_name}] 开始心跳")
 

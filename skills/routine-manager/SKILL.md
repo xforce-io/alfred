@@ -143,9 +143,16 @@ Hard delete:
 python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROOT" remove --id "routine_abcd1234" --hard
 ```
 
+## Frequency Constraints
+
+- **Schedules under 30 minutes** (e.g. `2m`, `5m`, `15m`) **require** `--skill` and `--scanner` flags. Without a scanner gate, the routine executes a full LLM conversation on every cycle — expensive and produces duplicate messages.
+- Without `--scanner`, no deduplication occurs — the task runs unconditionally every cycle.
+- `--min-execution-interval` provides additional throttle: even if the scanner detects changes, the skill will not run more frequently than this interval.
+
 ## Safety Notes
 
 - Always `list` before `add` to avoid duplicate routines.
 - For destructive operations (`--hard`), confirm user intent first.
 - Keep `execution_mode` explicit: `inline` for short tasks, `isolated` for long/complex tasks.
 - `execution_mode=auto` is supported and will be inferred by framework heuristics.
+- High-frequency schedules (`< 30m`) without `--skill` and `--scanner` are rejected to prevent runaway LLM execution.

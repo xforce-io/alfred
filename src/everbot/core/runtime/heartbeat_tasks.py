@@ -14,6 +14,7 @@ from ..tasks.task_manager import (
     TaskState,
     parse_iso_datetime,
 )
+from ..tasks.execution_gate import TaskExecutionGate
 from .heartbeat_utils import task_snapshot
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,12 @@ class IsolatedTaskMixin:
         return isolated
 
     def _recover_stuck_running_tasks(self, now: Optional[datetime] = None) -> None:
-        """Reset isolated tasks stuck in 'running' beyond 2x timeout to 'pending'."""
+        """Reset tasks stuck in 'running' beyond 2x timeout to 'pending'.
+
+        Covers both inline and isolated tasks — any task stuck in running
+        blocks get_due_tasks, causing structured_reflect mode where LLM
+        executes autonomously bypassing scanner gates.
+        """
         if self._file_mgr.task_list is None:
             return
         if now is None:
@@ -68,9 +74,6 @@ class IsolatedTaskMixin:
         recovered_any = False
         for task in self._file_mgr.task_list.tasks:
             if task.state != TaskState.RUNNING.value:
-                continue
-            mode = str(getattr(task, "execution_mode", "inline") or "inline")
-            if mode != "isolated":
                 continue
             last_run = parse_iso_datetime(task.last_run_at) if task.last_run_at else None
             if last_run is None:
@@ -227,8 +230,28 @@ class IsolatedTaskMixin:
         try:
             task = Task.from_dict(task_snapshot_dict)
             task.execution_mode = "isolated"
+
+            # Gate check for skill tasks — scanner + min_interval
+            verdict = None
+            if task.skill:
+                gate = TaskExecutionGate(
+                    self._get_workspace_path(), self.agent_name, self._get_scanner,
+                )
+                verdict = gate.check(task)
+                if not verdict.allowed:
+                    self._write_heartbeat_event(
+                        "skill_skipped", skill=task.skill, reason=verdict.skip_reason,
+                    )
+                    await self._update_isolated_task_state(task_id, TaskState.DONE, now=now)
+                    return
+
             active_run_id = run_id or f"heartbeat_isolated_{uuid.uuid4().hex[:12]}"
             await self._execute_isolated_task(task, active_run_id)
+
+            # Advance watermark after successful skill execution
+            if task.skill and verdict and verdict.scan_result:
+                gate.commit(task, verdict)
+
             await self._update_isolated_task_state(task_id, TaskState.DONE, now=now)
         except Exception as exc:
             await self._update_isolated_task_state(

@@ -83,6 +83,27 @@ class SessionManager:
         self._metrics: Dict[str, float] = {}
         self._metrics_lock = threading.Lock()
 
+    def get_last_activity_time(self, agent_name: str) -> Optional[float]:
+        """Return Unix timestamp of the last user activity on the primary session.
+
+        Reads the persisted ``updated_at`` field of the primary session file.
+        Returns ``None`` when the session does not exist or has no timestamp.
+        """
+        session_id = self.get_primary_session_id(agent_name)
+        session_path = self.persistence._get_session_path(session_id)
+        if not session_path.exists():
+            return None
+        try:
+            raw = json.loads(session_path.read_text(encoding="utf-8"))
+            updated_at = raw.get("updated_at")
+            parsed = self._parse_iso_datetime(updated_at)
+            if parsed is None:
+                return None
+            return parsed.timestamp()
+        except Exception:
+            logger.debug("Failed to read updated_at for %s", session_id, exc_info=True)
+            return None
+
     def record_metric(self, name: str, delta: float = 1.0) -> None:
         """Increment one runtime metric counter."""
         key = str(name or "").strip()

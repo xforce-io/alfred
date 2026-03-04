@@ -2,7 +2,7 @@
 
 import json
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from src.everbot.core.tasks.task_manager import (
     Task,
@@ -194,33 +194,30 @@ class TestTaskStateTransitions:
         assert task.state == "pending"
         assert task.next_run_at is not None
 
-    def test_done_with_schedule_rearms_pending_even_when_next_run_fails(self):
-        """When _compute_next_run returns None (e.g. croniter unavailable),
-        a scheduled task must still be re-armed as pending.  Without this,
-        the task stays in 'done' forever and get_due_tasks never picks it up.
-
-        Production bug: routine_7dcfa7a9 (cron '0 15 * * *') stuck in
-        state='done' with stale next_run_at for 3+ days.
-        """
-        from unittest.mock import patch
+    def test_done_with_cron_schedule_rearms_with_correct_next_run(self):
+        """A cron-scheduled task must be re-armed as pending with a future next_run_at."""
         task = _sample_task(state="running", schedule="0 15 * * *")
         task.timezone = "Asia/Shanghai"
-        now = datetime(2026, 3, 1, 7, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 3, 1, 7, 0, tzinfo=timezone.utc)  # 15:00 Shanghai
 
-        with patch("src.everbot.core.tasks.task_manager._compute_next_run", return_value=None):
-            update_task_state(task, TaskState.DONE, now=now)
+        update_task_state(task, TaskState.DONE, now=now)
 
-        assert task.state == "pending", (
-            f"Scheduled task should be re-armed as pending even when "
-            f"_compute_next_run fails, got '{task.state}'"
-        )
+        assert task.state == "pending"
+        assert task.next_run_at is not None
+        next_dt = datetime.fromisoformat(task.next_run_at)
+        if next_dt.tzinfo is None:
+            next_dt = next_dt.replace(tzinfo=timezone.utc)
+        assert next_dt > now, f"next_run_at should be in the future, got {task.next_run_at}"
 
     def test_failed_with_retry_rearms_pending(self):
+        now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
         task = _sample_task(retry=0, max_retry=3)
-        update_task_state(task, TaskState.FAILED, error_message="timeout")
+        update_task_state(task, TaskState.FAILED, error_message="timeout", now=now)
         assert task.state == "pending"
         assert task.retry == 1
         assert task.error_message == "timeout"
+        # Backoff: first retry → 30s delay
+        assert task.next_run_at is not None
 
     def test_failed_at_max_retry_stays_failed(self):
         task = _sample_task(retry=2, max_retry=3)
@@ -237,6 +234,36 @@ class TestTaskStateTransitions:
         update_task_state(task, TaskState.FAILED, error_message="timeout")
         assert task.state == "pending"  # retryable
         assert task.retry == 1
+
+    def test_failed_retry_backoff_30s(self):
+        """First retry should have 30s backoff (2^0 * 30)."""
+        now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
+        task = _sample_task(retry=0, max_retry=3)
+        update_task_state(task, TaskState.FAILED, error_message="err", now=now)
+        assert task.retry == 1
+        next_dt = datetime.fromisoformat(task.next_run_at)
+        expected = now + timedelta(seconds=30)
+        assert next_dt == expected, f"Expected {expected}, got {next_dt}"
+
+    def test_failed_backoff_exponential(self):
+        """Second retry should have 60s backoff (2^1 * 30)."""
+        now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
+        task = _sample_task(retry=1, max_retry=5)
+        update_task_state(task, TaskState.FAILED, error_message="err", now=now)
+        assert task.retry == 2
+        next_dt = datetime.fromisoformat(task.next_run_at)
+        expected = now + timedelta(seconds=60)
+        assert next_dt == expected, f"Expected {expected}, got {next_dt}"
+
+    def test_failed_backoff_capped_1h(self):
+        """Backoff should be capped at 1 hour regardless of retry count."""
+        now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
+        task = _sample_task(retry=9, max_retry=20)
+        update_task_state(task, TaskState.FAILED, error_message="err", now=now)
+        assert task.retry == 10
+        next_dt = datetime.fromisoformat(task.next_run_at)
+        expected = now + timedelta(seconds=3600)
+        assert next_dt == expected, f"Expected {expected}, got {next_dt}"
 
     def test_done_with_interval_uses_task_timezone(self):
         task = _sample_task(state="running", schedule="1h")
@@ -339,10 +366,11 @@ class TestComputeNextRun:
         now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
         assert _compute_next_run("", now) is None
 
-    def test_invalid_schedule_returns_none(self):
+    def test_invalid_schedule_raises(self):
         from src.everbot.core.tasks.task_manager import _compute_next_run
         now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
-        assert _compute_next_run("every tuesday", now) is None
+        with pytest.raises(ValueError, match="Invalid cron expression"):
+            _compute_next_run("every tuesday", now)
 
 
 # ── Write back ────────────────────────────────────────────────────
@@ -434,12 +462,16 @@ class TestHealStuckScheduledTasks:
         assert healed == 0
 
     def test_does_not_heal_running_task(self):
+        """Running tasks are NOT healed by heal_stuck_scheduled_tasks.
+        They are handled separately by _recover_stuck_running_tasks in
+        heartbeat_tasks.py which checks 2x timeout before recovery."""
         task = _sample_task(
             state="running", retry=1, max_retry=3, schedule="1d",
         )
         tl = TaskList(tasks=[task])
         healed = heal_stuck_scheduled_tasks(tl)
         assert healed == 0
+        assert task.state == "running"
 
     def test_does_not_heal_failed_with_retries_remaining(self):
         """Task with retry < max_retry isn't stuck — it will be retried normally."""
@@ -470,13 +502,8 @@ class TestHealStuckScheduledTasks:
             next_dt = datetime.fromisoformat(task.next_run_at)
             assert next_dt > now
 
-    def test_heal_done_cron_task_without_croniter_prevents_infinite_loop(self):
-        """Production bug: routine_7dcfa7a9 (cron '0 15 * * *') ran every tick
-        because croniter was not installed, _compute_next_run returned None,
-        and next_run_at stayed at a stale past value. After heal, the task
-        must not remain due (next_run_at must be in the future or None)."""
-        from unittest.mock import patch
-
+    def test_heal_done_cron_task_sets_future_next_run(self):
+        """A cron task stuck in 'done' should be healed with correct future next_run_at."""
         task = _sample_task(
             state="done", retry=0, max_retry=3, schedule="0 15 * * *",
         )
@@ -485,44 +512,33 @@ class TestHealStuckScheduledTasks:
         tl = TaskList(tasks=[task])
         now = datetime(2026, 3, 4, 7, 0, tzinfo=timezone.utc)
 
-        with patch("src.everbot.core.tasks.task_manager._compute_next_run", return_value=None):
-            healed = heal_stuck_scheduled_tasks(tl, now=now)
+        healed = heal_stuck_scheduled_tasks(tl, now=now)
 
         assert healed == 1
         assert task.state == "pending"
-        # Critical: next_run_at must NOT remain as a past timestamp
-        # Otherwise get_due_tasks will fire it every tick
-        if task.next_run_at is not None:
-            next_dt = datetime.fromisoformat(task.next_run_at)
-            if next_dt.tzinfo is None:
-                next_dt = next_dt.replace(tzinfo=timezone.utc)
-            assert next_dt >= now, (
-                f"next_run_at must not be in the past after heal, got {task.next_run_at}"
-            )
+        next_dt = datetime.fromisoformat(task.next_run_at)
+        if next_dt.tzinfo is None:
+            next_dt = next_dt.replace(tzinfo=timezone.utc)
+        assert next_dt > now, (
+            f"next_run_at must be in the future after heal, got {task.next_run_at}"
+        )
 
-    def test_update_done_cron_task_without_croniter_prevents_infinite_loop(self):
-        """Same as above but via update_task_state(DONE) path.
-        When _compute_next_run returns None, next_run_at must not retain
-        a stale past value that causes the task to be perpetually due."""
-        from unittest.mock import patch
-
+    def test_update_done_cron_task_sets_future_next_run(self):
+        """update_task_state(DONE) on a cron task must set future next_run_at."""
         task = _sample_task(state="running", schedule="0 15 * * *")
         task.timezone = "Asia/Shanghai"
         task.next_run_at = "2026-02-28T15:00:00+08:00"  # stale
         now = datetime(2026, 3, 4, 7, 0, tzinfo=timezone.utc)
 
-        with patch("src.everbot.core.tasks.task_manager._compute_next_run", return_value=None):
-            update_task_state(task, TaskState.DONE, now=now)
+        update_task_state(task, TaskState.DONE, now=now)
 
         assert task.state == "pending"
-        # Critical: next_run_at must not be a past timestamp
-        if task.next_run_at is not None:
-            next_dt = datetime.fromisoformat(task.next_run_at)
-            if next_dt.tzinfo is None:
-                next_dt = next_dt.replace(tzinfo=timezone.utc)
-            assert next_dt >= now, (
-                f"next_run_at must not be in the past after DONE, got {task.next_run_at}"
-            )
+        next_dt = datetime.fromisoformat(task.next_run_at)
+        if next_dt.tzinfo is None:
+            next_dt = next_dt.replace(tzinfo=timezone.utc)
+        assert next_dt > now, (
+            f"next_run_at must be in the future after DONE, got {task.next_run_at}"
+        )
 
     def test_heals_multiple_stuck_tasks(self):
         t1 = _sample_task(id="t1", state="failed", retry=3, max_retry=3, schedule="1d")

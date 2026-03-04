@@ -246,6 +246,20 @@ class RoutineManager:
                     "Use e.g. '30m', '2h', '1d'."
                 )
 
+        # High-frequency schedules (< 30m) require skill + scanner to prevent
+        # uncontrolled LLM execution every cycle.
+        if schedule:
+            _freq_match = re.fullmatch(r"(\d+)([mhd])", schedule.strip())
+            if _freq_match:
+                _amount = int(_freq_match.group(1))
+                _unit = _freq_match.group(2)
+                _total_minutes = {"m": _amount, "h": _amount * 60, "d": _amount * 1440}[_unit]
+                if _total_minutes < 30 and not (skill and scanner):
+                    raise ValueError(
+                        f"High-frequency schedule '{schedule}' (< 30m) requires "
+                        "--skill and --scanner to prevent uncontrolled execution."
+                    )
+
         if next_run_at is not None:
             computed_next_run = next_run_at
         elif schedule:
