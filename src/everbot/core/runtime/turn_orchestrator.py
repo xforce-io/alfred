@@ -936,6 +936,13 @@ async def _drain_after_timeout(
                 stage = progress.get("stage")
                 status = progress.get("status", "")
                 if stage == "skill" and status in ("completed", "failed"):
+                    # Skip internal resource-loading tools — their output
+                    # is framework-internal (contains [PIN] markers, full
+                    # SKILL.md content) and must not be forwarded to the user.
+                    skill_info = progress.get("skill_info") or {}
+                    skill_name = skill_info.get("name") or progress.get("tool_name") or ""
+                    if skill_name in ("_load_resource_skill", "_load_skill_resource"):
+                        continue
                     output = (
                         progress.get("answer")
                         or progress.get("block_answer")
@@ -961,6 +968,8 @@ async def _drain_after_timeout(
 
     parts = [p for p in [final_response, "\n".join(collected_outputs)] if p.strip()]
     result = "\n\n".join(parts)
+    # Strip any leaked [PIN] markers (dolphin framework internal token)
+    result = result.replace("[PIN]", "").strip()
     if not result.strip():
         return
     if len(result) > 8000:

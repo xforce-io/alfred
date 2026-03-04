@@ -1499,6 +1499,171 @@ async def test_drain_ignores_tool_output_stage():
 
 
 # ---------------------------------------------------------------------------
+# _drain_after_timeout: internal skill filtering & [PIN] marker cleanup
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_drain_filters_load_resource_skill():
+    """_load_resource_skill outputs are internal (contain [PIN] + SKILL.md)
+    and must not appear in deferred results."""
+    items = [
+        {"_progress": [{"stage": "skill", "status": "completed",
+                         "skill_info": {"name": "_load_resource_skill"},
+                         "output": "[PIN]\n# Coding Master Skill\nFull content..."}]},
+        {"_progress": [{"stage": "skill", "status": "completed",
+                         "skill_info": {"name": "_bash"},
+                         "output": "Real command result"}]},
+    ]
+    results = []
+    await _drain_after_timeout(
+        _FakeAsyncIter(items),
+        on_result=lambda r: results.append(r),
+        extra_timeout=5.0,
+    )
+    assert len(results) == 1
+    assert "Real command result" in results[0]
+    assert "Coding Master" not in results[0]
+    assert "[PIN]" not in results[0]
+
+
+@pytest.mark.asyncio
+async def test_drain_filters_load_skill_resource():
+    """_load_skill_resource (Level 3 resource loader) is also internal."""
+    items = [
+        {"_progress": [{"stage": "skill", "status": "completed",
+                         "skill_info": {"name": "_load_skill_resource"},
+                         "output": "scripts/etl.py content..."}]},
+        {"_progress": [{"stage": "llm", "delta": "Here is the analysis."}]},
+    ]
+    results = []
+    await _drain_after_timeout(
+        _FakeAsyncIter(items),
+        on_result=lambda r: results.append(r),
+        extra_timeout=5.0,
+    )
+    assert len(results) == 1
+    assert "Here is the analysis." in results[0]
+    assert "etl.py" not in results[0]
+
+
+@pytest.mark.asyncio
+async def test_drain_filters_resource_skill_only_result():
+    """If the only skill output is from _load_resource_skill and there is
+    no LLM text, drain should produce no result (not an empty callback)."""
+    items = [
+        {"_progress": [{"stage": "skill", "status": "completed",
+                         "skill_info": {"name": "_load_resource_skill"},
+                         "output": "[PIN]\n# Skill content"}]},
+    ]
+    results = []
+    await _drain_after_timeout(
+        _FakeAsyncIter(items),
+        on_result=lambda r: results.append(r),
+        extra_timeout=5.0,
+    )
+    assert len(results) == 0
+
+
+@pytest.mark.asyncio
+async def test_drain_strips_pin_marker_from_llm_text():
+    """[PIN] markers in LLM output are stripped from the final result."""
+    items = [
+        {"_progress": [{"stage": "llm", "delta": "Start [PIN] middle"}]},
+        {"_progress": [{"stage": "llm", "delta": " end [PIN]"}]},
+    ]
+    results = []
+    await _drain_after_timeout(
+        _FakeAsyncIter(items),
+        on_result=lambda r: results.append(r),
+        extra_timeout=5.0,
+    )
+    assert len(results) == 1
+    assert "[PIN]" not in results[0]
+    assert "Start" in results[0]
+    assert "middle" in results[0]
+    assert "end" in results[0]
+
+
+@pytest.mark.asyncio
+async def test_drain_strips_pin_marker_from_tool_output():
+    """[PIN] markers in tool output are stripped from the final result."""
+    items = [
+        {"_progress": [{"stage": "skill", "status": "completed",
+                         "skill_info": {"name": "_bash"},
+                         "output": "[PIN] should be cleaned"}]},
+    ]
+    results = []
+    await _drain_after_timeout(
+        _FakeAsyncIter(items),
+        on_result=lambda r: results.append(r),
+        extra_timeout=5.0,
+    )
+    assert len(results) == 1
+    assert "[PIN]" not in results[0]
+    assert "should be cleaned" in results[0]
+
+
+@pytest.mark.asyncio
+async def test_drain_collects_skill_answer_field():
+    """Drain should check answer, block_answer, and output fields in order."""
+    items = [
+        {"_progress": [{"stage": "skill", "status": "completed",
+                         "skill_info": {"name": "_bash"},
+                         "answer": "Answer field value",
+                         "output": "Output field value"}]},
+    ]
+    results = []
+    await _drain_after_timeout(
+        _FakeAsyncIter(items),
+        on_result=lambda r: results.append(r),
+        extra_timeout=5.0,
+    )
+    assert len(results) == 1
+    # answer takes precedence over output
+    assert "Answer field value" in results[0]
+
+
+@pytest.mark.asyncio
+async def test_drain_collects_skill_block_answer_field():
+    """When answer is empty, block_answer should be used."""
+    items = [
+        {"_progress": [{"stage": "skill", "status": "completed",
+                         "skill_info": {"name": "_python"},
+                         "answer": "",
+                         "block_answer": "Block answer value",
+                         "output": "Output value"}]},
+    ]
+    results = []
+    await _drain_after_timeout(
+        _FakeAsyncIter(items),
+        on_result=lambda r: results.append(r),
+        extra_timeout=5.0,
+    )
+    assert len(results) == 1
+    assert "Block answer value" in results[0]
+
+
+@pytest.mark.asyncio
+async def test_drain_resource_skill_name_via_tool_name_fallback():
+    """Filter works even when skill_info is missing and name is in tool_name."""
+    items = [
+        {"_progress": [{"stage": "skill", "status": "completed",
+                         "tool_name": "_load_resource_skill",
+                         "output": "[PIN]\n# Should be filtered"}]},
+        {"_progress": [{"stage": "llm", "delta": "Actual response."}]},
+    ]
+    results = []
+    await _drain_after_timeout(
+        _FakeAsyncIter(items),
+        on_result=lambda r: results.append(r),
+        extra_timeout=5.0,
+    )
+    assert len(results) == 1
+    assert "Actual response." in results[0]
+    assert "Should be filtered" not in results[0]
+
+
+# ---------------------------------------------------------------------------
 # Edge-case coverage: mixed failure signatures (different errors)
 # ---------------------------------------------------------------------------
 
