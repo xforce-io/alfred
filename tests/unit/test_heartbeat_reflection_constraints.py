@@ -125,6 +125,43 @@ def test_apply_reflection_routine_proposals_invalid_mode_falls_back_to_auto(tmp_
     assert parsed.task_list.tasks[0].execution_mode == "isolated"
 
 
+# ── Heartbeat repair loop prevention ─────────────────────────────────
+
+class TestHeartbeatRepairConstraints:
+    def test_system_instruction_prohibits_task_state_repair(self):
+        """Heartbeat rules must tell LLM not to fix task state via CLI.
+
+        Production incident: LLM retried routine_7dcfa7a9 state repair 77 times
+        over 35 hours because nothing prohibited it from doing so.
+        """
+        instruction = HeartbeatRunner.HEARTBEAT_SYSTEM_INSTRUCTION
+        assert "Never attempt to fix task state" in instruction
+        assert "HEARTBEAT_OK" in instruction
+
+    def test_system_instruction_prohibits_same_command_retry(self):
+        """Heartbeat rules must limit retrying failed CLI commands."""
+        instruction = HeartbeatRunner.HEARTBEAT_SYSTEM_INSTRUCTION
+        assert "do NOT retry the same command" in instruction
+
+    def test_corrupted_mode_does_not_ask_llm_to_fix(self, tmp_path: Path):
+        """Corrupted heartbeat prompt should NOT ask LLM to fix the file.
+
+        Production incident: LLM tried to fix HEARTBEAT.md JSON and made it worse.
+        Now .bak auto-recovery handles this in RoutineManager._load_task_list.
+        """
+        runner = _make_runner(tmp_path)
+        # Write corrupted HEARTBEAT.md
+        (tmp_path / "HEARTBEAT.md").write_text(
+            "# HEARTBEAT\n```json\n{bad json\n```\n", encoding="utf-8",
+        )
+        runner._file_mgr.read_heartbeat_md()
+        assert runner._file_mgr.heartbeat_mode == "corrupted"
+
+        # The system instruction should NOT tell LLM to diagnose/fix the file
+        instruction = HeartbeatRunner.HEARTBEAT_SYSTEM_INSTRUCTION
+        assert "请先诊断并修复" not in instruction
+
+
 # ── Permanent error detection ────────────────────────────────────────
 
 class TestPermanentErrorDetection:

@@ -135,6 +135,26 @@ class SessionPersistence:
             )
         ]
 
+    @staticmethod
+    def _filter_heartbeat_messages(messages: list) -> list:
+        """Remove heartbeat-injected messages and their placeholder artifacts.
+
+        Heartbeat results (metadata.source == 'heartbeat') and the placeholder
+        messages inserted by inject_history_message — '(acknowledged)' and
+        '[Background notification follows]' — are filtered so they don't
+        pollute the LLM conversation context during restore.
+        """
+        _PLACEHOLDER_CONTENTS = {"(acknowledged)", "[Background notification follows]"}
+        return [
+            m for m in messages
+            if isinstance(m, dict) and not (
+                # Heartbeat-sourced messages
+                (isinstance(m.get("metadata"), dict) and m["metadata"].get("source") == "heartbeat")
+                # Placeholder artifacts
+                or m.get("content") in _PLACEHOLDER_CONTENTS
+            )
+        ]
+
     def _get_session_path(self, session_id: str) -> Path:
         """获取 Session 文件路径"""
         if not self.is_safe_session_id(session_id):
@@ -425,11 +445,18 @@ class SessionPersistence:
             session_data: Session 数据
         """
         try:
-            # 0. Strip bare empty assistant messages (content="" with no tool_calls).
-            #    These are artifacts from failed/timed-out tool executions and will
-            #    cause API errors (e.g. DeepSeek 400 "assistant must not be empty").
+            # 0a. Strip bare empty assistant messages (content="" with no tool_calls).
+            #     These are artifacts from failed/timed-out tool executions and will
+            #     cause API errors (e.g. DeepSeek 400 "assistant must not be empty").
             session_data.history_messages = self._filter_empty_assistant_messages(
                 session_data.history_messages or []
+            )
+
+            # 0b. Strip heartbeat-injected messages and placeholder artifacts.
+            #     Heartbeat results are for async notification only and should not
+            #     be restored into the LLM conversation context.
+            session_data.history_messages = self._filter_heartbeat_messages(
+                session_data.history_messages
             )
 
             # 1. Compact history (SDK has no max_messages truncation)

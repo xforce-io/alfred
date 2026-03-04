@@ -132,6 +132,74 @@ class TestConfig:
             loaded = load_config(str(config_path))
             assert loaded["test"] == "value"
 
+    def test_load_config_respects_alfred_home(self, monkeypatch):
+        """load_config() should use ALFRED_HOME when no explicit path given."""
+        from src.everbot.infra.config import reset_config_cache
+        reset_config_cache()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            monkeypatch.setenv("ALFRED_HOME", tmpdir)
+            config_path = Path(tmpdir) / "config.yaml"
+
+            # Write a config to ALFRED_HOME
+            config = {"marker": "from_alfred_home"}
+            save_config(config, str(config_path))
+
+            # load_config with no args should find it via ALFRED_HOME
+            loaded = load_config()
+            assert loaded.get("marker") == "from_alfred_home"
+
+    def test_save_config_respects_alfred_home(self, monkeypatch):
+        """save_config() should use ALFRED_HOME when no explicit path given."""
+        from src.everbot.infra.config import reset_config_cache
+        reset_config_cache()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            monkeypatch.setenv("ALFRED_HOME", tmpdir)
+
+            config = {"marker": "saved_to_alfred_home"}
+            save_config(config)
+
+            # Verify it was written to ALFRED_HOME/config.yaml
+            config_path = Path(tmpdir) / "config.yaml"
+            assert config_path.exists()
+            loaded = load_config(str(config_path))
+            assert loaded.get("marker") == "saved_to_alfred_home"
+
+
+class TestCmdInit:
+    """cmd_init 集成测试"""
+
+    def test_init_writes_config_to_alfred_home(self, monkeypatch):
+        """cmd_init should write config.yaml and workspace path under ALFRED_HOME."""
+        from src.everbot.infra.config import reset_config_cache
+        from src.everbot.infra.user_data import reset_user_data_manager
+        reset_config_cache()
+        reset_user_data_manager()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            monkeypatch.setenv("ALFRED_HOME", tmpdir)
+
+            # Re-import to get fresh singleton
+            from src.everbot.cli.main import cmd_init
+
+            class FakeArgs:
+                agent = "test_bot"
+
+            cmd_init(FakeArgs())
+
+            # Config should be in ALFRED_HOME
+            config_path = Path(tmpdir) / "config.yaml"
+            assert config_path.exists(), f"config.yaml not found in {tmpdir}"
+
+            loaded = load_config(str(config_path))
+            agent_cfg = loaded["everbot"]["agents"]["test_bot"]
+
+            # workspace should point to ALFRED_HOME/agents/test_bot, not ~/.alfred
+            assert "/.alfred/" not in agent_cfg["workspace"], \
+                f"workspace should not contain hardcoded ~/.alfred: {agent_cfg['workspace']}"
+            assert tmpdir in agent_cfg["workspace"]
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

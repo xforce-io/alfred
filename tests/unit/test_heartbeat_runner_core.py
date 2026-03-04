@@ -724,6 +724,98 @@ class TestExecuteIsolatedClaimedTask:
 
 
 # ============================================================
+# 10a-bis. execute_isolated_claimed_task — gate integration
+# ============================================================
+
+
+class TestExecuteIsolatedClaimedTaskGate:
+    """Tests for gate check/commit in execute_isolated_claimed_task."""
+
+    @pytest.mark.asyncio
+    async def test_gate_blocks_skill_task(self, tmp_path: Path, monkeypatch):
+        """Skill task blocked by gate should not execute and should update to DONE."""
+        from src.everbot.core.scanners.base import ScanResult
+
+        sm = _make_session_manager_with_locks()
+        runner = _make_runner(workspace_path=tmp_path, session_manager=sm)
+
+        update_calls: list[tuple] = []
+
+        async def _tracking_update(task_id, state, **kwargs):
+            update_calls.append((task_id, state))
+
+        monkeypatch.setattr(runner, "_update_isolated_task_state", _tracking_update)
+        execute_mock = AsyncMock()
+        monkeypatch.setattr(runner, "_execute_isolated_task", execute_mock)
+        monkeypatch.setattr(runner, "_write_heartbeat_event", MagicMock())
+
+        # Scanner returns no_changes
+        fake_scanner = MagicMock()
+        fake_scanner.check.return_value = ScanResult(
+            has_changes=False, change_summary="No changes",
+        )
+        runner._get_scanner = MagicMock(return_value=fake_scanner)
+
+        snapshot = {
+            "id": "skill_1", "title": "Skill Job",
+            "execution_mode": "isolated",
+            "skill": "test-skill", "scanner": "session",
+        }
+        await runner.execute_isolated_claimed_task(snapshot)
+
+        # Task should NOT have been executed
+        execute_mock.assert_not_awaited()
+        # State should be updated to DONE (skipped)
+        assert len(update_calls) == 1
+        assert update_calls[0] == ("skill_1", TaskState.DONE)
+        # Event should record skip
+        runner._write_heartbeat_event.assert_called_once_with(
+            "skill_skipped", skill="test-skill", reason="no_changes",
+        )
+
+    @pytest.mark.asyncio
+    async def test_gate_allows_and_advances_watermark(self, tmp_path: Path, monkeypatch):
+        """Skill task allowed by gate should execute and advance watermark."""
+        from src.everbot.core.scanners.base import ScanResult
+        from src.everbot.core.scanners.reflection_state import ReflectionState
+
+        sm = _make_session_manager_with_locks()
+        runner = _make_runner(workspace_path=tmp_path, session_manager=sm)
+
+        update_calls: list[tuple] = []
+
+        async def _tracking_update(task_id, state, **kwargs):
+            update_calls.append((task_id, state))
+
+        monkeypatch.setattr(runner, "_update_isolated_task_state", _tracking_update)
+        monkeypatch.setattr(runner, "_execute_isolated_task", AsyncMock(return_value="ok"))
+
+        # Scanner returns has_changes
+        fake_scanner = MagicMock()
+        fake_scanner.check.return_value = ScanResult(
+            has_changes=True, change_summary="1 session",
+            payload=[],
+        )
+        runner._get_scanner = MagicMock(return_value=fake_scanner)
+
+        snapshot = {
+            "id": "skill_2", "title": "Skill Job",
+            "execution_mode": "isolated",
+            "skill": "test-skill", "scanner": "session",
+        }
+        await runner.execute_isolated_claimed_task(snapshot)
+
+        # Should have executed and updated to DONE
+        assert len(update_calls) == 1
+        assert update_calls[0] == ("skill_2", TaskState.DONE)
+
+        # Watermark should be advanced
+        state = ReflectionState.load(tmp_path)
+        wm = state.get_watermark("test-skill")
+        assert wm != "", "Watermark should be set after successful skill execution"
+
+
+# ============================================================
 # 10b. _update_isolated_task_state — lock failure leaves task stuck
 # ============================================================
 
@@ -901,8 +993,10 @@ class TestRecoverStuckRunningTasks:
         task = runner._file_mgr.task_list.tasks[0]
         assert task.state == "running"  # Not recovered
 
-    def test_inline_running_task_not_recovered(self, tmp_path: Path):
-        """Only isolated tasks are recovered, not inline."""
+    def test_inline_running_task_also_recovered(self, tmp_path: Path):
+        """Both inline and isolated stuck running tasks are recovered.
+        A stuck inline task also blocks get_due_tasks → causes reflect mode
+        → LLM bypasses scanner gates, same issue as isolated tasks."""
         now = datetime.now(timezone.utc)
         long_ago = (now - timedelta(minutes=30)).isoformat()
         tasks = [{
@@ -915,11 +1009,10 @@ class TestRecoverStuckRunningTasks:
         )
 
         runner = _make_runner(workspace_path=tmp_path)
-        runner.list_due_isolated_tasks(now=now)
-
         runner._read_heartbeat_md()
+        runner._recover_stuck_running_tasks(now=now)
         task = runner._file_mgr.task_list.tasks[0]
-        assert task.state == "running"  # Not recovered (inline)
+        assert task.state == "pending"  # Recovered (re-armed)
 
 
 # ============================================================
@@ -959,3 +1052,87 @@ class TestIsPermanentError:
     def test_no_match(self):
         exc = Exception("connection timeout")
         assert _is_permanent_error(exc) is False
+
+
+# ============================================================
+# TestIdleCooldown
+# ============================================================
+
+DEFAULT_IDLE_COOLDOWN_MINUTES = 15
+
+
+class TestIdleCooldown:
+    """Tests for idle cooldown gate: pause heartbeat when user has recent activity."""
+
+    def test_idle_cooldown_default_value(self, tmp_path: Path):
+        """Constructor default idle_cooldown_minutes should be DEFAULT_IDLE_COOLDOWN_MINUTES."""
+        runner = _make_runner(workspace_path=tmp_path)
+        assert runner._idle_cooldown_seconds == DEFAULT_IDLE_COOLDOWN_MINUTES * 60
+
+    def test_idle_cooldown_custom_value(self, tmp_path: Path):
+        """Constructor should accept custom idle_cooldown_minutes."""
+        runner = _make_runner(workspace_path=tmp_path, idle_cooldown_minutes=30)
+        assert runner._idle_cooldown_seconds == 30 * 60
+
+    def test_is_user_idle_returns_true_when_no_activity(self, tmp_path: Path):
+        """No prior activity (None) means user is idle."""
+        sm = SimpleNamespace(
+            get_primary_session_id=lambda agent_name: f"web_session_{agent_name}",
+            get_heartbeat_session_id=lambda agent_name: f"heartbeat_session_{agent_name}",
+            get_last_activity_time=MagicMock(return_value=None),
+        )
+        runner = _make_runner(workspace_path=tmp_path, session_manager=sm)
+        assert runner._is_user_idle() is True
+
+    def test_is_user_idle_returns_true_when_cooldown_elapsed(self, tmp_path: Path):
+        """Activity older than cooldown means user is idle."""
+        import time
+
+        old_activity = time.time() - (DEFAULT_IDLE_COOLDOWN_MINUTES * 60 + 1)
+        sm = SimpleNamespace(
+            get_primary_session_id=lambda agent_name: f"web_session_{agent_name}",
+            get_heartbeat_session_id=lambda agent_name: f"heartbeat_session_{agent_name}",
+            get_last_activity_time=MagicMock(return_value=old_activity),
+        )
+        runner = _make_runner(workspace_path=tmp_path, session_manager=sm)
+        assert runner._is_user_idle() is True
+
+    def test_is_user_idle_returns_false_when_within_cooldown(self, tmp_path: Path):
+        """Recent activity within cooldown means user is NOT idle."""
+        import time
+
+        recent_activity = time.time() - 60  # 1 minute ago
+        sm = SimpleNamespace(
+            get_primary_session_id=lambda agent_name: f"web_session_{agent_name}",
+            get_heartbeat_session_id=lambda agent_name: f"heartbeat_session_{agent_name}",
+            get_last_activity_time=MagicMock(return_value=recent_activity),
+        )
+        runner = _make_runner(workspace_path=tmp_path, session_manager=sm)
+        assert runner._is_user_idle() is False
+
+    @pytest.mark.asyncio
+    async def test_run_once_skips_when_user_active(self, tmp_path: Path):
+        """run_once_with_options should return HEARTBEAT_SKIPPED_USER_ACTIVE when user is active."""
+        import time
+
+        recent_activity = time.time() - 60  # 1 minute ago
+        sm = _make_session_manager_with_locks()
+        sm.get_last_activity_time = MagicMock(return_value=recent_activity)
+        runner = _make_runner(workspace_path=tmp_path, session_manager=sm)
+
+        result = await runner.run_once_with_options()
+        assert result == "HEARTBEAT_SKIPPED_USER_ACTIVE"
+
+    @pytest.mark.asyncio
+    async def test_run_once_proceeds_when_user_idle(self, tmp_path: Path, monkeypatch):
+        """run_once_with_options should proceed to execution when user is idle."""
+        sm = _make_session_manager_with_locks()
+        sm.get_last_activity_time = MagicMock(return_value=None)
+        runner = _make_runner(workspace_path=tmp_path, session_manager=sm)
+
+        # Stub _execute_with_retry to avoid full execution path
+        monkeypatch.setattr(runner, "_execute_with_retry", AsyncMock(return_value="HEARTBEAT_OK"))
+        monkeypatch.setattr(runner, "_should_skip_response", lambda r: True)
+
+        result = await runner.run_once_with_options()
+        assert result == "HEARTBEAT_OK"

@@ -26,6 +26,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     list_p = sub.add_parser("list", help="List routines")
     list_p.add_argument("--include-disabled", action="store_true")
+    list_p.add_argument("--format", default="json", choices=["json", "table"])
 
     add_p = sub.add_parser("add", help="Add routine")
     add_p.add_argument("--title", required=True)
@@ -38,6 +39,9 @@ def _build_parser() -> argparse.ArgumentParser:
     add_p.add_argument("--allow-duplicate", action="store_true")
     add_p.add_argument("--next-run-at", default=None, help="ISO-8601 datetime for one-shot tasks")
     add_p.add_argument("--delay", default=None, help="Relative delay like '1m', '30s', '2h' (converted to --next-run-at)")
+    add_p.add_argument("--skill", default=None, help="Skill name to bind (e.g. 'memory-review')")
+    add_p.add_argument("--scanner", default=None, help="Scanner gate type (e.g. 'session')")
+    add_p.add_argument("--min-execution-interval", default=None, help="Min interval between skill executions (e.g. '2h')")
 
     upd_p = sub.add_parser("update", help="Update routine")
     upd_p.add_argument("--id", required=True, dest="task_id")
@@ -78,6 +82,28 @@ def _print_error(message: str) -> int:
     return 1
 
 
+def _format_table(routines: list[dict[str, Any]]) -> str:
+    """Format routines as a fixed-width text table."""
+    headers = ["ID", "Title", "Schedule", "State", "Enabled", "Skill", "Next Run"]
+    keys = ["id", "title", "schedule", "state", "enabled", "skill", "next_run_at"]
+    widths = [20, 24, 14, 10, 8, 16, 24]
+
+    def _cell(value: Any, width: int) -> str:
+        s = str(value) if value is not None else "-"
+        if len(s) > width:
+            s = s[: width - 1] + "…"
+        return s.ljust(width)
+
+    lines: list[str] = []
+    header_line = "  ".join(h.ljust(w) for h, w in zip(headers, widths))
+    lines.append(header_line)
+    lines.append("  ".join("─" * w for w in widths))
+    for r in routines:
+        row = "  ".join(_cell(r.get(k), w) for k, w in zip(keys, widths))
+        lines.append(row)
+    return "\n".join(lines)
+
+
 def main() -> int:
     _setup_import_path()
     parser = _build_parser()
@@ -92,6 +118,9 @@ def main() -> int:
     try:
         if args.command == "list":
             routines = manager.list_routines(include_disabled=args.include_disabled)
+            if args.format == "table":
+                print(_format_table(routines))
+                return 0
             return _print_ok(routines)
 
         if args.command == "add":
@@ -108,6 +137,9 @@ def main() -> int:
                 timeout_seconds=args.timeout_seconds,
                 allow_duplicate=args.allow_duplicate,
                 next_run_at=next_run_at,
+                skill=args.skill,
+                scanner=args.scanner,
+                min_execution_interval=args.min_execution_interval,
             )
             return _print_ok(created)
 

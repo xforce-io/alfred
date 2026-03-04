@@ -9,6 +9,11 @@ tags: [routine, heartbeat, scheduler]
 
 Manage structured routines stored in `HEARTBEAT.md` JSON task block.
 
+## Agent Guidelines
+
+- When the user asks "有哪些任务" / "列出任务" / "show routines", always use `--format table` for human-readable output.
+- When programmatically parsing routine data, use the default JSON format.
+
 ## When To Use
 
 - The user asks to create, edit, disable, or remove recurring routines.
@@ -28,7 +33,19 @@ python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROO
 ### list_routines
 
 ```bash
+# JSON output (default, for programmatic use)
 python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROOT" list --include-disabled
+
+# Table output (for human display)
+python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROOT" list --format table
+```
+
+Table output example:
+
+```
+ID                    Title                     Schedule        State       Enabled   Skill             Next Run
+────────────────────  ────────────────────────  ──────────────  ──────────  ────────  ────────────────  ────────────────────────
+routine_86e85e59      每日新闻简报               1d              pending     True      -                 2026-03-05T09:10:42
 ```
 
 ### add_routine (periodic — fixed time of day, use cron)
@@ -83,6 +100,26 @@ python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROO
   --next-run-at "2026-02-14T08:00:00+08:00"
 ```
 
+### add_routine (skill-bound with scanner gate)
+
+For routines that trigger a skill and optionally gate execution on a scanner:
+
+```bash
+python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROOT" add \
+  --title "会话变化分析" \
+  --description "当会话发生变化时，分析潜在问题" \
+  --schedule "30m" \
+  --skill "memory-review" \
+  --scanner "session" \
+  --min-execution-interval "2h" \
+  --execution-mode "isolated" \
+  --source "manual"
+```
+
+- `--skill`: The skill to invoke when the routine fires.
+- `--scanner`: Scanner gate type; the routine only executes if the scanner detects changes.
+- `--min-execution-interval`: Minimum interval between actual skill executions (e.g. `2h`), even if the scanner triggers more frequently.
+
 ### update_routine
 
 ```bash
@@ -106,9 +143,16 @@ Hard delete:
 python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROOT" remove --id "routine_abcd1234" --hard
 ```
 
+## Frequency Constraints
+
+- **Schedules under 30 minutes** (e.g. `2m`, `5m`, `15m`) **require** `--skill` and `--scanner` flags. Without a scanner gate, the routine executes a full LLM conversation on every cycle — expensive and produces duplicate messages.
+- Without `--scanner`, no deduplication occurs — the task runs unconditionally every cycle.
+- `--min-execution-interval` provides additional throttle: even if the scanner detects changes, the skill will not run more frequently than this interval.
+
 ## Safety Notes
 
 - Always `list` before `add` to avoid duplicate routines.
 - For destructive operations (`--hard`), confirm user intent first.
 - Keep `execution_mode` explicit: `inline` for short tasks, `isolated` for long/complex tasks.
 - `execution_mode=auto` is supported and will be inferred by framework heuristics.
+- High-frequency schedules (`< 30m`) without `--skill` and `--scanner` are rejected to prevent runaway LLM execution.

@@ -34,8 +34,9 @@ def cmd_init(args):
         config = load_config()  # mutable copy for save_config
         agents = config.setdefault("everbot", {}).setdefault("agents", {})
         if args.agent not in agents:
+            workspace_path = str(user_data.get_agent_dir(args.agent))
             agents[args.agent] = {
-                "workspace": f"~/.alfred/agents/{args.agent}",
+                "workspace": workspace_path,
                 "heartbeat": {
                     "enabled": True,
                     "interval": 30,
@@ -43,7 +44,7 @@ def cmd_init(args):
                 },
             }
             save_config(config)
-            print(f"已注册到配置: ~/.alfred/config.yaml")
+            print(f"已注册到配置: {user_data.config_path}")
         else:
             print(f"配置中已存在 agent: {args.agent}")
     else:

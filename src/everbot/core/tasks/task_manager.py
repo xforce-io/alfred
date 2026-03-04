@@ -14,6 +14,8 @@ from zoneinfo import ZoneInfo
 from enum import Enum
 from typing import List, Optional, Dict, Any
 
+from croniter import croniter
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,6 +44,10 @@ class Task:
     max_retry: int = 3
     error_message: Optional[str] = None
     created_at: Optional[str] = None
+    # Reflection skill fields
+    skill: Optional[str] = None  # Skill name (e.g., "memory-review")
+    scanner: Optional[str] = None  # Optional scanner gate type (e.g., "session")
+    min_execution_interval: Optional[str] = None  # Optional min interval between skill executions
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -186,17 +192,14 @@ def _compute_next_run(
                  "d": timedelta(days=amount)}[unit]
         return (now_local + delta).isoformat()
 
-    # Try croniter for cron expressions
-    try:
-        from croniter import croniter
-        cron = croniter(schedule, now_local)
-        next_dt = cron.get_next(datetime)
-        if next_dt.tzinfo is None:
-            next_dt = next_dt.replace(tzinfo=tz)
-        return next_dt.isoformat()
-    except Exception:
-        logger.debug("croniter unavailable or invalid schedule: %s", schedule)
-        return None
+    # Cron expression (croniter is a hard dependency)
+    if not croniter.is_valid(schedule):
+        raise ValueError(f"Invalid cron expression: {schedule!r}")
+    cron = croniter(schedule, now_local)
+    next_dt = cron.get_next(datetime)
+    if next_dt.tzinfo is None:
+        next_dt = next_dt.replace(tzinfo=tz)
+    return next_dt.isoformat()
 
 
 def parse_iso_datetime(s: str) -> Optional[datetime]:
@@ -273,28 +276,25 @@ def update_task_state(
         task.last_run_at = now.isoformat()
         task.retry = 0
         task.error_message = None
-        # Re-arm scheduled tasks unconditionally.  Previously the state
-        # reset was inside `if next_run:`, so when _compute_next_run
-        # failed (e.g. croniter unavailable) the task stayed in "done"
-        # and get_due_tasks never picked it up again.
         if task.schedule:
-            task.state = TaskState.PENDING.value  # re-arm for next cycle
-            next_run = _compute_next_run(task.schedule, now, task.timezone)
-            if next_run:
-                task.next_run_at = next_run
+            task.state = TaskState.PENDING.value
+            task.next_run_at = _compute_next_run(task.schedule, now, task.timezone)
+        elif task.skill:
+            # Skill tasks re-arm to PENDING; scheduling controlled by scan_interval
+            task.state = TaskState.PENDING.value
     elif new_state == TaskState.FAILED:
         task.error_message = error_message
         task.retry += 1
         if task.retry < task.max_retry:
-            # Re-arm as pending for retry
+            # Re-arm as pending for retry with exponential backoff
+            backoff_seconds = min(2 ** (task.retry - 1) * 30, 3600)  # 30s, 60s, 120s, ... max 1h
             task.state = TaskState.PENDING.value
+            task.next_run_at = (now + timedelta(seconds=backoff_seconds)).isoformat()
         elif task.schedule:
             # Scheduled task: reset retry counter and re-arm for next cycle
             task.retry = 0
             task.state = TaskState.PENDING.value
-            next_run = _compute_next_run(task.schedule, now, task.timezone)
-            if next_run:
-                task.next_run_at = next_run
+            task.next_run_at = _compute_next_run(task.schedule, now, task.timezone)
         else:
             task.state = TaskState.FAILED.value
 
@@ -371,9 +371,7 @@ def heal_stuck_scheduled_tasks(
             task.retry = 0
             task.state = TaskState.PENDING.value
             task.error_message = None
-            next_run = _compute_next_run(task.schedule, now, task.timezone)
-            if next_run:
-                task.next_run_at = next_run
+            task.next_run_at = _compute_next_run(task.schedule, now, task.timezone)
             healed += 1
             logger.info(
                 "Healed stuck scheduled task %s (%s): re-armed as pending, next_run=%s",
@@ -383,9 +381,7 @@ def heal_stuck_scheduled_tasks(
             # Safety net: a scheduled task should never stay in "done"
             # (update_task_state re-arms it).  If it does, recover here.
             task.state = TaskState.PENDING.value
-            next_run = _compute_next_run(task.schedule, now, task.timezone)
-            if next_run:
-                task.next_run_at = next_run
+            task.next_run_at = _compute_next_run(task.schedule, now, task.timezone)
             healed += 1
             logger.info(
                 "Healed stuck done task %s (%s): re-armed as pending, next_run=%s",

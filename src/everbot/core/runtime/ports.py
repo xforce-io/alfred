@@ -64,6 +64,15 @@ class HeartbeatSessionPort(Protocol):
 
     async def migrate_legacy_sessions_for_agent(self, agent_name: str) -> bool: ...
 
+    # --- Activity -------------------------------------------------------------
+
+    def get_last_activity_time(self, agent_name: str) -> Optional[float]:
+        """Return Unix timestamp of the last user activity on the primary session.
+
+        Returns None when no activity has been recorded yet.
+        """
+        ...
+
     # --- Metrics --------------------------------------------------------------
 
     def record_metric(self, name: str, delta: float = ...) -> None: ...

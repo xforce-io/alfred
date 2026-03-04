@@ -108,6 +108,17 @@ async def demo_session_management():
         def __init__(self, name):
             self.name = name
             self.executor = MockExecutor()
+            self.snapshot = MockSnapshot(self.executor)
+
+    class MockSnapshot:
+        def __init__(self, executor):
+            self._executor = executor
+
+        def export_portable_session(self):
+            return {
+                "history_messages": self._executor.context.get_history_messages(),
+                "variables": dict(self._executor.context._variables),
+            }
 
     class MockExecutor:
         def __init__(self):
@@ -119,6 +130,9 @@ async def demo_session_management():
             self._messages = []
 
         def get_variable(self, name):
+            return self._variables.get(name)
+
+        def get_var_value(self, name):
             return self._variables.get(name)
 
         def set_variable(self, name, value):

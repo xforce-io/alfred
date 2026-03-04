@@ -189,6 +189,32 @@ class MemoryMerger:
             updated_count=updated_count,
         )
 
+    def merge_entries(
+        self,
+        entry_a: MemoryEntry,
+        entry_b: MemoryEntry,
+        merged_content: str,
+    ) -> MemoryEntry:
+        """Merge two entries into one new entry.
+
+        The new entry gets:
+        - score = max(a, b)
+        - activation_count = sum(a, b)
+        - category from the higher-scored entry
+        - new ID
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        return MemoryEntry(
+            id=new_id(),
+            content=merged_content,
+            category=entry_a.category if entry_a.score >= entry_b.score else entry_b.category,
+            score=max(entry_a.score, entry_b.score),
+            created_at=min(entry_a.created_at, entry_b.created_at),
+            last_activated=now,
+            activation_count=entry_a.activation_count + entry_b.activation_count,
+            source_session=entry_a.source_session or entry_b.source_session,
+        )
+
     @staticmethod
     def _find_duplicate(
         content: str,

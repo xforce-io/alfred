@@ -83,6 +83,27 @@ class SessionManager:
         self._metrics: Dict[str, float] = {}
         self._metrics_lock = threading.Lock()
 
+    def get_last_activity_time(self, agent_name: str) -> Optional[float]:
+        """Return Unix timestamp of the last user activity on the primary session.
+
+        Reads the persisted ``updated_at`` field of the primary session file.
+        Returns ``None`` when the session does not exist or has no timestamp.
+        """
+        session_id = self.get_primary_session_id(agent_name)
+        session_path = self.persistence._get_session_path(session_id)
+        if not session_path.exists():
+            return None
+        try:
+            raw = json.loads(session_path.read_text(encoding="utf-8"))
+            updated_at = raw.get("updated_at")
+            parsed = self._parse_iso_datetime(updated_at)
+            if parsed is None:
+                return None
+            return parsed.timestamp()
+        except Exception:
+            logger.debug("Failed to read updated_at for %s", session_id, exc_info=True)
+            return None
+
     def record_metric(self, name: str, delta: float = 1.0) -> None:
         """Increment one runtime metric counter."""
         key = str(name or "").strip()
@@ -219,19 +240,51 @@ class SessionManager:
 
     @staticmethod
     def _extract_context_trace(agent: Any) -> Dict[str, Any]:
-        """Extract a JSON-serializable context trace from agent if available."""
+        """Extract a JSON-serializable context trace from agent if available.
+
+        When the trace reports estimated_output_tokens=0 but the agent actually
+        produced visible output (tool calls and/or text responses), we estimate
+        token count from history to avoid under-reporting.
+        """
         if agent is None or not hasattr(agent, "get_execution_trace"):
             return {}
         try:
             raw_trace = agent.get_execution_trace()
-            if isinstance(raw_trace, dict):
-                return raw_trace
             if isinstance(raw_trace, str):
                 parsed = json.loads(raw_trace)
-                return parsed if isinstance(parsed, dict) else {}
+                trace = parsed if isinstance(parsed, dict) else {}
+            elif isinstance(raw_trace, dict):
+                trace = raw_trace
+            else:
+                return {}
         except Exception:
             return {}
-        return {}
+
+        # --- Fix under-reported output tokens ---
+        # When the first LLM turn is thinking-only (0 visible output tokens)
+        # but subsequent turns produce tool calls + text, the trace snapshot
+        # only captures turn-1's count.  Estimate from history instead.
+        if trace.get("estimated_output_tokens", -1) == 0:
+            try:
+                portable = agent.snapshot.export_portable_session()
+                history = portable.get("history_messages", [])
+                estimated = 0
+                for msg in history:
+                    if not isinstance(msg, dict):
+                        continue
+                    if msg.get("role") != "assistant":
+                        continue
+                    content = msg.get("content", "")
+                    if content:
+                        estimated += len(content) // 2  # rough char-to-token
+                    if msg.get("tool_calls"):
+                        estimated += len(msg["tool_calls"]) * 20  # per tool call overhead
+                if estimated > 0:
+                    trace["estimated_output_tokens"] = estimated
+            except Exception:
+                pass
+
+        return trace
 
     async def update_atomic(
         self,
@@ -374,14 +427,21 @@ class SessionManager:
                 else None
             )
 
-            # --- Content-based dedup for consecutive identical user messages ---
-            if (
-                msg_role == "user"
-                and last_msg is not None
-                and last_msg.get("role") == "user"
-                and last_msg.get("content") == msg_obj.get("content")
-            ):
-                return  # duplicate user message, skip
+            # --- Content-based dedup for recent identical user messages ---
+            # Check the last N user messages to catch non-consecutive duplicates
+            # (e.g. same message re-sent 8 min apart due to frontend retry),
+            # but not the full history — users may legitimately repeat messages
+            # like "你好" across different conversation contexts.
+            _DEDUP_WINDOW = 5
+            if msg_role == "user":
+                incoming_content = msg_obj.get("content")
+                recent_user_msgs = [
+                    m for m in session_data.history_messages
+                    if isinstance(m, dict) and m.get("role") == "user"
+                ][-_DEDUP_WINDOW:]
+                for existing in recent_user_msgs:
+                    if existing.get("content") == incoming_content:
+                        return  # duplicate user message, skip
 
             # --- Heartbeat/deferred assistant after unanswered user question ---
             msg_source = (msg_obj.get("metadata") or {}).get("source", "")

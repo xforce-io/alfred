@@ -49,6 +49,11 @@ def _is_internal_content(content: str) -> bool:
     return False
 
 
+class IntegrityError(Exception):
+    """Raised when a memory review operation violates entropy constraints."""
+    pass
+
+
 class MemoryManager:
     """Unified interface for memory operations.
 
@@ -124,6 +129,91 @@ class MemoryManager:
             "total": len(merge_result.entries),
         }
         logger.info("Memory processing complete: %s", stats)
+        return stats
+
+    def load_entries(self) -> List[MemoryEntry]:
+        """Load all memory entries from store."""
+        return self.store.load()
+
+    def apply_review(self, review: dict) -> dict:
+        """Apply a review result from memory-review skill.
+
+        The review dict may contain:
+        - merge_pairs: list of {id_a, id_b, merged_content}
+        - deprecate_ids: list of entry IDs to deprecate (score *= 0.3)
+        - reinforce_ids: list of entry IDs to reinforce
+        - refined_entries: list of {id, content} for in-place content updates
+
+        Returns stats dict. Raises IntegrityError if entries increase.
+        """
+        import fcntl  # Unix-only; project targets Linux/macOS
+
+        lock_path = self.store.memory_path.with_suffix(".md.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+        stats = {"merged": 0, "deprecated": 0, "reinforced": 0, "refined": 0}
+
+        with open(lock_path, "w") as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                entries = self.store.load()
+                entries_before = len(entries)
+                entry_map = {e.id: e for e in entries}
+
+                # 1. Merge pairs
+                for pair in review.get("merge_pairs", []):
+                    id_a = pair.get("id_a", "")
+                    id_b = pair.get("id_b", "")
+                    merged_content = pair.get("merged_content", "")
+                    if id_a not in entry_map or id_b not in entry_map:
+                        logger.warning("Merge pair references missing ID: %s, %s", id_a, id_b)
+                        continue
+                    merged = self.merger.merge_entries(
+                        entry_map[id_a], entry_map[id_b], merged_content
+                    )
+                    del entry_map[id_a]
+                    del entry_map[id_b]
+                    entry_map[merged.id] = merged
+                    stats["merged"] += 1
+
+                # 2. Deprecate
+                for eid in review.get("deprecate_ids", []):
+                    if eid not in entry_map:
+                        logger.warning("Deprecate references missing ID: %s", eid)
+                        continue
+                    entry_map[eid].score *= 0.3
+                    stats["deprecated"] += 1
+
+                # 3. Reinforce
+                for eid in review.get("reinforce_ids", []):
+                    if eid not in entry_map:
+                        logger.warning("Reinforce references missing ID: %s", eid)
+                        continue
+                    self.merger.reinforce(entry_map[eid])
+                    stats["reinforced"] += 1
+
+                # 4. Refine (in-place content update)
+                for item in review.get("refined_entries", []):
+                    eid = item.get("id", "")
+                    content = item.get("content", "")
+                    if eid not in entry_map:
+                        logger.warning("Refine references missing ID: %s", eid)
+                        continue
+                    entry_map[eid].content = content
+                    stats["refined"] += 1
+
+                result_entries = list(entry_map.values())
+
+                # Integrity check: entries should not increase
+                if len(result_entries) > entries_before:
+                    raise IntegrityError(
+                        f"Review should not increase entries: {entries_before} → {len(result_entries)}"
+                    )
+
+                self.store.save(result_entries)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+
         return stats
 
     def get_prompt_memories(self, top_k: int = 20) -> str:
