@@ -22,6 +22,11 @@ class UserDataManager:
     """
 
     def __init__(self, alfred_home: Optional[Path] = None):
+        import os
+        if alfred_home is None:
+            env_home = os.environ.get("ALFRED_HOME")
+            if env_home:
+                alfred_home = Path(env_home).expanduser()
         self.alfred_home = alfred_home or Path("~/.alfred").expanduser()
 
     # --- 路径属性 ---
