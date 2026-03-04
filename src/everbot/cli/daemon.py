@@ -228,6 +228,7 @@ class EverBotDaemon:
 
         snapshot = {
             "status": "running" if self._running else "stopped",
+            "project_root": os.environ.get("ALFRED_PROJECT_ROOT", ""),
             "pid": self._pid,
             "started_at": self._started_at,
             "timestamp": datetime.now().isoformat(),

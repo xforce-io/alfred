@@ -13,6 +13,7 @@ if [[ -f "${HOME}/.env.secrets" ]]; then
 fi
 
 export PYTHONPATH="${PROJECT_ROOT}"
+export ALFRED_PROJECT_ROOT="${PROJECT_ROOT}"
 
 # Activate virtual environment if it exists
 if [[ -f "${PROJECT_ROOT}/.venv/bin/activate" ]]; then
