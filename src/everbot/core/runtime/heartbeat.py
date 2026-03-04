@@ -115,6 +115,8 @@ If not, reply with `HEARTBEAT_OK`.
 3. New routines should start from the next schedule cycle.
 4. Avoid duplicates by checking existing routines first (use `routine_cli.py list`).
 5. Use `routine_cli.py` CLI commands (via `_bash`) to manage routines. Never edit HEARTBEAT.md directly.
+6. **Never attempt to fix task state** (state, next_run_at, retry) via CLI. The runtime automatically heals stuck tasks. If you see a task with anomalous state, ignore it — do NOT call `routine_cli.py update` to fix state/schedule. Report it once in your response, then move on.
+7. If a CLI operation fails, do NOT retry the same command in the same heartbeat turn. Report the error and reply `HEARTBEAT_OK`.
 """
 
     def __init__(
@@ -1270,29 +1272,18 @@ If not, reply with `HEARTBEAT_OK`.
             header = f"[系统心跳 - {datetime.now().strftime('%Y-%m-%d %H:%M')}]"
             if mode == "corrupted":
                 parse_error = ""
-                raw_json = ""
                 if parse_result and parse_result.status == ParseStatus.CORRUPTED:
                     parse_error = parse_result.parse_error or ""
-                    raw_json = parse_result.raw_json_content or ""
-                snapshot_summary = self._render_snapshot_summary()
+                # .bak auto-recovery is handled by RoutineManager._load_task_list.
+                # Don't ask LLM to fix the file — previous attempts caused repair
+                # loops (77 retries over 35h). Just report and move on.
                 return f"""
 {header}
 
-⚠️ HEARTBEAT.md 的 JSON 任务块解析失败。
+⚠️ HEARTBEAT.md 的 JSON 任务块解析失败（{parse_error or 'unknown error'}）。
+系统将尝试从备份自动恢复。无需手动修复。
 
-错误信息:
-{parse_error or "(unknown parse error)"}
-
-原始 JSON 内容:
-```json
-{raw_json}
-```
-
-最近快照摘要:
-{snapshot_summary}
-
-请先诊断并修复 HEARTBEAT.md 的任务结构。修复后再继续常规心跳任务。
-如果确认无需修复，回复 "HEARTBEAT_OK"。
+回复 "HEARTBEAT_OK"。
 """
 
             if mode == "reflect":

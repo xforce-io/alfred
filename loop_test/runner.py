@@ -54,6 +54,7 @@ class TestCase:
     query: str
     expectation: str
     max_loops: Optional[int] = None
+    cleanup_cmd: Optional[str] = None  # Shell command to run between iterations
 
 
 @dataclass
@@ -188,6 +189,7 @@ def load_cases(path: Path) -> list[TestCase]:
             query=item["query"],
             expectation=item["expectation"],
             max_loops=item.get("max_loops"),
+            cleanup_cmd=item.get("cleanup_cmd"),
         ))
     return cases
 
@@ -209,8 +211,18 @@ async def run_case(cfg: Config, case: TestCase, rlog: RunLogger) -> CaseResult:
         print(f"\n  {_YELLOW}--- Iteration {iteration}/{max_loops} ---{_RESET}")
         rlog.log(case.id, "iteration_start", iteration=iteration)
 
-        # Step 0: Restart agent between iterations
+        # Step 0: Cleanup + restart agent between iterations
         if iteration > 1:
+            # Run cleanup command to remove test artifacts (e.g., routines
+            # created in prior iteration) so the test is idempotent.
+            if case.cleanup_cmd:
+                try:
+                    import subprocess as _sp
+                    _sp.run(case.cleanup_cmd, shell=True, timeout=10, capture_output=True)
+                    rlog.log(case.id, "cleanup", status="ok", cmd=case.cleanup_cmd)
+                except Exception as exc:
+                    rlog.log(case.id, "cleanup", status="error", error=str(exc))
+
             try:
                 await restart_agent(cfg)
                 rlog.log(case.id, "agent_restart", status="ok")

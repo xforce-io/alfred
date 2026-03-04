@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import fcntl
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -60,13 +62,38 @@ class RoutineManager:
     def _read_content(self) -> str:
         if not self.heartbeat_path.exists():
             return self.DEFAULT_CONTENT
-        return self.heartbeat_path.read_text(encoding="utf-8")
+        try:
+            return self.heartbeat_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            raise ValueError("HEARTBEAT.md contains invalid UTF-8 bytes")
 
     def _load_task_list(self) -> tuple[str, TaskList]:
         content = self._read_content()
         parsed = parse_heartbeat_md(content)
         if parsed.status == ParseStatus.CORRUPTED:
-            raise ValueError("HEARTBEAT.md task block is corrupted")
+            # Auto-recover from .bak if available, instead of staying broken
+            # indefinitely (production: 95 heartbeats over 35h reported anomaly).
+            bak_path = self.heartbeat_path.with_suffix(
+                self.heartbeat_path.suffix + ".bak"
+            )
+            if bak_path.exists():
+                logger.warning(
+                    "HEARTBEAT.md corrupted; recovering from %s", bak_path,
+                )
+                try:
+                    bak_content = bak_path.read_text(encoding="utf-8")
+                    bak_parsed = parse_heartbeat_md(bak_content)
+                    if bak_parsed.status == ParseStatus.OK and bak_parsed.task_list:
+                        # Restore the good backup over the corrupted file
+                        SessionPersistence.atomic_save(
+                            self.heartbeat_path, bak_content.encode("utf-8"),
+                        )
+                        content = bak_content
+                        parsed = bak_parsed
+                except Exception:
+                    logger.exception("Failed to recover from .bak")
+            if parsed.status == ParseStatus.CORRUPTED:
+                raise ValueError("HEARTBEAT.md task block is corrupted")
         if parsed.status == ParseStatus.OK and parsed.task_list is not None:
             task_list = parsed.task_list
         else:
@@ -76,9 +103,30 @@ class RoutineManager:
         return content, task_list
 
     def _save_task_list(self, base_content: str, task_list: TaskList) -> None:
+        """Persist task list with file-level lock to prevent concurrent corruption.
+
+        Production bug: rapid CLI calls (3 in 24s) caused a read-modify-write
+        race that corrupted HEARTBEAT.md with invalid control characters.
+        """
         task_list.version = max(2, int(float(task_list.version or 0)))
-        updated = write_task_block(base_content, task_list)
-        SessionPersistence.atomic_save(self.heartbeat_path, updated.encode("utf-8"))
+        # File lock prevents concurrent read-modify-write races between
+        # heartbeat runtime and CLI processes writing to the same file.
+        lock_path = self.heartbeat_path.with_suffix(
+            self.heartbeat_path.suffix + ".lock"
+        )
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "w") as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                # Re-read inside lock to get the latest markdown structure,
+                # so we don't overwrite concurrent changes to non-task sections.
+                fresh_content = self._read_content()
+                updated = write_task_block(fresh_content, task_list)
+                SessionPersistence.atomic_save(
+                    self.heartbeat_path, updated.encode("utf-8"),
+                )
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
 
     @staticmethod
     def infer_execution_mode(
@@ -143,6 +191,9 @@ class RoutineManager:
         allow_duplicate: bool = False,
         now: Optional[datetime] = None,
         next_run_at: Optional[str] = None,
+        skill: Optional[str] = None,
+        scanner: Optional[str] = None,
+        min_execution_interval: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Add one routine and persist task block."""
         title = str(title or "").strip()
@@ -188,6 +239,13 @@ class RoutineManager:
                 if self._dedupe_key(existing) == new_key:
                     raise ValueError("duplicate routine detected")
 
+        if min_execution_interval is not None:
+            if not re.fullmatch(r"\d+[mhd]", min_execution_interval.strip()):
+                raise ValueError(
+                    f"Invalid min_execution_interval: {min_execution_interval!r}. "
+                    "Use e.g. '30m', '2h', '1d'."
+                )
+
         if next_run_at is not None:
             computed_next_run = next_run_at
         elif schedule:
@@ -207,6 +265,9 @@ class RoutineManager:
             next_run_at=computed_next_run,
             timeout_seconds=timeout_value,
             created_at=now_dt.isoformat(),
+            skill=skill,
+            scanner=scanner,
+            min_execution_interval=min_execution_interval,
         )
         task_list.tasks.append(task)
         self._save_task_list(content, task_list)

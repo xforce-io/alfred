@@ -9,6 +9,11 @@ tags: [routine, heartbeat, scheduler]
 
 Manage structured routines stored in `HEARTBEAT.md` JSON task block.
 
+## Agent Guidelines
+
+- When the user asks "有哪些任务" / "列出任务" / "show routines", always use `--format table` for human-readable output.
+- When programmatically parsing routine data, use the default JSON format.
+
 ## When To Use
 
 - The user asks to create, edit, disable, or remove recurring routines.
@@ -28,7 +33,19 @@ python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROO
 ### list_routines
 
 ```bash
+# JSON output (default, for programmatic use)
 python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROOT" list --include-disabled
+
+# Table output (for human display)
+python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROOT" list --format table
+```
+
+Table output example:
+
+```
+ID                    Title                     Schedule        State       Enabled   Skill             Next Run
+────────────────────  ────────────────────────  ──────────────  ──────────  ────────  ────────────────  ────────────────────────
+routine_86e85e59      每日新闻简报               1d              pending     True      -                 2026-03-05T09:10:42
 ```
 
 ### add_routine (periodic — fixed time of day, use cron)
@@ -82,6 +99,26 @@ python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROO
   --description "Summarize overnight updates" \
   --next-run-at "2026-02-14T08:00:00+08:00"
 ```
+
+### add_routine (skill-bound with scanner gate)
+
+For routines that trigger a skill and optionally gate execution on a scanner:
+
+```bash
+python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROOT" add \
+  --title "会话变化分析" \
+  --description "当会话发生变化时，分析潜在问题" \
+  --schedule "30m" \
+  --skill "memory-review" \
+  --scanner "session" \
+  --min-execution-interval "2h" \
+  --execution-mode "isolated" \
+  --source "manual"
+```
+
+- `--skill`: The skill to invoke when the routine fires.
+- `--scanner`: Scanner gate type; the routine only executes if the scanner detects changes.
+- `--min-execution-interval`: Minimum interval between actual skill executions (e.g. `2h`), even if the scanner triggers more frequently.
 
 ### update_routine
 

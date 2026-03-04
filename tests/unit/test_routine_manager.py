@@ -87,6 +87,111 @@ def test_corrupted_heartbeat_raises_on_crud(tmp_path: Path):
         manager.list_routines()
 
 
+def test_corrupted_json_with_control_chars_detected_as_corrupted(tmp_path: Path):
+    """HEARTBEAT.md with control characters in JSON strings must be detected as corrupted.
+
+    This reproduces the production bug where Chinese titles like "每日新闻简报生成"
+    were written with wrong encoding, producing control characters (U+0000-U+001F)
+    that cause json.loads to fail with 'Invalid control character'.
+    """
+    # Manually construct JSON with raw control characters in the title value.
+    # json.dumps would escape these, but encoding corruption writes them raw.
+    corrupted_json = (
+        '{\n'
+        '  "version": 2,\n'
+        '  "tasks": [\n'
+        '    {\n'
+        '      "id": "routine_abc123",\n'
+        '      "title": "\x01\x0f\x03\x17\x05\x06",\n'
+        '      "schedule": "1h",\n'
+        '      "state": "pending"\n'
+        '    }\n'
+        '  ]\n'
+        '}'
+    )
+    content = f"# HEARTBEAT\n\n## Tasks\n\n```json\n{corrupted_json}\n```\n"
+    (tmp_path / "HEARTBEAT.md").write_text(content, encoding="utf-8")
+
+    manager = RoutineManager(tmp_path)
+    with pytest.raises(ValueError, match="corrupted"):
+        manager.list_routines()
+
+
+def test_invalid_utf8_bytes_in_heartbeat_handled_gracefully(tmp_path: Path):
+    """HEARTBEAT.md with invalid UTF-8 bytes must not crash with UnicodeDecodeError.
+
+    When a file-writing tool corrupts Chinese content encoding, the file may
+    contain raw bytes that are not valid UTF-8. _read_content() uses
+    encoding='utf-8' which would raise UnicodeDecodeError — this should be
+    caught and reported as corruption, not an unhandled crash.
+    """
+    # Write raw bytes that are valid latin-1 but invalid UTF-8 sequences
+    # This simulates a tool writing Chinese text with wrong encoding
+    header = b"# HEARTBEAT\n\n## Tasks\n\n```json\n"
+    # 0xE6 0xAF 0x8F is valid UTF-8 for '每', but truncate to make invalid UTF-8
+    invalid_json = b'{"version": 2, "tasks": [{"id": "r1", "title": "\xe6\xaf"}]}'
+    footer = b"\n```\n"
+    (tmp_path / "HEARTBEAT.md").write_bytes(header + invalid_json + footer)
+
+    manager = RoutineManager(tmp_path)
+    # Currently this raises UnicodeDecodeError (unhandled bug).
+    # The correct behavior would be ValueError("corrupted"), but we test
+    # that it at least raises *something* rather than silently returning bad data.
+    with pytest.raises((ValueError, UnicodeDecodeError)):
+        manager.list_routines()
+
+
+def test_chinese_roundtrip_through_add_and_list(tmp_path: Path):
+    """Chinese titles and descriptions must survive add → persist → list round-trip."""
+    manager = RoutineManager(tmp_path)
+    created = manager.add_routine(
+        title="每日新闻简报生成",
+        description="学术论文发现与推送",
+        schedule="1h",
+        execution_mode="inline",
+        now=datetime(2026, 2, 12, 12, 0, tzinfo=timezone.utc),
+    )
+    assert created["title"] == "每日新闻简报生成"
+    assert created["description"] == "学术论文发现与推送"
+
+    # Re-read from disk and verify Chinese is preserved
+    listed = manager.list_routines()
+    assert len(listed) == 1
+    assert listed[0]["title"] == "每日新闻简报生成"
+    assert listed[0]["description"] == "学术论文发现与推送"
+
+    # Also verify the raw file content is valid UTF-8 with correct Chinese
+    raw = (tmp_path / "HEARTBEAT.md").read_text(encoding="utf-8")
+    assert "每日新闻简报生成" in raw
+    assert "学术论文发现与推送" in raw
+
+
+def test_chinese_roundtrip_through_parse_and_write(tmp_path: Path):
+    """write_task_block + parse_heartbeat_md must preserve Chinese characters."""
+    from src.everbot.core.tasks.task_manager import Task, TaskList, write_task_block
+
+    task_list = TaskList(version=2, tasks=[
+        Task(
+            id="routine_test01",
+            title="每日投资信号推送",
+            description="每天早上推送投资吸引子信号",
+            schedule="1d",
+        ),
+    ])
+    content = write_task_block("# HEARTBEAT\n", task_list)
+
+    # Verify raw content has Chinese, not escaped unicode
+    assert "每日投资信号推送" in content
+    assert "\\u" not in content  # ensure_ascii=False should prevent escaping
+
+    # Verify round-trip parse
+    parsed = parse_heartbeat_md(content)
+    assert parsed.status == ParseStatus.OK
+    assert parsed.task_list is not None
+    assert parsed.task_list.tasks[0].title == "每日投资信号推送"
+    assert parsed.task_list.tasks[0].description == "每天早上推送投资吸引子信号"
+
+
 def test_add_routine_auto_mode_infers_isolated_for_long_description(tmp_path: Path):
     manager = RoutineManager(tmp_path)
     created = manager.add_routine(
@@ -218,3 +323,125 @@ def test_add_routine_no_default_timezone_without_schedule(tmp_path: Path):
     )
     # timezone should remain unset (None or empty)
     assert not created.get("timezone")
+
+
+# ===========================================================================
+# P0: HEARTBEAT.md corruption - file lock + .bak recovery
+# ===========================================================================
+
+
+def test_concurrent_save_does_not_corrupt(tmp_path: Path):
+    """Concurrent _save_task_list calls must not corrupt HEARTBEAT.md.
+
+    Reproduces the production bug where rapid CLI updates (3 calls in 24s)
+    caused file corruption due to read-modify-write without a file lock.
+    """
+    import concurrent.futures
+
+    manager = RoutineManager(tmp_path)
+    # Seed with some tasks
+    for i in range(3):
+        manager.add_routine(
+            title=f"Task {i}",
+            schedule=f"{i + 1}h",
+            execution_mode="inline",
+            now=datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc),
+        )
+
+    errors = []
+
+    def update_task(task_idx: int, iteration: int):
+        try:
+            m = RoutineManager(tmp_path)
+            tasks = m.list_routines()
+            if task_idx < len(tasks):
+                m.update_routine(
+                    tasks[task_idx]["id"],
+                    description=f"updated by thread {task_idx} iter {iteration}",
+                )
+        except Exception as exc:
+            errors.append(str(exc))
+
+    # Simulate concurrent updates from multiple processes
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        futures = []
+        for iteration in range(5):
+            for task_idx in range(3):
+                futures.append(pool.submit(update_task, task_idx, iteration))
+        concurrent.futures.wait(futures)
+
+    # After all concurrent writes, file must still be parseable
+    final_manager = RoutineManager(tmp_path)
+    routines = final_manager.list_routines()
+    assert len(routines) == 3, f"Expected 3 routines, got {len(routines)}; errors: {errors}"
+
+
+def test_corrupted_heartbeat_recovers_from_bak(tmp_path: Path):
+    """When HEARTBEAT.md is corrupted, _load_task_list should auto-recover from .bak.
+
+    Reproduces: after corruption, 95 heartbeats reported anomaly for 35 hours
+    because there was no auto-recovery mechanism.
+    """
+    manager = RoutineManager(tmp_path)
+    manager.add_routine(
+        title="Recoverable task",
+        schedule="1h",
+        now=datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc),
+    )
+
+    # Verify the task is persisted
+    hb_path = tmp_path / "HEARTBEAT.md"
+    bak_path = tmp_path / "HEARTBEAT.md.bak"
+
+    # Save a good copy as .bak (simulating atomic_save's rotation)
+    good_content = hb_path.read_bytes()
+    bak_path.write_bytes(good_content)
+
+    # Now corrupt the main file
+    hb_path.write_text("# HEARTBEAT\n```json\n{invalid corrupted\n```\n", encoding="utf-8")
+
+    # _load_task_list should recover from .bak instead of raising
+    recovered_manager = RoutineManager(tmp_path)
+    routines = recovered_manager.list_routines()
+    assert len(routines) == 1
+    assert routines[0]["title"] == "Recoverable task"
+
+
+def test_invalid_utf8_raises_valueerror_not_unicode_error(tmp_path: Path):
+    """_read_content must raise ValueError (not UnicodeDecodeError) for invalid UTF-8.
+
+    This strengthens test_invalid_utf8_bytes_in_heartbeat_handled_gracefully
+    to require the correct exception type for proper error handling upstream.
+    """
+    header = b"# HEARTBEAT\n\n## Tasks\n\n```json\n"
+    invalid_json = b'{"version": 2, "tasks": [{"id": "r1", "title": "\xe6\xaf"}]}'
+    footer = b"\n```\n"
+    (tmp_path / "HEARTBEAT.md").write_bytes(header + invalid_json + footer)
+
+    manager = RoutineManager(tmp_path)
+    with pytest.raises(ValueError):
+        manager.list_routines()
+
+
+def test_min_execution_interval_validation(tmp_path: Path):
+    """Invalid min_execution_interval format must be rejected."""
+    manager = RoutineManager(tmp_path)
+    with pytest.raises(ValueError, match="Invalid min_execution_interval"):
+        manager.add_routine(
+            title="Bad interval",
+            schedule="1h",
+            min_execution_interval="abc",
+        )
+
+    # Valid formats should work
+    created = manager.add_routine(
+        title="Good interval",
+        schedule="1h",
+        skill="memory-review",
+        scanner="session",
+        min_execution_interval="2h",
+        now=datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc),
+    )
+    assert created["min_execution_interval"] == "2h"
+    assert created["skill"] == "memory-review"
+    assert created["scanner"] == "session"

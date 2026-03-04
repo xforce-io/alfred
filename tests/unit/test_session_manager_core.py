@@ -750,6 +750,99 @@ class TestUserMessageContentDedup:
             "Consecutive identical user messages should be collapsed."
         )
 
+    @pytest.mark.asyncio
+    async def test_non_consecutive_duplicate_user_message_rejected(self, tmp_path: Path):
+        """Production bug: same user message sent 8 minutes apart (separated by
+        assistant reply + tool calls) is NOT deduplicated because the current
+        code only checks consecutive identical user messages.
+
+        Scenario from production trajectory:
+            11:11:59 user: "帮我注册一个定时任务：每两分钟检测一次会话..."
+            11:12:xx assistant: (processes request, registers routine)
+            11:19:50 user: "帮我注册一个定时任务：每两分钟检测一次会话..."  ← DUPLICATE
+
+        The second submission should be rejected because it's identical content
+        within a short time window, but inject_history_message only deduplicates
+        CONSECUTIVE identical user messages (last_msg.role == "user" && same content).
+        When an assistant reply sits in between, the duplicate slips through.
+        """
+        manager = SessionManager(tmp_path)
+        session_id = "web_session_test_agent"
+
+        duplicate_content = "帮我注册一个定时任务：每两分钟检测一次会话，看会话轨迹是否有问题"
+
+        # First: user sends the message
+        await manager.inject_history_message(
+            session_id, {"role": "user", "content": duplicate_content}
+        )
+        # Agent processes and replies
+        await manager.inject_history_message(
+            session_id, {"role": "assistant", "content": "好的，我已经帮你注册了定时任务。"}
+        )
+        # 8 minutes later: same message re-sent (frontend glitch / network retry)
+        await manager.inject_history_message(
+            session_id, {"role": "user", "content": duplicate_content}
+        )
+
+        loaded = await manager.load_session(session_id)
+        assert loaded is not None
+        duplicate_messages = [
+            m for m in loaded.history_messages
+            if m.get("role") == "user" and m.get("content") == duplicate_content
+        ]
+        assert len(duplicate_messages) == 1, (
+            f"Expected 1 user message, got {len(duplicate_messages)}. "
+            "Non-consecutive duplicate user message was not rejected. "
+            "inject_history_message only deduplicates CONSECUTIVE identical user "
+            "messages — when an assistant reply separates them, the duplicate "
+            "slips through, causing 'duplicate routine detected' errors downstream."
+        )
+
+
+    @pytest.mark.asyncio
+    async def test_distant_duplicate_user_message_allowed(self, tmp_path: Path):
+        """User messages identical to very old history should NOT be blocked.
+
+        The dedup window is limited to the last N user messages so that
+        legitimate repeated messages (e.g. "你好") are not silently dropped.
+        """
+        manager = SessionManager(tmp_path)
+        session_id = "web_session_test_agent"
+
+        repeated_content = "你好"
+
+        # First occurrence
+        await manager.inject_history_message(
+            session_id, {"role": "user", "content": repeated_content}
+        )
+        await manager.inject_history_message(
+            session_id, {"role": "assistant", "content": "你好！"}
+        )
+        # Inject enough distinct user messages to push the first "你好" out of
+        # the dedup window (window = 5)
+        for i in range(6):
+            await manager.inject_history_message(
+                session_id, {"role": "user", "content": f"问题 {i}"}
+            )
+            await manager.inject_history_message(
+                session_id, {"role": "assistant", "content": f"回答 {i}"}
+            )
+        # Now send "你好" again — should be accepted (outside dedup window)
+        await manager.inject_history_message(
+            session_id, {"role": "user", "content": repeated_content}
+        )
+
+        loaded = await manager.load_session(session_id)
+        assert loaded is not None
+        hello_messages = [
+            m for m in loaded.history_messages
+            if m.get("role") == "user" and m.get("content") == repeated_content
+        ]
+        assert len(hello_messages) == 2, (
+            f"Expected 2 '你好' messages, got {len(hello_messages)}. "
+            "Distant duplicate user messages outside the dedup window should be allowed."
+        )
+
 
 class TestInjectHistoryMessageDedup:
     """inject_history_message should deduplicate messages with the same
@@ -1025,3 +1118,129 @@ class TestHeartbeatResponseDoesNotPollutePrimaryConversation:
                         f"user question at [{i}]. This breaks conversation coherence."
                     )
                 break
+
+
+# ===========================================================================
+# 16. Isolated job results must not pollute primary session restore context
+# ===========================================================================
+
+class TestIsolatedJobResultNotRestoredToLLMContext:
+    """Production bug: isolated routine results (heartbeat-injected assistant
+    messages) are persisted in primary session's history_messages. When
+    restore_to_agent loads the session for the next chat turn, these heartbeat
+    messages appear in the LLM context as if they were normal conversation
+    messages.
+
+    Example from production history_messages:
+        [0] user: "你好"
+        [1] assistant: "[此消息由心跳系统自动执行例行任务生成] MicroStrategy 吸引子分析..."
+        [2] user: "帮我搜索 Anthropic 新闻"
+        [3] assistant: "[此消息由心跳系统自动执行例行任务生成] 会话轨迹健康检测..."
+
+    The LLM sees these heartbeat results as part of the conversation, which:
+    - Confuses the model about what the user is asking
+    - Wastes context window with irrelevant heartbeat output
+    - Can cause the model to reference heartbeat analysis in unrelated replies
+    """
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_messages_filtered_during_restore(self, tmp_path: Path):
+        """restore_to_agent should filter out heartbeat-injected messages so
+        the LLM only sees real user-assistant conversation turns."""
+        manager = SessionManager(tmp_path)
+        session_id = "web_session_test_agent"
+
+        # Build a session with heartbeat messages mixed into conversation
+        session_data = _make_session_data(
+            session_id=session_id,
+            history_messages=[
+                {"role": "user", "content": "你好"},
+                {"role": "assistant", "content": "你好！有什么可以帮助你的？"},
+                # Heartbeat result injected by _inject_result_to_primary_history
+                {"role": "assistant", "content": "(acknowledged)"},
+                {"role": "user", "content": "[Background notification follows]"},
+                {
+                    "role": "assistant",
+                    "content": "[此消息由心跳系统自动执行例行任务生成]\n\nMicroStrategy 吸引子分析：当前价格...",
+                    "metadata": {"source": "heartbeat", "run_id": "hb_001"},
+                },
+                # Another real conversation turn
+                {"role": "user", "content": "帮我搜索 Anthropic 最新的新闻"},
+                # Another heartbeat injection
+                {"role": "assistant", "content": "(acknowledged)"},
+                {"role": "user", "content": "[Background notification follows]"},
+                {
+                    "role": "assistant",
+                    "content": "[此消息由心跳系统自动执行例行任务生成]\n\n会话轨迹健康检测结果...",
+                    "metadata": {"source": "heartbeat", "run_id": "hb_002"},
+                },
+            ],
+        )
+        await manager.persistence.save_data(session_data)
+
+        agent = _make_mock_agent()
+        await manager.restore_to_agent(agent, session_data)
+
+        # Check what was passed to import_portable_session
+        call_args = agent.snapshot.import_portable_session.call_args
+        portable = call_args[0][0]
+        restored_history = portable["history_messages"]
+
+        # Heartbeat messages should NOT be in the restored context
+        heartbeat_messages = [
+            m for m in restored_history
+            if isinstance(m, dict)
+            and isinstance(m.get("metadata"), dict)
+            and m["metadata"].get("source") == "heartbeat"
+        ]
+        assert len(heartbeat_messages) == 0, (
+            f"Found {len(heartbeat_messages)} heartbeat message(s) in restored history. "
+            "Heartbeat-injected messages should be filtered during restore_to_agent "
+            "to prevent isolated job results from polluting the LLM conversation context."
+        )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_placeholder_messages_filtered_during_restore(self, tmp_path: Path):
+        """The '(acknowledged)' and '[Background notification follows]' placeholder
+        messages inserted by inject_history_message should also be filtered during
+        restore, as they are artifacts of the heartbeat injection mechanism."""
+        manager = SessionManager(tmp_path)
+        session_id = "web_session_test_agent"
+
+        session_data = _make_session_data(
+            session_id=session_id,
+            history_messages=[
+                {"role": "user", "content": "你好"},
+                {"role": "assistant", "content": "你好！"},
+                {"role": "assistant", "content": "(acknowledged)"},
+                {"role": "user", "content": "[Background notification follows]"},
+                {
+                    "role": "assistant",
+                    "content": "[此消息由心跳系统自动执行例行任务生成]\n\n分析结果...",
+                    "metadata": {"source": "heartbeat", "run_id": "hb_003"},
+                },
+                {"role": "user", "content": "继续"},
+            ],
+        )
+        await manager.persistence.save_data(session_data)
+
+        agent = _make_mock_agent()
+        await manager.restore_to_agent(agent, session_data)
+
+        call_args = agent.snapshot.import_portable_session.call_args
+        portable = call_args[0][0]
+        restored_history = portable["history_messages"]
+
+        # Check no placeholder artifacts remain
+        placeholder_messages = [
+            m for m in restored_history
+            if isinstance(m, dict) and m.get("content") in (
+                "(acknowledged)", "[Background notification follows]"
+            )
+        ]
+        assert len(placeholder_messages) == 0, (
+            f"Found {len(placeholder_messages)} placeholder message(s) in restored history. "
+            "'(acknowledged)' and '[Background notification follows]' are artifacts of "
+            "heartbeat injection and should be filtered during restore to keep the LLM "
+            "context clean."
+        )

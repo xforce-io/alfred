@@ -102,7 +102,9 @@ def check_answer(
 
     raw = _run_claude(
         prompt, command=command, flags=flags, timeout=timeout,
-        extra_args=["--max-turns", "3"],
+        # 3 turns was insufficient for evaluating complex agent responses
+        # (production: first loop test iteration was a false-negative FAIL).
+        extra_args=["--max-turns", "5"],
     )
     parsed = _parse_json_result(raw)
 
