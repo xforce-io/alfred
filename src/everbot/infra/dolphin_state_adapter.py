@@ -29,7 +29,7 @@ class DolphinStateAdapter:
         max_messages: Optional[int],
     ) -> List[Dict[str, Any]]:
         """Compact history while preserving tool-call sequence validity."""
-        from ..core.session.compressor import SUMMARY_TAG
+        from ..core.models.constants import SUMMARY_TAG
 
         messages = [msg for msg in history_messages if isinstance(msg, dict)]
         if not max_messages or max_messages <= 0:

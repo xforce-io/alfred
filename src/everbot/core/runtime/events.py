@@ -71,7 +71,7 @@ async def emit(
             if asyncio.iscoroutine(res):
                 tasks.append(res)
         except Exception as e:
-            logger.error(f"Error in event subscriber: {e}")
+            logger.error("Error in event subscriber: %s", e)
 
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)

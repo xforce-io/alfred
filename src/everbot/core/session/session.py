@@ -14,6 +14,7 @@ import logging
 
 from .compressor import SessionCompressor
 from . import session_ids as _sid
+from . import session_mailbox as _mailbox
 
 logger = logging.getLogger(__name__)
 
@@ -155,13 +156,7 @@ class SessionManager:
         now_utc: datetime,
         stale_after: timedelta = timedelta(hours=24),
     ) -> bool:
-        """Return True when event is marked stale and exceeds max age."""
-        if not bool(event.get("suppress_if_stale", False)):
-            return False
-        event_ts = self._parse_iso_datetime(event.get("timestamp"))
-        if event_ts is None:
-            return False
-        return (now_utc - event_ts) > stale_after
+        return _mailbox.is_mailbox_event_stale(event, now_utc=now_utc, stale_after=stale_after)
 
     def _get_lock(self, session_id: str) -> asyncio.Lock:
         """获取 Session 锁（懒创建，带 LRU 淘汰，event loop 安全）"""
@@ -198,7 +193,7 @@ class SessionManager:
             await asyncio.wait_for(lock.acquire(), timeout=timeout)
             return True
         except asyncio.TimeoutError:
-            logger.warning(f"获取 Session 锁超时: {session_id}")
+            logger.warning("获取 Session 锁超时: %s", session_id)
             return False
 
     def release_session(self, session_id: str):
@@ -321,197 +316,33 @@ class SessionManager:
             lock.release()
 
     async def deposit_mailbox_event(
-        self,
-        session_id: str,
-        event: Dict[str, Any],
-        *,
-        timeout: float = 5.0,
-        blocking: bool = True,
+        self, session_id: str, event: Dict[str, Any],
+        *, timeout: float = 5.0, blocking: bool = True,
     ) -> bool:
         """Append one event into session mailbox atomically with idempotency."""
-        if not isinstance(event, dict):
-            return False
-
-        event_obj = dict(event)
-        now_utc = datetime.now(timezone.utc)
-        if not isinstance(event_obj.get("timestamp"), str) or not str(event_obj.get("timestamp")).strip():
-            event_obj["timestamp"] = now_utc.isoformat()
-        event_id = str(event_obj.get("event_id") or "").strip()
-        dedupe_key = str(event_obj.get("dedupe_key") or "").strip()
-        inserted = {"value": False}
-        dropped_duplicate = {"value": False}
-        dropped_stale = {"value": False}
-
-        def _mutator(session_data: SessionData) -> None:
-            if not isinstance(session_data.mailbox, list):
-                session_data.mailbox = []
-            mailbox = [e for e in session_data.mailbox if isinstance(e, dict)]
-
-            if event_id:
-                existing_ids = {str(e.get("event_id") or "").strip() for e in mailbox}
-                if event_id in existing_ids:
-                    dropped_duplicate["value"] = True
-                    return
-
-            if self._is_mailbox_event_stale(event_obj, now_utc=now_utc):
-                dropped_stale["value"] = True
-                return
-
-            if dedupe_key:
-                filtered = []
-                removed_any = False
-                for existing in mailbox:
-                    existing_key = str(existing.get("dedupe_key") or "").strip()
-                    if existing_key and existing_key == dedupe_key:
-                        removed_any = True
-                        continue
-                    filtered.append(existing)
-                mailbox = filtered
-                if removed_any:
-                    dropped_duplicate["value"] = True
-
-            mailbox.append(dict(event_obj))
-            session_data.mailbox = mailbox
-            inserted["value"] = True
-
-        updated = await self.update_atomic(session_id, _mutator, timeout=timeout, blocking=blocking)
-        if updated is None:
-            return False
-        if inserted["value"]:
-            self.record_metric("mailbox_deposit_count")
-        if dropped_duplicate["value"]:
-            self.record_metric("mailbox_dedup_drop_count")
-        if dropped_stale["value"]:
-            self.record_metric("mailbox_stale_drop_count")
-        return True
+        return await _mailbox.deposit_mailbox_event(
+            self, session_id, event, timeout=timeout, blocking=blocking,
+        )
 
     async def inject_history_message(
-        self,
-        session_id: str,
-        message: dict,
-        *,
-        timeout: float = 5.0,
-        blocking: bool = True,
+        self, session_id: str, message: dict,
+        *, timeout: float = 5.0, blocking: bool = True,
     ) -> bool:
-        """Append one message into session history_messages atomically.
-
-        Used by HeartbeatRunner to inject deliverable results into the
-        primary session's conversation history so that subsequent chat
-        turns see the heartbeat output as a real assistant message.
-        """
-        if not isinstance(message, dict):
-            return False
-
-        msg_obj = dict(message)
-
-        def _mutator(session_data: SessionData) -> None:
-            if not isinstance(session_data.history_messages, list):
-                session_data.history_messages = []
-
-            # --- Dedup by run_id ---
-            run_id = (msg_obj.get("metadata") or {}).get("run_id")
-            if run_id:
-                for existing in session_data.history_messages:
-                    if (
-                        isinstance(existing, dict)
-                        and isinstance(existing.get("metadata"), dict)
-                        and existing["metadata"].get("run_id") == run_id
-                    ):
-                        return  # already injected
-
-            msg_role = msg_obj.get("role")
-            last_msg = (
-                session_data.history_messages[-1]
-                if session_data.history_messages
-                and isinstance(session_data.history_messages[-1], dict)
-                else None
-            )
-
-            # --- Content-based dedup for recent identical user messages ---
-            # Check the last N user messages to catch non-consecutive duplicates
-            # (e.g. same message re-sent 8 min apart due to frontend retry),
-            # but not the full history — users may legitimately repeat messages
-            # like "你好" across different conversation contexts.
-            _DEDUP_WINDOW = 5
-            if msg_role == "user":
-                incoming_content = msg_obj.get("content")
-                recent_user_msgs = [
-                    m for m in session_data.history_messages
-                    if isinstance(m, dict) and m.get("role") == "user"
-                ][-_DEDUP_WINDOW:]
-                for existing in recent_user_msgs:
-                    if existing.get("content") == incoming_content:
-                        return  # duplicate user message, skip
-
-            # --- Heartbeat/deferred assistant after unanswered user question ---
-            msg_source = (msg_obj.get("metadata") or {}).get("source", "")
-            if (
-                msg_role == "assistant"
-                and msg_source in ("heartbeat", "deferred_result")
-                and last_msg is not None
-                and last_msg.get("role") == "user"
-            ):
-                # Insert placeholder so heartbeat doesn't look like a reply
-                session_data.history_messages.append(
-                    {"role": "assistant", "content": "(acknowledged)"}
-                )
-                session_data.history_messages.append(
-                    {"role": "user", "content": "[Background notification follows]"}
-                )
-
-            # --- Consecutive user message guard ---
-            elif (
-                msg_role == "user"
-                and last_msg is not None
-                and last_msg.get("role") == "user"
-            ):
-                session_data.history_messages.append(
-                    {"role": "assistant", "content": "(acknowledged)"}
-                )
-
-            session_data.history_messages.append(msg_obj)
-
-        updated = await self.update_atomic(session_id, _mutator, timeout=timeout, blocking=blocking)
-        if updated is not None:
-            self.record_metric("history_inject_count")
-        return updated is not None
+        """Append one message into session history_messages atomically."""
+        return await _mailbox.inject_history_message(
+            self, session_id, message, timeout=timeout, blocking=blocking,
+        )
 
     async def ack_mailbox_events(
-        self,
-        session_id: str,
-        event_ids: list[str],
-        *,
-        timeout: float = 5.0,
-        blocking: bool = True,
+        self, session_id: str, event_ids: list[str],
+        *, timeout: float = 5.0, blocking: bool = True,
         lock_already_held: bool = False,
     ) -> bool:
         """Remove consumed mailbox events by event_id atomically."""
-        ids = {str(eid).strip() for eid in event_ids if str(eid).strip()}
-        if not ids:
-            return True
-
-        def _mutator(session_data: SessionData) -> None:
-            if not isinstance(session_data.mailbox, list):
-                session_data.mailbox = []
-            session_data.mailbox = [
-                e for e in session_data.mailbox
-                if not isinstance(e, dict) or str(e.get("event_id") or "").strip() not in ids
-            ]
-
-        if lock_already_held:
-            # Pass lock_already_held to persistence so it skips flock
-            # acquisition.  Without this, the flock self-deadlocks on
-            # macOS when the caller already holds a flock via a
-            # separate fd (e.g. core_service.process_message).
-            updated = await self.persistence.update_atomic(
-                session_id, _mutator, timeout=timeout, blocking=blocking,
-                lock_already_held=True,
-            )
-        else:
-            updated = await self.update_atomic(session_id, _mutator, timeout=timeout, blocking=blocking)
-        if updated is not None:
-            self.record_metric("mailbox_drain_count", float(len(ids)))
-        return updated is not None
+        return await _mailbox.ack_mailbox_events(
+            self, session_id, event_ids, timeout=timeout, blocking=blocking,
+            lock_already_held=lock_already_held,
+        )
 
     def file_lock(self, session_id: str, **kwargs):
         """Expose file-level lock for callers that need longer lock spans."""
@@ -685,7 +516,7 @@ class SessionManager:
         updated = await self.update_atomic(session_id, _mutator, timeout=10.0, blocking=True)
         if updated is None:
             raise TimeoutError(f"Failed to persist session {session_id}: lock not acquired")
-        print(f"[Chat] Session persisted.")
+        logger.debug("Session persisted: %s", session_id)
 
     async def load_session(self, session_id: str) -> Optional[SessionData]:
         """加载 Session"""
@@ -854,7 +685,7 @@ class SessionManager:
         self._agent_metadata.pop(session_id, None)
         self._timeline_events.pop(session_id, None)
         await self.persistence.delete(session_id)
-        logger.info(f"Session 已重置: {session_id}")
+        logger.info("Session 已重置: %s", session_id)
 
     @staticmethod
     def _clear_agent_context(agent: Any) -> None:

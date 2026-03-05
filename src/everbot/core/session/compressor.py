@@ -15,8 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Summary marker used to identify injected summary messages.
-SUMMARY_TAG = "[context_summary]"
+from ..models.constants import SUMMARY_TAG  # noqa: F401 — re-exported
 
 # ── Tunables ──────────────────────────────────────────────────────────
 COMPRESS_THRESHOLD = 80  # trigger compression when history exceeds this

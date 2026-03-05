@@ -236,10 +236,10 @@ class SessionPersistence:
             serialized = self._serialize_session(data.to_dict())
             self.atomic_save(session_path, serialized)
 
-            logger.debug(f"Session 已保存: {session_id}")
+            logger.debug("Session 已保存: %s", session_id)
 
         except Exception as e:
-            logger.error(f"保存 Session 失败: {e}")
+            logger.error("保存 Session 失败: %s", e)
             raise
 
     def _postprocess_loaded_data(self, data: Dict) -> SessionData:
@@ -434,7 +434,7 @@ class SessionPersistence:
         session_file = self._get_session_path(session_id)
         if session_file.exists():
             session_file.unlink()
-            logger.info(f"Session 文件已删除: {session_id}")
+            logger.info("Session 文件已删除: %s", session_id)
 
     async def restore_to_agent(self, agent: Any, session_data: SessionData):
         """
@@ -505,9 +505,9 @@ class SessionPersistence:
                     report.get("dropped_fields", []),
                 )
 
-            logger.info(f"Session 已恢复: {session_data.session_id}, "
-                       f"历史消息: {len(compacted_history)} 条")
+            logger.info("Session 已恢复: %s, 历史消息: %s 条",
+                       session_data.session_id, len(compacted_history))
 
         except Exception as e:
-            logger.error(f"恢复 Session 失败: {e}")
+            logger.error("恢复 Session 失败: %s", e)
             raise

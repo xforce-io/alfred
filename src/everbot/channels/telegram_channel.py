@@ -34,7 +34,9 @@ from ..core.runtime import events
 from ..core.runtime.control import get_local_status
 from ..core.session.session import SessionManager
 from ..infra.user_data import get_user_data_manager
-from ..web.services.agent_service import AgentService
+from ..core.agent.agent_service import AgentService
+from . import telegram_commands
+from . import telegram_media
 
 logger = logging.getLogger(__name__)
 
@@ -340,39 +342,7 @@ class TelegramChannel:
     @staticmethod
     def _extract_media_text(msg: dict) -> str:
         """Extract a structured text description from a media message."""
-        parts: list[str] = []
-        caption = (msg.get("caption") or "").strip()
-
-        if msg.get("voice"):
-            v = msg["voice"]
-            parts.append(f"[语音消息 duration={v.get('duration', 0)}s]")
-        if msg.get("audio"):
-            a = msg["audio"]
-            info = a.get("title") or a.get("file_name") or ""
-            parts.append(f"[音频: {info} duration={a.get('duration', 0)}s]")
-        if msg.get("photo"):
-            parts.append("[图片]")
-        if msg.get("video"):
-            v = msg["video"]
-            parts.append(f"[视频 duration={v.get('duration', 0)}s]")
-        if msg.get("document"):
-            d = msg["document"]
-            fname = d.get("file_name") or "unknown"
-            mime = d.get("mime_type") or ""
-            parts.append(f"[文件: {fname} ({mime})]" if mime else f"[文件: {fname}]")
-        if msg.get("sticker"):
-            s = msg["sticker"]
-            parts.append(f"[贴纸: {s.get('emoji', '')}]")
-
-        urls = _extract_urls(caption, msg.get("caption_entities") or [])
-
-        tag = " ".join(parts)
-        pieces = [p for p in [tag, caption] if p]
-        for u in urls:
-            if u not in caption:
-                pieces.append(u)
-
-        return "\n".join(pieces).strip()
+        return telegram_media.extract_media_text(msg, _extract_urls)
 
     # ------------------------------------------------------------------
     # Update routing
@@ -466,139 +436,7 @@ class TelegramChannel:
     async def _handle_command(
         self, chat_id: str, text: str, raw_msg: dict
     ) -> None:
-        parts = text.split(maxsplit=1)
-        cmd = parts[0].lower().split("@")[0]  # strip @botname suffix
-        arg = parts[1].strip() if len(parts) > 1 else ""
-
-        if cmd == "/start":
-            await self._cmd_start(chat_id, arg)
-        elif cmd == "/ping":
-            await self._cmd_ping(chat_id)
-        elif cmd == "/status":
-            await self._cmd_status(chat_id)
-        elif cmd == "/heartbeat":
-            await self._cmd_heartbeat(chat_id)
-        elif cmd == "/tasks":
-            await self._cmd_tasks(chat_id)
-        elif cmd == "/new":
-            await self._cmd_new(chat_id)
-        elif cmd == "/help":
-            await self._cmd_help(chat_id)
-        else:
-            await self._send_message(chat_id, f"Unknown command: {cmd}\nType /help for available commands.")
-
-    async def _cmd_start(self, chat_id: str, agent_name: str) -> None:
-        if not agent_name:
-            agent_name = self._default_agent
-        if not agent_name:
-            await self._send_message(
-                chat_id, "Usage: /start <agent_name>\nExample: /start daily_insight"
-            )
-            return
-        self._bindings[chat_id] = agent_name
-        self._save_bindings()
-        await self._send_message(chat_id, f"Bound to agent: {agent_name}")
-
-    async def _cmd_ping(self, chat_id: str) -> None:
-        agent = self._bindings.get(chat_id, "(none)")
-        global_depth = self._inbound_queue.qsize()
-        chat_depth = 0
-        if chat_id in self._chat_queues:
-            chat_depth = self._chat_queues[chat_id].qsize()
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        lines = [
-            "pong",
-            f"Agent: {agent}",
-            f"Queue: global={global_depth}, chat={chat_depth}",
-            f"Time: {now}",
-        ]
-        await self._send_message(chat_id, "\n".join(lines))
-
-    async def _cmd_status(self, chat_id: str) -> None:
-        status = get_local_status(self._user_data)
-        running = status.get("running", False)
-        pid = status.get("pid")
-        snapshot = status.get("snapshot") or {}
-        agents = snapshot.get("agents", [])
-        started = snapshot.get("started_at", "N/A")
-
-        lines = [
-            f"Status: {'running' if running else 'stopped'}",
-            f"PID: {pid or 'N/A'}",
-            f"Started: {started}",
-            f"Agents: {', '.join(agents) if agents else 'none'}",
-        ]
-        await self._send_message(chat_id, "\n".join(lines))
-
-    async def _cmd_heartbeat(self, chat_id: str) -> None:
-        status = get_local_status(self._user_data)
-        snapshot = status.get("snapshot") or {}
-        heartbeats = snapshot.get("heartbeats", {})
-
-        if not heartbeats:
-            await self._send_message(chat_id, "No heartbeat results available.")
-            return
-
-        lines = []
-        for agent_name, hb in heartbeats.items():
-            ts = hb.get("timestamp", "N/A")
-            preview = hb.get("result_preview", "")
-            lines.append(f"[{agent_name}] {ts}\n{preview}")
-
-        await self._send_message(chat_id, "\n\n".join(lines))
-
-    async def _cmd_tasks(self, chat_id: str) -> None:
-        status = get_local_status(self._user_data)
-        snapshot = status.get("snapshot") or {}
-        task_states = snapshot.get("task_states", {})
-
-        if not task_states:
-            await self._send_message(chat_id, "No task data available.")
-            return
-
-        lines = []
-        for agent_name, ts_data in task_states.items():
-            tasks = ts_data.get("tasks", []) if isinstance(ts_data, dict) else []
-            lines.append(f"[{agent_name}] {len(tasks)} task(s)")
-            for t in tasks[:10]:  # limit display
-                title = t.get("title") or t.get("id", "?")
-                state = t.get("state", "?")
-                lines.append(f"  - {title} ({state})")
-
-        await self._send_message(chat_id, "\n".join(lines))
-
-    async def _cmd_new(self, chat_id: str) -> None:
-        """Clear conversation history for the current chat, starting a fresh session."""
-        agent_name = self._bindings.get(chat_id)
-        if not agent_name:
-            await self._send_message(chat_id, "No agent bound. Use /start <agent_name> first.")
-            return
-
-        session_id = ChannelSessionResolver.resolve("telegram", agent_name, chat_id)
-        try:
-            cleared = await self._session_manager.clear_session_history(session_id)
-        except Exception as exc:
-            logger.error("Failed to clear session %s: %s", session_id, exc)
-            await self._send_message(chat_id, "Failed to clear conversation. Please try again.")
-            return
-        if cleared:
-            await self._send_message(chat_id, "Conversation cleared. Starting fresh.")
-        else:
-            await self._send_message(chat_id, "No conversation history to clear.")
-
-    async def _cmd_help(self, chat_id: str) -> None:
-        text = (
-            "EverBot Telegram Assistant\n\n"
-            "/start <agent> — Bind to an agent\n"
-            "/new — Clear history and start a fresh conversation\n"
-            "/ping — Health check (no LLM call)\n"
-            "/status — Show daemon status\n"
-            "/heartbeat — Show recent heartbeat results\n"
-            "/tasks — Show task list\n"
-            "/help — Show this help\n\n"
-            "Send any text to chat with the bound agent (conversation history is preserved)."
-        )
-        await self._send_message(chat_id, text)
+        await telegram_commands.dispatch_command(self, chat_id, text, raw_msg)
 
     # ------------------------------------------------------------------
     # Chat message handling
@@ -875,161 +713,39 @@ class TelegramChannel:
         return False
 
     # ------------------------------------------------------------------
-    # Download helpers — security hardened
+    # Download helpers — delegated to telegram_media module
     # ------------------------------------------------------------------
-
-    # Size limits (bytes)
-    _MAX_DOCUMENT_SIZE = 50 * 1024 * 1024   # 50 MB
-    _MAX_VOICE_SIZE = 20 * 1024 * 1024      # 20 MB
-    _MAX_PHOTO_SIZE = 20 * 1024 * 1024      # 20 MB
 
     @staticmethod
     def _sanitize_filename(raw: str) -> str:
-        """Strip path components and special characters to prevent path traversal."""
-        name = Path(raw).name                              # drop directory parts
-        name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)     # keep only safe chars
-        return name.strip("._-") or "unnamed"
+        return telegram_media.sanitize_filename(raw)
 
     def _safe_local_path(self, target_dir: Path, filename: str) -> Optional[Path]:
-        """Resolve the final path and verify it stays inside *target_dir*."""
-        candidate = (target_dir / filename).resolve()
-        if not str(candidate).startswith(str(target_dir.resolve())):
-            logger.warning("Path traversal attempt blocked: %s", filename)
-            return None
-        return candidate
+        return telegram_media.safe_local_path(target_dir, filename)
 
     async def _download_document(self, file_id: str, file_name: str, agent_name: str) -> Optional[str]:
-        """Download a Telegram document file and return the local path, or None on failure."""
-        if not file_id or self._client is None:
-            return None
-        try:
-            resp = await self._client.get(
-                f"{self._base_url}/getFile",
-                params={"file_id": file_id},
-            )
-            data = resp.json()
-            if not data.get("ok"):
-                logger.warning("getFile failed for %s: %s", file_id, data.get("description"))
-                return None
-            file_info = data["result"]
-            remote_path = file_info["file_path"]
-
-            # Size check (Telegram returns file_size for files ≤ 20 MB guaranteed)
-            file_size = file_info.get("file_size", 0)
-            if file_size and file_size > self._MAX_DOCUMENT_SIZE:
-                logger.warning("Document %s exceeds size limit (%d > %d), skipping",
-                               file_id, file_size, self._MAX_DOCUMENT_SIZE)
-                return None
-
-            download_url = f"{self._file_base_url}/{remote_path}"
-            resp = await self._client.get(download_url)
-            resp.raise_for_status()
-
-            if len(resp.content) > self._MAX_DOCUMENT_SIZE:
-                logger.warning("Document %s download size exceeds limit (%d), discarding",
-                               file_id, len(resp.content))
-                return None
-
-            doc_dir = self._user_data.get_agent_tmp_dir(agent_name) / "documents"
-            doc_dir.mkdir(parents=True, exist_ok=True)
-            raw_name = file_name or Path(remote_path).name or f"{file_id}"
-            safe_name = self._sanitize_filename(raw_name)
-            local_path = self._safe_local_path(doc_dir, safe_name)
-            if local_path is None:
-                return None
-            local_path.write_bytes(resp.content)
-            return str(local_path)
-        except Exception as exc:
-            logger.error("Failed to download document %s: %s", file_id, exc)
-            return None
+        """Download a Telegram document file and return the local path."""
+        target_dir = self._user_data.get_agent_tmp_dir(agent_name)
+        return await telegram_media.download_document(
+            self._client, self._base_url, self._file_base_url,
+            file_id, file_name, target_dir,
+        )
 
     async def _download_voice(self, file_id: str, agent_name: str) -> Optional[str]:
-        """Download a Telegram voice file and return the local path, or None on failure."""
-        if not file_id or self._client is None:
-            return None
-        try:
-            resp = await self._client.get(
-                f"{self._base_url}/getFile",
-                params={"file_id": file_id},
-            )
-            data = resp.json()
-            if not data.get("ok"):
-                logger.warning("getFile failed for %s: %s", file_id, data.get("description"))
-                return None
-            file_info = data["result"]
-            remote_path = file_info["file_path"]
-
-            file_size = file_info.get("file_size", 0)
-            if file_size and file_size > self._MAX_VOICE_SIZE:
-                logger.warning("Voice %s exceeds size limit (%d > %d), skipping",
-                               file_id, file_size, self._MAX_VOICE_SIZE)
-                return None
-
-            download_url = f"{self._file_base_url}/{remote_path}"
-            resp = await self._client.get(download_url)
-            resp.raise_for_status()
-
-            if len(resp.content) > self._MAX_VOICE_SIZE:
-                logger.warning("Voice %s download size exceeds limit (%d), discarding",
-                               file_id, len(resp.content))
-                return None
-
-            voice_dir = self._user_data.get_agent_tmp_dir(agent_name) / "voice"
-            voice_dir.mkdir(parents=True, exist_ok=True)
-            suffix = Path(remote_path).suffix or ".ogg"
-            safe_name = self._sanitize_filename(f"{file_id}{suffix}")
-            local_path = self._safe_local_path(voice_dir, safe_name)
-            if local_path is None:
-                return None
-            local_path.write_bytes(resp.content)
-            return str(local_path)
-        except Exception as exc:
-            logger.error("Failed to download voice file %s: %s", file_id, exc)
-            return None
+        """Download a Telegram voice file and return the local path."""
+        target_dir = self._user_data.get_agent_tmp_dir(agent_name)
+        return await telegram_media.download_voice(
+            self._client, self._base_url, self._file_base_url,
+            file_id, target_dir,
+        )
 
     async def _download_photo(self, file_id: str, agent_name: str) -> Optional[str]:
-        """Download a Telegram photo and return the local path, or None on failure."""
-        if not file_id or self._client is None:
-            return None
-        try:
-            resp = await self._client.get(
-                f"{self._base_url}/getFile",
-                params={"file_id": file_id},
-            )
-            data = resp.json()
-            if not data.get("ok"):
-                logger.warning("getFile failed for %s: %s", file_id, data.get("description"))
-                return None
-            file_info = data["result"]
-            remote_path = file_info["file_path"]
-
-            file_size = file_info.get("file_size", 0)
-            if file_size and file_size > self._MAX_PHOTO_SIZE:
-                logger.warning("Photo %s exceeds size limit (%d > %d), skipping",
-                               file_id, file_size, self._MAX_PHOTO_SIZE)
-                return None
-
-            download_url = f"{self._file_base_url}/{remote_path}"
-            resp = await self._client.get(download_url)
-            resp.raise_for_status()
-
-            if len(resp.content) > self._MAX_PHOTO_SIZE:
-                logger.warning("Photo %s download size exceeds limit (%d), discarding",
-                               file_id, len(resp.content))
-                return None
-
-            photo_dir = self._user_data.get_agent_tmp_dir(agent_name) / "photos"
-            photo_dir.mkdir(parents=True, exist_ok=True)
-            suffix = Path(remote_path).suffix or ".jpg"
-            safe_name = self._sanitize_filename(f"{file_id}{suffix}")
-            local_path = self._safe_local_path(photo_dir, safe_name)
-            if local_path is None:
-                return None
-            local_path.write_bytes(resp.content)
-            return str(local_path)
-        except Exception as exc:
-            logger.error("Failed to download photo %s: %s", file_id, exc)
-            return None
+        """Download a Telegram photo and return the local path."""
+        target_dir = self._user_data.get_agent_tmp_dir(agent_name)
+        return await telegram_media.download_photo(
+            self._client, self._base_url, self._file_base_url,
+            file_id, target_dir,
+        )
 
     async def _send_chat_action(self, chat_id: str, action: str = "typing") -> None:
         if self._client is None:

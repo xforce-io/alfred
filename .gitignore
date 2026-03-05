@@ -38,6 +38,7 @@ log/
 
 # Backup files
 *.bak
+*.backup
 
 # IDE / Editor
 .vscode/

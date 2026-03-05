@@ -48,10 +48,10 @@ class WorkspaceLoader:
         if file_path.exists():
             try:
                 content = file_path.read_text(encoding="utf-8")
-                logger.debug(f"加载 {filename} ({len(content)} 字符)")
+                logger.debug("加载 %s (%d 字符)", filename, len(content))
                 return content
             except Exception as e:
-                logger.warning(f"读取 {filename} 失败: {e}")
+                logger.warning("读取 %s 失败: %s", filename, e)
                 return None
         return None
 
@@ -137,7 +137,8 @@ class WorkspaceLoader:
         if instructions.user_md:
             parts.append(f"# 用户画像\n\n{instructions.user_md}")
 
-        # 用 MemoryManager 加载结构化记忆
+        # NOTE: Lazy import from core — workspace prompt assembly needs memory
+        # business logic. Accepted as pragmatic boundary crossing with fallback.
         try:
             from ..core.memory.manager import MemoryManager
             memory_prompt = MemoryManager(self.workspace_path / "MEMORY.md").get_prompt_memories(top_k=15)

@@ -125,7 +125,7 @@ class TestCommands:
 
     @pytest.mark.asyncio
     async def test_status(self, channel):
-        with patch("src.everbot.channels.telegram_channel.get_local_status") as mock_status:
+        with patch("src.everbot.channels.telegram_commands.get_local_status") as mock_status:
             mock_status.return_value = {
                 "running": True,
                 "pid": 1234,
@@ -141,7 +141,7 @@ class TestCommands:
 
     @pytest.mark.asyncio
     async def test_heartbeat_no_data(self, channel):
-        with patch("src.everbot.channels.telegram_channel.get_local_status") as mock_status:
+        with patch("src.everbot.channels.telegram_commands.get_local_status") as mock_status:
             mock_status.return_value = {"snapshot": {"heartbeats": {}}}
             await channel._handle_command("111", "/heartbeat", {})
             msg = channel._send_message.call_args[0][1]
@@ -149,7 +149,7 @@ class TestCommands:
 
     @pytest.mark.asyncio
     async def test_tasks_no_data(self, channel):
-        with patch("src.everbot.channels.telegram_channel.get_local_status") as mock_status:
+        with patch("src.everbot.channels.telegram_commands.get_local_status") as mock_status:
             mock_status.return_value = {"snapshot": {"task_states": {}}}
             await channel._handle_command("111", "/tasks", {})
             msg = channel._send_message.call_args[0][1]

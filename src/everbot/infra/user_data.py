@@ -135,7 +135,7 @@ class UserDataManager:
                 try:
                     files[filename] = file_path.read_text(encoding="utf-8")
                 except Exception as e:
-                    logger.warning(f"读取 {filename} 失败: {e}")
+                    logger.warning("读取 %s 失败: %s", filename, e)
                     files[filename] = None
             else:
                 files[filename] = None
@@ -154,7 +154,7 @@ class UserDataManager:
             self.trajectories_dir,
         ]:
             dir_path.mkdir(parents=True, exist_ok=True)
-            logger.debug(f"确保目录存在: {dir_path}")
+            logger.debug("确保目录存在: %s", dir_path)
 
     def init_agent_workspace(self, agent_name: str):
         """
@@ -242,12 +242,12 @@ class UserDataManager:
             file_path = agent_dir / filename
             if not file_path.exists():
                 file_path.write_text(content, encoding="utf-8")
-                logger.info(f"创建文件: {file_path}")
+                logger.info("创建文件: %s", file_path)
 
         # 创建 Agent 专属技能目录
         (agent_dir / "skills").mkdir(exist_ok=True)
 
-        logger.info(f"Agent 工作区初始化完成: {agent_name}")
+        logger.info("Agent 工作区初始化完成: %s", agent_name)
 
 
 # ---------------------------------------------------------------------------

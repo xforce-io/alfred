@@ -68,7 +68,7 @@ class AgentFactory:
 
         for path in candidates:
             if path.exists():
-                logger.info(f"使用 Dolphin 配置: {path}")
+                logger.info("使用 Dolphin 配置: %s", path)
                 return str(path)
 
         logger.warning("未找到 Dolphin 配置文件，使用默认配置")
@@ -124,13 +124,13 @@ class AgentFactory:
         # 添加 agent 专属目录（最高优先级）
         if agent_skills_dir not in directories:
             directories.insert(0, agent_skills_dir)
-            logger.info(f"为 agent 添加专属 skills 目录: {agent_skills_dir}")
+            logger.info("为 agent 添加专属 skills 目录: %s", agent_skills_dir)
 
         # 确保全局 skills 目录也在列表中
         global_skills_dir = str(Path("~/.alfred/skills").expanduser())
         if global_skills_dir not in directories:
             directories.append(global_skills_dir)
-            logger.info(f"添加全局 skills 目录: {global_skills_dir}")
+            logger.info("添加全局 skills 目录: %s", global_skills_dir)
 
         # Add bundled repository skills as fallback when available.
         bundled_skills_dir = Path(__file__).resolve().parents[4] / "skills"
@@ -138,7 +138,7 @@ class AgentFactory:
             bundled_skills_dir_str = str(bundled_skills_dir)
             if bundled_skills_dir_str not in directories:
                 directories.append(bundled_skills_dir_str)
-                logger.info(f"添加仓库内置 skills 目录: {bundled_skills_dir_str}")
+                logger.info("添加仓库内置 skills 目录: %s", bundled_skills_dir_str)
 
         agent_config.resource_skills['directories'] = directories
 
@@ -179,7 +179,7 @@ class AgentFactory:
         actual_model = model_name or self.default_model or agent_config.default_llm
 
         # 2. 加载工作区指令
-        logger.info(f"创建 Agent: {agent_name}, 使用模型: {actual_model}")
+        logger.info("创建 Agent: %s, 使用模型: %s", agent_name, actual_model)
         loader = WorkspaceLoader(workspace_path)
         workspace_instructions = loader.build_system_prompt()
         workspace_instructions = self._append_runtime_paths(
@@ -215,9 +215,9 @@ class AgentFactory:
             variables.update(extra_variables)
 
         # 5. 为此 agent 创建独立的 GlobalSkills（包含专属 skills 目录）
-        logger.info(f"为 Agent {agent_name} 创建独立 GlobalSkills")
+        logger.info("为 Agent %s 创建独立 GlobalSkills", agent_name)
         agent_skills = GlobalSkills(agent_config)
-        logger.info(f"GlobalSkills 创建完成")
+        logger.info("GlobalSkills 创建完成")
 
         # 6. 创建 Agent
         agent = DolphinAgent(
@@ -231,12 +231,12 @@ class AgentFactory:
 
         # 7. 初始化
         await agent.initialize()
-        logger.info(f"Agent 已初始化: {agent_name}")
+        logger.info("Agent 已初始化: %s", agent_name)
 
         # 初始化 trajectory 记录
         trajectory_path = str(workspace_path / "tmp" / "trajectory.json")
         agent.executor.context.init_trajectory(trajectory_path, overwrite=True)
-        logger.info(f"Trajectory initialized: {trajectory_path}")
+        logger.info("Trajectory initialized: %s", trajectory_path)
 
         runtime_skills = self._extract_runtime_available_skills(agent.global_skills)
         if runtime_skills:

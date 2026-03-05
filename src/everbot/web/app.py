@@ -471,20 +471,14 @@ async def websocket_chat(websocket: WebSocket, agent_name: str, session_id: Opti
 
     Real-time conversation with streaming output
     """
-    import sys
-
     # Authenticate before accepting the WebSocket connection
     if not await verify_ws_api_key(websocket):
         await websocket.close(code=4001, reason="Unauthorized")
         return
 
-    print(f"[WebSocket Endpoint] Received connection request for agent: {agent_name}", flush=True)
-    sys.stdout.flush()
+    logger.info("WebSocket connection request for agent: %s", agent_name)
     try:
         await chat_service.handle_chat_session(websocket, agent_name, requested_session_id=session_id)
-        print(f"[WebSocket Endpoint] Session completed for agent: {agent_name}", flush=True)
+        logger.info("WebSocket session completed for agent: %s", agent_name)
     except Exception as e:
-        print(f"[WebSocket Endpoint] Error in session: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
-        sys.stdout.flush()
+        logger.exception("WebSocket session error for agent %s: %s", agent_name, e)

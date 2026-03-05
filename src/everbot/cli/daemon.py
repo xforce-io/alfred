@@ -244,7 +244,7 @@ class EverBotDaemon:
                 encoding="utf-8",
             )
         except Exception as e:
-            logger.warning(f"Failed to write status snapshot: {e}")
+            logger.warning("Failed to write status snapshot: %s", e)
 
     async def _on_heartbeat_result(self, agent_name: str, result: str):
         """心跳结果回调"""
@@ -254,7 +254,7 @@ class EverBotDaemon:
                 timestamp = datetime.now().isoformat()
                 f.write(f"[{timestamp}] [{agent_name}] {result[:200]}\n")
         except Exception as e:
-            logger.error(f"写入心跳日志失败: {e}")
+            logger.error("写入心跳日志失败: %s", e)
             return
 
         self._heartbeat_state[agent_name] = {
@@ -270,7 +270,7 @@ class EverBotDaemon:
         for agent_name, agent_config in agents_config.items():
             heartbeat_config = agent_config.get("heartbeat", {})
             if not heartbeat_config.get("enabled", False):
-                logger.info(f"Agent {agent_name} 心跳未启用")
+                logger.info("Agent %s 心跳未启用", agent_name)
                 continue
 
             workspace_path = Path(agent_config.get(
@@ -279,7 +279,7 @@ class EverBotDaemon:
             )).expanduser()
 
             if not workspace_path.exists():
-                logger.warning(f"工作区不存在，正在创建: {workspace_path}")
+                logger.warning("工作区不存在，正在创建: %s", workspace_path)
                 self.user_data.init_agent_workspace(agent_name)
 
             runner_kwargs = {
@@ -301,7 +301,7 @@ class EverBotDaemon:
             }
             runner = HeartbeatRunner(**runner_kwargs)
             self.heartbeat_runners[agent_name] = runner
-            logger.info(f"注册心跳: {agent_name} (间隔: {heartbeat_config.get('interval', 30)}分钟)")
+            logger.info("注册心跳: %s (间隔: %s分钟)", agent_name, heartbeat_config.get('interval', 30))
 
     # -- Telegram Channel ---------------------------------------------------
 
@@ -416,7 +416,7 @@ class EverBotDaemon:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error(f"守护进程异常: {e}")
+            logger.error("守护进程异常: %s", e)
             raise
         finally:
             self._running = False

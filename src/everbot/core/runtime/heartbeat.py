@@ -229,7 +229,7 @@ If not, reply with `HEARTBEAT_OK`.
             return memory_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return None
-        except Exception as e:
+        except OSError as e:
             logger.warning("Failed to read MEMORY.md: %s", e)
             return None
 
@@ -252,7 +252,7 @@ If not, reply with `HEARTBEAT_OK`.
             content = hb_path.read_text(encoding="utf-8")
             updated = write_task_block(content, task_list)
             self._write_heartbeat_file(updated)
-        except Exception as exc:
+        except (OSError, ValueError) as exc:
             logger.warning("Failed to update HEARTBEAT.md task state: %s", exc)
 
     def _write_task_snapshot(self, task_list: TaskList) -> None:
@@ -275,7 +275,7 @@ If not, reply with `HEARTBEAT_OK`.
             event.update(kwargs)
             with open(events_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(event, ensure_ascii=False) + "\n")
-        except Exception as exc:
+        except OSError as exc:
             logger.debug("Failed to write heartbeat event: %s", exc)
 
     @property
@@ -584,7 +584,7 @@ If not, reply with `HEARTBEAT_OK`.
                         attempt + 1, self.max_retries, e,
                     )
                     break
-                logger.warning(f"心跳执行失败 (尝试 {attempt + 1}/{self.max_retries}): {e}")
+                logger.warning("心跳执行失败 (尝试 %s/%s): %s", attempt + 1, self.max_retries, e)
                 if attempt < self.max_retries - 1:
                     await asyncio.sleep(5 * (attempt + 1))  # 递增等待
 
@@ -1276,7 +1276,7 @@ If not, reply with `HEARTBEAT_OK`.
         # 先从缓存获取
         agent = self.session_manager.get_cached_agent(self.session_id)
         if agent:
-            logger.debug(f"从缓存获取 Agent: {self.session_id}")
+            logger.debug("从缓存获取 Agent: %s", self.session_id)
             if session_data:
                 self.session_manager.restore_timeline(self.session_id, session_data.timeline or [])
                 await self.session_manager.restore_to_agent(agent, session_data)
@@ -1286,11 +1286,11 @@ If not, reply with `HEARTBEAT_OK`.
 
         # 尝试从持久化恢复
         if session_data:
-            logger.info(f"从持久化恢复 Agent: {self.session_id}")
+            logger.info("从持久化恢复 Agent: %s", self.session_id)
             agent = await self.agent_factory(self.agent_name, self.workspace_path)
             await self.session_manager.persistence.restore_to_agent(agent, session_data)
         else:
-            logger.info(f"创建新 Agent: {self.session_id}")
+            logger.info("创建新 Agent: %s", self.session_id)
             agent = await self.agent_factory(self.agent_name, self.workspace_path)
 
         self._bind_session_id_to_context(agent)
@@ -1371,7 +1371,7 @@ If not, reply with `HEARTBEAT_OK`.
 """
 
             return f"{header}\nHEARTBEAT_OK"
-        except Exception as e:
+        except (OSError, KeyError, ValueError) as e:
             logger.error("Failed to inject heartbeat context: %s", e)
             raise
 
@@ -1474,7 +1474,7 @@ If not, reply with `HEARTBEAT_OK`.
                 type(e).__name__,
                 str(e),
             )
-            logger.error(f"执行 Agent 失败: {e}")
+            logger.error("执行 Agent 失败: %s", e)
             raise
 
     async def _run_agent_with_override(
@@ -1513,7 +1513,7 @@ If not, reply with `HEARTBEAT_OK`.
                 type(e).__name__,
                 str(e),
             )
-            logger.error(f"执行 Agent 失败: {e}")
+            logger.error("执行 Agent 失败: %s", e)
             raise
 
     async def run_once(self):
@@ -1536,16 +1536,16 @@ If not, reply with `HEARTBEAT_OK`.
             include_isolated: If False, skip isolated tasks in heartbeat turn.
         """
         if (not force) and (not self._is_active_time()):
-            logger.debug(f"[{self.agent_name}] 非活跃时段，跳过")
+            logger.debug("[%s] 非活跃时段，跳过", self.agent_name)
             self._write_heartbeat_event("skipped", reason="inactive")
             return "HEARTBEAT_SKIPPED_INACTIVE"
 
         if (not force) and (not self._is_user_idle()):
-            logger.debug(f"[{self.agent_name}] 用户近期有活跃对话，跳过心跳")
+            logger.debug("[%s] 用户近期有活跃对话，跳过心跳", self.agent_name)
             self._write_heartbeat_event("skipped", reason="user_active")
             return "HEARTBEAT_SKIPPED_USER_ACTIVE"
 
-        logger.info(f"[{self.agent_name}] 开始心跳")
+        logger.info("[%s] 开始心跳", self.agent_name)
 
         try:
             result = await self._execute_with_retry(
@@ -1554,10 +1554,10 @@ If not, reply with `HEARTBEAT_OK`.
             )
 
             if self._should_skip_response(result):
-                logger.debug(f"[{self.agent_name}] 静默响应")
+                logger.debug("[%s] 静默响应", self.agent_name)
             else:
                 self._last_result = result
-                logger.info(f"[{self.agent_name}] 心跳结果: {result[:100]}...")
+                logger.info("[%s] 心跳结果: %s...", self.agent_name, result[:100])
 
                 if self.on_result:
                     await self._emit_result(result)
@@ -1571,13 +1571,13 @@ If not, reply with `HEARTBEAT_OK`.
                     await self._emit_result(failure_summary)
                 except Exception as callback_error:
                     logger.error("Heartbeat failure callback failed: %s", callback_error)
-            logger.error(f"[{self.agent_name}] 心跳失败: {e}")
+            logger.error("[%s] 心跳失败: %s", self.agent_name, e)
             return "HEARTBEAT_FAILED"
 
     async def start(self):
         """启动心跳循环"""
         self._running = True
-        logger.info(f"[{self.agent_name}] 心跳启动，间隔 {self.interval_minutes} 分钟")
+        logger.info("[%s] 心跳启动，间隔 %s 分钟", self.agent_name, self.interval_minutes)
 
         while self._running:
             await self.run_once()
@@ -1586,7 +1586,7 @@ If not, reply with `HEARTBEAT_OK`.
     def stop(self):
         """停止心跳"""
         self._running = False
-        logger.info(f"[{self.agent_name}] 心跳已停止")
+        logger.info("[%s] 心跳已停止", self.agent_name)
 
 
 class _SkillLLMClient:

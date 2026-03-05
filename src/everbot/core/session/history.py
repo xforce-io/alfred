@@ -55,11 +55,11 @@ class HistoryManager:
             # context.clear_history() might also not exist, let's just use set_variable to overwrite
             context.set_variable(KEY_HISTORY, trimmed_messages)
 
-            logger.info(f"裁剪 History: 归档 {len(archived_messages)} 条，保留 {len(trimmed_messages)} 条")
+            logger.info("裁剪 History: 归档 %s 条，保留 %s 条", len(archived_messages), len(trimmed_messages))
             return True
 
         except Exception as e:
-            logger.error(f"裁剪 History 失败: {e}")
+            logger.error("裁剪 History 失败: %s", e)
             return False
 
     def _archive_to_memory(self, messages: List[Dict[str, Any]]):
@@ -95,7 +95,7 @@ class HistoryManager:
             with open(self.memory_path, "a", encoding="utf-8") as f:
                 f.write("\n".join(summary_lines))
 
-            logger.info(f"已归档 {len(messages)} 条消息到 {self.memory_path}")
+            logger.info("已归档 %s 条消息到 %s", len(messages), self.memory_path)
 
         except Exception as e:
-            logger.error(f"归档消息失败: {e}")
+            logger.error("归档消息失败: %s", e)
