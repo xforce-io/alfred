@@ -19,7 +19,7 @@ _PROTECTION_DAYS = 7
 _DECAY_RATE = 0.99
 
 # Dedup parameters
-_SIMILARITY_THRESHOLD = 0.45
+_SIMILARITY_THRESHOLD = 0.35
 
 
 def _tokenize(text: str) -> Set[str]:

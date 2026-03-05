@@ -57,7 +57,8 @@ _EXTRACT_PROMPT = """\
 
 注意：
 - 每条记忆必须是关于**用户**的，而非对话内容的摘要
-- 宁缺毋滥：如果对话中没有透露用户画像信息，返回空列表
+- **严格去重**：仔细对比已有记忆，如果新提取的内容与已有记忆表达相同或相似的意思（即使措辞不同），必须放入 reinforced_ids 而非 new_memories。例如"用户偏好简洁输出"和"用户反感冗长展示"是同一个意思，不要重复提取。
+- **宁缺毋滥**：如果对话中没有透露用户画像的**全新**信息，返回空的 new_memories 列表。大多数对话不应产生新记忆。
 - importance: high=核心偏好/身份特征, medium=有用的用户信息, low=可能有用的线索
 """
 
@@ -129,7 +130,7 @@ class MemoryExtractor:
         msgs.append_message(MessageRole.USER, prompt)
 
         config = self._context.get_config()
-        model = getattr(config, "fast_llm", None) or "qwen-turbo"
+        model = getattr(config, "default_model", None) or getattr(config, "fast_llm", None) or "deepseek-chat"
 
         result = ""
         async for chunk in llm_client.mf_chat_stream(

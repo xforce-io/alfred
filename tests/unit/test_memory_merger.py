@@ -3,7 +3,7 @@
 import pytest
 from datetime import datetime, timedelta, timezone
 
-from src.everbot.core.memory.merger import MemoryMerger, MergeResult
+from src.everbot.core.memory.merger import MemoryMerger, MergeResult, token_similarity, _SIMILARITY_THRESHOLD
 from src.everbot.core.memory.models import MemoryEntry
 
 
@@ -122,6 +122,57 @@ class TestDecay:
         assert entry.score < 0.05
 
 
+class TestTokenSimilarity:
+    """Verify similarity threshold doesn't cause false merges."""
+
+    def test_identical_strings(self):
+        assert token_similarity("用户喜欢Python", "用户喜欢Python") == 1.0
+
+    def test_semantically_similar_should_match(self):
+        # Nearly the same meaning, high token overlap
+        sim = token_similarity("用户偏好简洁输出", "用户偏好简洁的输出风格")
+        assert sim >= _SIMILARITY_THRESHOLD
+
+    def test_different_python_usage_should_not_match(self):
+        # Same keyword "Python" but different meaning — must NOT merge
+        sim = token_similarity("用户用Python做数据分析", "用户用Python做后端开发")
+        assert sim < _SIMILARITY_THRESHOLD, (
+            f"Different Python use cases should not be merged (sim={sim:.3f})"
+        )
+
+    def test_completely_unrelated(self):
+        sim = token_similarity("用户喜欢跑步", "工作在金融行业")
+        assert sim < _SIMILARITY_THRESHOLD
+
+    def test_empty_string(self):
+        assert token_similarity("", "anything") == 0.0
+        assert token_similarity("", "") == 0.0
+
+
+class TestDedup:
+    """Verify merge correctly deduplicates vs keeps distinct entries."""
+
+    def test_near_duplicate_is_reinforced_not_added(self):
+        merger = MemoryMerger()
+        existing = [_make_entry(id="e1", content="用户偏好简洁输出", category="preference", score=0.6, activation_count=2)]
+        new_extractions = [
+            {"content": "用户偏好简洁的输出风格", "category": "preference", "importance": "high"},
+        ]
+        result = merger.merge(existing, new_extractions, [], source_session="s1")
+        assert result.new_count == 0, "Near-duplicate should not create new entry"
+        assert result.updated_count == 1, "Near-duplicate should reinforce existing"
+
+    def test_different_meaning_same_category_not_deduped(self):
+        merger = MemoryMerger()
+        existing = [_make_entry(id="e1", content="用户用Python做数据分析", category="fact", score=0.6)]
+        new_extractions = [
+            {"content": "用户用Python做后端开发", "category": "fact", "importance": "medium"},
+        ]
+        result = merger.merge(existing, new_extractions, [], source_session="s1")
+        assert result.new_count == 1, "Different meanings should create new entry"
+        assert result.updated_count == 0
+
+
 class TestMerge:
     """Merging new extractions, reinforcements, and existing entries."""
 
@@ -129,7 +180,7 @@ class TestMerge:
         merger = MemoryMerger()
         existing = [_make_entry(id="old1")]
         new_extractions = [
-            {"content": "新记忆", "category": "fact", "importance": "high"},
+            {"content": "用户偏好使用深色主题编辑器", "category": "fact", "importance": "high"},
         ]
         result = merger.merge(existing, new_extractions, [], source_session="s1")
         assert result.new_count == 1

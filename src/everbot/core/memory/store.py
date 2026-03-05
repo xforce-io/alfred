@@ -85,12 +85,20 @@ class MemoryStore:
 
         return entries
 
+    # Hard cap on total entries to prevent unbounded growth.
+    # Increase once consolidation logic matures.
+    MAX_ENTRIES = 30
+
     def save(self, entries: List[MemoryEntry], last_processed_count: Optional[int] = None) -> None:
         """Write entries to MEMORY.md with backup. Discards score < 0.05."""
         if last_processed_count is not None:
             self.last_processed_count = last_processed_count
         # Filter out near-zero entries
         entries = [e for e in entries if e.score >= 0.05]
+
+        # Enforce hard cap: keep top entries by score
+        if len(entries) > self.MAX_ENTRIES:
+            entries = sorted(entries, key=lambda e: e.score, reverse=True)[:self.MAX_ENTRIES]
 
         # Partition
         active = sorted([e for e in entries if e.score >= 0.2], key=lambda e: e.score, reverse=True)
