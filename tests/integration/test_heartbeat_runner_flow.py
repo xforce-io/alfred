@@ -399,16 +399,16 @@ async def test_execute_structured_tasks_uses_atomic_save(
     monkeypatch.setattr(runner, "_record_runtime_metric", MagicMock())
     monkeypatch.setattr(runner, "_write_heartbeat_event", MagicMock())
 
-    write_hb_mock = MagicMock()
-    monkeypatch.setattr(runner, "_write_heartbeat_file", write_hb_mock)
+    monkeypatch.setattr(runner._cron, "_write_event", MagicMock())
 
     result = await runner._execute_structured_tasks(
         fake_agent, hb_content, "run_123"
     )
 
     assert "task result" in result
-    # _flush_task_state writes via _write_heartbeat_file (atomic_save)
-    assert write_hb_mock.call_count >= 1
+    # CronExecutor flushes task state via RoutineManager.flush() to disk
+    disk_content = (tmp_path / "HEARTBEAT.md").read_text(encoding="utf-8")
+    assert "atomic_task" in disk_content  # task still in file after flush
 
 
 # ============================================================

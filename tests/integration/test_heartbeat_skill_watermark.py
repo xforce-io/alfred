@@ -140,8 +140,8 @@ async def test_watermark_advanced_after_successful_skill_execution(tmp_path: Pat
     fake_scanner = MagicMock()
     fake_scanner.check.return_value = fake_scan_result
 
-    runner._get_scanner = MagicMock(return_value=fake_scanner)
-    runner._invoke_skill_task = AsyncMock(return_value="skill ok")
+    runner._cron._get_scanner = MagicMock(return_value=fake_scanner)
+    runner._cron._invoke_skill = AsyncMock(return_value="skill ok")
 
     agent = AsyncMock()
     await runner._execute_structured_tasks(agent, "heartbeat content", "run-001")
@@ -164,14 +164,14 @@ async def test_scanner_gate_blocks_when_no_changes(tmp_path: Path):
         has_changes=False,
         change_summary="No new sessions since last scan",
     )
-    runner._get_scanner = MagicMock(return_value=fake_scanner)
-    runner._invoke_skill_task = AsyncMock()
+    runner._cron._get_scanner = MagicMock(return_value=fake_scanner)
+    runner._cron._invoke_skill = AsyncMock()
 
     agent = AsyncMock()
     await runner._execute_structured_tasks(agent, "heartbeat content", "run-001")
 
     # Skill should NOT have been invoked
-    runner._invoke_skill_task.assert_not_awaited()
+    runner._cron._invoke_skill.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -217,8 +217,8 @@ async def test_second_cycle_skipped_after_watermark_advanced(tmp_path: Path):
 
     fake_scanner = MagicMock()
     fake_scanner.check.side_effect = dynamic_check
-    runner._get_scanner = MagicMock(return_value=fake_scanner)
-    runner._invoke_skill_task = AsyncMock(return_value="skill ok")
+    runner._cron._get_scanner = MagicMock(return_value=fake_scanner)
+    runner._cron._invoke_skill = AsyncMock(return_value="skill ok")
 
     # Cycle 1
     _setup_runner_with_tasks(runner, tmp_path, [_make_skill_task()])
@@ -230,7 +230,7 @@ async def test_second_cycle_skipped_after_watermark_advanced(tmp_path: Path):
     await runner._execute_structured_tasks(agent, "heartbeat content", "run-002")
 
     # Skill should only have been invoked once (first cycle)
-    assert runner._invoke_skill_task.await_count == 1
+    assert runner._cron._invoke_skill.await_count == 1
     assert call_count == 2
 
 
@@ -292,8 +292,8 @@ async def test_no_self_triggering_loop_when_skill_updates_session(tmp_path: Path
 
     fake_scanner = MagicMock()
     fake_scanner.check.side_effect = realistic_scanner_check
-    runner._get_scanner = MagicMock(return_value=fake_scanner)
-    runner._invoke_skill_task = AsyncMock(return_value="skill ok")
+    runner._cron._get_scanner = MagicMock(return_value=fake_scanner)
+    runner._cron._invoke_skill = AsyncMock(return_value="skill ok")
 
     # Cycle 1: should execute
     _setup_runner_with_tasks(runner, tmp_path, [_make_skill_task()])
@@ -305,8 +305,8 @@ async def test_no_self_triggering_loop_when_skill_updates_session(tmp_path: Path
     await runner._execute_structured_tasks(agent, "heartbeat content", "run-002")
 
     # Skill should only have been invoked once — no self-triggering loop
-    assert runner._invoke_skill_task.await_count == 1, (
-        f"Skill invoked {runner._invoke_skill_task.await_count} times, expected 1. "
+    assert runner._cron._invoke_skill.await_count == 1, (
+        f"Skill invoked {runner._cron._invoke_skill.await_count} times, expected 1. "
         "Self-triggering loop detected!"
     )
     assert call_count == 2
@@ -336,8 +336,8 @@ async def test_watermark_not_advanced_on_skill_failure(tmp_path: Path):
 
     fake_scanner = MagicMock()
     fake_scanner.check.return_value = fake_scan_result
-    runner._get_scanner = MagicMock(return_value=fake_scanner)
-    runner._invoke_skill_task = AsyncMock(side_effect=RuntimeError("skill crashed"))
+    runner._cron._get_scanner = MagicMock(return_value=fake_scanner)
+    runner._cron._invoke_skill = AsyncMock(side_effect=RuntimeError("skill crashed"))
 
     agent = AsyncMock()
     await runner._execute_structured_tasks(agent, "heartbeat content", "run-001")
@@ -366,14 +366,14 @@ async def test_isolated_scanner_gate_blocks_when_no_changes(tmp_path: Path):
         has_changes=False,
         change_summary="No new sessions since last scan",
     )
-    runner._get_scanner = MagicMock(return_value=fake_scanner)
-    runner._execute_isolated_task = AsyncMock()
+    runner._cron._get_scanner = MagicMock(return_value=fake_scanner)
+    runner._cron._run_isolated_task = AsyncMock()
 
     agent = AsyncMock()
     await runner._execute_structured_tasks(agent, "heartbeat content", "run-001")
 
     # Isolated task should NOT have been executed
-    runner._execute_isolated_task.assert_not_awaited()
+    runner._cron._run_isolated_task.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -400,8 +400,8 @@ async def test_isolated_watermark_advanced_after_success(tmp_path: Path):
 
     fake_scanner = MagicMock()
     fake_scanner.check.return_value = fake_scan_result
-    runner._get_scanner = MagicMock(return_value=fake_scanner)
-    runner._execute_isolated_task = AsyncMock(return_value="isolated skill ok")
+    runner._cron._get_scanner = MagicMock(return_value=fake_scanner)
+    runner._cron._run_isolated_task = AsyncMock(return_value="isolated skill ok")
 
     agent = AsyncMock()
     await runner._execute_structured_tasks(agent, "heartbeat content", "run-001")
@@ -437,14 +437,14 @@ async def test_isolated_task_respects_min_execution_interval(tmp_path: Path):
             )
         ],
     )
-    runner._get_scanner = MagicMock(return_value=fake_scanner)
-    runner._execute_isolated_task = AsyncMock()
+    runner._cron._get_scanner = MagicMock(return_value=fake_scanner)
+    runner._cron._run_isolated_task = AsyncMock()
 
     agent = AsyncMock()
     await runner._execute_structured_tasks(agent, "heartbeat content", "run-001")
 
     # Task should be skipped due to min_execution_interval
-    runner._execute_isolated_task.assert_not_awaited()
+    runner._cron._run_isolated_task.assert_not_awaited()
 
 
 # ============================================================
@@ -489,7 +489,7 @@ def test_stuck_running_task_recovered_in_execute_once(tmp_path: Path):
     assert runner._file_mgr.heartbeat_mode == "structured_reflect"
 
     # Simulate what _execute_once does: recover + re-evaluate
-    runner._recover_stuck_running_tasks()
+    runner._routine_manager.recover_stuck_running_tasks(runner._file_mgr.task_list)
     task = runner._file_mgr.task_list.tasks[0]
 
     # _recover_stuck_running_tasks sets FAILED, then update_task_state
@@ -524,9 +524,9 @@ async def test_path_b_isolated_claimed_respects_scanner_gate(tmp_path: Path):
         has_changes=False,
         change_summary="No new sessions since last scan",
     )
-    runner._get_scanner = MagicMock(return_value=fake_scanner)
-    runner._execute_isolated_task = AsyncMock()
-    runner._write_heartbeat_event = MagicMock()
+    runner._cron._get_scanner = MagicMock(return_value=fake_scanner)
+    runner._cron._run_isolated_task = AsyncMock()
+    runner._cron._write_event = MagicMock()
 
     # Write HEARTBEAT.md so _update_isolated_task_state can find the task
     task_data = _make_skill_task("isolated")
@@ -540,8 +540,8 @@ async def test_path_b_isolated_claimed_respects_scanner_gate(tmp_path: Path):
     await runner.execute_isolated_claimed_task(snapshot)
 
     # Skill should NOT have been executed (gate blocked)
-    runner._execute_isolated_task.assert_not_awaited()
+    runner._cron._run_isolated_task.assert_not_awaited()
     # Event should record the skip
-    runner._write_heartbeat_event.assert_any_call(
+    runner._cron._write_event.assert_any_call(
         "skill_skipped", skill="test-skill", reason="no_changes",
     )

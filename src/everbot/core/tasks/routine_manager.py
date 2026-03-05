@@ -5,7 +5,7 @@ from __future__ import annotations
 import fcntl
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import uuid
@@ -16,9 +16,16 @@ from ..session.session import SessionPersistence
 from .task_manager import (
     Task,
     TaskList,
+    TaskState,
     ParseStatus,
     parse_heartbeat_md,
     write_task_block,
+    purge_stale_tasks,
+    get_due_tasks,
+    claim_task,
+    update_task_state,
+    heal_stuck_scheduled_tasks,
+    parse_iso_datetime,
     _compute_next_run,
 )
 
@@ -368,3 +375,104 @@ class RoutineManager:
             self._save_task_list(content, task_list)
             return True
         return False
+
+    # ── Cron execution interface ─────────────────────────────────
+    # These methods provide the task-state operations that CronExecutor
+    # needs, keeping RoutineManager as the single writer to HEARTBEAT.md.
+
+    def load_task_list(self) -> Optional[TaskList]:
+        """Load and return the current TaskList, or None if empty/missing."""
+        try:
+            _, task_list = self._load_task_list()
+            return task_list
+        except ValueError:
+            return None
+
+    def get_due_tasks(self, now: Optional[datetime] = None) -> List[Task]:
+        """Return tasks whose next_run_at <= now and state is pending."""
+        task_list = self.load_task_list()
+        if task_list is None:
+            return []
+        return get_due_tasks(task_list, now=now)
+
+    def claim_task(self, task: Task, now: Optional[datetime] = None) -> bool:
+        """Claim a task for execution (set state to running)."""
+        return claim_task(task, now=now)
+
+    def update_task_state(
+        self,
+        task: Task,
+        new_state: TaskState,
+        *,
+        error_message: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> None:
+        """Transition a task to a new state."""
+        update_task_state(task, new_state, error_message=error_message, now=now)
+
+    def flush(self, task_list: TaskList) -> None:
+        """Persist task_list state to HEARTBEAT.md atomically.
+
+        Purges stale one-shot tasks before writing.
+        """
+        hb_path = self.heartbeat_path
+        try:
+            purged = purge_stale_tasks(task_list)
+            if purged:
+                logger.info("Purged %d stale task(s) from HEARTBEAT.md", purged)
+            content = self._read_content()
+            updated = write_task_block(content, task_list)
+            SessionPersistence.atomic_save(hb_path, updated.encode("utf-8"))
+        except Exception as exc:
+            logger.warning("Failed to flush task state to HEARTBEAT.md: %s", exc)
+
+    def heal_stuck_tasks(self, now: Optional[datetime] = None) -> int:
+        """Re-arm scheduled tasks stuck in 'failed' state. Returns count healed."""
+        task_list = self.load_task_list()
+        if task_list is None:
+            return 0
+        healed = heal_stuck_scheduled_tasks(task_list, now=now)
+        if healed:
+            self.flush(task_list)
+        return healed
+
+    def recover_stuck_running_tasks(
+        self,
+        task_list: TaskList,
+        *,
+        timeout_multiplier: int = 2,
+        now: Optional[datetime] = None,
+    ) -> List[Task]:
+        """Reset tasks stuck in 'running' beyond timeout_multiplier * timeout.
+
+        Returns list of recovered tasks.
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+
+        recovered: List[Task] = []
+        for task in task_list.tasks:
+            if task.state != TaskState.RUNNING.value:
+                continue
+            last_run = parse_iso_datetime(task.last_run_at) if task.last_run_at else None
+            if last_run is None:
+                continue
+            timeout = max(int(getattr(task, "timeout_seconds", 600) or 600), 60)
+            stuck_threshold = timedelta(seconds=timeout * timeout_multiplier)
+            if now - last_run > stuck_threshold:
+                logger.warning(
+                    "Recovering stuck task %s (%s): running since %s, threshold=%ss",
+                    task.id, task.title, task.last_run_at, timeout * timeout_multiplier,
+                )
+                update_task_state(
+                    task, TaskState.FAILED,
+                    error_message="recovered: stuck in running state",
+                    now=now,
+                )
+                recovered.append(task)
+
+        if recovered:
+            self.flush(task_list)
+        return recovered

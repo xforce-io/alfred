@@ -24,7 +24,9 @@ from .heartbeat_utils import (
     task_snapshot,
     build_job_session_id,
 )
-from .heartbeat_tasks import IsolatedTaskMixin
+from .cron import CronExecutor
+from .cron_delivery import CronDelivery
+from .inspector import Inspector
 from .ports import HeartbeatSessionPort
 from ..tasks.routine_manager import RoutineManager
 from ..tasks.task_manager import (
@@ -81,7 +83,7 @@ def _is_permanent_error(exc: BaseException) -> bool:
     return any(marker in text for marker in _PERMANENT_ERROR_MARKERS)
 
 
-class HeartbeatRunner(IsolatedTaskMixin):
+class HeartbeatRunner:
     """
     心跳运行器
 
@@ -191,6 +193,36 @@ If not, reply with `HEARTBEAT_OK`.
                 list_due_tasks=self._runtime_list_due_tasks,
                 heartbeat_instructions=self.HEARTBEAT_SYSTEM_INSTRUCTION.strip(),
             )
+        )
+        # CronExecutor: delegates structured_due task execution
+        self._routine_manager = RoutineManager(workspace_path)
+        self._delivery = CronDelivery(
+            session_manager=session_manager,
+            primary_session_id=session_manager.get_primary_session_id(agent_name),
+            heartbeat_session_id=session_manager.get_heartbeat_session_id(agent_name),
+            agent_name=agent_name,
+            ack_max_chars=self.ack_max_chars,
+            broadcast_scope=self.broadcast_scope,
+            realtime_push=self.realtime_status_hint,
+            on_result=on_result,
+        )
+        self._cron = CronExecutor(
+            agent_name=agent_name,
+            workspace_path=workspace_path,
+            session_manager=session_manager,
+            agent_factory=agent_factory,
+            routine_manager=self._routine_manager,
+            delivery=self._delivery,
+            broadcast_scope=self.broadcast_scope,
+        )
+        # Inspector: delegates structured_reflect observation
+        self._inspector = Inspector(
+            agent_name=agent_name,
+            workspace_path=workspace_path,
+            routine_manager=self._routine_manager,
+            reflection_manager=self._reflection,
+            auto_register_routines=self.auto_register_routines,
+            reflect_force_interval_hours=max(1, int(reflect_force_interval_hours or 24)),
         )
 
     # --- Backward-compatible accessors for extracted _file_mgr state ---
@@ -631,7 +663,8 @@ If not, reply with `HEARTBEAT_OK`.
                 # mode dispatch. Without this, stuck tasks cause reflect mode
                 # where LLM executes autonomously, bypassing scanner gates.
                 if self._file_mgr.heartbeat_mode == "structured_reflect":
-                    self._recover_stuck_running_tasks()
+                    if self._file_mgr.task_list:
+                        self._routine_manager.recover_stuck_running_tasks(self._file_mgr.task_list)
                     # Re-evaluate: recovered tasks may now be due
                     if self._file_mgr.task_list and get_due_tasks(self._file_mgr.task_list):
                         self._file_mgr.heartbeat_mode = "structured_due"
@@ -643,7 +676,7 @@ If not, reply with `HEARTBEAT_OK`.
                         self._write_heartbeat_event("reflect_skipped", reason="disabled")
                         self._record_timeline_event("turn_end", run_id, status="completed", result="HEARTBEAT_OK")
                         return "HEARTBEAT_OK"
-                    if self._should_skip_reflection():
+                    if self._inspector.should_skip():
                         logger.info("[%s] Reflection skipped: files unchanged since last reflect", self.agent_name)
                         self._write_heartbeat_event("reflect_skipped", reason="file_unchanged")
                         self._record_timeline_event("turn_end", run_id, status="completed", result="HEARTBEAT_OK")
@@ -664,26 +697,23 @@ If not, reply with `HEARTBEAT_OK`.
                         include_isolated=include_isolated,
                     )
                 elif self._file_mgr.heartbeat_mode == "structured_reflect":
-                    user_message = await self._inject_heartbeat_context(
-                        agent,
-                        heartbeat_content,
-                        mode="reflect",
+                    inspection = await self._inspector.inspect(
+                        run_agent=self._run_agent,
+                        inject_context=self._inject_heartbeat_context,
+                        agent=agent,
+                        heartbeat_content=heartbeat_content,
+                        run_id=run_id,
+                        session_manager=self.session_manager,
+                        primary_session_id=self.primary_session_id,
                     )
-                    result = await self._run_agent(agent, user_message)
-                    self._update_reflect_state()
-                    proposals = self._extract_reflection_routine_proposals(result)
-                    if proposals:
-                        if self.auto_register_routines:
-                            result = self._apply_reflection_routine_proposals(result, run_id)
-                        else:
-                            result = await self._deposit_routine_proposals_to_mailbox(proposals, run_id)
-                        self._write_heartbeat_event("reflect", result="proposals", proposal_count=len(proposals))
+                    if inspection.proposals:
+                        self._write_heartbeat_event("reflect", result="proposals", proposal_count=len(inspection.proposals))
                     else:
-                        # No actionable routine proposals found — suppress to
-                        # prevent prompt-echo from polluting the primary mailbox.
-                        logger.debug("[%s] Reflection produced no proposals, forcing HEARTBEAT_OK", self.agent_name)
                         self._write_heartbeat_event("reflect", result="ok")
-                        result = "HEARTBEAT_OK"
+                    # Refresh in-memory task snapshot if routines were added
+                    if inspection.applied > 0:
+                        self._read_heartbeat_md()
+                    result = inspection.output
                 elif self._file_mgr.heartbeat_mode == "corrupted":
                     self._write_heartbeat_event("corrupted")
                     user_message = await self._inject_heartbeat_context(
@@ -1062,186 +1092,46 @@ If not, reply with `HEARTBEAT_OK`.
         include_inline: bool = True,
         include_isolated: bool = True,
     ) -> str:
-        """Execute due structured tasks with per-task state tracking."""
+        """Execute due structured tasks — delegates to CronExecutor."""
         task_list = self._file_mgr.task_list
         if task_list is None:
             return "HEARTBEAT_OK"
-        due = get_due_tasks(task_list)
-        inline_due = [t for t in due if str(getattr(t, "execution_mode", "inline") or "inline") != "isolated"]
-        isolated_due = [t for t in due if str(getattr(t, "execution_mode", "inline") or "inline") == "isolated"]
-        results = []
 
-        if include_inline:
-            for task in inline_due:
-                if not claim_task(task):
-                    continue
-                # Persist claim before execution so concurrent ticks/processes observe running state.
-                self._flush_task_state()
-                self._write_heartbeat_event("task_start", task_id=task.id, title=task.title, execution_mode="inline")
-                self._record_timeline_event(
-                    "task_start", run_id, task_id=task.id, task_title=task.title,
-                )
-
-                try:
-                    # Skill tasks: unified gate check + skill execution, no LLM agent
-                    if task.skill:
-                        gate = TaskExecutionGate(self._get_workspace_path(), self.agent_name, self._get_scanner)
-                        verdict = gate.check(task)
-                        # Log scanner check result when scanner was consulted
-                        if verdict.scan_result is not None:
-                            self._write_heartbeat_event(
-                                "scanner_check", scanner=task.scanner,
-                                has_changes=verdict.scan_result.has_changes,
-                                change_summary=verdict.scan_result.change_summary,
-                            )
-                        if not verdict.allowed:
-                            if verdict.skip_reason == "scanner_error":
-                                self._write_heartbeat_event("scanner_error", scanner=task.scanner, error="gate check failed")
-                            else:
-                                self._write_heartbeat_event("skill_skipped", skill=task.skill, reason=verdict.skip_reason)
-                            self._rearm_skill_task(task)
-                            results.append(f"SKILL_SKIPPED:{task.id}" if verdict.skip_reason != "scanner_error" else f"SCANNER_ERROR:{task.id}")
-                            self._flush_task_state()
-                            continue
-                        result = await asyncio.wait_for(
-                            self._invoke_skill_task(task, verdict.scan_result, run_id),
-                            timeout=task.timeout_seconds,
-                        )
-                        if verdict.scan_result:
-                            gate.commit(task, verdict)
-                        self._rearm_skill_task(task)
-                        self._write_heartbeat_event("task_done", task_id=task.id, title=task.title)
-                        results.append(result)
-                        continue
-
-                    # Deterministic tasks: programmatic output, skip LLM
-                    deterministic_result = self._try_deterministic_task(task)
-                    if deterministic_result is not None:
-                        result = deterministic_result
-                        update_task_state(task, TaskState.DONE)
-                        self._write_heartbeat_event("task_done", task_id=task.id, title=task.title)
-                        self._record_timeline_event(
-                            "task_end", run_id,
-                            task_id=task.id, status="done", result=result[:self.SUMMARY_MAX_CHARS],
-                        )
-                        results.append(result)
-                        continue
-
-                    user_message = await self._inject_heartbeat_context(
-                        agent,
-                        heartbeat_content,
-                        mode="execute_due",
-                        current_task=task,
-                    )
-                    result = await asyncio.wait_for(
-                        self._run_agent(agent, user_message),
-                        timeout=task.timeout_seconds,
-                    )
-                    update_task_state(task, TaskState.DONE)
-                    self._write_heartbeat_event("task_done", task_id=task.id, title=task.title)
-                    self._record_timeline_event(
-                        "task_end", run_id,
-                        task_id=task.id, status="done", result=result[:self.SUMMARY_MAX_CHARS],
-                    )
-                    results.append(result)
-                except asyncio.TimeoutError:
-                    update_task_state(
-                        task, TaskState.FAILED, error_message="timeout",
-                    )
-                    self._write_heartbeat_event("task_failed", task_id=task.id, title=task.title, error="timeout")
-                    self._record_timeline_event(
-                        "task_end", run_id,
-                        task_id=task.id, status="failed", error="timeout",
-                    )
-                    results.append(f"TASK_TIMEOUT:{task.id}")
-                except Exception as exc:
-                    update_task_state(
-                        task, TaskState.FAILED, error_message=str(exc),
-                    )
-                    self._write_heartbeat_event("task_failed", task_id=task.id, title=task.title, error=str(exc)[:200])
-                    self._record_timeline_event(
-                        "task_end", run_id,
-                        task_id=task.id, status="failed", error=str(exc),
-                    )
-                    results.append(f"TASK_FAILED:{task.id}")
-
-                # Write state after each task to survive crashes
-                self._flush_task_state()
-
-        if include_isolated:
-            for task in isolated_due:
-                if not claim_task(task):
-                    continue
-
-                # Unified gate check for isolated skill tasks
-                verdict = None
-                if task.skill:
-                    gate = TaskExecutionGate(self._get_workspace_path(), self.agent_name, self._get_scanner)
-                    verdict = gate.check(task)
-                    if verdict.scan_result is not None:
-                        self._write_heartbeat_event(
-                            "scanner_check", scanner=task.scanner,
-                            has_changes=verdict.scan_result.has_changes,
-                            change_summary=verdict.scan_result.change_summary,
-                        )
-                    if not verdict.allowed:
-                        if verdict.skip_reason == "scanner_error":
-                            self._write_heartbeat_event("scanner_error", scanner=task.scanner, error="gate check failed")
-                        else:
-                            self._write_heartbeat_event("skill_skipped", skill=task.skill, reason=verdict.skip_reason)
-                        self._rearm_skill_task(task)
-                        results.append(f"SKILL_SKIPPED:{task.id}" if verdict.skip_reason != "scanner_error" else f"SCANNER_ERROR:{task.id}")
-                        self._flush_task_state()
-                        continue
-
-                # Persist claim before execution so concurrent ticks/processes observe running state.
-                self._flush_task_state()
-                self._write_heartbeat_event("task_start", task_id=task.id, title=task.title, execution_mode="isolated")
-                self._record_timeline_event(
-                    "task_start", run_id, task_id=task.id, task_title=task.title, execution_mode="isolated",
-                )
-                try:
-                    result = await self._execute_isolated_task(task, run_id)
-                    # Advance watermark after successful isolated skill execution
-                    if verdict and verdict.scan_result:
-                        gate.commit(task, verdict)
-                    update_task_state(task, TaskState.DONE)
-                    self._write_heartbeat_event("task_done", task_id=task.id, title=task.title)
-                    self._record_timeline_event(
-                        "task_end", run_id,
-                        task_id=task.id, status="done", execution_mode="isolated", result=result[:self.SUMMARY_MAX_CHARS],
-                    )
-                    results.append(f"ISOLATED_DONE:{task.id}")
-                except asyncio.TimeoutError:
-                    update_task_state(task, TaskState.FAILED, error_message="timeout")
-                    self._write_heartbeat_event("task_failed", task_id=task.id, title=task.title, error="timeout")
-                    self._record_timeline_event(
-                        "task_end", run_id,
-                        task_id=task.id, status="failed", execution_mode="isolated", error="timeout",
-                    )
-                    results.append(f"ISOLATED_TIMEOUT:{task.id}")
-                except Exception as exc:
-                    update_task_state(task, TaskState.FAILED, error_message=str(exc))
-                    self._write_heartbeat_event("task_failed", task_id=task.id, title=task.title, error=str(exc)[:200])
-                    self._record_timeline_event(
-                        "task_end", run_id,
-                        task_id=task.id, status="failed", execution_mode="isolated", error=str(exc),
-                    )
-                    results.append(f"ISOLATED_FAILED:{task.id}")
-                self._flush_task_state()
-
-        if not results:
-            return "HEARTBEAT_OK"
-        # Filter out task status markers — isolated results have already been
-        # injected into primary history individually, and inline failure/timeout
-        # markers should not leak into user-visible output.
-        _STATUS_PREFIXES = (
-            "ISOLATED_DONE:", "ISOLATED_TIMEOUT:", "ISOLATED_FAILED:",
-            "TASK_FAILED:", "TASK_TIMEOUT:",
-            "SKILL_SKIPPED:", "SCANNER_ERROR:",
+        tick_result = await self._cron.tick(
+            task_list,
+            run_agent=self._run_agent,
+            inject_context=self._inject_heartbeat_context_for_cron,
+            agent=agent,
+            heartbeat_content=heartbeat_content,
+            run_id=run_id,
+            include_inline=include_inline,
+            include_isolated=include_isolated,
         )
-        meaningful = [r for r in results if not any(r.startswith(p) for p in _STATUS_PREFIXES)]
-        return "; ".join(meaningful) if meaningful else "HEARTBEAT_OK"
+        return tick_result.user_visible_output
+
+    async def _inject_heartbeat_context_for_cron(
+        self, agent: Any, heartbeat_content: str, mode: str, current_task: Any,
+    ) -> str:
+        """Adapter for CronExecutor: wraps _inject_heartbeat_context with matching signature."""
+        return await self._inject_heartbeat_context(
+            agent, heartbeat_content, mode=mode, current_task=current_task,
+        )
+
+    # ── Forwarded IsolatedTaskMixin methods (now in CronExecutor) ──
+
+    def list_due_inline_tasks(self, now=None):
+        return self._cron.list_due_inline_tasks(now=now)
+
+    def list_due_isolated_tasks(self, now=None):
+        return self._cron.list_due_isolated_tasks(now=now)
+
+    async def claim_isolated_task(self, task_id, now=None):
+        return await self._cron.claim_isolated_task(task_id, now=now)
+
+    async def execute_isolated_claimed_task(self, task_snapshot_dict, *, run_id=None, now=None):
+        return await self._cron.execute_isolated_claimed_task(
+            task_snapshot_dict, run_agent=self._run_agent, run_id=run_id, now=now,
+        )
 
     def _trim_session_history(self, session_data: Any) -> None:
         """Trim session history_messages in-place to reduce token usage.

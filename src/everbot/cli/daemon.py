@@ -19,7 +19,7 @@ from ..infra.user_data import get_user_data_manager
 from ..infra.config import get_config
 from ..core.agent.factory import get_agent_factory
 from ..infra.process import DaemonLock, write_pid_file, remove_pid_file
-from ..core.runtime.scheduler import AgentSchedule, Scheduler, SchedulerTask
+from ..core.runtime.scheduler import AgentSchedule, InspectorSchedule, Scheduler, SchedulerTask
 from ..channels.telegram_channel import TelegramChannel
 
 logger = logging.getLogger(__name__)
@@ -173,13 +173,48 @@ class EverBotDaemon:
             run_id = f"job_{uuid.uuid4().hex[:12]}"
             await execute(snapshot, run_id=run_id, now=ts)
 
+        # Inspector callback: runs one inspection tick for an agent
+        async def _run_inspector(agent_name: str, ts: datetime) -> None:
+            runner = self.heartbeat_runners.get(agent_name)
+            if runner is None:
+                return
+            inspector = getattr(runner, "_inspector", None)
+            if inspector is None:
+                return
+            # Inspector needs an agent for LLM calls — reuse heartbeat's
+            agent = await runner._get_or_create_agent()
+            heartbeat_content = ""
+            hb_path = runner.workspace_path / "HEARTBEAT.md"
+            if hb_path.exists():
+                try:
+                    heartbeat_content = hb_path.read_text(encoding="utf-8")
+                except OSError:
+                    pass
+            run_id = f"inspect_{uuid.uuid4().hex[:8]}"
+            await inspector.inspect(
+                run_agent=runner._run_agent,
+                inject_context=runner._inject_heartbeat_context,
+                agent=agent,
+                heartbeat_content=heartbeat_content,
+                run_id=run_id,
+                session_manager=runner.session_manager,
+                primary_session_id=runner.primary_session_id,
+            )
+
         # Build agent schedules from registered runners
         agent_schedules: Dict[str, AgentSchedule] = {}
+        inspector_schedules: Dict[str, InspectorSchedule] = {}
         for agent_name, runner in self.heartbeat_runners.items():
+            active_hours = tuple(getattr(runner, "active_hours", (8, 22)))
             agent_schedules[agent_name] = AgentSchedule(
                 agent_name=agent_name,
                 interval_minutes=max(1, int(getattr(runner, "interval_minutes", 30) or 30)),
-                active_hours=tuple(getattr(runner, "active_hours", (8, 22))),
+                active_hours=active_hours,
+            )
+            inspector_schedules[agent_name] = InspectorSchedule(
+                agent_name=agent_name,
+                interval_minutes=60,  # default 1h for inspector
+                active_hours=active_hours,
             )
 
         return Scheduler(
@@ -188,7 +223,9 @@ class EverBotDaemon:
             claim_task=_claim_task if self._scheduler_cron_jobs else None,
             run_inline=_run_inline if self._scheduler_cron_jobs else None,
             run_isolated=_run_isolated if self._scheduler_cron_jobs else None,
+            run_inspector=_run_inspector,
             agent_schedules=agent_schedules,
+            inspector_schedules=inspector_schedules,
             tick_interval_seconds=1.0,
             state_file=self.user_data.alfred_home / "scheduler_state.json",
         )
