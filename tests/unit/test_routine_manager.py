@@ -10,7 +10,12 @@ from src.everbot.core.tasks.routine_manager import (
     RoutineManager,
     _detect_local_iana_timezone,
 )
-from src.everbot.core.tasks.task_manager import ParseStatus, parse_heartbeat_md
+from src.everbot.core.tasks.task_manager import (
+    ParseStatus,
+    TaskState,
+    parse_heartbeat_md,
+    update_task_state,
+)
 
 
 def _read_task_list(path: Path):
@@ -497,3 +502,153 @@ class TestHighFrequencyConstraint:
         mgr = RoutineManager(tmp_path)
         with pytest.raises(ValueError, match="High-frequency"):
             mgr.add_routine(title="test", schedule="5m", scanner="session")
+
+
+# ===========================================================================
+# Cron execution interface (get_due_tasks, claim, update_state, flush, etc.)
+# ===========================================================================
+
+
+class TestCronExecutionInterface:
+    """Tests for RoutineManager methods used by CronExecutor."""
+
+    def test_get_due_tasks_returns_pending_due(self, tmp_path):
+        mgr = RoutineManager(tmp_path)
+        now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+        mgr.add_routine(
+            title="Due task",
+            schedule="1h",
+            next_run_at="2026-03-01T11:00:00+00:00",
+            now=now,
+        )
+        mgr.add_routine(
+            title="Future task",
+            schedule="1h",
+            next_run_at="2026-03-01T15:00:00+00:00",
+            now=now,
+        )
+        due = mgr.get_due_tasks(now=now)
+        assert len(due) == 1
+        assert due[0].title == "Due task"
+
+    def test_get_due_tasks_empty_when_no_heartbeat(self, tmp_path):
+        mgr = RoutineManager(tmp_path)
+        assert mgr.get_due_tasks() == []
+
+    def test_claim_task_transitions_to_running(self, tmp_path):
+        mgr = RoutineManager(tmp_path)
+        now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+        mgr.add_routine(
+            title="Claimable",
+            schedule="1h",
+            next_run_at="2026-03-01T11:00:00+00:00",
+            now=now,
+        )
+        due = mgr.get_due_tasks(now=now)
+        assert len(due) == 1
+        assert mgr.claim_task(due[0], now=now) is True
+        assert due[0].state == TaskState.RUNNING.value
+
+    def test_claim_task_rejects_non_pending(self, tmp_path):
+        mgr = RoutineManager(tmp_path)
+        now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+        mgr.add_routine(
+            title="Already running",
+            schedule="1h",
+            next_run_at="2026-03-01T11:00:00+00:00",
+            now=now,
+        )
+        due = mgr.get_due_tasks(now=now)
+        mgr.claim_task(due[0], now=now)
+        # Second claim should fail
+        assert mgr.claim_task(due[0], now=now) is False
+
+    def test_update_task_state_done_rearms_scheduled(self, tmp_path):
+        mgr = RoutineManager(tmp_path)
+        now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+        mgr.add_routine(
+            title="Recurring",
+            schedule="1h",
+            next_run_at="2026-03-01T11:00:00+00:00",
+            now=now,
+        )
+        due = mgr.get_due_tasks(now=now)
+        task = due[0]
+        mgr.claim_task(task, now=now)
+        mgr.update_task_state(task, TaskState.DONE, now=now)
+        # Scheduled task should be re-armed to pending
+        assert task.state == TaskState.PENDING.value
+        assert task.next_run_at is not None
+
+    def test_flush_persists_state_changes(self, tmp_path):
+        mgr = RoutineManager(tmp_path)
+        now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+        mgr.add_routine(
+            title="Flushable",
+            schedule="1h",
+            next_run_at="2026-03-01T11:00:00+00:00",
+            now=now,
+        )
+        # Load task_list, claim a task on it, then flush the same object
+        task_list = mgr.load_task_list()
+        assert task_list is not None
+        task = task_list.tasks[0]
+        mgr.claim_task(task, now=now)
+        assert task.state == TaskState.RUNNING.value
+        mgr.flush(task_list)
+
+        # Re-read from disk: task should be in running state
+        fresh = mgr.load_task_list()
+        assert fresh.tasks[0].state == TaskState.RUNNING.value
+
+    def test_load_task_list_returns_none_for_corrupted(self, tmp_path):
+        (tmp_path / "HEARTBEAT.md").write_text(
+            "# HEARTBEAT\n```json\n{invalid\n```\n", encoding="utf-8"
+        )
+        mgr = RoutineManager(tmp_path)
+        assert mgr.load_task_list() is None
+
+    def test_heal_stuck_tasks(self, tmp_path):
+        mgr = RoutineManager(tmp_path)
+        now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+        mgr.add_routine(
+            title="Stuck task",
+            schedule="1h",
+            next_run_at="2026-03-01T11:00:00+00:00",
+            now=now,
+        )
+        # Manually exhaust retries and set to failed
+        task_list = mgr.load_task_list()
+        task = task_list.tasks[0]
+        task.state = TaskState.FAILED.value
+        task.retry = task.max_retry
+        mgr.flush(task_list)
+
+        healed = mgr.heal_stuck_tasks(now=now)
+        assert healed == 1
+        fresh = mgr.load_task_list()
+        assert fresh.tasks[0].state == TaskState.PENDING.value
+
+    def test_recover_stuck_running_tasks(self, tmp_path):
+        mgr = RoutineManager(tmp_path)
+        now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+        mgr.add_routine(
+            title="Stuck running",
+            schedule="1h",
+            next_run_at="2026-03-01T10:00:00+00:00",
+            now=now,
+        )
+        task_list = mgr.load_task_list()
+        task = task_list.tasks[0]
+        # Simulate stuck: running since 2 hours ago, timeout=120s
+        task.state = TaskState.RUNNING.value
+        task.last_run_at = "2026-03-01T10:00:00+00:00"
+        task.timeout_seconds = 120
+        mgr.flush(task_list)
+
+        task_list = mgr.load_task_list()
+        recovered = mgr.recover_stuck_running_tasks(task_list, now=now)
+        assert len(recovered) == 1
+        # Verify persisted
+        fresh = mgr.load_task_list()
+        assert fresh.tasks[0].state != TaskState.RUNNING.value

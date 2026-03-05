@@ -511,6 +511,7 @@ class TestExecuteStructuredTasksErrors:
         monkeypatch.setattr(runner, "_record_runtime_metric", MagicMock())
         monkeypatch.setattr(runner, "_write_heartbeat_event", MagicMock())
         monkeypatch.setattr(runner, "_write_heartbeat_file", MagicMock())
+        monkeypatch.setattr(runner._cron, "_write_event", MagicMock())
 
         result = await runner._execute_structured_tasks(
             fake_agent, hb_content, "run_test"
@@ -522,8 +523,8 @@ class TestExecuteStructuredTasksErrors:
         # that error_message was set (indicating timeout was handled).
         task = runner._task_list.tasks[0]
         assert task.error_message == "timeout"
-        # The write_heartbeat_event should have recorded the failure
-        runner._write_heartbeat_event.assert_any_call(
+        # The cron executor should have recorded the failure event
+        runner._cron._write_event.assert_any_call(
             "task_failed", task_id="timeout_task", title="Due Task", error="timeout"
         )
 
@@ -550,6 +551,7 @@ class TestExecuteStructuredTasksErrors:
         monkeypatch.setattr(runner, "_record_runtime_metric", MagicMock())
         monkeypatch.setattr(runner, "_write_heartbeat_event", MagicMock())
         monkeypatch.setattr(runner, "_write_heartbeat_file", MagicMock())
+        monkeypatch.setattr(runner._cron, "_write_event", MagicMock())
 
         result = await runner._execute_structured_tasks(
             fake_agent, hb_content, "run_test"
@@ -559,7 +561,7 @@ class TestExecuteStructuredTasksErrors:
         # Verify error was recorded on the task (re-armed as pending due to retries/schedule)
         task = runner._task_list.tasks[0]
         assert task.error_message == "agent crashed"
-        runner._write_heartbeat_event.assert_any_call(
+        runner._cron._write_event.assert_any_call(
             "task_failed", task_id="fail_task", title="Due Task", error="agent crashed"
         )
 
@@ -667,13 +669,12 @@ class TestExecuteIsolatedClaimedTask:
         runner = _make_runner(workspace_path=tmp_path, session_manager=sm)
 
         update_calls: list[tuple] = []
-        original_update = runner._update_isolated_task_state
 
         async def _tracking_update(task_id, state, **kwargs):
             update_calls.append((task_id, state))
 
-        monkeypatch.setattr(runner, "_update_isolated_task_state", _tracking_update)
-        monkeypatch.setattr(runner, "_execute_isolated_task", AsyncMock(return_value="result ok"))
+        monkeypatch.setattr(runner._cron, "_update_isolated_task_state", _tracking_update)
+        monkeypatch.setattr(runner._cron, "_run_isolated_task", AsyncMock(return_value="result ok"))
 
         task_snapshot = {"id": "iso_1", "title": "Isolated Job", "execution_mode": "isolated"}
         await runner.execute_isolated_claimed_task(task_snapshot)
@@ -694,10 +695,10 @@ class TestExecuteIsolatedClaimedTask:
         async def _tracking_update(task_id, state, **kwargs):
             update_calls.append((task_id, state, kwargs.get("error_message")))
 
-        monkeypatch.setattr(runner, "_update_isolated_task_state", _tracking_update)
+        monkeypatch.setattr(runner._cron, "_update_isolated_task_state", _tracking_update)
         monkeypatch.setattr(
-            runner,
-            "_execute_isolated_task",
+            runner._cron,
+            "_run_isolated_task",
             AsyncMock(side_effect=RuntimeError("execution exploded")),
         )
 
@@ -744,17 +745,17 @@ class TestExecuteIsolatedClaimedTaskGate:
         async def _tracking_update(task_id, state, **kwargs):
             update_calls.append((task_id, state))
 
-        monkeypatch.setattr(runner, "_update_isolated_task_state", _tracking_update)
+        monkeypatch.setattr(runner._cron, "_update_isolated_task_state", _tracking_update)
         execute_mock = AsyncMock()
-        monkeypatch.setattr(runner, "_execute_isolated_task", execute_mock)
-        monkeypatch.setattr(runner, "_write_heartbeat_event", MagicMock())
+        monkeypatch.setattr(runner._cron, "_run_isolated_task", execute_mock)
+        monkeypatch.setattr(runner._cron, "_write_event", MagicMock())
 
         # Scanner returns no_changes
         fake_scanner = MagicMock()
         fake_scanner.check.return_value = ScanResult(
             has_changes=False, change_summary="No changes",
         )
-        runner._get_scanner = MagicMock(return_value=fake_scanner)
+        runner._cron._get_scanner = MagicMock(return_value=fake_scanner)
 
         snapshot = {
             "id": "skill_1", "title": "Skill Job",
@@ -769,7 +770,7 @@ class TestExecuteIsolatedClaimedTaskGate:
         assert len(update_calls) == 1
         assert update_calls[0] == ("skill_1", TaskState.DONE)
         # Event should record skip
-        runner._write_heartbeat_event.assert_called_once_with(
+        runner._cron._write_event.assert_called_once_with(
             "skill_skipped", skill="test-skill", reason="no_changes",
         )
 
@@ -787,8 +788,8 @@ class TestExecuteIsolatedClaimedTaskGate:
         async def _tracking_update(task_id, state, **kwargs):
             update_calls.append((task_id, state))
 
-        monkeypatch.setattr(runner, "_update_isolated_task_state", _tracking_update)
-        monkeypatch.setattr(runner, "_execute_isolated_task", AsyncMock(return_value="ok"))
+        monkeypatch.setattr(runner._cron, "_update_isolated_task_state", _tracking_update)
+        monkeypatch.setattr(runner._cron, "_run_isolated_task", AsyncMock(return_value="ok"))
 
         # Scanner returns has_changes
         fake_scanner = MagicMock()
@@ -796,7 +797,7 @@ class TestExecuteIsolatedClaimedTaskGate:
             has_changes=True, change_summary="1 session",
             payload=[],
         )
-        runner._get_scanner = MagicMock(return_value=fake_scanner)
+        runner._cron._get_scanner = MagicMock(return_value=fake_scanner)
 
         snapshot = {
             "id": "skill_2", "title": "Skill Job",
@@ -843,7 +844,7 @@ class TestUpdateIsolatedTaskStateLockFailure:
         runner._read_heartbeat_md()
 
         with pytest.raises(RuntimeError, match="Failed to acquire session lock"):
-            await runner._update_isolated_task_state("stuck_1", TaskState.DONE)
+            await runner._cron._update_isolated_task_state("stuck_1", TaskState.DONE)
 
     @pytest.mark.asyncio
     async def test_file_lock_fails_raises_error(self, tmp_path: Path):
@@ -863,8 +864,8 @@ class TestUpdateIsolatedTaskStateLockFailure:
         runner._read_heartbeat_md()
 
         with pytest.raises(RuntimeError, match="Failed to acquire file lock"):
-            await runner._update_isolated_task_state("stuck_2", TaskState.FAILED,
-                                                      error_message="timed out")
+            await runner._cron._update_isolated_task_state("stuck_2", TaskState.FAILED,
+                                                            error_message="timed out")
 
 
 # ============================================================
@@ -1010,8 +1011,9 @@ class TestRecoverStuckRunningTasks:
 
         runner = _make_runner(workspace_path=tmp_path)
         runner._read_heartbeat_md()
-        runner._recover_stuck_running_tasks(now=now)
-        task = runner._file_mgr.task_list.tasks[0]
+        task_list = runner._file_mgr.task_list
+        runner._routine_manager.recover_stuck_running_tasks(task_list, now=now)
+        task = task_list.tasks[0]
         assert task.state == "pending"  # Recovered (re-armed)
 
 
