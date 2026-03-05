@@ -151,7 +151,7 @@ class SessionPersistence:
                 # Heartbeat-sourced messages
                 (isinstance(m.get("metadata"), dict) and m["metadata"].get("source") == "heartbeat")
                 # Placeholder artifacts
-                or m.get("content") in _PLACEHOLDER_CONTENTS
+                or (isinstance(m.get("content"), str) and m["content"] in _PLACEHOLDER_CONTENTS)
             )
         ]
 

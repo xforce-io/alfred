@@ -1244,3 +1244,44 @@ class TestIsolatedJobResultNotRestoredToLLMContext:
             "heartbeat injection and should be filtered during restore to keep the LLM "
             "context clean."
         )
+
+    @pytest.mark.asyncio
+    async def test_multimodal_list_content_not_crash_filter(self, tmp_path: Path):
+        """Messages with list-typed content (multimodal format) must not crash
+        the heartbeat filter with 'TypeError: unhashable type: list'."""
+        manager = SessionManager(tmp_path)
+        session_id = "web_session_test_agent"
+
+        multimodal_content = [{"type": "text", "text": "你好"}, {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}]
+        session_data = _make_session_data(
+            session_id=session_id,
+            history_messages=[
+                {"role": "user", "content": multimodal_content},
+                {"role": "assistant", "content": "这是一张图片"},
+                {"role": "assistant", "content": "(acknowledged)"},
+                {"role": "user", "content": "[Background notification follows]"},
+                {
+                    "role": "assistant",
+                    "content": "[此消息由心跳系统自动执行例行任务生成]\n\n结果...",
+                    "metadata": {"source": "heartbeat", "run_id": "hb_004"},
+                },
+            ],
+        )
+        await manager.persistence.save_data(session_data)
+
+        agent = _make_mock_agent()
+        await manager.restore_to_agent(agent, session_data)
+
+        call_args = agent.snapshot.import_portable_session.call_args
+        portable = call_args[0][0]
+        restored_history = portable["history_messages"]
+
+        # The multimodal message should be preserved
+        assert any(
+            isinstance(m, dict) and m.get("content") == multimodal_content
+            for m in restored_history
+        ), "Multimodal message with list content should be preserved after filtering"
+        # Heartbeat and placeholders should still be filtered
+        assert len(restored_history) == 2, (
+            f"Expected 2 messages (multimodal user + assistant reply), got {len(restored_history)}"
+        )
