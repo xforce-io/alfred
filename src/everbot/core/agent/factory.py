@@ -107,11 +107,11 @@ class AgentFactory:
         agent_skills_dir = str(workspace_path / "skills")
 
         # 确保 resource_skills 配置存在
-        if not hasattr(agent_config, 'resource_skills'):
-            agent_config.resource_skills = {}
+        if agent_config.resource_skills is None:
+            agent_config._resource_skills = {}
 
         if not isinstance(agent_config.resource_skills, dict):
-            agent_config.resource_skills = {}
+            agent_config._resource_skills = {}
 
         # 获取或创建 directories 列表（拷贝一份避免修改原列表）
         base_directories = agent_config.resource_skills.get('directories', [])

@@ -667,8 +667,8 @@ class TelegramChannel:
                 )
             except Exception as exc:
                 logger.warning(
-                    "sendMessage exception for chat %s (attempt %d/%d): %s",
-                    chat_id, attempt + 1, max_retries, exc,
+                    "sendMessage exception for chat %s (attempt %d/%d): [%s] %r",
+                    chat_id, attempt + 1, max_retries, type(exc).__name__, exc,
                 )
 
             if attempt < max_retries - 1:
@@ -703,8 +703,8 @@ class TelegramChannel:
                 )
             except Exception as exc:
                 logger.warning(
-                    "sendPlainMessage exception for chat %s (attempt %d/%d): %s",
-                    chat_id, attempt + 1, max_retries, exc,
+                    "sendPlainMessage exception for chat %s (attempt %d/%d): [%s] %r",
+                    chat_id, attempt + 1, max_retries, type(exc).__name__, exc,
                 )
             if attempt < max_retries - 1:
                 await asyncio.sleep(2 ** attempt)

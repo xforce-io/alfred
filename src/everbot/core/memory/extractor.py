@@ -1,5 +1,6 @@
 """LLM-based memory extraction from conversation history."""
 
+import asyncio
 import json
 import logging
 import re
@@ -141,7 +142,13 @@ class MemoryExtractor:
         ):
             result = chunk.get("content") or ""
 
-        return result.strip()
+        # Dolphin LLMClient yields error messages as content when all retries
+        # are exhausted instead of raising.  Detect and treat as failure.
+        stripped = result.strip()
+        if stripped.startswith("❌") or stripped.startswith("failed to call LLM"):
+            raise RuntimeError(f"LLM call returned error: {stripped[:120]}")
+
+        return stripped
 
     def _parse_response(self, raw: str) -> ExtractResult:
         """Parse LLM JSON response with fallback."""

@@ -441,6 +441,7 @@ class SessionManager:
         context_trace = self._extract_context_trace(agent)
 
         # Extract structured memories for primary / channel sessions.
+        # Fire-and-forget with timeout so it never blocks session persistence.
         session_type = SessionManager.infer_session_type(session_id)
         if session_type in ("primary", "channel"):
             try:
@@ -453,7 +454,12 @@ class SessionManager:
                     mm = MemoryManager(memory_path, context)
                     portable = agent.snapshot.export_portable_session()
                     history = portable.get("history_messages", [])
-                    await mm.process_session_end(history, session_id)
+                    await asyncio.wait_for(
+                        mm.process_session_end(history, session_id),
+                        timeout=30,
+                    )
+            except asyncio.TimeoutError:
+                logger.warning("Memory extraction timed out (30s); skipping")
             except Exception:
                 logger.warning("Memory extraction failed; skipping", exc_info=True)
 
@@ -476,8 +482,8 @@ class SessionManager:
         exported_variables.pop("_history", None)  # avoid duplicating history_messages
         created_at_hint = context.get_var_value("session_created_at")
 
-        # Compress history for primary sessions before entering the lock.
-        if SessionManager.infer_session_type(session_id) == "primary":
+        # Compress history for long-lived sessions before entering the lock.
+        if SessionManager.infer_session_type(session_id) in ("primary", "channel"):
             try:
                 compressor = SessionCompressor(context)
                 compressed, new_history = await compressor.maybe_compress(serializable_history)

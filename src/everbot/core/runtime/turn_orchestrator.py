@@ -9,6 +9,7 @@ execution policies are defined once.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -124,9 +125,21 @@ def _extract_tool_intent_signature(tool_name: str, args) -> Optional[str]:
         except (json.JSONDecodeError, AttributeError):
             pass
     if tool_name == "_bash":
+        # Detect command_id continuation/wait pattern — repeated waits on the
+        # same long-running command should be capped like any other intent.
+        cid_match = re.search(r'command_id["\'\s]*[=:]\s*["\'\s]*([a-f0-9]{6,})', args)
+        if cid_match:
+            return f"bash_wait:{cid_match.group(1)}"
         grep_match = re.search(r'(?:grep|rg)\s+(?:-\w+\s+)*["\']?([^"\'|\s]+)', args)
         if grep_match:
             return f"search_bash:{grep_match.group(1)}"
+    # Generic fallback for _python calls: hash the normalized code so that
+    # identical calls (e.g. repeated whisper.transcribe()) are caught by the
+    # REPEATED_TOOL_INTENT guard even when they don't match file-path patterns.
+    if tool_name == "_python":
+        normalized = re.sub(r'\s+', ' ', args.strip())
+        code_hash = hashlib.md5(normalized.encode()).hexdigest()[:12]
+        return f"python_exec:{code_hash}"
     return None
 
 
@@ -417,12 +430,14 @@ class TurnOrchestrator:
                         consecutive_empty_llm_rounds = 0
                     # Reasoning output (think) indicates the model is actively
                     # working, even when it produces no user-visible text
-                    # (e.g. deciding to call a tool).  Treat it as valid output
-                    # so multi-step tool-call flows are not mistaken for a
-                    # degraded model.
+                    # (e.g. deciding to call a tool).  Mark the round as
+                    # having output so the first few think-only rounds don't
+                    # trigger a false positive, but do NOT reset the
+                    # consecutive counter — if the model keeps calling tools
+                    # with think-only output (no visible delta), it's likely
+                    # stuck in a loop (e.g. repeated whisper calls).
                     if think and not llm_had_output_this_round:
                         llm_had_output_this_round = True
-                        consecutive_empty_llm_rounds = 0
 
                 elif stage == "skill":
                     if pid and sent_progress.get(pid) == status:
