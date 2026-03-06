@@ -87,7 +87,7 @@
 - ~55 个测试文件
   - `tests/unit/` — 单元测试（~38 个）
   - `tests/integration/` — 集成测试（~10 个）
-  - `tests/web/` — 端到端测试（~5 个）
+  - `tests/e2e/` — 端到端测试（~5 个）
 
 #### 文档
 - README.md / QUICKSTART.md: 使用文档

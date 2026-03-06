@@ -2,7 +2,7 @@
 # Unified test runner for EverBot
 #
 # Usage: tests/run_tests.sh <test_type> [options]
-#   test_type: unit | integration | web | all
+#   test_type: unit | integration | e2e | all (all = unit + integration)
 
 set -e
 
@@ -22,9 +22,9 @@ run_integration() {
     pytest tests/integration/ "$@"
 }
 
-run_web() {
-    echo "Running Web (E2E) Tests..."
-    pytest tests/web/ "$@"
+run_e2e() {
+    echo "Running E2E Tests..."
+    pytest tests/e2e/ "$@"
 }
 
 case "${TYPE}" in
@@ -34,16 +34,15 @@ case "${TYPE}" in
     integration)
         run_integration "$@"
         ;;
-    web)
-        run_web "$@"
+    e2e)
+        run_e2e "$@"
         ;;
     all)
         run_unit "$@"
         run_integration "$@"
-        run_web "$@"
         ;;
     *)
-        echo "Usage: $0 {unit|integration|web|all} [pytest options]"
+        echo "Usage: $0 {unit|integration|e2e|all} [pytest options]"
         exit 1
         ;;
 esac

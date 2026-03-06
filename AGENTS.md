@@ -40,9 +40,9 @@
 - Test directory: `tests/`, organized by test type:
   - `tests/unit/` — Unit tests (isolated, no external dependencies)
   - `tests/integration/` — Integration tests (cross-module, may use network/cache)
-  - `tests/web/` — End-to-end tests (Playwright-based, simulating real user interaction with Streamlit pages)
+  - `tests/e2e/` — End-to-end tests (WebSocket/API, requires full service environment)
 - Unified entry: `tests/run_tests.sh <test_type> [options]`
-  - `test_type`: `unit` / `integration` / `web` / `all`
+  - `test_type`: `unit` / `integration` / `e2e` / `all` (all = unit + integration)
   - Common params: `-v/--verbose`, `--coverage`, `--parallel`, `--fail-fast`
   - Integration test params: `-f/--filter <pattern>`, `-c/--config <file>`, `--agent-only`, `--regular-only`
   - Environment params: `--python <version>`, `--sync`, `--clean`

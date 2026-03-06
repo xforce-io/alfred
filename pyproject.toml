@@ -35,6 +35,10 @@ asyncio_mode = "auto"
 markers = [
     "slow: marks tests as slow",
 ]
+filterwarnings = [
+    "ignore::DeprecationWarning:docstring_parser",
+    "ignore::RuntimeWarning:.*coroutine.*was never awaited",
+]
 
 [tool.ruff]
 line-length = 100

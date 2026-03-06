@@ -172,7 +172,7 @@ python -m pytest tests/ -v
 # 按类型运行
 python -m pytest tests/unit/ -v           # 单元测试（隔离，无外部依赖）
 python -m pytest tests/integration/ -v    # 集成测试（跨模块，可能需要网络）
-python -m pytest tests/web/ -v            # 端到端测试（WebSocket/API）
+python -m pytest tests/e2e/ -v            # 端到端测试（WebSocket/API）
 
 # 使用统一入口脚本
 tests/run_tests.sh unit                   # 运行单元测试
