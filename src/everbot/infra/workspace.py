@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class WorkspaceInstructions:
     """工作区指令集"""
+    soul_md: Optional[str] = None
     agents_md: Optional[str] = None
     skills_md: Optional[str] = None
     user_md: Optional[str] = None
@@ -32,6 +33,7 @@ class WorkspaceLoader:
     SNAPSHOT_READ_RETRIES = 3
 
     INSTRUCTION_FILES = {
+        'soul_md': 'SOUL.md',
         'agents_md': 'AGENTS.md',
         'skills_md': 'SKILLS.md',
         'user_md': 'USER.md',
@@ -127,6 +129,9 @@ class WorkspaceLoader:
         """
         instructions = self.load()
         parts = []
+
+        if instructions.soul_md:
+            parts.append(f"# 身份定义\n\n{instructions.soul_md}")
 
         if instructions.agents_md:
             parts.append(f"# 行为规范\n\n{instructions.agents_md}")

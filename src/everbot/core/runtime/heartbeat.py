@@ -947,7 +947,11 @@ If not, reply with `HEARTBEAT_OK`.
             # get notified of task failures via Telegram.
             from .events import emit
 
+            from ..tasks.task_manager import format_retry_hint
+            retry_hint = format_retry_hint(task)
             _fail_msg = f"Task failed: {task_title or getattr(task, 'id', 'task')}\n{exc}"
+            if retry_hint:
+                _fail_msg += f"\n\n{retry_hint}"
             await emit(
                 self.primary_session_id,
                 {

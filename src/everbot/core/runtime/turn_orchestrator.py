@@ -51,7 +51,7 @@ def _is_retryable(exc: Exception, markers: List[str]) -> bool:
 def _extract_failure_signature(output: str) -> Optional[str]:
     if not output:
         return None
-    code_match = re.search(r"Command exited with code\s+(\d+)", output)
+    code_match = re.search(r"(?m)^\s*Command exited with code\s+(\d+)\b", output)
     if code_match and code_match.group(1) != "0":
         exit_code = code_match.group(1)
         # Try to extract a structured error_code from JSON body for finer
@@ -133,6 +133,10 @@ def _extract_tool_intent_signature(tool_name: str, args) -> Optional[str]:
         grep_match = re.search(r'(?:grep|rg)\s+(?:-\w+\s+)*["\']?([^"\'|\s]+)', args)
         if grep_match:
             return f"search_bash:{grep_match.group(1)}"
+        normalized = re.sub(r"\s+", " ", args.strip())
+        if normalized:
+            cmd_hash = hashlib.md5(normalized.encode()).hexdigest()[:12]
+            return f"bash_exec:{cmd_hash}"
     # Generic fallback for _python calls: hash the normalized code so that
     # identical calls (e.g. repeated whisper.transcribe()) are caught by the
     # REPEATED_TOOL_INTENT guard even when they don't match file-path patterns.

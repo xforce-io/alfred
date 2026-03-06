@@ -126,6 +126,18 @@ class _FailingAgent:
         yield {}  # pragma: no cover
 
 
+class _TurnErrorAgent:
+    name = "dummy_agent"
+
+    def __init__(self):
+        self.executor = SimpleNamespace(context=_DummyContext())
+        self.state = AgentState.INITIALIZED
+
+    async def continue_chat(self, **_kwargs):
+        if False:
+            yield {}
+
+
 def _make_core_service(tmp_path: Path):
     """Create a ChannelCoreService with mocked dependencies."""
     sm = _make_session_manager_mock()
@@ -229,6 +241,35 @@ async def test_process_message_error_sends_error_outbound():
     texts = collector.payloads_by_type("text")
     assert any("本轮执行遇到错误" in t.content for t in texts)
     assert collector.last.msg_type == "end"
+
+
+@pytest.mark.asyncio
+async def test_process_message_repeated_tool_failures_sends_generic_guidance(monkeypatch):
+    """Repeated tool failures should produce a generic strategy-switch hint."""
+    agent = _TurnErrorAgent()
+
+    class _FakeTurnOrchestrator:
+        def __init__(self, _policy):
+            return None
+
+        async def run_turn(self, *_args, **_kwargs):
+            from src.everbot.core.runtime.turn_policy import TurnEvent, TurnEventType
+            yield TurnEvent(
+                type=TurnEventType.TURN_ERROR,
+                error="REPEATED_TOOL_FAILURES: failed=4, signature=exit_code:2, count=4",
+            )
+
+    monkeypatch.setattr("src.everbot.core.channel.core_service.TurnOrchestrator", _FakeTurnOrchestrator)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        core = _make_core_service(Path(tmp))
+        collector = _EventCollector()
+
+        await core.process_message(agent, "demo_agent", "web_session_demo_agent", "hi", collector)
+
+    texts = collector.payloads_by_type("text")
+    assert any("当前策略没有产生新信息" in t.content for t in texts)
+    assert not any("更换站点/接口" in t.content for t in texts)
 
 
 @pytest.mark.asyncio

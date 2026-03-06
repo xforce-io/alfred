@@ -257,6 +257,26 @@ def claim_task(task: Task, now: Optional[datetime] = None) -> bool:
     return True
 
 
+_RETRY_BACKOFF = [300, 900]  # 5 min, 15 min
+
+
+def format_retry_hint(task: Task) -> Optional[str]:
+    """Return a human-readable retry hint based on current task state.
+
+    Called *before* update_task_state, so uses task.retry (pre-increment)
+    to predict the next backoff.
+    """
+    next_retry = task.retry + 1
+    if next_retry - 1 < len(_RETRY_BACKOFF):
+        backoff = _RETRY_BACKOFF[next_retry - 1]
+        if backoff >= 60:
+            label = f"{backoff // 60}分钟"
+        else:
+            label = f"{backoff}秒"
+        return f"将在{label}后重试 ({next_retry}/{len(_RETRY_BACKOFF)})"
+    return None
+
+
 def update_task_state(
     task: Task,
     new_state: TaskState,
@@ -285,9 +305,9 @@ def update_task_state(
     elif new_state == TaskState.FAILED:
         task.error_message = error_message
         task.retry += 1
-        if task.retry < task.max_retry:
-            # Re-arm as pending for retry with exponential backoff
-            backoff_seconds = min(2 ** (task.retry - 1) * 30, 3600)  # 30s, 60s, 120s, ... max 1h
+        if task.retry - 1 < len(_RETRY_BACKOFF):
+            # Re-arm as pending for retry with fixed backoff table
+            backoff_seconds = _RETRY_BACKOFF[task.retry - 1]
             task.state = TaskState.PENDING.value
             task.next_run_at = (now + timedelta(seconds=backoff_seconds)).isoformat()
         elif task.schedule:

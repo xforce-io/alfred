@@ -422,7 +422,7 @@ class ChannelCoreService:
                     run_id=run_id,
                 )
                 err_msg = str(e)
-                if err_msg.startswith("TOOL_CALL_BUDGET_EXCEEDED"):
+                if err_msg.startswith(("TOOL_CALL_BUDGET_EXCEEDED", "REPEATED_TOOL_INTENT")):
                     await on_event(OutboundMessage(session_id, (
                         "我已停止本轮自动尝试：工具调用次数过多，继续重试很可能是无效循环。"
                         "建议你指定一个替代路径（例如换信息源、缩小目标或提供可用入口）。"
@@ -430,7 +430,8 @@ class ChannelCoreService:
                 elif err_msg.startswith("REPEATED_TOOL_FAILURES"):
                     await on_event(OutboundMessage(session_id, (
                         "我已停止本轮自动重试：检测到重复失败（同类错误连续出现）。"
-                        "请确认是否切换策略：1) 更换站点/接口 2) 你先人工完成验证后我继续。"
+                        "这通常说明当前策略没有产生新信息。"
+                        "请换一种做法，或直接告诉我下一步要缩小范围、改用别的工具、还是只基于现有结果给结论。"
                     ), msg_type="text"))
                 elif "timeout" in err_msg.lower():
                     await on_event(OutboundMessage(session_id, (

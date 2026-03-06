@@ -85,25 +85,54 @@ class SessionManager:
         self._metrics_lock = threading.Lock()
 
     def get_last_activity_time(self, agent_name: str) -> Optional[float]:
-        """Return Unix timestamp of the last user activity on the primary session.
+        """Return Unix timestamp of the latest user activity across agent chat sessions.
 
-        Reads the persisted ``updated_at`` field of the primary session file.
-        Returns ``None`` when the session does not exist or has no timestamp.
+        Aggregates persisted ``updated_at`` values across primary and channel
+        sessions for the given agent. Heartbeat/job sessions are excluded
+        because they represent background execution, not user activity.
+        Returns ``None`` when no qualifying session exists or all timestamps
+        are unreadable.
         """
-        session_id = self.get_primary_session_id(agent_name)
-        session_path = self.persistence._get_session_path(session_id)
-        if not session_path.exists():
-            return None
-        try:
-            raw = json.loads(session_path.read_text(encoding="utf-8"))
-            updated_at = raw.get("updated_at")
-            parsed = self._parse_iso_datetime(updated_at)
-            if parsed is None:
-                return None
-            return parsed.timestamp()
-        except Exception:
-            logger.debug("Failed to read updated_at for %s", session_id, exc_info=True)
-            return None
+        from ..channel.session_resolver import ChannelSessionResolver
+
+        patterns = [
+            f"{self.get_primary_session_id(agent_name)}.json",
+            f"{self.get_session_prefix(agent_name)}*.json",
+        ]
+        for channel_type, prefix in ChannelSessionResolver._PREFIX_MAP.items():
+            if channel_type == "web":
+                continue
+            patterns.append(f"{prefix}{agent_name}{ChannelSessionResolver._SEP}*.json")
+
+        latest: Optional[float] = None
+        seen_paths: set[Path] = set()
+        for pattern in patterns:
+            for session_path in self.persistence.sessions_dir.glob(pattern):
+                if session_path in seen_paths or not session_path.is_file():
+                    continue
+                seen_paths.add(session_path)
+                try:
+                    raw = json.loads(session_path.read_text(encoding="utf-8"))
+                except Exception:
+                    logger.debug("Failed to read session file for activity scan: %s", session_path, exc_info=True)
+                    continue
+
+                session_type = raw.get("session_type") or self.infer_session_type(raw.get("session_id") or session_path.stem)
+                if session_type not in {"primary", "channel", "sub"}:
+                    continue
+                if raw.get("agent_name") not in {None, "", agent_name}:
+                    continue
+
+                ua = raw.get("updated_at")
+                if not ua:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(ua).timestamp()
+                except (ValueError, TypeError):
+                    continue
+                if latest is None or ts > latest:
+                    latest = ts
+        return latest
 
     def record_metric(self, name: str, delta: float = 1.0) -> None:
         """Increment one runtime metric counter."""

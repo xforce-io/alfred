@@ -155,6 +155,35 @@ async def test_repeated_tool_intent():
 
 
 @pytest.mark.asyncio
+async def test_repeated_identical_bash_command_triggers_intent_guard():
+    """Repeated identical bash commands should stop before the loop grows."""
+    script = []
+    for i in range(4):
+        script.append(_progress_event(
+            _tool_call(
+                "_bash",
+                "python skills/trajectory-reviewer/scripts/review_recent.py --limit-files 2",
+                pid=f"tc{i}",
+            )
+        ))
+        script.append(_progress_event(_tool_output("_bash", "report ok", pid=f"to{i}")))
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(TurnPolicy(
+        max_attempts=1,
+        max_same_tool_intent=2,
+        max_tool_calls=20,
+        max_consecutive_empty_llm_rounds=99,
+    ))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "go"):
+        events.append(te)
+
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert len(errors) == 1
+    assert "REPEATED_TOOL_INTENT" in errors[0].error
+
+
+@pytest.mark.asyncio
 async def test_retry_on_transient_error():
     """Transient error triggers retry with STATUS event."""
     call_count = {"n": 0}
@@ -246,6 +275,7 @@ def test_extract_failure_signature():
     assert _extract_failure_signature("ERR_CONNECTION something") == "ERR_CONNECTION"
     assert _extract_failure_signature("") is None
     assert _extract_failure_signature("SyntaxError: invalid syntax") is not None
+    assert _extract_failure_signature("snippet=Command exited with code 2") is None
 
 
 def test_extract_tool_intent_signature():
@@ -260,6 +290,10 @@ def test_extract_tool_intent_signature():
     # _bash with grep/rg commands
     assert _extract_tool_intent_signature("_bash", 'grep -r "attractor" .') == "search_bash:attractor"
     assert _extract_tool_intent_signature("_bash", "rg -i 'TODO' src/") == "search_bash:TODO"
+    assert _extract_tool_intent_signature(
+        "_bash",
+        "python skills/trajectory-reviewer/scripts/review_recent.py --limit-files 2",
+    ).startswith("bash_exec:")
 
 
 def test_truncate_preview():

@@ -18,7 +18,7 @@ Use this skill when the user asks the agent to self-review recent execution beha
 ## Command
 
 ```bash
-python skills/trajectory-reviewer/scripts/review_recent.py --limit-files 3 --tail-lines 3000
+python skills/trajectory-reviewer/scripts/review_recent.py --limit-files 2 --tail-lines 3000
 ```
 
 Optional filters:
@@ -34,7 +34,7 @@ python skills/trajectory-reviewer/scripts/review_recent.py \
 
 ## Recommended Workflow
 
-1. Run the script with `--limit-files 3` first.
+1. Run the script with `--limit-files 2` first.
 2. Read `High` findings first, then `Medium`.
 3. Convert findings into concrete fixes (prompt update, tool guardrail, retry policy, timeout split, etc.).
 4. Re-run after fixes and compare issue counts.

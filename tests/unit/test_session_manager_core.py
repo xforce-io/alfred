@@ -225,7 +225,76 @@ class TestListAgentSessions:
 
 
 # ===========================================================================
-# 4. SessionManager.infer_session_type
+# 4. SessionManager.get_last_activity_time
+# ===========================================================================
+
+class TestGetLastActivityTime:
+
+    @pytest.mark.asyncio
+    async def test_prefers_latest_channel_session_activity(self, tmp_path: Path):
+        manager = SessionManager(tmp_path)
+
+        old = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        new = datetime(2024, 1, 1, 0, 30, tzinfo=timezone.utc)
+
+        primary = _make_session_data(
+            session_id="web_session_demo_agent",
+            agent_name="demo_agent",
+            updated_at=old.isoformat(),
+            created_at=old.isoformat(),
+        )
+        tg = _make_session_data(
+            session_id="tg_session_demo_agent__12345",
+            agent_name="demo_agent",
+            updated_at=new.isoformat(),
+            created_at=new.isoformat(),
+        )
+
+        await manager.persistence.save_data(primary)
+        await manager.persistence.save_data(tg)
+
+        last = manager.get_last_activity_time("demo_agent")
+
+        assert last is not None
+        assert last == new.timestamp()
+
+    @pytest.mark.asyncio
+    async def test_ignores_heartbeat_and_job_sessions(self, tmp_path: Path):
+        manager = SessionManager(tmp_path)
+
+        base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        primary = _make_session_data(
+            session_id="web_session_demo_agent",
+            agent_name="demo_agent",
+            updated_at=base.isoformat(),
+            created_at=base.isoformat(),
+        )
+        heartbeat = _make_session_data(
+            session_id="heartbeat_session_demo_agent",
+            agent_name="demo_agent",
+            session_type="heartbeat",
+            updated_at=(base.replace(hour=1)).isoformat(),
+            created_at=(base.replace(hour=1)).isoformat(),
+        )
+        job = _make_session_data(
+            session_id="job_123",
+            agent_name="demo_agent",
+            session_type="job",
+            updated_at=(base.replace(hour=2)).isoformat(),
+            created_at=(base.replace(hour=2)).isoformat(),
+        )
+
+        await manager.persistence.save_data(primary)
+        await manager.persistence.save_data(heartbeat)
+        await manager.persistence.save_data(job)
+
+        last = manager.get_last_activity_time("demo_agent")
+
+        assert last == base.timestamp()
+
+
+# ===========================================================================
+# 5. SessionManager.infer_session_type
 # ===========================================================================
 
 class TestInferSessionType:
@@ -250,7 +319,7 @@ class TestInferSessionType:
 
 
 # ===========================================================================
-# 5. SessionManager.resolve_agent_name
+# 6. SessionManager.resolve_agent_name
 # ===========================================================================
 
 class TestResolveAgentName:
@@ -269,7 +338,7 @@ class TestResolveAgentName:
 
 
 # ===========================================================================
-# 6. SessionManager.create_chat_session_id
+# 7. SessionManager.create_chat_session_id
 # ===========================================================================
 
 class TestCreateChatSessionId:

@@ -49,7 +49,7 @@ class InspectorSchedule:
     """Per-agent inspector scheduling state."""
 
     agent_name: str
-    interval_minutes: int = 60  # default 1h
+    interval_minutes: int = 30  # default 30min
     next_inspect_at: Optional[datetime] = None
     active_hours: tuple[int, int] = (8, 22)
     consecutive_failures: int = 0

@@ -129,7 +129,7 @@ class UserDataManager:
         agent_dir = self.get_agent_dir(agent_name)
         files = {}
 
-        for filename in ["AGENTS.md", "HEARTBEAT.md", "MEMORY.md", "USER.md"]:
+        for filename in ["SOUL.md", "AGENTS.md", "HEARTBEAT.md", "MEMORY.md", "USER.md"]:
             file_path = agent_dir / filename
             if file_path.exists():
                 try:
@@ -167,6 +167,30 @@ class UserDataManager:
 
         # 创建默认文件
         templates = {
+            "SOUL.md": f"""# {agent_name} 的灵魂
+
+## 身份
+
+我是 {agent_name}，一个专为你打造的个人 AI 助手。
+
+## 人格特征
+
+- 直接、简洁，不废话
+- 遇到不确定时，诚实说不知道，然后主动去查
+- 对用户的真实需求保持敏锐
+
+## 说话风格
+
+- 默认用中文回复，除非用户用英文
+- 语气自然，像在和朋友交流
+- 不用"好的！"、"当然！"等无意义的开场白
+
+## 核心价值
+
+- 帮用户解决真实问题，而非表现聪明
+- 行动先于解释
+- 对用户的时间保持尊重
+""",
             "AGENTS.md": f"""# {agent_name} 行为规范
 
 ## 身份

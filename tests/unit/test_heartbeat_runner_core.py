@@ -1138,3 +1138,73 @@ class TestIdleCooldown:
 
         result = await runner.run_once_with_options()
         assert result == "HEARTBEAT_OK"
+
+    @pytest.mark.asyncio
+    async def test_run_once_skips_when_channel_session_recently_active(self, tmp_path: Path):
+        """Recent Telegram/channel activity should also block heartbeat execution."""
+        from src.everbot.core.session.session import SessionManager
+        from src.everbot.core.session.session_data import SessionData
+
+        manager = SessionManager(tmp_path)
+        now = datetime.now(timezone.utc)
+        old = now - timedelta(minutes=30)
+
+        await manager.persistence.save_data(SessionData(
+            session_id="web_session_test_agent",
+            agent_name="test_agent",
+            model_name="gpt-4",
+            session_type="primary",
+            history_messages=[],
+            mailbox=[],
+            variables={},
+            created_at=old.isoformat(),
+            updated_at=old.isoformat(),
+            state="active",
+            events=[],
+            timeline=[],
+            context_trace={},
+            revision=1,
+        ))
+        await manager.persistence.save_data(SessionData(
+            session_id="tg_session_test_agent__12345",
+            agent_name="test_agent",
+            model_name="gpt-4",
+            session_type="channel",
+            history_messages=[],
+            mailbox=[],
+            variables={},
+            created_at=now.isoformat(),
+            updated_at=now.isoformat(),
+            state="active",
+            events=[],
+            timeline=[],
+            context_trace={},
+            revision=1,
+        ))
+
+        manager.acquire_session = AsyncMock(return_value=True)
+        manager.release_session = MagicMock()
+        manager.load_session = AsyncMock(return_value=None)
+        manager.get_cached_agent = MagicMock(return_value=None)
+        manager.cache_agent = MagicMock()
+        manager.save_session = AsyncMock()
+        manager.append_timeline_event = MagicMock()
+        manager.record_metric = MagicMock()
+        manager.migrate_legacy_sessions_for_agent = AsyncMock(return_value=False)
+        manager.deposit_mailbox_event = AsyncMock(return_value=True)
+        manager.inject_history_message = AsyncMock(return_value=True)
+        manager.mark_session_archived = AsyncMock(return_value=True)
+        manager.restore_timeline = MagicMock()
+        manager.restore_to_agent = AsyncMock()
+        manager.update_atomic = AsyncMock(return_value=None)
+        manager.persistence.restore_to_agent = AsyncMock()
+
+        @contextmanager
+        def _file_lock(_session_id, blocking=False):
+            yield True
+
+        manager.file_lock = _file_lock
+
+        runner = _make_runner(workspace_path=tmp_path, session_manager=manager)
+        result = await runner.run_once_with_options()
+        assert result == "HEARTBEAT_SKIPPED_USER_ACTIVE"

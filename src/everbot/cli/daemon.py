@@ -213,7 +213,7 @@ class EverBotDaemon:
             )
             inspector_schedules[agent_name] = InspectorSchedule(
                 agent_name=agent_name,
-                interval_minutes=60,  # default 1h for inspector
+                interval_minutes=30,  # default 30min for inspector
                 active_hours=active_hours,
             )
 

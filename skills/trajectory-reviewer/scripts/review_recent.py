@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import glob
 import json
 import re
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -36,11 +37,18 @@ class Finding:
     recommendation: str
 
 
+@dataclass
+class LoadedTrajectory:
+    path: Path
+    payload: Dict[str, Any]
+    error: Optional[str] = None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Review recent trajectory and log files.")
     parser.add_argument("--agent", default=None, help="Filter trajectory by agent name.")
     parser.add_argument("--session", default=None, help="Filter trajectory by session id substring.")
-    parser.add_argument("--limit-files", type=int, default=3, help="Number of latest trajectory files to analyze.")
+    parser.add_argument("--limit-files", type=int, default=2, help="Number of latest trajectory files to analyze.")
     parser.add_argument("--tail-lines", type=int, default=3000, help="Number of recent log lines to analyze.")
     parser.add_argument("--trajectory-glob", default=DEFAULT_TRAJECTORY_GLOB, help="Glob pattern for trajectory files.")
     parser.add_argument("--dolphin-log", default=None, help="Path to dolphin log file.")
@@ -69,6 +77,44 @@ def extract_session_id(path: Path) -> str:
     return raw
 
 
+def extract_agent_name(path: Path) -> Optional[str]:
+    parts = path.parts
+    try:
+        idx = parts.index("agents")
+    except ValueError:
+        return None
+    agent_idx = idx + 1
+    if agent_idx >= len(parts):
+        return None
+    return parts[agent_idx]
+
+
+def _trajectory_priority(path: Path, anchor_agent: Optional[str], anchor_session: Optional[str]) -> Tuple[int, float]:
+    session_id = extract_session_id(path)
+    agent_name = extract_agent_name(path)
+    mtime = path.stat().st_mtime
+
+    if anchor_session and session_id == anchor_session:
+        return (0, -mtime)
+    if anchor_agent and session_id == f"heartbeat_session_{anchor_agent}":
+        return (1, -mtime)
+    if anchor_agent and agent_name == anchor_agent and not session_id.startswith("heartbeat_session_"):
+        return (2, -mtime)
+    if session_id.startswith("heartbeat_session_"):
+        return (4, -mtime)
+    return (3, -mtime)
+
+
+def _session_anchor_rank(session_id: str) -> int:
+    if session_id.startswith(("tg_session_", "web_session_", "api_session_", "cli_session_")):
+        return 0
+    if session_id.startswith("heartbeat_session_"):
+        return 2
+    if session_id.startswith(("job_", "routine_")):
+        return 3
+    return 1
+
+
 def discover_trajectory_files(pattern: str, agent: Optional[str], session: Optional[str], limit: int) -> List[Path]:
     # Use glob with explicit home expansion because the default pattern starts with "~".
     expanded_pattern = str(Path(pattern).expanduser())
@@ -78,21 +124,32 @@ def discover_trajectory_files(pattern: str, agent: Optional[str], session: Optio
     for path in paths:
         if not path.is_file():
             continue
-        if agent and path.parts[-3] != agent:
+        path_agent = extract_agent_name(path)
+        if agent and path_agent != agent:
             continue
         if session and session not in path.name:
             continue
         filtered.append(path)
 
     filtered.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    if not filtered:
+        return []
+
+    anchor_path = min(
+        filtered,
+        key=lambda p: (_session_anchor_rank(extract_session_id(p)), -p.stat().st_mtime),
+    )
+    anchor_agent = agent or extract_agent_name(anchor_path)
+    anchor_session = session or extract_session_id(anchor_path)
+    filtered.sort(key=lambda p: _trajectory_priority(p, anchor_agent, anchor_session))
     return filtered[: max(1, limit)]
 
 
-def load_json(path: Path) -> Dict[str, Any]:
+def load_json(path: Path) -> LoadedTrajectory:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+        return LoadedTrajectory(path=path, payload=json.loads(path.read_text(encoding="utf-8")))
+    except Exception as exc:
+        return LoadedTrajectory(path=path, payload={}, error=str(exc))
 
 
 def normalize_text(value: Any) -> str:
@@ -118,10 +175,14 @@ def pick_log_path(explicit_path: Optional[str]) -> Optional[Path]:
 
 
 def tail_lines(path: Path, count: int) -> List[str]:
-    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
     if count <= 0:
-        return lines
-    return lines[-count:]
+        return path.read_text(encoding="utf-8", errors="ignore").splitlines()
+
+    window: deque[str] = deque(maxlen=count)
+    with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            window.append(line.rstrip("\n"))
+    return list(window)
 
 
 def infer_hint(message: str) -> str:
@@ -129,6 +190,31 @@ def infer_hint(message: str) -> str:
         if pattern.search(message):
             return hint
     return "Inspect stack traces and add guardrails for this failure path."
+
+
+_TOOL_ERROR_PATTERNS: Sequence[re.Pattern[str]] = (
+    re.compile(r"(?m)^\s*Command exited with code\s+[1-9]\d*\b"),
+    re.compile(r"(?m)^\s*Traceback \(most recent call last\):"),
+    re.compile(r"(?m)^\s*\w*Error:"),
+    re.compile(r"(?m)^\s*Failed to\b", re.IGNORECASE),
+    re.compile(r"(?m)^\s*Exception:"),
+)
+
+
+def extract_tool_error_signature(content_text: str) -> Optional[str]:
+    if not content_text:
+        return None
+    for pattern in _TOOL_ERROR_PATTERNS:
+        match = pattern.search(content_text)
+        if not match:
+            continue
+        line = content_text[match.start():].split("\n", 1)[0].strip()
+        normalized = re.sub(r"\s+", " ", line)
+        if normalized.startswith("Command exited with code"):
+            return normalized
+        digest = hashlib.md5(normalized.encode("utf-8")).hexdigest()[:12]
+        return f"{normalized[:120]}::{digest}"
+    return None
 
 
 def analyze_trajectories(paths: Sequence[Path]) -> Tuple[Dict[str, Any], List[Finding], List[str]]:
@@ -148,7 +234,17 @@ def analyze_trajectories(paths: Sequence[Path]) -> Tuple[Dict[str, Any], List[Fi
     loop_sessions: Dict[str, int] = defaultdict(int)
 
     for path in paths:
-        payload = load_json(path)
+        loaded = load_json(path)
+        if loaded.error:
+            findings.append(
+                Finding(
+                    severity="Medium",
+                    title="Unreadable trajectory file",
+                    evidence=[f"file={path}", f"error={loaded.error[:220]}"],
+                    recommendation="Repair or regenerate the trajectory file before relying on this review.",
+                )
+            )
+        payload = loaded.payload
         messages = payload.get("trajectory") if isinstance(payload, dict) else None
         if not isinstance(messages, list):
             continue
@@ -203,9 +299,10 @@ def analyze_trajectories(paths: Sequence[Path]) -> Tuple[Dict[str, Any], List[Fi
 
             if role == "tool":
                 metrics["tool"] += 1
-                if re.search(r"error|exception|traceback|failed", content_text, re.IGNORECASE):
+                error_sig = extract_tool_error_signature(content_text)
+                if error_sig:
                     metrics["tool_error_messages"] += 1
-                    repeated_error_counter[content_text[:180]] += 1
+                    repeated_error_counter[error_sig] += 1
 
     for session_id, loop_count in sorted(loop_sessions.items(), key=lambda item: item[1], reverse=True):
         if loop_count >= 2:

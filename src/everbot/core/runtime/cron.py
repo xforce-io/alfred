@@ -499,7 +499,11 @@ class CronExecutor:
                 detail=str(exc),
                 run_id=run_id,
             )
+            from ..tasks.task_manager import format_retry_hint
+            retry_hint = format_retry_hint(task)
             fail_msg = f"Task failed: {task_title or task.id}\n{exc}"
+            if retry_hint:
+                fail_msg += f"\n\n{retry_hint}"
             await self.delivery._emit_realtime(fail_msg, run_id)
             raise
 

@@ -9,6 +9,8 @@ from src.everbot.core.tasks.task_manager import (
     TaskList,
     TaskState,
     ParseStatus,
+    _RETRY_BACKOFF,
+    format_retry_hint,
     parse_heartbeat_md,
     get_due_tasks,
     claim_task,
@@ -235,35 +237,32 @@ class TestTaskStateTransitions:
         assert task.state == "pending"  # retryable
         assert task.retry == 1
 
-    def test_failed_retry_backoff_30s(self):
-        """First retry should have 30s backoff (2^0 * 30)."""
+    def test_failed_retry_backoff_5min(self):
+        """First retry should have 5min (300s) backoff."""
         now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
         task = _sample_task(retry=0, max_retry=3)
         update_task_state(task, TaskState.FAILED, error_message="err", now=now)
         assert task.retry == 1
         next_dt = datetime.fromisoformat(task.next_run_at)
-        expected = now + timedelta(seconds=30)
+        expected = now + timedelta(seconds=_RETRY_BACKOFF[0])
         assert next_dt == expected, f"Expected {expected}, got {next_dt}"
 
-    def test_failed_backoff_exponential(self):
-        """Second retry should have 60s backoff (2^1 * 30)."""
+    def test_failed_backoff_15min(self):
+        """Second retry should have 15min (900s) backoff."""
         now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
         task = _sample_task(retry=1, max_retry=5)
         update_task_state(task, TaskState.FAILED, error_message="err", now=now)
         assert task.retry == 2
         next_dt = datetime.fromisoformat(task.next_run_at)
-        expected = now + timedelta(seconds=60)
+        expected = now + timedelta(seconds=_RETRY_BACKOFF[1])
         assert next_dt == expected, f"Expected {expected}, got {next_dt}"
 
-    def test_failed_backoff_capped_1h(self):
-        """Backoff should be capped at 1 hour regardless of retry count."""
+    def test_failed_beyond_backoff_table_stays_failed(self):
+        """After exhausting backoff table, one-shot task stays failed."""
         now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
-        task = _sample_task(retry=9, max_retry=20)
+        task = _sample_task(retry=len(_RETRY_BACKOFF), max_retry=20)
         update_task_state(task, TaskState.FAILED, error_message="err", now=now)
-        assert task.retry == 10
-        next_dt = datetime.fromisoformat(task.next_run_at)
-        expected = now + timedelta(seconds=3600)
-        assert next_dt == expected, f"Expected {expected}, got {next_dt}"
+        assert task.state == "failed"
 
     def test_done_with_interval_uses_task_timezone(self):
         task = _sample_task(state="running", schedule="1h")
@@ -326,6 +325,25 @@ class TestTaskStateTransitions:
         assert task.state == "pending", "Scheduled task should reset, not stay failed"
         assert task.retry == 0, "Retry counter should reset after max_retry cycle"
         assert task.next_run_at is not None
+
+
+# ── format_retry_hint ─────────────────────────────────────────────
+
+class TestFormatRetryHint:
+    def test_first_retry_hint(self):
+        task = _sample_task(retry=0)
+        hint = format_retry_hint(task)
+        assert hint == "将在5分钟后重试 (1/2)"
+
+    def test_second_retry_hint(self):
+        task = _sample_task(retry=1)
+        hint = format_retry_hint(task)
+        assert hint == "将在15分钟后重试 (2/2)"
+
+    def test_no_hint_when_exhausted(self):
+        task = _sample_task(retry=2)
+        hint = format_retry_hint(task)
+        assert hint is None
 
 
 # ── _compute_next_run edge cases ─────────────────────────────────
