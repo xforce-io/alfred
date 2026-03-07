@@ -51,7 +51,7 @@ def generate_one_line_summary(abstract: str) -> str:
 
         loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(asyncio.wait_for(_call(), timeout=30))
+            return loop.run_until_complete(asyncio.wait_for(_call(), timeout=90))
         finally:
             loop.close()
     except Exception as e:
@@ -64,7 +64,7 @@ def fetch_huggingface_papers(limit: int = 10) -> List[Dict[str, Any]]:
     url = f"https://huggingface.co/api/daily_papers?limit={limit}"
 
     try:
-        response = requests.get(url, timeout=30)
+        response = requests.get(url, timeout=90)
         response.raise_for_status()
         data = response.json()
     except (requests.exceptions.RequestException, ValueError) as e:
@@ -129,7 +129,7 @@ def fetch_arxiv_papers(category: str = "cs.AI", limit: int = 10) -> List[Dict[st
     )
 
     try:
-        response = requests.get(api_url, timeout=30)
+        response = requests.get(api_url, timeout=90)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         print(f"Error fetching arXiv papers: {e}", file=sys.stderr)
