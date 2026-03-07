@@ -84,7 +84,7 @@ class NewsCluster:
 class RhinoAnalyzer:
     """Clusters news items and prepares structured data for LLM evaluation."""
 
-    def __init__(self, min_cluster_size: int = 2):
+    def __init__(self, min_cluster_size: int = 1):
         self.min_cluster_size = min_cluster_size
 
     def analyze(self, news_items: List[dict]) -> List[dict]:

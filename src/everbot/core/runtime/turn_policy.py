@@ -66,9 +66,10 @@ class TurnPolicy:
     max_tool_calls: int = 50
     max_failed_tool_outputs: int = 6
     max_same_failure_signature: int = 4
-    max_same_tool_intent: int = 4
-    max_same_readonly_intent: int = 8
+    max_same_tool_intent: int = 6
+    max_same_readonly_intent: int = 10
     max_consecutive_empty_llm_rounds: int = 3
+    max_consecutive_similar_llm_rounds: int = 4
     max_non_progress_events: int = 500
     max_tool_args_preview_chars: int = 500
     max_tool_output_preview_chars: int = 8000

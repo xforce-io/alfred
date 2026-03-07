@@ -136,6 +136,11 @@ def _extract_tool_intent_signature(tool_name: str, args) -> Optional[str]:
         normalized = re.sub(r"\s+", " ", args.strip())
         if normalized:
             cmd_hash = hashlib.md5(normalized.encode()).hexdigest()[:12]
+            # Classify common read-only bash commands so they get the
+            # higher max_same_readonly_intent limit instead of the
+            # stricter write-intent limit.
+            if _is_read_only_bash(args_lower):
+                return f"bash_read:{cmd_hash}"
             return f"bash_exec:{cmd_hash}"
     # Generic fallback for _python calls: hash the normalized code so that
     # identical calls (e.g. repeated whisper.transcribe()) are caught by the
@@ -147,12 +152,55 @@ def _extract_tool_intent_signature(tool_name: str, args) -> Optional[str]:
     return None
 
 
-_READ_ONLY_INTENT_PREFIXES = frozenset({"read_file:", "search_grep:", "search_bash:"})
+_READ_ONLY_BASH_PATTERNS = re.compile(
+    r"""(?:^|&&|\|\||;)\s*(?:
+        git\s+(?:status|diff|log|show|branch|tag|remote|stash\s+list|rev-parse|describe)
+        |ls(?:\s|$)
+        |cat\s
+        |head\s
+        |tail\s
+        |wc\s
+        |file\s
+        |stat\s
+        |du\s
+        |df\s
+        |pwd
+        |which\s
+        |type\s
+        |echo\s
+        |python[3]?\s+(?:-c\s|.*\bprint\b)
+    )""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
+# Patterns that indicate write operations — these override read-only detection.
+_WRITE_BASH_MARKERS = (
+    "cat >", "cat>", "echo >", "echo>", "tee ", ">>",
+    "sed -i", "mv ", "cp ", "rm ", "mkdir ", "touch ",
+    "chmod ", "chown ", "git add", "git commit", "git push",
+    "git checkout", "git reset", "git merge", "git rebase",
+    "pip install", "npm install", "apt ", "brew ",
+)
+
+
+def _is_read_only_bash(args_lower: str) -> bool:
+    """Heuristic: return True if a bash command looks read-only."""
+    if any(m in args_lower for m in _WRITE_BASH_MARKERS):
+        return False
+    return bool(_READ_ONLY_BASH_PATTERNS.search(args_lower))
+
+
+_READ_ONLY_INTENT_PREFIXES = frozenset({
+    "read_file:", "search_grep:", "search_bash:", "bash_read:",
+})
 
 
 def _is_read_only_intent(intent_sig: str) -> bool:
     """Return True if the intent signature represents a read-only operation."""
     return any(intent_sig.startswith(p) for p in _READ_ONLY_INTENT_PREFIXES)
+
+
+_FINGERPRINT_CHARS = 120  # chars of LLM text to fingerprint per round
 
 
 def _truncate_preview(text: str, max_chars: int) -> tuple[str, bool, int]:
@@ -392,6 +440,21 @@ class TurnOrchestrator:
         consecutive_empty_llm_rounds = 0
         last_successful_tool_output = ""  # fallback when LLM returns empty
         output_chars = 0  # approximate output token tracking (chars produced by LLM)
+        # Repeated-text loop detection: track LLM text fingerprint per round.
+        _round_text = ""
+        _prev_fp = ""
+        _similar_rounds = 0
+
+        def _check_round_text_loop() -> bool:
+            """Compare current round's text to previous; return True if limit hit."""
+            nonlocal _round_text, _prev_fp, _similar_rounds
+            text = _round_text
+            _round_text = ""
+            fp = hashlib.md5(text.strip()[:_FINGERPRINT_CHARS].encode()).hexdigest()[:12] if text else ""
+            if fp and _prev_fp:
+                _similar_rounds = _similar_rounds + 1 if fp == _prev_fp else 0
+            _prev_fp = fp
+            return _similar_rounds >= policy.max_consecutive_similar_llm_rounds
 
         async for event in event_stream:
             # External cancellation — emit partial results instead of
@@ -437,6 +500,7 @@ class TurnOrchestrator:
                         llm_had_output_this_round = True
                         consecutive_empty_llm_rounds = 0
                         response += delta
+                        _round_text += delta
                         yield TurnEvent(type=TurnEventType.LLM_DELTA, content=delta)
                     if answer and not response:
                         response = answer
@@ -474,6 +538,17 @@ class TurnOrchestrator:
                         )
                         if err:
                             yield err
+                            return
+                        # Repeated-text loop detection
+                        if tool_execution_count > 0 and _check_round_text_loop():
+                            yield TurnEvent(
+                                type=TurnEventType.TURN_ERROR,
+                                error=f"REPEATED_TEXT_LOOP: {_similar_rounds + 1} consecutive similar LLM outputs",
+                                answer=response, tool_call_count=tool_call_count,
+                                tool_execution_count=tool_execution_count,
+                                tool_names_executed=list(tool_names_executed),
+                                failed_tool_outputs=failed_tool_outputs,
+                            )
                             return
                         if not llm_had_output_this_round and tool_execution_count > 0:
                             consecutive_empty_llm_rounds += 1
@@ -579,6 +654,17 @@ class TurnOrchestrator:
                     )
                     if err:
                         yield err
+                        return
+                    # Repeated-text loop detection
+                    if tool_execution_count > 0 and _check_round_text_loop():
+                        yield TurnEvent(
+                            type=TurnEventType.TURN_ERROR,
+                            error=f"REPEATED_TEXT_LOOP: {_similar_rounds + 1} consecutive similar LLM outputs",
+                            answer=response, tool_call_count=tool_call_count,
+                            tool_execution_count=tool_execution_count,
+                            tool_names_executed=list(tool_names_executed),
+                            failed_tool_outputs=failed_tool_outputs,
+                        )
                         return
                     if not llm_had_output_this_round and tool_execution_count > 0:
                         consecutive_empty_llm_rounds += 1

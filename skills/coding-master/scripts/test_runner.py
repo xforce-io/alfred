@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
 from config_manager import ConfigManager
@@ -31,17 +33,35 @@ class TestResult:
 
 
 @dataclass
+class EnvFingerprint:
+    """Snapshot of the execution environment, included in every test report."""
+    cwd: str
+    python: str            # resolved path to python
+    python_version: str
+    pytest: str             # resolved path to pytest (or "")
+    pip_available: bool
+    package_manager: str    # "uv" | "pip" | "poetry" | "unknown"
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class TestReport:
     lint: LintResult
     test: TestResult
     overall: str  # "passed" | "failed"
+    env: EnvFingerprint | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "lint": asdict(self.lint),
             "test": asdict(self.test),
             "overall": self.overall,
         }
+        if self.env:
+            d["env"] = self.env.to_dict()
+        return d
 
 
 class TestRunner:
@@ -55,12 +75,13 @@ class TestRunner:
 
         ws_path = ws["path"]
         commands = self._detect_commands(ws_path, ws)
+        env_fp = _probe_env(ws_path)
 
         lint_result = self._run_lint(ws_path, commands.get("lint_command"))
         test_result = self._run_test(ws_path, commands.get("test_command"))
 
         overall = "passed" if (lint_result.passed and test_result.passed) else "failed"
-        report = TestReport(lint=lint_result, test=test_result, overall=overall)
+        report = TestReport(lint=lint_result, test=test_result, overall=overall, env=env_fp)
 
         # Save artifact
         art_dir = Path(ws_path) / ".coding-master"
@@ -79,7 +100,7 @@ class TestRunner:
 
         if not test_cmd:
             if (p / "pyproject.toml").exists():
-                test_cmd = "pytest"
+                test_cmd = _resolve_pytest_command(p)
             elif (p / "package.json").exists():
                 test_cmd = "npm test"
             elif (p / "Cargo.toml").exists():
@@ -164,3 +185,104 @@ def _has_tool(path: Path, tool: str) -> bool:
         return f"[tool.{tool}]" in path.read_text()
     except Exception:
         return False
+
+
+# ── Pytest command resolution ──────────────────────────────
+
+def _resolve_pytest_command(project_path: Path) -> str:
+    """Pick the best way to invoke pytest for a Python project.
+
+    Priority:
+    1. .venv/bin/pytest (direct venv binary — works regardless of pip)
+    2. uv run pytest   (if uv project detected)
+    3. pytest           (bare — relies on PATH)
+    """
+    venv_pytest = project_path / ".venv" / "bin" / "pytest"
+    if venv_pytest.is_file():
+        return str(venv_pytest.resolve())
+
+    if _is_uv_project(project_path):
+        return "uv run pytest"
+
+    return "pytest"
+
+
+def _is_uv_project(project_path: Path) -> bool:
+    """Detect a uv-managed project (uv.lock or uv-created venv)."""
+    if (project_path / "uv.lock").exists():
+        return True
+    cfg = project_path / ".venv" / "pyvenv.cfg"
+    if cfg.exists():
+        try:
+            return any(
+                line.strip().startswith("uv")
+                for line in cfg.read_text().splitlines()
+            )
+        except Exception:
+            pass
+    return False
+
+
+# ── Environment fingerprint ────────────────────────────────
+
+def _probe_env(ws_path: str) -> EnvFingerprint:
+    """Capture a snapshot of python/pytest/pip in the workspace."""
+    p = Path(ws_path)
+
+    # Resolve python
+    venv_python = p / ".venv" / "bin" / "python"
+    if venv_python.is_file():
+        python_path = str(venv_python.resolve())
+    else:
+        python_path = shutil.which("python3") or shutil.which("python") or ""
+
+    # Python version
+    py_version = ""
+    if python_path:
+        try:
+            r = subprocess.run(
+                [python_path, "--version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            py_version = r.stdout.strip() or r.stderr.strip()
+        except Exception:
+            pass
+
+    # Resolve pytest
+    venv_pytest = p / ".venv" / "bin" / "pytest"
+    if venv_pytest.is_file():
+        pytest_path = str(venv_pytest.resolve())
+    else:
+        pytest_path = shutil.which("pytest") or ""
+
+    # pip available?
+    pip_available = (p / ".venv" / "bin" / "pip").is_file()
+    if not pip_available and python_path:
+        try:
+            r = subprocess.run(
+                [python_path, "-m", "pip", "--version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            pip_available = r.returncode == 0
+        except Exception:
+            pass
+
+    # Package manager
+    pm = "unknown"
+    if _is_uv_project(p):
+        pm = "uv"
+    elif (p / "poetry.lock").exists():
+        pm = "poetry"
+    elif (p / "Pipfile.lock").exists():
+        pm = "pipenv"
+    elif pip_available:
+        pm = "pip"
+
+    return EnvFingerprint(
+        cwd=ws_path,
+        python=python_path,
+        python_version=py_version,
+        pytest=pytest_path,
+        pip_available=pip_available,
+        package_manager=pm,
+    )

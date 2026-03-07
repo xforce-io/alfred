@@ -56,6 +56,8 @@ All commands return JSON: `{"ok": true, "data": {...}}` or `{"ok": false, "error
 
 ## Common Rules
 
+- **禁止裸 bash 执行开发/测试操作**: 所有测试、搜索、开发操作**必须**通过 `$D` 命令执行（`$D test`, `$D quick-test --repos`, `$D quick-find` 等）。**严禁**直接用 `_bash` 拼写 `cd ... && pytest`、`pip install`、`python -m pytest` 等命令。dispatch 会自动处理正确的 Python 解释器、venv 路径、依赖和 workspace 上下文。
+- **`--workspace` 可省略**: 当只有一个活跃 workspace 时，`test`、`develop`、`submit-pr` 等命令会自动检测，无需手动指定 `--workspace`。
 - **Review uses `--repos`**: Review/analysis is read-only — use `analyze --repos <name>` directly. No `workspace-check` or `release` needed. Only bugfix and feature-dev flows require workspace lock.
 - **Engine commands need long timeout**: `analyze` and `develop` take 2-5 minutes. Always use `_bash(cmd="...", timeout=600)` for engine commands. If timeout returns a `command_id`, continue waiting with `_bash(command_id="...", timeout=300)` — do NOT cancel.
 - **Engine fallback**: If `ENGINE_ERROR`, retry with the other engine (`codex`↔`claude`). If both fail, do it yourself, but `test`, `submit-pr`, `release` **must** go through `$D`.

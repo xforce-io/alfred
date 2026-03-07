@@ -381,7 +381,7 @@ class WorkspaceManager:
             version = _run_cmd(ws_path, ["python3", "--version"]).strip()
             # detect package manager
             pm = "pip"
-            if (p / "uv.lock").exists():
+            if (p / "uv.lock").exists() or _is_uv_venv(p):
                 pm = "uv"
             elif (p / "poetry.lock").exists():
                 pm = "poetry"
@@ -431,7 +431,11 @@ class WorkspaceManager:
             elif (p / "Cargo.toml").exists():
                 lint_cmd = "cargo clippy"
 
-        return {"test_command": test_cmd, "lint_command": lint_cmd}
+        return {
+            "test_command": test_cmd,
+            "lint_command": lint_cmd,
+            "directory_structure": _probe_directory_structure(ws_path),
+        }
 
     # ── Repo-based workflow ──────────────────────────────────
 
@@ -698,3 +702,48 @@ def _has_tool_in_pyproject(path: Path, tool: str) -> bool:
         return f"[tool.{tool}]" in text
     except Exception:
         return False
+
+
+def _is_uv_venv(project_path: Path) -> bool:
+    """Check if .venv was created by uv (pyvenv.cfg contains 'uv = ...')."""
+    cfg = project_path / ".venv" / "pyvenv.cfg"
+    if not cfg.exists():
+        return False
+    try:
+        text = cfg.read_text()
+        return any(line.strip().startswith("uv") for line in text.splitlines())
+    except Exception:
+        return False
+
+
+def _probe_directory_structure(ws_path: str, max_depth: int = 3) -> dict:
+    """Return a directory tree of src/ and tests/ for path disambiguation.
+
+    Traverses up to *max_depth* levels below each top-level directory,
+    listing only sub-directories (files are omitted to keep output compact).
+    """
+    p = Path(ws_path)
+    result = {}
+    for top in ("src", "tests", "lib", "app"):
+        top_dir = p / top
+        if not top_dir.is_dir():
+            continue
+        result[top] = _walk_dirs(top_dir, max_depth)
+    return result
+
+
+def _walk_dirs(root: Path, depth: int) -> list[str]:
+    """Return sorted list of sub-directory names, recursing up to *depth* levels."""
+    if depth <= 0:
+        return []
+    entries = []
+    for child in sorted(root.iterdir()):
+        if child.name.startswith((".", "__pycache__")) or not child.is_dir():
+            continue
+        sub = _walk_dirs(child, depth - 1)
+        if sub:
+            entries.append(f"{child.name}/")
+            entries.extend(f"  {s}" for s in sub)
+        else:
+            entries.append(f"{child.name}/")
+    return entries

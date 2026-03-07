@@ -191,6 +191,13 @@ class ConfigManager:
     # Backward compat alias
     resolve_envs_for_workspace = resolve_envs_for_repo
 
+    def get_agent_dir(self) -> str | None:
+        """Return agent_dir from config, expanded. None if not set."""
+        raw = self._section().get("agent_dir")
+        if raw:
+            return str(Path(raw).expanduser())
+        return None
+
     def get_default_engine(self) -> str:
         return self._section().get("default_engine", "claude")
 

@@ -21,6 +21,8 @@ class WorkspaceInstructions:
     user_md: Optional[str] = None
     memory_md: Optional[str] = None
     heartbeat_md: Optional[str] = None
+    coding_stats_md: Optional[str] = None
+    coding_md: Optional[str] = None
 
 
 class WorkspaceLoader:
@@ -39,6 +41,8 @@ class WorkspaceLoader:
         'user_md': 'USER.md',
         'memory_md': 'MEMORY.md',
         'heartbeat_md': 'HEARTBEAT.md',
+        'coding_stats_md': 'CODING_STATS.md',
+        'coding_md': 'CODING.md',
     }
 
     def __init__(self, workspace_path: Path):
@@ -160,6 +164,14 @@ class WorkspaceLoader:
 
         if instructions.heartbeat_md:
             parts.append(f"# 心跳任务\n\n{self._slim_heartbeat(instructions.heartbeat_md)}")
+
+        coding_parts = []
+        if instructions.coding_stats_md:
+            coding_parts.append(instructions.coding_stats_md)
+        if instructions.coding_md:
+            coding_parts.append(instructions.coding_md)
+        if coding_parts:
+            parts.append("# 开发状态\n\n" + "\n\n".join(coding_parts))
 
         if not parts:
             return ""

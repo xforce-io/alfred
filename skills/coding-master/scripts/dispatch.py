@@ -90,12 +90,34 @@ Rules:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _resolve_workspace_path(args) -> str | None:
-    """Get workspace path from args.workspace name."""
+    """Get workspace path from args.workspace name.
+
+    When ``args.workspace`` is None, auto-detect the sole active (locked,
+    non-expired) workspace so callers can omit ``--workspace``.
+    """
+    ws_name = getattr(args, "workspace", None)
+
+    if ws_name is None:
+        # Auto-detect: if exactly one workspace has an active lock, use it.
+        sole = _find_sole_active_workspace()
+        if sole is None:
+            return None
+        ws_name = sole
+        args.workspace = sole       # back-fill so downstream code sees it
+
     config = ConfigManager()
-    ws = config.get_workspace(args.workspace)
+    ws = config.get_workspace(ws_name)
     if ws is None:
         return None
     return ws["path"]
+
+
+def _find_sole_active_workspace() -> str | None:
+    """Return the workspace name if exactly one non-expired lock exists, else None."""
+    active = _collect_workspace_status()
+    if len(active) == 1:
+        return active[0]["name"]
+    return None
 
 
 def _resolve_repo_paths(args, config: ConfigManager | None = None) -> dict | list[tuple[str, str]]:
@@ -153,17 +175,33 @@ def with_lock_update(workspace_path: str, phase: str, fn, *args, **kwargs) -> di
         lock.renew_lease()
         lock.save()
 
+    _sync_coding_stats()
     return result
 
 
 def requires_workspace(fn):
-    """Decorator: enforce workspace-check was called, inject ws_path from session."""
+    """Decorator: enforce workspace-check was called, inject ws_path from session.
+
+    When ``--workspace`` is omitted, auto-detection kicks in via
+    ``_resolve_workspace_path`` (picks the sole active workspace).
+    """
     @functools.wraps(fn)
     def wrapper(args):
         ws_path = _resolve_workspace_path(args)
         if ws_path is None:
-            return {"ok": False, "error": f"workspace '{args.workspace}' not found",
-                    "error_code": "PATH_NOT_FOUND"}
+            avail = _available_names(ConfigManager())
+            active = _collect_workspace_status()
+            if not getattr(args, "workspace", None) and len(active) != 1:
+                hint = (
+                    f"No --workspace specified and {len(active)} active workspace(s) found. "
+                    f"Pass --workspace explicitly."
+                )
+            else:
+                hint = f"Available workspaces: {avail['workspaces']}."
+            return {"ok": False,
+                    "error": f"workspace '{getattr(args, 'workspace', None)}' not found",
+                    "error_code": "PATH_NOT_FOUND",
+                    "hint": hint}
         session_path = Path(ws_path) / ARTIFACT_DIR / "session.json"
         if not session_path.exists():
             return {"ok": False,
@@ -510,17 +548,19 @@ def cmd_workspace_check(args) -> dict:
     if args.repos:
         # Repo mode: clone/update repos into workspace
         repo_names = [r.strip() for r in args.repos.split(",") if r.strip()]
-        return mgr.check_and_acquire_for_repos(
+        result = mgr.check_and_acquire_for_repos(
             repo_names, args.task, engine,
             workspace_name=args.workspace,
             auto_clean=getattr(args, "auto_clean", False),
         )
-
-    # Direct workspace mode (original behavior)
-    if not args.workspace:
-        return {"ok": False, "error": "--workspace is required when --repos is not provided",
+    elif not args.workspace:
+        result = {"ok": False, "error": "--workspace is required when --repos is not provided",
                 "error_code": "INVALID_ARGS"}
-    return mgr.check_and_acquire(args.workspace, args.task, engine)
+    else:
+        result = mgr.check_and_acquire(args.workspace, args.task, engine)
+
+    _sync_coding_stats()
+    return result
 
 
 @requires_workspace
@@ -829,11 +869,14 @@ def cmd_release(args) -> dict:
     mgr = WorkspaceManager(config)
     cleanup = getattr(args, "cleanup", False)
     if getattr(args, "all", False):
-        return mgr.release_all(cleanup=cleanup)
-    if not args.workspace:
-        return {"ok": False, "error": "--workspace or --all is required",
+        result = mgr.release_all(cleanup=cleanup)
+    elif not args.workspace:
+        result = {"ok": False, "error": "--workspace or --all is required",
                 "error_code": "INVALID_ARGS"}
-    return mgr.release(args.workspace, cleanup=cleanup)
+    else:
+        result = mgr.release(args.workspace, cleanup=cleanup)
+    _sync_coding_stats()
+    return result
 
 
 def cmd_renew_lease(args) -> dict:
@@ -981,7 +1024,7 @@ def _build_parser() -> argparse.ArgumentParser:
     wc.add_argument("--auto-clean", action="store_true", help="Auto-reset dirty workspace repos (git reset --hard + clean -fd)")
 
     ep = sub.add_parser("env-probe", help="Probe runtime environment")
-    ep.add_argument("--workspace", required=True)
+    ep.add_argument("--workspace", default=None, help="Workspace name (auto-detected if only one active)")
     ep.add_argument("--env", required=True)
     ep.add_argument("--commands", nargs="*", default=None)
 
@@ -992,23 +1035,23 @@ def _build_parser() -> argparse.ArgumentParser:
     az.add_argument("--engine", default=None)
 
     dv = sub.add_parser("develop", help="Develop fix with coding engine")
-    dv.add_argument("--workspace", required=True)
+    dv.add_argument("--workspace", default=None, help="Workspace name (auto-detected if only one active)")
     dv.add_argument("--task", required=True)
     dv.add_argument("--plan", default=None)
     dv.add_argument("--branch", default=None)
     dv.add_argument("--engine", default=None)
 
     ts = sub.add_parser("test", help="Run lint + tests")
-    ts.add_argument("--workspace", required=True)
+    ts.add_argument("--workspace", default=None, help="Workspace name (auto-detected if only one active)")
 
     sp = sub.add_parser("submit-pr", help="Commit, push, create PR")
-    sp.add_argument("--workspace", required=True)
+    sp.add_argument("--workspace", default=None, help="Workspace name (auto-detected if only one active)")
     sp.add_argument("--repo", default=None, help="Repo name within workspace (e.g. 'alfred'). Uses workspace root if omitted.")
     sp.add_argument("--title", required=True)
     sp.add_argument("--body", default="")
 
     ev = sub.add_parser("env-verify", help="Verify fix in deployment env")
-    ev.add_argument("--workspace", required=True)
+    ev.add_argument("--workspace", default=None, help="Workspace name (auto-detected if only one active)")
     ev.add_argument("--env", required=True)
 
     rl = sub.add_parser("release", help="Release workspace lock")
@@ -1017,42 +1060,44 @@ def _build_parser() -> argparse.ArgumentParser:
     rl.add_argument("--cleanup", action="store_true")
 
     rn = sub.add_parser("renew-lease", help="Renew workspace lock lease")
-    rn.add_argument("--workspace", required=True)
+    rn.add_argument("--workspace", default=None, help="Workspace name (auto-detected if only one active)")
 
     # ── Feature management ──────────────────────────────────
+    _ws_help = "Workspace name (auto-detected if only one active)"
+
     fp = sub.add_parser("feature-plan", help="Create feature split plan")
-    fp.add_argument("--workspace", required=True)
+    fp.add_argument("--workspace", default=None, help=_ws_help)
     fp.add_argument("--task", required=True)
     fp.add_argument("--features", required=True, help="JSON array of {title, task, depends_on?}")
 
     fn = sub.add_parser("feature-next", help="Get next executable feature")
-    fn.add_argument("--workspace", required=True)
+    fn.add_argument("--workspace", default=None, help=_ws_help)
 
     fd = sub.add_parser("feature-done", help="Mark feature as done")
-    fd.add_argument("--workspace", required=True)
+    fd.add_argument("--workspace", default=None, help=_ws_help)
     fd.add_argument("--index", type=int, required=True)
     fd.add_argument("--branch", default=None)
     fd.add_argument("--pr", default=None)
     fd.add_argument("--force", action="store_true", help="Skip criteria check")
 
     fl = sub.add_parser("feature-list", help="List all features and status")
-    fl.add_argument("--workspace", required=True)
+    fl.add_argument("--workspace", default=None, help=_ws_help)
 
     fu = sub.add_parser("feature-update", help="Update a feature")
-    fu.add_argument("--workspace", required=True)
+    fu.add_argument("--workspace", default=None, help=_ws_help)
     fu.add_argument("--index", type=int, required=True)
     fu.add_argument("--status", default=None, choices=["pending", "in_progress", "done", "skipped"])
     fu.add_argument("--title", default=None)
     fu.add_argument("--task-desc", default=None)
 
     fc = sub.add_parser("feature-criteria", help="View/append feature acceptance criteria")
-    fc.add_argument("--workspace", required=True)
+    fc.add_argument("--workspace", default=None, help=_ws_help)
     fc.add_argument("--index", type=int, required=True)
     fc.add_argument("--action", required=True, choices=["view", "append"])
     fc.add_argument("--criteria", default=None, help="JSON criteria to append (single object or array)")
 
     fv = sub.add_parser("feature-verify", help="Run feature acceptance criteria verification")
-    fv.add_argument("--workspace", required=True)
+    fv.add_argument("--workspace", default=None, help=_ws_help)
     fv.add_argument("--index", type=int, required=True)
     fv.add_argument("--engine", default=None, help="Engine for assert-type criteria")
 
@@ -1088,6 +1133,190 @@ COMMANDS = {
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Workspace status & CODING.md sync
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _collect_workspace_status() -> list[dict]:
+    """Scan all configured workspaces, return status of active (locked) ones."""
+    try:
+        config = ConfigManager()
+    except Exception:
+        return []
+    all_ws = config._section().get("workspaces", {})
+    active = []
+    for name in all_ws:
+        ws = config.get_workspace(name)
+        if ws is None:
+            continue
+        lock = LockFile(ws["path"])
+        if not lock.exists():
+            continue
+        try:
+            lock.load()
+        except Exception:
+            continue
+        if lock.is_expired():
+            continue
+        active.append({
+            "name": name,
+            "task": lock.data.get("task", ""),
+            "branch": lock.data.get("branch"),
+            "phase": lock.data.get("phase", ""),
+            "engine": lock.data.get("engine", ""),
+            "path": lock.data.get("ws_path", ws["path"]),
+            "updated_at": lock.data.get("updated_at", ""),
+        })
+    return active
+
+
+def _sync_coding_stats() -> None:
+    """Write CODING_STATS.md to agent_dir based on current workspace status.
+
+    This file is fully owned by dispatch — agent should NOT edit it.
+    Agent-owned notes go into CODING.md (which dispatch never touches).
+    """
+    try:
+        config = ConfigManager()
+        agent_dir = config.get_agent_dir()
+        if not agent_dir:
+            return
+        agent_path = Path(agent_dir)
+        if not agent_path.is_dir():
+            return
+
+        stats_path = agent_path / "CODING_STATS.md"
+        active = _collect_workspace_status()
+        expired = _collect_expired_workspace_status()
+
+        if not active and not expired:
+            if stats_path.exists():
+                stats_path.unlink()
+            return
+
+        lines = []
+
+        for ws in active:
+            lines.append(f"## {ws['name']} — {ws['phase']} ✅ active")
+            _append_workspace_details(lines, ws)
+
+        for ws in expired:
+            lines.append(f"## {ws['name']} — ⚠️ lease expired")
+            _append_workspace_details(lines, ws)
+            lines.append("- **Status**: lease expired，需要 `$D workspace-check` 重新获取锁后才能继续开发")
+            lines.append("")
+
+        lines.append("---")
+        lines.append("")
+        lines.append("## Rules")
+        lines.append("")
+        lines.append(
+            "- **所有代码开发、测试、搜索操作必须通过 coding-master skill 的 dispatch 命令执行**"
+            "（`$D test`, `$D quick-test`, `$D quick-find` 等），"
+            "**禁止**直接用 `_bash` 拼 `cd ... && pytest/pip install/python -m pytest` 命令。"
+        )
+        lines.append(
+            "- dispatch 会自动处理正确的 Python 解释器、pytest 路径、"
+            "依赖安装和 workspace 上下文，裸 bash 无法保证这些。"
+        )
+        lines.append("")
+
+        stats_path.write_text("\n".join(lines), encoding="utf-8")
+    except Exception:
+        pass  # best-effort, never break the main command
+
+
+def _append_workspace_details(lines: list[str], ws: dict) -> None:
+    """Append workspace detail lines (shared between active and expired)."""
+    lines.append(f"- **Task**: {ws['task']}")
+    if ws.get("branch"):
+        lines.append(f"- **Branch**: {ws['branch']}")
+    lines.append(f"- **Engine**: {ws.get('engine', '')}")
+    lines.append(f"- **Path**: {ws['path']}")
+    if ws.get("updated_at"):
+        lines.append(f"- **Updated**: {ws['updated_at']}")
+
+    # Enrich from artifacts if available
+    ws_path = ws["path"]
+    test_report = _load_artifact(ws_path, "test_report.json")
+    if test_report:
+        try:
+            report = json.loads(test_report)
+            overall = report.get("overall", "?")
+            test = report.get("test", {})
+            lines.append(
+                f"- **Last test**: {overall} "
+                f"({test.get('passed_count', 0)} passed, {test.get('failed_count', 0)} failed)"
+            )
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    git_dirty = _quick_git_stat(ws_path)
+    if git_dirty:
+        lines.append(f"- **Uncommitted changes**: {git_dirty}")
+
+    lines.append("")
+
+
+def _collect_expired_workspace_status() -> list[dict]:
+    """Scan workspaces with expired (but existing) locks."""
+    try:
+        config = ConfigManager()
+    except Exception:
+        return []
+    all_ws = config._section().get("workspaces", {})
+    expired = []
+    for name in all_ws:
+        ws = config.get_workspace(name)
+        if ws is None:
+            continue
+        lock = LockFile(ws["path"])
+        if not lock.exists():
+            continue
+        try:
+            lock.load()
+        except Exception:
+            continue
+        if not lock.is_expired():
+            continue
+        expired.append({
+            "name": name,
+            "task": lock.data.get("task", ""),
+            "branch": lock.data.get("branch"),
+            "phase": lock.data.get("phase", ""),
+            "engine": lock.data.get("engine", ""),
+            "path": lock.data.get("ws_path", ws["path"]),
+            "updated_at": lock.data.get("updated_at", ""),
+        })
+    return expired
+
+
+def _load_artifact(ws_path: str, filename: str) -> str | None:
+    """Read an artifact file from .coding-master/ dir, return content or None."""
+    art = Path(ws_path) / ARTIFACT_DIR / filename
+    if art.is_file():
+        try:
+            return art.read_text(encoding="utf-8")
+        except Exception:
+            pass
+    return None
+
+
+def _quick_git_stat(ws_path: str) -> str:
+    """Return a short git diff --stat summary, or empty string."""
+    try:
+        r = subprocess.run(
+            ["git", "diff", "--stat", "--no-color"],
+            cwd=ws_path, capture_output=True, text=True, timeout=10,
+        )
+        lines = r.stdout.strip().splitlines()
+        if lines:
+            return lines[-1].strip()  # e.g. "3 files changed, 50 insertions(+), 10 deletions(-)"
+    except Exception:
+        pass
+    return ""
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Entry point
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1103,6 +1332,12 @@ def main() -> int:
             result = handler(args)
         except Exception as exc:
             result = {"ok": False, "error": str(exc)}
+
+    # Inject active workspace status into every response
+    if isinstance(result, dict):
+        ws_status = _collect_workspace_status()
+        if ws_status:
+            result["_workspaces"] = ws_status
 
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result.get("ok") else 1

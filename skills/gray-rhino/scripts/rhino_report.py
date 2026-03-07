@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Gray Rhino comprehensive report generator.
 
-Orchestrates: news_fetcher -> rhino_analyzer -> asset_mapper -> report
+Orchestrates: news_fetcher -> rhino_analyzer -> trend_tracker -> asset_mapper -> report
+
+The key shift: instead of ranking by absolute coverage (already priced in),
+we rank by trend signal strength — prioritizing emerging and accelerating risks.
 """
 
 import argparse
@@ -18,17 +21,21 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from news_fetcher import NewsFetcher, _check_dependencies
 from rhino_analyzer import RhinoAnalyzer, CATEGORY_NAMES_ZH
 from asset_mapper import AssetMapper, ASSET_CLASSES
+from trend_tracker import TrendTracker
 
 logger = logging.getLogger(__name__)
 
 
-def generate_report(max_age_hours: int = 48, top_n: int = 5,
+def generate_report(max_age_hours: int = 48, top_n: int = 8,
                     category_filter: str = None,
-                    min_cluster_size: int = 2) -> dict:
-    """Generate a full gray rhino report.
+                    min_cluster_size: int = 1,
+                    history_dir: str = None,
+                    lookback_days: int = 7,
+                    save_snapshot: bool = True) -> dict:
+    """Generate a trend-aware gray rhino report.
 
     Returns:
-        Dict with report data including clusters, impacts, and metadata.
+        Dict with report data including trend signals, impacts, and metadata.
     """
     # Step 1: Fetch news
     fetcher = NewsFetcher()
@@ -42,10 +49,9 @@ def generate_report(max_age_hours: int = 48, top_n: int = 5,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    # Step 2: Cluster and analyze
+    # Step 2: Cluster and analyze (min_cluster_size=1 to keep weak signals)
     analyzer = RhinoAnalyzer(min_cluster_size=min_cluster_size)
     items_dicts = [asdict(item) for item in items]
-    # Remove internal fields
     for d in items_dicts:
         d.pop("_hash", None)
     clusters = analyzer.analyze(items_dicts)
@@ -56,49 +62,75 @@ def generate_report(max_age_hours: int = 48, top_n: int = 5,
                     if c["category"] == category_filter
                     or c["category_zh"] == category_filter]
 
-    # Keep top N
-    clusters = clusters[:top_n]
+    # Step 3: Trend analysis — compare against historical baseline
+    tracker_kwargs = {"lookback_days": lookback_days}
+    if history_dir:
+        tracker_kwargs["history_dir"] = history_dir
+    tracker = TrendTracker(**tracker_kwargs)
+    signals = tracker.analyze_trends(clusters)
 
-    # Step 3: Map to asset impacts
+    # Save today's snapshot for future trend comparison
+    if save_snapshot:
+        tracker.save_snapshot(clusters)
+
+    # Step 4: Take top N by trend score
+    signals = signals[:top_n]
+
+    # Step 5: Map to asset impacts (only for clusters with enough context)
     mapper = AssetMapper()
-    matrix = mapper.map_clusters(clusters)
+    signal_clusters = []
+    for sig in signals:
+        # Rebuild minimal cluster dict for asset mapper
+        signal_clusters.append({
+            "representative_title": sig.representative_title,
+            "category": sig.category,
+            "category_zh": sig.category_zh,
+            "keywords": sig.keywords,
+            "titles": [sig.representative_title],
+        })
+    matrix = mapper.map_clusters(signal_clusters)
 
     return {
         "ok": True,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "news_count": len(items),
-        "cluster_count": len(clusters),
-        "clusters": clusters,
+        "total_clusters": len(clusters),
+        "reported_signals": len(signals),
+        "signals": [asdict(s) for s in signals],
         "impact_matrix": asdict(matrix),
         "assets": list(ASSET_CLASSES.keys()),
+        "history_days": len(tracker.load_history()),
     }
 
 
 def format_text_report(report: dict) -> str:
-    """Format report as human-readable text."""
+    """Format report as human-readable text with trend focus."""
     if not report.get("ok"):
         return f"Error: {report.get('error', 'Unknown error')}"
 
     lines = []
     gen_time = report.get("generated_at", "")[:19].replace("T", " ")
+    history_days = report.get("history_days", 0)
 
-    lines.append("=" * 60)
-    lines.append(f"  🦏 灰犀牛风险预警报告 | {gen_time}")
-    lines.append("=" * 60)
-    lines.append(f"  新闻来源: {report['news_count']} 条 | "
-                 f"识别聚类: {report['cluster_count']} 个")
+    lines.append("=" * 62)
+    lines.append(f"  灰犀牛趋势预警报告 | {gen_time}")
+    lines.append("=" * 62)
+    lines.append(f"  新闻源: {report['news_count']} 条 | "
+                 f"聚类: {report['total_clusters']} 个 | "
+                 f"历史基线: {history_days} 天")
+    if history_days == 0:
+        lines.append("  (首次运行，尚无历史基线。持续运行后趋势分析将更准确)")
     lines.append("")
 
-    clusters = report.get("clusters", [])
+    signals = report.get("signals", [])
     events = report.get("impact_matrix", {}).get("events", [])
 
-    # Build event lookup by matching scenario
     event_map = {}
     for evt in events:
         event_map[evt.get("event_name", "")] = evt
 
-    if not clusters:
-        lines.append("  当前未发现显著灰犀牛风险聚类。")
+    if not signals:
+        lines.append("  当前未发现显著趋势信号。")
         lines.append("")
         return "\n".join(lines)
 
@@ -108,73 +140,80 @@ def format_text_report(report: dict) -> str:
         "health_social": "🏥", "other": "📰",
     }
 
-    for i, cluster in enumerate(clusters, 1):
-        cat = cluster.get("category", "other")
-        cat_zh = cluster.get("category_zh", cat)
-        icon = category_icons.get(cat, "📰")
+    signal_icons = {
+        "emerging": "🆕",
+        "accelerating": "📈",
+        "steady": "📊",
+        "fading": "📉",
+    }
 
-        # Severity color based on cluster size
-        count = cluster.get("count", 0)
-        if count >= 5:
-            severity = "🔴"
-        elif count >= 3:
-            severity = "🟠"
-        else:
-            severity = "🟡"
+    for i, sig in enumerate(signals, 1):
+        cat = sig.get("category", "other")
+        cat_zh = sig.get("category_zh", cat)
+        cat_icon = category_icons.get(cat, "📰")
+        sig_icon = signal_icons.get(sig.get("signal_type", ""), "❓")
+        sig_zh = sig.get("signal_type_zh", "")
 
-        lines.append(f"{severity} [{cat_zh}] {cluster['representative_title']}")
-        lines.append(f"   相关报道: {count} 条 | "
-                     f"来源: {', '.join(cluster.get('sources', []))}")
-        lines.append(f"   关键词: {', '.join(cluster.get('keywords', [])[:6])}")
+        lines.append(f"{sig_icon} {cat_icon} [{cat_zh}] {sig['representative_title']}")
+        lines.append(f"   信号: {sig_zh} | 趋势分: {sig['trend_score']:.1f} | "
+                     f"报道: {sig['current_count']} 条 | "
+                     f"来源: {', '.join(sig.get('sources', []))}")
 
-        # Show related titles
-        titles = cluster.get("titles", [])
-        if len(titles) > 1:
-            for t in titles[1:3]:
-                lines.append(f"   · {t}")
-            if len(titles) > 3:
-                lines.append(f"   · ...及 {len(titles)-3} 条更多")
+        # Trend details
+        details = []
+        if sig.get("novelty_score", 0) >= 0.8:
+            details.append("新兴话题")
+        if sig.get("acceleration", 1) > 1.5:
+            details.append(f"加速×{sig['acceleration']:.1f}")
+        if sig.get("source_diversity", 0) >= 0.75:
+            details.append("多源印证")
+        if sig.get("days_tracked", 0) > 0:
+            history_counts = sig.get("history_counts", [])
+            if history_counts:
+                details.append(f"近{len(history_counts)}日: {history_counts}")
+        if details:
+            lines.append(f"   趋势: {' | '.join(details)}")
 
-        # Show asset impact if matched
-        event_name = cluster["representative_title"]
-        event = event_map.get(event_name)
+        lines.append(f"   关键词: {', '.join(sig.get('keywords', [])[:6])}")
+
+        # Asset impact
+        event = event_map.get(sig["representative_title"])
         if event:
             impacts = event.get("impacts", [])
             if impacts:
                 lines.append(f"   匹配场景: {event.get('matched_scenario', 'N/A')}")
-                lines.append(f"   ┌{'─' * 11}┬{'─' * 8}┐")
-                lines.append(f"   │ {'资产':<8} │ {'影响':<5} │")
-                lines.append(f"   ├{'─' * 11}┼{'─' * 8}┤")
+                impact_parts = []
                 for imp in impacts:
-                    asset = imp.get("asset", "")
-                    direction = imp.get("direction", "±")
-                    lines.append(f"   │ {asset:<8} │ {direction:<5} │")
-                lines.append(f"   └{'─' * 11}┴{'─' * 8}┘")
-        else:
-            lines.append("   💡 提示: 此聚类未匹配到已知风险场景，建议人工评估")
+                    d = imp.get("direction", "±")
+                    if d != "±":
+                        impact_parts.append(f"{imp['asset']}{d}")
+                if impact_parts:
+                    lines.append(f"   资产影响: {' | '.join(impact_parts)}")
 
         lines.append("")
 
-    # Summary
-    lines.append("-" * 60)
-    lines.append("📋 汇总")
-    matched_count = len(events)
-    lines.append(f"  已匹配场景: {matched_count}/{len(clusters)} 个聚类")
-    if events:
-        # Find most impacted assets (deduplicate scenarios)
-        asset_impacts = {}
-        for evt in events:
-            for imp in evt.get("impacts", []):
-                asset = imp["asset"]
-                direction = imp["direction"]
-                scenario = evt.get("matched_scenario", "")
-                if direction in ("↑↑", "↓↓"):
-                    key = f"{direction}({scenario})"
-                    asset_impacts.setdefault(asset, set()).add(key)
-        if asset_impacts:
-            lines.append("  强影响资产:")
-            for asset, impacts_list in asset_impacts.items():
-                lines.append(f"    {asset}: {' / '.join(sorted(impacts_list))}")
+    # Summary by signal type
+    lines.append("-" * 62)
+    lines.append("汇总")
+    type_counts = {}
+    for sig in signals:
+        st = sig.get("signal_type_zh", "未知")
+        type_counts[st] = type_counts.get(st, 0) + 1
+    summary_parts = [f"{k}: {v}" for k, v in type_counts.items()]
+    lines.append(f"  信号分布: {' | '.join(summary_parts)}")
+
+    # Highlight most actionable
+    emerging = [s for s in signals if s.get("signal_type") == "emerging"]
+    accelerating = [s for s in signals if s.get("signal_type") == "accelerating"]
+    if emerging:
+        lines.append(f"  🆕 新兴信号 ({len(emerging)}):")
+        for s in emerging:
+            lines.append(f"     - {s['representative_title']}")
+    if accelerating:
+        lines.append(f"  📈 加速趋势 ({len(accelerating)}):")
+        for s in accelerating:
+            lines.append(f"     - {s['representative_title']} "
+                         f"(×{s.get('acceleration', 0):.1f})")
     lines.append("")
 
     return "\n".join(lines)
@@ -182,22 +221,29 @@ def format_text_report(report: dict) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate gray rhino risk report",
+        description="Generate gray rhino trend-aware risk report",
         epilog="Examples:\n"
                "  python rhino_report.py --format text\n"
-               "  python rhino_report.py --max-age 24 --top 3 --format json\n"
+               "  python rhino_report.py --max-age 24 --top 5 --format json\n"
                "  python rhino_report.py --fetch-only\n"
-               "  python rhino_report.py --category geopolitics\n",
+               "  python rhino_report.py --category geopolitics\n"
+               "  python rhino_report.py --lookback 14\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--max-age", type=int, default=48,
                         help="News age window in hours (default: 48)")
-    parser.add_argument("--top", type=int, default=5,
-                        help="Top N risk clusters to report (default: 5)")
+    parser.add_argument("--top", type=int, default=8,
+                        help="Top N trend signals to report (default: 8)")
     parser.add_argument("--category", type=str, default=None,
                         help="Filter by risk category (e.g., geopolitics, macro)")
-    parser.add_argument("--min-cluster", type=int, default=2,
-                        help="Minimum cluster size (default: 2)")
+    parser.add_argument("--min-cluster", type=int, default=1,
+                        help="Minimum cluster size (default: 1)")
+    parser.add_argument("--lookback", type=int, default=7,
+                        help="Historical lookback window in days (default: 7)")
+    parser.add_argument("--history-dir", type=str, default=None,
+                        help="Custom history directory path")
+    parser.add_argument("--no-save", action="store_true",
+                        help="Do not save today's snapshot to history")
     parser.add_argument("--format", choices=["json", "text"], default="text",
                         help="Output format (default: text)")
     parser.add_argument("--fetch-only", action="store_true",
@@ -238,6 +284,9 @@ def main():
         top_n=args.top,
         category_filter=args.category,
         min_cluster_size=args.min_cluster,
+        history_dir=args.history_dir,
+        lookback_days=args.lookback,
+        save_snapshot=not args.no_save,
     )
 
     if args.format == "json":

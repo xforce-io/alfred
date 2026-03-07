@@ -427,6 +427,8 @@ Current time: $current_time
                     f"  - {safe_path(workspace_path / 'USER.md')}",
                     f"  - {safe_path(workspace_path / 'MEMORY.md')}",
                     f"  - {safe_path(workspace_path / 'HEARTBEAT.md')}",
+                    f"  - {safe_path(workspace_path / 'CODING_STATS.md')}  (dispatch auto-generated, do NOT edit)",
+                    f"  - {safe_path(workspace_path / 'CODING.md')}  (agent-owned notes)",
                     f"- Agent temp dir: {safe_path(workspace_path / 'tmp')}  (use this for ALL temporary files)",
                     f"- Alfred home: {safe_path(user_data.alfred_home)}",
                     f"- Sessions dir: {safe_path(user_data.sessions_dir)}",
