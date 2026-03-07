@@ -49,25 +49,59 @@ class SessionCompressor:
     # ── Public API ────────────────────────────────────────────────────
 
     async def maybe_compress(
-        self, history_messages: List[Dict[str, Any]]
+        self,
+        history_messages: List[Dict[str, Any]],
+        token_budget: Optional[int] = None,
     ) -> Tuple[bool, List[Dict[str, Any]]]:
         """Compress *history_messages* if they exceed the threshold.
+
+        When *token_budget* is provided, the window is computed by token
+        count (accumulating from the tail until *token_budget* tokens are
+        reached) instead of the fixed ``WINDOW_SIZE`` message count.
+        The threshold check also switches to token-based: compression is
+        always attempted when *token_budget* is given (the caller already
+        checked that total tokens exceed COMPACT_TOKEN_BUDGET).
 
         Returns ``(compressed, new_history)`` where *compressed* indicates
         whether compression was actually performed.  The caller should use
         *new_history* in place of the original list.
         """
-        if len(history_messages) <= COMPRESS_THRESHOLD:
-            return False, history_messages
+        if token_budget is None:
+            # Legacy path: count-based threshold
+            if len(history_messages) <= COMPRESS_THRESHOLD:
+                return False, history_messages
 
         old_summary, remaining = extract_existing_summary(history_messages)
 
-        # Nothing to compress if remaining messages fit in the window.
-        if len(remaining) <= WINDOW_SIZE:
-            return False, history_messages
+        if token_budget is not None:
+            # Token-based window: accumulate from tail, always keeping at
+            # least the last message verbatim so the newest context is never
+            # entirely summarized away.
+            from .history_utils import _estimate_tokens
 
-        to_compress = remaining[:-WINDOW_SIZE]
-        to_keep = remaining[-WINDOW_SIZE:]
+            window_start = len(remaining)
+            accumulated = 0
+            for j in range(len(remaining) - 1, -1, -1):
+                msg_tokens = _estimate_tokens([remaining[j]])
+                if accumulated + msg_tokens > token_budget:
+                    break
+                accumulated += msg_tokens
+                window_start = j
+
+            # Guarantee at least the last message is kept verbatim.
+            # This prevents a single oversized message from pushing
+            # window_start to len(remaining) and yielding to_keep=[].
+            if window_start >= len(remaining) and remaining:
+                window_start = len(remaining) - 1
+
+            to_compress = remaining[:window_start]
+            to_keep = remaining[window_start:]
+        else:
+            # Legacy path: fixed message-count window
+            if len(remaining) <= WINDOW_SIZE:
+                return False, history_messages
+            to_compress = remaining[:-WINDOW_SIZE]
+            to_keep = remaining[-WINDOW_SIZE:]
 
         if not to_compress:
             return False, history_messages
@@ -88,6 +122,46 @@ class SessionCompressor:
             len(to_keep),
         )
         return True, inject_summary(new_summary, to_keep)
+
+    # ── High-level entry point ───────────────────────────────────────
+
+    async def compress_history(
+        self, history: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Token-budget compress with heartbeat isolation.
+
+        Separates chat from heartbeat/placeholder, compresses only the chat
+        portion when it exceeds COMPACT_TOKEN_BUDGET, and re-appends heartbeat
+        messages to the tail.  Returns the (possibly compressed) history.
+
+        This is the single entry point used by both save paths
+        (session.py and persistence.py) to avoid logic duplication.
+        """
+        from .history_utils import (
+            _is_heartbeat,
+            _is_placeholder,
+            _estimate_tokens,
+            COMPACT_TOKEN_BUDGET,
+            COMPACT_WINDOW_TOKENS,
+        )
+
+        chat_msgs = [
+            m for m in history
+            if not _is_heartbeat(m) and not _is_placeholder(m)
+        ]
+        if _estimate_tokens(chat_msgs) <= COMPACT_TOKEN_BUDGET:
+            return history
+
+        heartbeat_msgs = [
+            m for m in history
+            if _is_heartbeat(m) or _is_placeholder(m)
+        ]
+        compressed, new_chat = await self.maybe_compress(
+            chat_msgs, token_budget=COMPACT_WINDOW_TOKENS,
+        )
+        if compressed:
+            return new_chat + heartbeat_msgs
+        return history
 
     # ── LLM interaction ──────────────────────────────────────────────
 

@@ -274,6 +274,13 @@ case "${cmd}" in
     for _ in $(seq 1 50); do
       pid="$(read_pid)"
       if is_running "${pid}"; then
+        # Wait a moment to catch immediate crashes (e.g. import errors).
+        sleep 1
+        if ! is_running "${pid}"; then
+          echo "ERROR: EverBot daemon crashed immediately. Check logs: ${DAEMON_OUT}" >&2
+          tail -5 "${DAEMON_OUT}" >&2 || true
+          exit 1
+        fi
         if (( daemon_already_running == 0 )); then
           echo "EverBot daemon started (pid=${pid})."
         fi

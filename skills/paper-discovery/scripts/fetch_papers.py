@@ -51,7 +51,7 @@ def generate_one_line_summary(abstract: str) -> str:
 
         loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(_call())
+            return loop.run_until_complete(asyncio.wait_for(_call(), timeout=30))
         finally:
             loop.close()
     except Exception as e:

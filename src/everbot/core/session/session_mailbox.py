@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 from .session_data import SessionData
+from .history_utils import evict_oldest_heartbeat
 
 if TYPE_CHECKING:
     from .session import SessionManager
@@ -171,18 +172,20 @@ async def inject_history_message(
 
         # --- Heartbeat/deferred assistant after unanswered user question ---
         msg_source = (msg_obj.get("metadata") or {}).get("source", "")
+        msg_run_id = (msg_obj.get("metadata") or {}).get("run_id")
         if (
             msg_role == "assistant"
             and msg_source in ("heartbeat", "deferred_result")
             and last_msg is not None
             and last_msg.get("role") == "user"
         ):
-            session_data.history_messages.append(
-                {"role": "assistant", "content": "(acknowledged)"}
-            )
-            session_data.history_messages.append(
-                {"role": "user", "content": "[Background notification follows]"}
-            )
+            _ack = {"role": "assistant", "content": "(acknowledged)"}
+            _bg = {"role": "user", "content": "[Background notification follows]"}
+            if msg_run_id:
+                _ack["metadata"] = {"source": "system", "category": "placeholder", "run_id": msg_run_id}
+                _bg["metadata"] = {"source": "system", "category": "placeholder", "run_id": msg_run_id}
+            session_data.history_messages.append(_ack)
+            session_data.history_messages.append(_bg)
 
         # --- Consecutive user message guard ---
         elif (
@@ -195,6 +198,7 @@ async def inject_history_message(
             )
 
         session_data.history_messages.append(msg_obj)
+        session_data.history_messages = evict_oldest_heartbeat(session_data.history_messages)
 
     updated = await mgr.update_atomic(session_id, _mutator, timeout=timeout, blocking=blocking)
     if updated is not None:
