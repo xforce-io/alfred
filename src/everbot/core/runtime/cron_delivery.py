@@ -88,14 +88,15 @@ class CronDelivery:
         return True
 
     async def inject_to_history(self, result: str, run_id: str) -> bool:
-        """Inject result as an assistant message in primary session history."""
-        prefixed_content = (
-            "[此消息由心跳系统自动执行例行任务生成]\n\n"
-            + result
-        )
+        """Inject result as an assistant message in primary session history.
+
+        Heartbeat identification now relies on metadata.source == 'heartbeat'
+        rather than a content prefix.  The _is_heartbeat helper retains
+        backward-compatible prefix detection for legacy data.
+        """
         message = {
             "role": "assistant",
-            "content": prefixed_content,
+            "content": result,
             "metadata": {
                 "source": "heartbeat",
                 "run_id": run_id,

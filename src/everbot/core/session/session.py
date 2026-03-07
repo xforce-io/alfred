@@ -515,9 +515,7 @@ class SessionManager:
         if SessionManager.infer_session_type(session_id) in ("primary", "channel"):
             try:
                 compressor = SessionCompressor(context)
-                compressed, new_history = await compressor.maybe_compress(serializable_history)
-                if compressed:
-                    serializable_history = new_history
+                serializable_history = await compressor.compress_history(serializable_history)
             except Exception:
                 logger.warning("History compression failed; saving uncompressed", exc_info=True)
 

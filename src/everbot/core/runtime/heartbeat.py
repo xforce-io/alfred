@@ -545,14 +545,15 @@ If not, reply with `HEARTBEAT_OK`.
         return ok
 
     async def _inject_result_to_primary_history(self, result: str, run_id: str) -> bool:
-        """Inject heartbeat result as an assistant message in primary session history."""
-        prefixed_content = (
-            "[此消息由心跳系统自动执行例行任务生成]\n\n"
-            + result
-        )
+        """Inject heartbeat result as an assistant message in primary session history.
+
+        Heartbeat identification relies on metadata.source == 'heartbeat'.
+        The _is_heartbeat helper retains backward-compatible prefix detection
+        for legacy data.
+        """
         message = {
             "role": "assistant",
-            "content": prefixed_content,
+            "content": result,
             "metadata": {
                 "source": "heartbeat",
                 "run_id": run_id,

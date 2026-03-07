@@ -91,6 +91,9 @@ def _evict_oldest_heartbeat(history: list[dict]) -> list[dict]:
                 continue
 
         # 旧格式占位：紧接在被淘汰心跳之前的 (acknowledged) / [Background notification follows]
+        # 已知限制：旧格式靠 content 精确匹配，如果用户恰好发了内容为
+        # "(acknowledged)" 的消息且后面紧跟被淘汰心跳，会被误删。
+        # 这种概率极低，且只影响 inject 路径的 disk 存储，不影响 restore。
         if _is_placeholder(msg) and (i + 1) in to_evict:
             continue
         if _is_placeholder(msg) and (i + 2) in to_evict:
@@ -102,29 +105,85 @@ def _evict_oldest_heartbeat(history: list[dict]) -> list[dict]:
     return result
 ```
 
-### 2.2 save：标准 compact（排除心跳计数）
+### 2.2 save：token 预算驱动的 compact
 
-`save_session` 时，只看用户对话消息数量决定是否触发 compact。触发后，**先过滤心跳再 compact，再把心跳追加到尾部**。
+`save_session` 时，按 token 数（而非消息条数）决定是否触发 compact。只计用户对话部分的 token，心跳消息不参与。
 
-不拆分后 merge 的原因：compact 会把旧 chat 重写为 summary pair + window，原始位置信息丢失，中间插入的心跳消息没有明确的归位规则。既然心跳在 restore 时会被全部过滤掉（不送 LLM），它在 disk 上的位置只影响审计可读性，不影响正确性。追加到尾部是最简实现。
+**为什么用 token 数而非条数**：一条 tool 输出可能 3000 token，一条闲聊 30 token。条数阈值和真实 context 成本脱节，会导致要么过早压缩（浪费 LLM 调用），要么延迟压缩（context 膨胀）。业界主流（Claude Code、OpenAI Assistants、Cursor）均按 token 数管理。
+
+**token 估算**：复用项目已有的字符估算惯例（`context_manager.py` 用 `chars // 3`），不引入 tiktoken 依赖。
+
+```python
+COMPACT_TOKEN_BUDGET = 40_000  # 对话部分超过 40K token 时触发 compact
+COMPACT_WINDOW_TOKENS = 20_000  # compact 后保留最近 ~20K token
+
+def _estimate_tokens(messages: list[dict]) -> int:
+    """估算消息列表的 token 数。
+
+    统计所有会被送入 LLM 的内容：
+    - content（字符串或 multipart list）
+    - tool_calls（函数名 + 参数 JSON）
+    - tool_call_id
+    - 每条消息的结构开销（role 标签、JSON 包装等）
+
+    估算比例：1 token ≈ 3 chars（与 context_manager.py 一致）。
+    """
+    total_chars = 0
+    MSG_OVERHEAD = 12  # role/name/tool_call_id 等结构开销，约 4 token
+
+    for msg in messages:
+        total_chars += MSG_OVERHEAD
+
+        # content
+        content = msg.get("content") or ""
+        if isinstance(content, str):
+            total_chars += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    total_chars += len(str(part.get("text", "")))
+
+        # tool_calls（assistant 消息）
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            total_chars += len(fn.get("name") or "")
+            total_chars += len(fn.get("arguments") or "")
+            total_chars += len(tc.get("id") or "")
+
+        # tool_call_id（tool 响应消息）
+        total_chars += len(msg.get("tool_call_id") or "")
+
+    return total_chars // 3
+```
+
+compact 触发逻辑：
 
 ```python
 # save_session 中
-chat_count = sum(1 for m in history if not _is_heartbeat(m) and not _is_placeholder(m))
-if chat_count > COMPRESS_THRESHOLD:
-    # 分离心跳
+chat_msgs = [m for m in history if not _is_heartbeat(m) and not _is_placeholder(m)]
+chat_tokens = _estimate_tokens(chat_msgs)
+if chat_tokens > COMPACT_TOKEN_BUDGET:
     heartbeat_msgs = [m for m in history if _is_heartbeat(m) or _is_placeholder(m)]
-    chat_msgs = [m for m in history if not _is_heartbeat(m) and not _is_placeholder(m)]
     # 只对 chat 部分 compact
-    compressed, new_chat = await compressor.maybe_compress(chat_msgs)
+    compressed, new_chat = await compressor.maybe_compress(
+        chat_msgs, token_budget=COMPACT_WINDOW_TOKENS
+    )
     if compressed:
         # 心跳追加到尾部（disk 审计用，restore 时会被过滤）
         history = new_chat + heartbeat_msgs
-    else:
-        history = chat_msgs + heartbeat_msgs
+    # else: compact 未触发（LLM 摘要失败等），保持原 history 不变
 ```
 
+`compressor.maybe_compress` 需要相应改造：接受 `token_budget` 参数，用 `_estimate_tokens` 计算 window 大小（从尾部保留到 token 预算内的消息），替代固定的 `WINDOW_SIZE=60`。
+
 心跳消息保留在 disk 上（可审计），不参与 compact 决策，不参与 compact 内容。
+当 `chat_tokens <= COMPACT_TOKEN_BUDGET` 时，history 原样写入。
+
+**追加到尾部而非原位 merge 的原因**：compact 把旧 chat 重写为 summary pair + window，原位置信息丢失，夹在中间的心跳没有明确的归位规则。心跳在 restore 时全部过滤，disk 上的位置只影响审计可读性。
+
+**参数选择依据**：
+- `COMPACT_TOKEN_BUDGET=40_000`：Claude 200K context window，system prompt + skills 约占 10-20K，留给对话 ~40K 是合理的活动空间
+- `COMPACT_WINDOW_TOKENS=20_000`：compact 后保留最近 ~20K token 的对话，给下次 compact 留出 20K 的增长空间，避免频繁触发
 
 ### 2.3 restore：过滤心跳 + 现有 compact
 
@@ -193,18 +252,18 @@ session_data.history_messages = _evict_oldest_heartbeat(session_data.history_mes
 ### save_session (session.py)
 
 ```python
-# Before: 直接 compact 全量 history
+# Before: 按条数判断 compact
 compressed, new_history = await compressor.maybe_compress(serializable_history)
 
-# After: 计数排除心跳，compact 排除心跳，心跳追加尾部
-chat_count = sum(1 for m in serializable_history
-                 if not _is_heartbeat(m) and not _is_placeholder(m))
-if chat_count > COMPRESS_THRESHOLD:
+# After: 按 token 数判断，排除心跳
+chat_msgs = [m for m in serializable_history
+             if not _is_heartbeat(m) and not _is_placeholder(m)]
+if _estimate_tokens(chat_msgs) > COMPACT_TOKEN_BUDGET:
     heartbeat_msgs = [m for m in serializable_history
                       if _is_heartbeat(m) or _is_placeholder(m)]
-    chat_msgs = [m for m in serializable_history
-                 if not _is_heartbeat(m) and not _is_placeholder(m)]
-    compressed, new_chat = await compressor.maybe_compress(chat_msgs)
+    compressed, new_chat = await compressor.maybe_compress(
+        chat_msgs, token_budget=COMPACT_WINDOW_TOKENS
+    )
     if compressed:
         serializable_history = new_chat + heartbeat_msgs
 ```
@@ -222,7 +281,8 @@ history = DolphinStateAdapter.compact_session_state(history, max_messages=120)
 | 操作 | 文件 | 说明 |
 |------|------|------|
 | 改动 | `src/everbot/core/session/session_mailbox.py` | inject 后加心跳数量限制 |
-| 改动 | `src/everbot/core/session/session.py` | save 时排除心跳再判断 compact |
+| 改动 | `src/everbot/core/session/session.py` | save 时按 token 数判断 compact，排除心跳 |
+| 改动 | `src/everbot/core/session/compressor.py` | maybe_compress 接受 token_budget 参数，替代固定 WINDOW_SIZE |
 | 改动 | `src/everbot/core/session/persistence.py` | restore 时用 metadata 过滤心跳 |
 | 改动 | `src/everbot/core/runtime/cron_delivery.py` | 注入消息用结构化 metadata |
 | 改动 | `src/everbot/core/runtime/heartbeat.py` | 同上 |
@@ -231,20 +291,20 @@ history = DolphinStateAdapter.compact_session_state(history, max_messages=120)
 
 ## 5. 迁移策略
 
-### Phase 1：隔离心跳（立即止血）
+一步到位，不分 phase。
 
 - `inject_history_message` 加心跳消息上限（20 条），超限淘汰最老的（连带占位消息）
 - 心跳注入改用结构化 metadata（保留向后兼容的 content 前缀识别）
-- `save_session` compact 决策排除心跳消息计数
+- `save_session` compact 改为 token 预算驱动（`COMPACT_TOKEN_BUDGET=40K`），排除心跳
+- `compressor.maybe_compress` 接受 `token_budget` 参数，替代固定 `WINDOW_SIZE`
 - `restore_to_agent` 过滤改用 metadata 识别
 
-预期效果：心跳不再推动主对话触发压缩，消除最大的问题源。
+预期效果：心跳不再推动主对话触发压缩；compact 触发时机与真实 context 成本对齐。
 
-### Phase 2：token 预算驱动（可选，未来）
+### 后续优化（可选）
 
-- 引入轻量 token 计数（tiktoken 或字符数估算）
-- compact 阈值改为 token 数（如 `compress_token_budget=60000`）
 - 心跳消息按 task_id 去重（每个任务只保留最新一条结果）
+- `_estimate_tokens` 升级为真实 tokenizer（tiktoken），提升估算精度
 
 ## 6. 测试方案
 
@@ -319,14 +379,16 @@ def _legacy_heartbeat(content="结果正常"):
 ### 6.4 save compact 隔离测试（`class TestSaveCompact`）
 
 ```
-test_chat_below_threshold_no_compact
-  - 20 条 chat + 30 条心跳 → 总量 50 超旧阈值，但 chat 只有 20 条
+test_chat_below_token_budget_no_compact
+  - chat 部分 ~10K token + 心跳 ~5K token → 总量 15K
+  - chat_tokens < COMPACT_TOKEN_BUDGET，不触发
   - compressor.maybe_compress 未被调用
-  → 验证心跳不影响 compact 决策
+  → 验证心跳 token 不计入 compact 决策
 
-test_chat_above_threshold_triggers_compact
-  - 90 条 chat + 10 条心跳
-  - compressor.maybe_compress 被调用，且只传入 chat 部分
+test_chat_above_token_budget_triggers_compact
+  - chat 部分 ~50K token + 心跳 ~3K token
+  - chat_tokens > COMPACT_TOKEN_BUDGET
+  - compressor.maybe_compress 被调用，传入 token_budget=COMPACT_WINDOW_TOKENS
   → 验证只对 chat 做 compact
 
 test_heartbeat_preserved_on_disk_after_compact
@@ -342,6 +404,37 @@ test_heartbeat_appended_to_tail_after_compact
 test_no_heartbeat_same_as_before
   - 无心跳时，行为与现有逻辑完全一致
   → 回归验证
+```
+
+### 6.4b token 估算测试（`class TestEstimateTokens`）
+
+```
+test_simple_string_content
+  - 300 chars content → ~100 tokens + overhead
+
+test_list_content_with_text
+  - content 是 [{"type": "text", "text": "..."}] 格式
+  - 正确累加 text 部分
+
+test_empty_messages
+  - [] → 0
+
+test_tool_calls_counted
+  - assistant 消息含 tool_calls: [{"function": {"name": "bash", "arguments": '{"cmd":"ls -la"}'}}]
+  - 函数名 + 参数 JSON + tool_call id 都计入
+  - 验证: 比纯 content 消息估算值高
+
+test_tool_response_counted
+  - tool 消息含 tool_call_id + content
+  - tool_call_id 计入
+
+test_tool_heavy_vs_chat_only
+  - 构造: 10 条纯 chat（每条 100 chars）vs 10 条 tool chain（每条 100 chars content + 500 chars arguments）
+  - 验证: tool chain 估算值显著高于纯 chat（约 6 倍）
+
+test_message_overhead
+  - 单条空消息（content=""，无 tool_calls）
+  - 估算值 > 0（结构开销）
 ```
 
 ### 6.5 restore 过滤测试（`class TestRestoreFilter`）
@@ -380,7 +473,7 @@ test_inject_accumulation_then_save_then_restore
   - 交替注入 30 次心跳和 5 次 user_chat
   - 每次 inject 后调用 _evict_oldest_heartbeat
   - 验证: 心跳不超过 20 条
-  - save: compact 决策只看 chat 数量
+  - save: compact 决策按 chat token 数判断，心跳不计入
   - restore: 无心跳、无占位、DolphinStateAdapter 校验通过
 
 test_metadata_roundtrip
