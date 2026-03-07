@@ -72,9 +72,21 @@ def _append_turn(history: list, turn_id: int) -> list:
 async def test_channel_session_history_stays_bounded():
     """Simulate many save-restore cycles on a channel session.
 
-    After enough turns to exceed the compression threshold, the persisted
-    history must stay bounded, not grow linearly.
+    Uses long-content messages so the token budget (COMPACT_TOKEN_BUDGET=40K)
+    is exceeded during the save cycles, triggering LLM summary compression.
+    After compression fires, the persisted history must stay bounded — not grow
+    linearly with turn count.
     """
+    # Each message needs ~600 chars so that ~200 messages exceed the 40K-token
+    # budget (200 × (600+12) / 3 ≈ 40,800 tokens > COMPACT_TOKEN_BUDGET).
+    _LONG = "x" * 600
+
+    def _append_long_turn(history: list, turn_id: int) -> list:
+        return history + [
+            {"role": "user", "content": f"{_LONG} turn-{turn_id}-question"},
+            {"role": "assistant", "content": f"{_LONG} turn-{turn_id}-answer"},
+        ]
+
     with tempfile.TemporaryDirectory() as tmpdir:
         session_dir = Path(tmpdir)
         manager = SessionManager(session_dir)
@@ -90,7 +102,7 @@ async def test_channel_session_history_stays_bounded():
             for turn in range(100):
                 loaded = await manager.load_session(session_id)
                 history = loaded.history_messages if loaded and loaded.history_messages else []
-                history = _append_turn(history, turn)
+                history = _append_long_turn(history, turn)
 
                 context = Context()
                 context.set_variable(KEY_HISTORY, history)
@@ -100,21 +112,33 @@ async def test_channel_session_history_stays_bounded():
             final = await manager.load_session(session_id)
             assert final is not None
 
-            max_expected = COMPRESS_THRESHOLD + 2
-            assert len(final.history_messages) <= max_expected, (
-                f"History grew to {len(final.history_messages)} messages, "
-                f"expected at most {max_expected} (bounded by compression cycle)"
+            # Token-based compression must have fired: summary injected at head.
+            assert SUMMARY_TAG in final.history_messages[0]["content"], (
+                "Compression never triggered — token budget may not have been exceeded"
             )
+            # History must be bounded below the raw accumulated size.
             assert len(final.history_messages) < 200, (
-                "History was never compressed — still at raw size"
+                f"History grew to {len(final.history_messages)} messages — "
+                "compression did not reduce history size"
             )
-            assert SUMMARY_TAG in final.history_messages[0]["content"]
-            assert final.history_messages[-1]["content"] == "turn-99-answer"
+            # Most-recent turn must still be verbatim in the kept window.
+            assert final.history_messages[-1]["content"].endswith("turn-99-answer")
 
 
 @pytest.mark.asyncio
 async def test_primary_session_history_also_stays_bounded():
-    """Same boundedness check for primary sessions (no regression)."""
+    """Same boundedness check for primary sessions (no regression).
+
+    Uses long-content messages to exceed the token budget and trigger compression.
+    """
+    _LONG = "x" * 600
+
+    def _append_long_turn(history: list, turn_id: int) -> list:
+        return history + [
+            {"role": "user", "content": f"{_LONG} turn-{turn_id}-question"},
+            {"role": "assistant", "content": f"{_LONG} turn-{turn_id}-answer"},
+        ]
+
     with tempfile.TemporaryDirectory() as tmpdir:
         session_dir = Path(tmpdir)
         manager = SessionManager(session_dir)
@@ -130,7 +154,7 @@ async def test_primary_session_history_also_stays_bounded():
             for turn in range(100):
                 loaded = await manager.load_session(session_id)
                 history = loaded.history_messages if loaded and loaded.history_messages else []
-                history = _append_turn(history, turn)
+                history = _append_long_turn(history, turn)
 
                 context = Context()
                 context.set_variable(KEY_HISTORY, history)
@@ -139,8 +163,9 @@ async def test_primary_session_history_also_stays_bounded():
 
             final = await manager.load_session(session_id)
             assert final is not None
-            max_expected = COMPRESS_THRESHOLD + 2
-            assert len(final.history_messages) <= max_expected
+            assert SUMMARY_TAG in final.history_messages[0]["content"], (
+                "Compression never triggered for primary session"
+            )
             assert len(final.history_messages) < 200
 
 
@@ -169,60 +194,67 @@ async def test_channel_session_below_threshold_no_compression():
 
 
 @pytest.mark.asyncio
-async def test_e2e_restored_channel_session_llm_context_bounded():
-    """End-to-end: save a large channel session → restore to agent →
-    verify that dolphin's assembled LLM messages are bounded.
+async def test_e2e_restore_preserves_compressed_result():
+    """End-to-end: save compresses history → restore passes the result through intact.
 
-    This crosses both the everbot persistence layer and the dolphin
-    context assembly layer, catching issues in either.
+    Verifies the responsibility boundary:
+    - save() compresses history (token-budget based, via SessionCompressor).
+    - restore_to_agent() performs data hygiene only (strips empty/heartbeat
+      messages) and must NOT further truncate what save() already compressed.
+    - Token-based context guardrail for LLM calls is Dolphin's responsibility
+      and is not tested here.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         session_dir = Path(tmpdir)
         manager = SessionManager(session_dir)
         session_id = "tg_session_demo_agent__12345"
 
-        # Step 1: Build a large history (200 messages) and save with compression
+        # Step 1: Build a large history (200 messages) and save with compression.
+        # Messages need enough content to exceed the 40K-token budget so that
+        # save() actually compresses (200 × (600+12) / 3 ≈ 40,800 tokens).
+        _LONG = "x" * 600
+
+        def _make_long_history(n: int) -> list:
+            msgs = []
+            for i in range(n):
+                msgs.append({"role": "user", "content": f"{_LONG} msg-{i}"})
+                msgs.append({"role": "assistant", "content": f"{_LONG} reply-{i}"})
+            return msgs
+
         with patch(
             "src.everbot.core.session.compressor.SessionCompressor._generate_summary",
             new_callable=AsyncMock,
             return_value="这是100轮对话的摘要",
         ):
-            history = _make_history(100)  # 200 messages
+            history = _make_long_history(100)  # 200 messages with long content
             context = Context()
             context.set_variable(KEY_HISTORY, history)
             agent = _make_mock_agent(context)
             await manager.save_session(session_id, agent)
 
-        # Verify persistence compressed it
         saved = await manager.load_session(session_id)
-        assert len(saved.history_messages) < 200
+        assert len(saved.history_messages) < 200, "save() should have compressed history"
+        compressed_count = len(saved.history_messages)
 
-        # Step 2: Create a fresh agent and restore the compressed session
+        # Step 2: Restore into a fresh agent; intercept import_portable_session
+        # to capture exactly what EverBot passes to Dolphin.
         fresh_context = Context()
         fresh_agent = _make_mock_agent(fresh_context)
+        imported_state: dict = {}
+        original_import = fresh_agent.snapshot.import_portable_session
+
+        def capture_import(state, **kwargs):
+            imported_state.update(state)
+            return original_import(state, **kwargs)
+
+        fresh_agent.snapshot.import_portable_session = capture_import
         await manager.restore_to_agent(fresh_agent, saved)
 
-        # Step 3: Simulate what dolphin does before an LLM call —
-        # assemble messages via context_manager.to_dph_messages()
-        ctx = fresh_agent.executor.context
-        cm = ctx.context_manager
-        if cm is not None:
-            llm_messages = cm.to_dph_messages()
-            msg_count = len(llm_messages.get_messages())
-        else:
-            # Fallback: check history directly from context
-            llm_messages = ctx.get_messages()
-            msg_count = len(llm_messages.get_messages())
-
-        # The messages sent to LLM must be bounded
-        max_llm_messages = SessionPersistence.MAX_RESTORED_HISTORY_MESSAGES + 10  # small headroom
-        assert msg_count <= max_llm_messages, (
-            f"LLM would receive {msg_count} messages after restore, "
-            f"expected at most ~{max_llm_messages}. "
-            f"Context is unbounded — compression or restore truncation failed."
-        )
-        # Must not be the raw 200
-        assert msg_count < 200, (
-            f"LLM context has {msg_count} messages — neither compression "
-            f"nor restore truncation reduced the history."
+        # Step 3: restore must pass the compressed history intact — no additional loss.
+        # (The test history has no heartbeat/empty messages, so hygiene filters are no-ops.)
+        assert "history_messages" in imported_state, "import_portable_session was not called"
+        assert len(imported_state["history_messages"]) == compressed_count, (
+            f"restore introduced additional truncation: "
+            f"save produced {compressed_count} messages but "
+            f"restore passed {len(imported_state['history_messages'])} to Dolphin"
         )

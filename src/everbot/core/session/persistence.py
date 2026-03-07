@@ -14,6 +14,7 @@ import logging
 
 from ...infra.dolphin_state_adapter import DolphinStateAdapter
 from .compressor import SessionCompressor
+from .history_utils import _is_heartbeat, _is_placeholder
 from .session_data import SessionData
 from . import session_ids as _sid
 
@@ -23,8 +24,6 @@ logger = logging.getLogger(__name__)
 class SessionPersistence:
     """Session 持久化管理器"""
 
-    # Keep a larger restoration window to reduce truncation-related context loss.
-    MAX_RESTORED_HISTORY_MESSAGES = 120
     SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 
     def __init__(self, sessions_dir: Path):
@@ -139,20 +138,14 @@ class SessionPersistence:
     def _filter_heartbeat_messages(messages: list) -> list:
         """Remove heartbeat-injected messages and their placeholder artifacts.
 
-        Heartbeat results (metadata.source == 'heartbeat') and the placeholder
-        messages inserted by inject_history_message — '(acknowledged)' and
-        '[Background notification follows]' — are filtered so they don't
-        pollute the LLM conversation context during restore.
+        Uses shared _is_heartbeat / _is_placeholder from history_utils for
+        consistent identification (metadata + legacy content matching).
         """
-        _PLACEHOLDER_CONTENTS = {"(acknowledged)", "[Background notification follows]"}
         return [
             m for m in messages
-            if isinstance(m, dict) and not (
-                # Heartbeat-sourced messages
-                (isinstance(m.get("metadata"), dict) and m["metadata"].get("source") == "heartbeat")
-                # Placeholder artifacts
-                or (isinstance(m.get("content"), str) and m["content"] in _PLACEHOLDER_CONTENTS)
-            )
+            if isinstance(m, dict)
+            and not _is_heartbeat(m)
+            and not _is_placeholder(m)
         ]
 
     def _get_session_path(self, session_id: str) -> Path:
@@ -222,13 +215,13 @@ class SessionPersistence:
                 revision=next_revision,
             )
 
-            # Compress history for primary sessions before persisting.
-            if data.session_type == "primary":
+            # Compress history for long-lived sessions before persisting.
+            if data.session_type in ("primary", "channel"):
                 try:
                     compressor = SessionCompressor(agent.executor.context)
-                    compressed, new_history = await compressor.maybe_compress(data.history_messages)
-                    if compressed:
-                        data.history_messages = new_history
+                    data.history_messages = await compressor.compress_history(
+                        data.history_messages
+                    )
                 except Exception:
                     logger.warning("History compression failed; saving uncompressed", exc_info=True)
 
@@ -437,44 +430,41 @@ class SessionPersistence:
             logger.info("Session 文件已删除: %s", session_id)
 
     async def restore_to_agent(self, agent: Any, session_data: SessionData):
-        """
-        恢复 Session 数据到 Agent
+        """Restore session data into a Dolphin agent.
+
+        Responsibility boundary
+        -----------------------
+        EverBot restore handles **data hygiene** only:
+          - Strip structurally invalid messages (empty assistant with no tool_calls).
+          - Strip heartbeat / placeholder messages (async-only artifacts that must
+            not enter LLM conversation context).
+          - Filter non-restorable variables (re-injected at runtime or internal-only).
+
+        Context-budget management (token limits) is fully delegated to Dolphin
+        runtime, which enforces the guardrail before each LLM call.  EverBot
+        restore does NOT truncate history by message count — doing so silently
+        discards context that save() already paid the cost to compress.
 
         Args:
-            agent: DolphinAgent 实例
-            session_data: Session 数据
+            agent: DolphinAgent instance.
+            session_data: Session data loaded from disk.
         """
         try:
             # 0a. Strip bare empty assistant messages (content="" with no tool_calls).
             #     These are artifacts from failed/timed-out tool executions and will
             #     cause API errors (e.g. DeepSeek 400 "assistant must not be empty").
-            session_data.history_messages = self._filter_empty_assistant_messages(
+            history = self._filter_empty_assistant_messages(
                 session_data.history_messages or []
             )
 
             # 0b. Strip heartbeat-injected messages and placeholder artifacts.
-            #     Heartbeat results are for async notification only and should not
+            #     Heartbeat results are for async notification only; they must not
             #     be restored into the LLM conversation context.
-            session_data.history_messages = self._filter_heartbeat_messages(
-                session_data.history_messages
-            )
+            history = self._filter_heartbeat_messages(history)
 
-            # 1. Compact history (SDK has no max_messages truncation)
-            compacted_history = session_data.history_messages or []
-            if compacted_history:
-                compacted_history = DolphinStateAdapter.compact_session_state(
-                    compacted_history,
-                    max_messages=self.MAX_RESTORED_HISTORY_MESSAGES,
-                )
-                if len(compacted_history) < len(session_data.history_messages):
-                    logger.info(
-                        "Truncating restored history from %s to last %s messages for session_id=%s.",
-                        len(session_data.history_messages),
-                        self.MAX_RESTORED_HISTORY_MESSAGES,
-                        session_data.session_id,
-                    )
-
-            # 2. Build portable state, filtering non-restorable variables
+            # 1. Build portable state, filtering non-restorable variables.
+            #    workspace_instructions is re-injected at runtime; _history is
+            #    already captured in history_messages above.
             _NON_RESTORABLE_VARS = {"workspace_instructions", "_history"}
             restore_variables = {
                 k: v for k, v in (session_data.variables or {}).items()
@@ -484,11 +474,13 @@ class SessionPersistence:
             portable_state = {
                 "schema_version": "portable_session.v1",
                 "session_id": session_data.session_id,
-                "history_messages": compacted_history,
+                "history_messages": history,
                 "variables": restore_variables,
             }
 
-            # 3. Import via SDK (handles history, variables, session_id, and repair)
+            # 2. Import via SDK (handles history, variables, session_id, and repair).
+            #    repair=True lets Dolphin fix structural issues (orphaned tool_calls,
+            #    role-order violations) before the first LLM call.
             report = agent.snapshot.import_portable_session(portable_state, repair=True)
 
             if report and report.get("issues_after"):
@@ -506,7 +498,7 @@ class SessionPersistence:
                 )
 
             logger.info("Session 已恢复: %s, 历史消息: %s 条",
-                       session_data.session_id, len(compacted_history))
+                       session_data.session_id, len(history))
 
         except Exception as e:
             logger.error("恢复 Session 失败: %s", e)

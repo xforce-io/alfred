@@ -564,17 +564,21 @@ class TestSaveSessionLockAlreadyHeld:
 
 
 # ===========================================================================
-# 10. SessionManager.restore_to_agent history truncation
+# 10. SessionManager.restore_to_agent
 # ===========================================================================
 
-class TestRestoreToAgentTruncation:
+class TestRestoreToAgent:
 
     @pytest.mark.asyncio
-    async def test_history_truncated_when_exceeding_max(self, tmp_path: Path):
-        manager = SessionManager(tmp_path)
-        max_msgs = SessionPersistence.MAX_RESTORED_HISTORY_MESSAGES  # 120
+    async def test_history_passed_through_intact(self, tmp_path: Path):
+        """restore_to_agent must NOT truncate history by message count.
 
-        # Create a session with more than MAX_RESTORED_HISTORY_MESSAGES
+        Context-budget management is Dolphin's responsibility.  EverBot restore
+        only strips data-hygiene artifacts (empty assistant, heartbeat) and then
+        passes whatever save() persisted straight into import_portable_session.
+        """
+        manager = SessionManager(tmp_path)
+
         large_history = [{"role": "user", "content": f"msg {i}"} for i in range(200)]
         session_data = _make_session_data(
             session_id="web_session_test_agent",
@@ -582,20 +586,18 @@ class TestRestoreToAgentTruncation:
         )
 
         agent = _make_mock_agent()
-
         await manager.restore_to_agent(agent, session_data)
 
-        # Verify import_portable_session was called
         agent.snapshot.import_portable_session.assert_called_once()
         call_args = agent.snapshot.import_portable_session.call_args
         portable = call_args[0][0]
         restored_history = portable["history_messages"]
 
-        # Should be truncated to MAX_RESTORED_HISTORY_MESSAGES
-        assert len(restored_history) <= max_msgs
+        # All 200 messages must reach import_portable_session — no EverBot truncation.
+        assert len(restored_history) == 200
 
     @pytest.mark.asyncio
-    async def test_history_not_truncated_when_within_limit(self, tmp_path: Path):
+    async def test_history_small_session_passed_through(self, tmp_path: Path):
         manager = SessionManager(tmp_path)
 
         small_history = [{"role": "user", "content": f"msg {i}"} for i in range(10)]
@@ -605,7 +607,6 @@ class TestRestoreToAgentTruncation:
         )
 
         agent = _make_mock_agent()
-
         await manager.restore_to_agent(agent, session_data)
 
         agent.snapshot.import_portable_session.assert_called_once()
