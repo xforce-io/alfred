@@ -19,6 +19,17 @@ from src.everbot.core.runtime.heartbeat import HeartbeatRunner
 from src.everbot.core.tasks.task_manager import Task, TaskList, TaskState
 
 
+class _StubUserDataManager:
+    """Test double that redirects inspector state into the workspace."""
+
+    def __init__(self, base_dir: Path):
+        self._base_dir = base_dir
+        self.heartbeat_events_file = base_dir / "heartbeat_events.jsonl"
+
+    def get_agent_tmp_dir(self, agent_name: str) -> Path:
+        return self._base_dir / agent_name / "tmp"
+
+
 def _make_runner(workspace_path: Path = Path("."), **overrides) -> HeartbeatRunner:
     from contextlib import contextmanager
 
@@ -58,7 +69,16 @@ def _make_runner(workspace_path: Path = Path("."), **overrides) -> HeartbeatRunn
         "on_result": None,
     }
     defaults.update(overrides)
-    return HeartbeatRunner(**defaults)
+    stub_udm = _StubUserDataManager(workspace_path / ".alfred")
+    patcher = patch(
+        "src.everbot.core.runtime.inspector.get_user_data_manager",
+        return_value=stub_udm,
+    )
+    patcher.start()
+    runner = HeartbeatRunner(**defaults)
+    # Keep patch active for the runner's lifetime (inspector calls get_user_data_manager at runtime)
+    runner._udm_patcher = patcher
+    return runner
 
 
 def _write_heartbeat_md(workspace: Path, tasks: list[dict] | None = None) -> None:
@@ -282,8 +302,9 @@ class TestAgentCreationSkip:
         _write_heartbeat_md(tmp_path)
         (tmp_path / "MEMORY.md").write_text("stable", encoding="utf-8")
 
-        # Simulate prior reflect
+        # Simulate prior reflect (both RM and Inspector state)
         runner._update_reflect_state()
+        runner._inspector.update_state()
 
         get_agent_mock = AsyncMock()
         monkeypatch.setattr(runner, "_get_or_create_agent", get_agent_mock)
@@ -310,8 +331,9 @@ class TestAgentCreationSkip:
         _write_heartbeat_md(tmp_path)
         (tmp_path / "MEMORY.md").write_text("stable", encoding="utf-8")
 
-        # Simulate prior reflect so subsequent cycles skip
+        # Simulate prior reflect so subsequent cycles skip (both RM and Inspector state)
         runner._update_reflect_state()
+        runner._inspector.update_state()
 
         get_agent_mock = AsyncMock()
         monkeypatch.setattr(runner, "_get_or_create_agent", get_agent_mock)
@@ -344,6 +366,7 @@ class TestAgentCreationSkip:
         (tmp_path / "MEMORY.md").write_text("v1", encoding="utf-8")
 
         runner._update_reflect_state()
+        runner._inspector.update_state()
 
         # Change MEMORY.md
         (tmp_path / "MEMORY.md").write_text("v2 — new intentions", encoding="utf-8")
