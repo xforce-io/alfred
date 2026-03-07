@@ -68,13 +68,14 @@ class SkillInstaller:
             print(f"Warning: Could not load registry: {e}", file=sys.stderr)
             return {"skills": {}}
 
-    def install(self, source: str, method: Optional[str] = None) -> bool:
+    def install(self, source: str, method: Optional[str] = None, dev: bool = False) -> bool:
         """
         Install a skill from various sources
 
         Args:
             source: Skill name (from registry), git URL, or file path
             method: Installation method - "registry", "git", "url", "local"
+            dev: If True, symlink instead of copy (local only)
 
         Returns:
             True if successful
@@ -92,7 +93,7 @@ class SkillInstaller:
         elif method == "url":
             return self._install_from_url(source)
         elif method == "local":
-            return self._install_from_local(source)
+            return self._install_from_local(source, dev=dev)
         else:
             print(f"Error: Unknown installation method: {method}", file=sys.stderr)
             return False
@@ -254,7 +255,7 @@ class SkillInstaller:
                 print(f"Error extracting archive: {e}", file=sys.stderr)
                 return False
 
-    def _install_from_local(self, path: str, skill_name: Optional[str] = None) -> bool:
+    def _install_from_local(self, path: str, skill_name: Optional[str] = None, dev: bool = False) -> bool:
         """Install skill from local path"""
         source_path = Path(path).expanduser().resolve()
 
@@ -267,15 +268,22 @@ class SkillInstaller:
 
         target_dir = self.skills_dir / skill_name
 
-        if target_dir.exists():
+        if target_dir.exists() or target_dir.is_symlink():
             print(f"Warning: Skill directory already exists: {target_dir}")
             response = input("Overwrite? [y/N] ")
             if response.lower() != "y":
                 return False
-            shutil.rmtree(target_dir)
+            if target_dir.is_symlink():
+                target_dir.unlink()
+            else:
+                shutil.rmtree(target_dir)
 
-        print(f"Copying from {source_path}...")
-        shutil.copytree(source_path, target_dir)
+        if dev:
+            print(f"Symlinking {source_path} -> {target_dir}...")
+            os.symlink(source_path, target_dir)
+        else:
+            print(f"Copying from {source_path}...")
+            shutil.copytree(source_path, target_dir)
         return True
 
     def _install_dependencies(self, skill_name: str, install_info: Dict) -> bool:
@@ -329,11 +337,13 @@ def main():
     parser.add_argument("--method", choices=["registry", "git", "url", "local"],
                        help="Installation method (auto-detected if not specified)")
     parser.add_argument("--skills-dir", help="Skills directory (default: auto-detect)")
+    parser.add_argument("--dev", action="store_true",
+                       help="Symlink instead of copy (local paths only, for development)")
 
     args = parser.parse_args()
 
     installer = SkillInstaller(args.skills_dir)
-    success = installer.install(args.source, args.method)
+    success = installer.install(args.source, args.method, dev=args.dev)
 
     sys.exit(0 if success else 1)
 

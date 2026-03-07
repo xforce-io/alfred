@@ -289,13 +289,20 @@ class TurnOrchestrator:
         self,
         intent_sig: Optional[str],
         tool_intent_signatures: Dict[str, int],
+        warned_intents: set,
         response: str,
         tool_call_count: int,
         tool_execution_count: int,
         tool_names_executed: list,
         failed_tool_outputs: int,
     ) -> Optional[TurnEvent]:
-        """Check for repeated tool intent; return a TURN_ERROR event or None."""
+        """Check for repeated tool intent.
+
+        Returns a TURN_ERROR event when hard limit is exceeded, or *None*.
+        When ``count == limit`` the intent is added to *warned_intents* so the
+        caller can inject a warning into the tool output, giving the LLM one
+        last chance to self-correct before the next call triggers a hard stop.
+        """
         if not intent_sig:
             return None
         tool_intent_signatures[intent_sig] = tool_intent_signatures.get(intent_sig, 0) + 1
@@ -304,12 +311,13 @@ class TurnOrchestrator:
             if _is_read_only_intent(intent_sig)
             else self.policy.max_same_tool_intent
         )
-        if tool_intent_signatures[intent_sig] > limit:
+        count = tool_intent_signatures[intent_sig]
+        if count > limit:
             return TurnEvent(
                 type=TurnEventType.TURN_ERROR,
                 error=(
                     f"REPEATED_TOOL_INTENT: intent={intent_sig}, "
-                    f"count={tool_intent_signatures[intent_sig]}, limit={limit}"
+                    f"count={count}, limit={limit}"
                 ),
                 answer=response,
                 tool_call_count=tool_call_count,
@@ -317,6 +325,8 @@ class TurnOrchestrator:
                 tool_names_executed=list(tool_names_executed),
                 failed_tool_outputs=failed_tool_outputs,
             )
+        if count == limit:
+            warned_intents.add(intent_sig)
         return None
 
     # -- single attempt -----------------------------------------------------
@@ -368,6 +378,8 @@ class TurnOrchestrator:
         failed_tool_outputs = 0
         failure_signatures: Dict[str, int] = {}
         tool_intent_signatures: Dict[str, int] = {}
+        warned_intents: set = set()
+        pid_to_intent: Dict[str, str] = {}
         sent_progress: Dict[str, str] = {}
         non_progress_count = 0
         llm_started = False
@@ -485,13 +497,15 @@ class TurnOrchestrator:
                         # Intent dedup check
                         intent_sig = _extract_tool_intent_signature(s_name, s_args)
                         err = self._check_intent_dedup(
-                            intent_sig, tool_intent_signatures,
+                            intent_sig, tool_intent_signatures, warned_intents,
                             response, tool_call_count, tool_execution_count,
                             tool_names_executed, failed_tool_outputs,
                         )
                         if err:
                             yield err
                             return
+                        if pid and intent_sig:
+                            pid_to_intent[pid] = intent_sig
 
                         tool_execution_count += 1
                         tool_names_executed.append(s_name)
@@ -535,6 +549,15 @@ class TurnOrchestrator:
                             f"\n[⚠ tool_failure {failed_tool_outputs}/{total_max}"
                             f" (sig {sig_count}/{sig_max}): {fail_sig}."
                             f" Switch strategy to avoid circuit break.]"
+                        )
+                    # Inject repeated-intent warning so LLM can self-correct
+                    _pid_intent = pid_to_intent.get(pid)
+                    if _pid_intent and _pid_intent in warned_intents:
+                        warn_output += (
+                            f"\n[⚠ repeated_intent: You have already run this"
+                            f" same command {tool_intent_signatures.get(_pid_intent, 0)} times."
+                            f" Do NOT call it again. Respond to the user based"
+                            f" on information you already have.]"
                         )
 
                     yield TurnEvent(
@@ -581,13 +604,15 @@ class TurnOrchestrator:
                     # Intent dedup check
                     intent_sig = _extract_tool_intent_signature(t_name, t_args_raw)
                     err = self._check_intent_dedup(
-                        intent_sig, tool_intent_signatures,
+                        intent_sig, tool_intent_signatures, warned_intents,
                         response, tool_call_count, tool_execution_count,
                         tool_names_executed, failed_tool_outputs,
                     )
                     if err:
                         yield err
                         return
+                    if pid and intent_sig:
+                        pid_to_intent[pid] = intent_sig
 
                     args_preview, args_trunc, args_total = _truncate_preview(t_args_raw, policy.max_tool_args_preview_chars)
                     tool_execution_count += 1
@@ -639,6 +664,15 @@ class TurnOrchestrator:
                             f"\n[⚠ tool_failure {failed_tool_outputs}/{total_max}"
                             f" (sig {sig_count}/{sig_max}): {fail_sig}."
                             f" Switch strategy to avoid circuit break.]"
+                        )
+                    # Inject repeated-intent warning so LLM can self-correct
+                    _pid_intent = pid_to_intent.get(pid)
+                    if _pid_intent and _pid_intent in warned_intents:
+                        out_preview += (
+                            f"\n[⚠ repeated_intent: You have already run this"
+                            f" same command {tool_intent_signatures.get(_pid_intent, 0)} times."
+                            f" Do NOT call it again. Respond to the user based"
+                            f" on information you already have.]"
                         )
 
                     yield TurnEvent(

@@ -439,9 +439,9 @@ async def test_write_intent_keeps_strict_limit():
 
 @pytest.mark.asyncio
 async def test_read_only_intent_still_has_limit():
-    """8 reads of the same file should trigger error (exceeds limit=6)."""
+    """10 reads of the same file should trigger error (exceeds limit=8)."""
     script = []
-    for i in range(8):
+    for i in range(10):
         script.append(_progress_event(_tool_call("_read_file", "/tmp/foo.py", pid=f"tc{i}")))
         script.append(_progress_event(_tool_output("_read_file", "content", pid=f"to{i}")))
     agent = _ScriptedAgent(script)
@@ -450,6 +450,31 @@ async def test_read_only_intent_still_has_limit():
     async for te in orch.run_turn(agent, "go"):
         events.append(te)
 
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert len(errors) == 1
+    assert "REPEATED_TOOL_INTENT" in errors[0].error
+
+
+@pytest.mark.asyncio
+async def test_intent_warning_injected_before_hard_stop():
+    """When count == limit, tool output should contain a repeated_intent warning."""
+    script = []
+    # 4 identical bash calls: count 1..3 normal, count 4 == limit → warning, count 5 → error
+    for i in range(5):
+        script.append(_progress_event(_tool_call("_bash", "echo hello", pid=f"tc{i}")))
+        script.append(_progress_event(_tool_output("_bash", "hello", pid=f"tc{i}")))
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(TurnPolicy(max_attempts=1, max_tool_calls=20, max_consecutive_empty_llm_rounds=99))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "go"):
+        events.append(te)
+
+    # The 4th tool output (at limit) should carry the warning
+    tool_outputs = [e for e in events if e.type == TurnEventType.TOOL_OUTPUT]
+    warned = [e for e in tool_outputs if "repeated_intent" in e.tool_output]
+    assert len(warned) >= 1
+
+    # The 5th call should still trigger the hard error
     errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
     assert len(errors) == 1
     assert "REPEATED_TOOL_INTENT" in errors[0].error

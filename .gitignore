@@ -47,8 +47,18 @@ log/
 *.swo
 *~
 
+# AI IDE configs
+.agent/
+.agents/
+.cursor/
+.factory/
+.trae/
+
 # Claude Code
 .claude/
+
+# macOS
+.DS_Store
 
 # Misc
 ~/
