@@ -3,12 +3,35 @@
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ParsedReflectionResponse:
+    """Parsed unified reflection response.
+
+    Expected LLM output format:
+    {
+        "heartbeat_ok": bool,
+        "push_message": str | null,
+        "routines": [...] | null
+    }
+    """
+
+    heartbeat_ok: bool = True
+    push_message: Optional[str] = None
+    routines: Optional[List[Dict[str, Any]]] = None
+    raw_response: str = ""
+
+    def __post_init__(self):
+        if self.routines is None:
+            self.routines = []
 
 
 class ReflectionManager:
@@ -61,8 +84,111 @@ class ReflectionManager:
         self.last_reflect_file_hashes = self.compute_file_hashes()
 
     @staticmethod
+    def _parse_heartbeat_ok(value: Any) -> bool:
+        """Parse heartbeat_ok with string compatibility for LLM JSON output."""
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return True
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "y", "ok"}:
+                return True
+            if normalized in {"false", "0", "no", "n", "null", "none", ""}:
+                return False
+        return bool(value)
+
+    @staticmethod
+    def extract_unified_response(response: str) -> ParsedReflectionResponse:
+        """Parse unified reflection response format.
+
+        Expected format:
+        {
+            "heartbeat_ok": bool,
+            "push_message": str | null,
+            "routines": [...] | null
+        }
+
+        Backward compatible: if response contains only "routines" array
+        without the wrapper, it will be parsed as heartbeat_ok=true,
+        push_message=null, routines=[...]
+        """
+        result = ParsedReflectionResponse(raw_response=response)
+
+        if not isinstance(response, str) or not response.strip():
+            return result
+
+        json_text = None
+
+        # Try code blocks first
+        for match in re.finditer(r"```json\s*(\{.*?\})\s*```", response, re.DOTALL):
+            try:
+                json_text = match.group(1)
+                payload = json.loads(json_text)
+                # Check if this looks like unified format
+                if isinstance(payload, dict) and ("heartbeat_ok" in payload or "push_message" in payload):
+                    break
+                json_text = None  # Keep looking if not unified format
+            except Exception:
+                continue
+
+        # Try raw JSON if no unified format code block found
+        if json_text is None:
+            start = response.find("{")
+            end = response.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                try:
+                    json_text = response[start : end + 1]
+                    payload = json.loads(json_text)
+                    if not isinstance(payload, dict):
+                        json_text = None
+                except Exception:
+                    json_text = None
+
+        if json_text is None:
+            # No valid JSON found
+            return result
+
+        try:
+            payload = json.loads(json_text)
+        except json.JSONDecodeError:
+            return result
+
+        if not isinstance(payload, dict):
+            return result
+
+        # Parse unified format fields
+        result.heartbeat_ok = ReflectionManager._parse_heartbeat_ok(
+            payload.get("heartbeat_ok", True)
+        )
+
+        push_msg = payload.get("push_message")
+        if push_msg and isinstance(push_msg, str):
+            push_msg = push_msg.strip()
+            if push_msg.lower() not in ("null", "none", ""):
+                result.push_message = push_msg
+
+        routines = payload.get("routines")
+        if isinstance(routines, list):
+            result.routines = [item for item in routines if isinstance(item, dict)]
+
+        return result
+
+    @staticmethod
     def extract_routine_proposals(response: str) -> list[dict[str, Any]]:
-        """Extract routine proposals from reflection response JSON payload."""
+        """Extract routine proposals from reflection response JSON payload.
+
+        Backward compatible: works with both old format (just routines array)
+        and new unified format.
+        """
+        # First try unified format
+        unified = ReflectionManager.extract_unified_response(response)
+        if unified.routines:
+            return unified.routines
+
+        # Fall back to legacy extraction
         if not isinstance(response, str) or not response.strip():
             return []
 

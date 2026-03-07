@@ -677,9 +677,12 @@ If not, reply with `HEARTBEAT_OK`.
                         self._write_heartbeat_event("reflect_skipped", reason="disabled")
                         self._record_timeline_event("turn_end", run_id, status="completed", result="HEARTBEAT_OK")
                         return "HEARTBEAT_OK"
-                    if self._inspector.should_skip():
-                        logger.info("[%s] Reflection skipped: files unchanged since last reflect", self.agent_name)
-                        self._write_heartbeat_event("reflect_skipped", reason="file_unchanged")
+                    if self._inspector.should_skip(
+                        session_manager=self.session_manager,
+                        primary_session_id=self.primary_session_id,
+                    ):
+                        logger.info("[%s] Reflection skipped: no context change since last reflect", self.agent_name)
+                        self._write_heartbeat_event("reflect_skipped", reason="no_context_change")
                         self._record_timeline_event("turn_end", run_id, status="completed", result="HEARTBEAT_OK")
                         self._record_runtime_metric("heartbeat_reflect_skipped")
                         return "HEARTBEAT_OK"
@@ -1245,6 +1248,16 @@ If not, reply with `HEARTBEAT_OK`.
 4. 若无可执行动作，回复 "HEARTBEAT_OK"
 {memory_section}
 当前 HEARTBEAT.md 内容：
+{heartbeat_content}
+"""
+
+            if mode == "reflect_json":
+                # heartbeat_content here is actually the enriched prompt
+                # built by Inspector._build_reflect_prompt(), passed through
+                # the inject_context(agent, reflect_prompt, mode="reflect_json") call.
+                return f"""
+{header}
+
 {heartbeat_content}
 """
 
