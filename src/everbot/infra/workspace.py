@@ -117,7 +117,7 @@ class WorkspaceLoader:
         if not tasks:
             return raw
 
-        _KEEP = {"id", "title", "description", "schedule", "enabled"}
+        _KEEP = {"id", "title", "description", "schedule", "enabled", "next_run_at", "last_run_at"}
         slim_tasks = [
             {k: v for k, v in t.items() if k in _KEEP}
             for t in tasks
