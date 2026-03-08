@@ -74,12 +74,16 @@ DEVELOP_PROMPT = """\
 {plan}
 
 ## Task
-Implement the fix based on the diagnosis report above.
+Implement the fix/feature based on the diagnosis report above.
 Task: {task}
+
+## Test Command
+{test_command}
 
 Rules:
 - Only modify files within this repository
-- Do NOT run tests — that will be done separately
+- After implementing, run the test command to verify
+- If tests fail, fix the code and re-run until tests pass
 - Do NOT commit — that will be done separately
 - Keep changes minimal and focused
 """
@@ -253,6 +257,95 @@ def _load_artifact(ws_path: str, filename: str) -> str:
     if p.exists():
         return p.read_text()
     return "(not available)"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  auto-dev helpers
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _looks_complex(task: str) -> bool:
+    """Heuristic: does the task description suggest multi-feature complexity?"""
+    complex_signals = ["重构", "refactor", "redesign", "整个", "所有", "全部",
+                       "多模块", "cross-cutting", "新子系统", "new subsystem"]
+    task_lower = task.lower()
+    return sum(1 for s in complex_signals if s in task_lower) >= 2
+
+
+
+
+def _clean_workspace_repos(ws_path: str, workspace_snapshot: str) -> dict:
+    """Reset tracked/untracked changes for repos inside the workspace snapshot."""
+    try:
+        snapshot = json.loads(workspace_snapshot)
+    except Exception:
+        return {
+            "ok": False,
+            "error": "workspace snapshot unavailable for reset",
+            "error_code": "NO_SNAPSHOT",
+            "hint": "先运行 workspace-check，或手动清理 workspace 后重试",
+        }
+
+    repos = snapshot.get("repos", [])
+    if not repos:
+        # Single-repo workspace — clean the root
+        result = GitOps.force_clean(ws_path)
+        if not result.get("ok"):
+            return {
+                "ok": False,
+                "error": result.get("error", f"failed to clean: {ws_path}"),
+                "error_code": "GIT_ERROR",
+            }
+        return {"ok": True}
+
+    for repo in repos:
+        repo_path = repo.get("path")
+        if not repo_path:
+            continue
+        result = GitOps.force_clean(repo_path)
+        if not result.get("ok"):
+            return {
+                "ok": False,
+                "error": result.get("error", f"failed to clean repo: {repo_path}"),
+                "error_code": "GIT_ERROR",
+                "hint": f"手动检查仓库后重试: {repo_path}",
+            }
+
+    return {"ok": True}
+
+
+def _suggest_next(args, feature_mode: bool, tests_passed: bool) -> str:
+    workspace_mode = bool(getattr(args, "workspace", None)) and not feature_mode
+
+    if feature_mode:
+        if tests_passed:
+            return (
+                f"当前 feature 完成。继续下一个 feature: "
+                f"$D auto-dev --workspace {args.workspace} --feature next"
+            )
+        return (
+            f"当前 feature 验证失败。两个选择:\n"
+            f"1. 继续修复: $D auto-dev --workspace {args.workspace} --feature next\n"
+            f"2. 清空改动后重试: $D auto-dev --workspace {args.workspace} --feature next --reset-worktree"
+        )
+
+    if workspace_mode:
+        if tests_passed:
+            return f"测试通过。提交 PR: $D submit --workspace {args.workspace} --title \"<title>\""
+        return (
+            f"测试未全部通过。两个选择:\n"
+            f"1. 继续修复: $D auto-dev --workspace {args.workspace} --task \"fix failing tests\"\n"
+            f"2. 清空改动后重试: $D auto-dev --workspace {args.workspace} --task \"{getattr(args, 'task', '')}\" --reset-worktree"
+        )
+
+    repos = getattr(args, "repos", "")
+    if tests_passed:
+        return f"测试通过。提交 PR: $D submit --repos {repos} --title \"<title>\""
+
+    return (
+        f"测试未全部通过。两个选择:\n"
+        f"1. 继续修复: $D auto-dev --repos {repos} --task \"fix failing tests\"\n"
+        f"2. 清空改动后重试: $D auto-dev --repos {repos} --task \"{getattr(args, 'task', '')}\" --reset-worktree"
+    )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -758,6 +851,7 @@ def cmd_develop(args) -> dict:
             analysis=analysis,
             plan=args.plan or "(proceed with recommended approach)",
             task=args.task,
+            test_command="(no test command available)",
         )
 
         result = engine.run(ws_path, prompt, max_turns=max_turns)
@@ -862,6 +956,283 @@ def cmd_env_verify(args) -> dict:
         return result
 
     return with_lock_update(ws_path, "env-verified", do_verify)
+
+
+def cmd_auto_dev(args) -> dict:
+    """One-step development: workspace-check → develop (with test loop) → final test → report.
+
+    All repo resolution goes through repo_target.resolve_repo_target().
+    All execution uses the resolved RepoTarget — never raw workspace paths.
+    """
+    from repo_target import (
+        resolve_repo_target, resolve_repo_target_for_feature,
+        run_final_test, RepoTargetBinding,
+    )
+
+    config = ConfigManager()
+    mgr = WorkspaceManager(config)
+
+    # ── 0. Feature mode ──
+    feature_mode = getattr(args, "feature", None) == "next"
+    current_feature = None
+
+    if feature_mode:
+        ws_name = getattr(args, "workspace", None)
+        if not ws_name:
+            return {
+                "ok": False,
+                "error": "--feature next requires --workspace",
+                "error_code": "MISSING_WORKSPACE",
+                "hint": "用 analyze 返回的 workspace 名称: $D auto-dev --workspace env0 --feature next",
+            }
+        ws = config.get_workspace(ws_name)
+        if ws is None:
+            return {"ok": False, "error": f"workspace '{ws_name}' not found",
+                    "error_code": "NO_WORKSPACE"}
+
+        fm = FeatureManager(ws["path"])
+        feat = fm.next_feature()
+        if not feat.get("ok"):
+            _sync_coding_stats()
+            return feat
+
+        feat_data = feat.get("data", {})
+        current_feature = feat_data.get("feature")
+        if current_feature is None:
+            status = feat_data.get("status", "unknown")
+            if status == "all_complete":
+                return {
+                    "ok": True,
+                    "data": {"status": "all_complete", "progress": feat_data.get("progress")},
+                    "next_step": f"所有 feature 已完成。提交 PR: $D submit --workspace {ws_name} --title \"<title>\"",
+                }
+            return {"ok": False, "error": "no executable feature available",
+                    "error_code": "NO_FEATURE",
+                    "hint": "运行 $D feature-list 查看当前 plan 状态"}
+
+    # ── 1. Task + complexity check ──
+    task = current_feature["task"] if current_feature else getattr(args, "task", "")
+    if not task:
+        return {"ok": False, "error": "--task is required", "error_code": "INVALID_ARGS"}
+
+    if not getattr(args, "allow_complex", False) and _looks_complex(task):
+        repos_hint = getattr(args, "repos", "") or ""
+        return {
+            "ok": False,
+            "error_code": "TASK_TOO_COMPLEX",
+            "hint": f"建议先分析: $D analyze --repos {repos_hint} --task \"{task}\"",
+        }
+
+    # ── 2. Engine ──
+    engine_name = getattr(args, "engine", None) or config.get_default_engine()
+    engine = _get_engine(engine_name)
+    if engine is None:
+        return {"ok": False, "error": f"unknown engine: {engine_name}",
+                "error_code": "ENGINE_ERROR"}
+
+    # ── 3. Resolve repo target (unified) ──
+    if feature_mode:
+        binding = resolve_repo_target_for_feature(
+            config=config,
+            workspace_arg=getattr(args, "workspace", None),
+            repo_arg=getattr(args, "repo", None),
+            feature=current_feature,
+        )
+    else:
+        binding = resolve_repo_target(
+            config=config,
+            repos_arg=getattr(args, "repos", None),
+            workspace_arg=getattr(args, "workspace", None),
+            repo_arg=getattr(args, "repo", None),
+        )
+
+    # Handle NEEDS_WORKSPACE_ACQUISITION — acquire workspace then re-resolve
+    if isinstance(binding, dict) and binding.get("error_code") == "NEEDS_WORKSPACE_ACQUISITION":
+        repo_names = binding["data"]["repo_names"]
+        resolved_repo_name = binding["data"]["repo_name"]
+        ws_result = mgr.check_and_acquire_for_repos(repo_names, task, engine_name)
+        if not ws_result.get("ok"):
+            return ws_result
+        # Re-resolve with acquired workspace
+        acquired_ws_name = ws_result["data"]["snapshot"]["workspace"]["name"]
+        binding = resolve_repo_target(
+            config=config,
+            workspace_arg=acquired_ws_name,
+            repo_arg=getattr(args, "repo", None) or resolved_repo_name,
+        )
+
+    if isinstance(binding, dict):
+        return binding  # error
+
+    ws_ctx = binding.workspace
+    target = binding.target
+
+    # ── 3.5. Reset worktree if requested ──
+    if getattr(args, "reset_worktree", False):
+        snapshot_text = _load_artifact(ws_ctx.path, "workspace_snapshot.json")
+        clean_result = _clean_workspace_repos(ws_ctx.path, snapshot_text)
+        if not clean_result.get("ok"):
+            return clean_result
+
+    # ── 4. Build prompt + run engine (uses only RepoTarget) ──
+    ws_snapshot = _load_artifact(ws_ctx.path, "workspace_snapshot.json")
+    analysis = _load_artifact(ws_ctx.path, "phase2_analysis.md")
+
+    prompt = DEVELOP_PROMPT.format(
+        workspace_snapshot=ws_snapshot,
+        analysis=analysis,
+        plan=current_feature.get("plan", "") if current_feature else getattr(args, "plan", None) or "(proceed with recommended approach)",
+        task=task,
+        test_command=target.test_command or "(no test command available)",
+    )
+
+    max_turns = config.get_max_turns()
+
+    def do_dev():
+        # Branch
+        branch = getattr(args, "branch", None)
+        if branch:
+            git = GitOps(target.git_root)
+            br_result = git.create_branch(branch)
+            if not br_result.get("ok"):
+                return br_result
+            lock = LockFile(ws_ctx.path)
+            if lock.exists():
+                lock.load()
+                lock.data["branch"] = branch
+                lock.save()
+
+        # Engine runs on RepoTarget.repo_path
+        result = engine.run(target.repo_path, prompt, max_turns=max_turns)
+        if not result.success:
+            return {
+                "ok": False,
+                "error": result.error or "engine failed",
+                "error_code": "ENGINE_ERROR",
+                "hint": "引擎失败，可换引擎重试: --engine codex 或 --engine claude",
+            }
+
+        # ── Final test (uses RepoTarget) ──
+        test_status = run_final_test(target, config)
+
+        if test_status.status == "failed":
+            return {
+                "ok": False,
+                "error": "final verification failed after engine completed development",
+                "error_code": "FINAL_TEST_FAILED",
+                "data": {
+                    "summary": result.summary,
+                    "files_changed": result.files_changed,
+                    "test_status": test_status.status,
+                    "test_reason": test_status.reason,
+                    "test_report": test_status.report,
+                },
+                "hint": "查看失败报告后重试 auto-dev，或手动运行 $D test / $D analyze",
+            }
+
+        # Feature done
+        if feature_mode and current_feature is not None:
+            fm = FeatureManager(ws_ctx.path)
+            fm.mark_done(index=current_feature["index"], force=False)
+
+        return {
+            "ok": True,
+            "data": {
+                "summary": result.summary,
+                "files_changed": result.files_changed,
+                "test_status": test_status.status,
+                "test_reason": test_status.reason,
+                "test_report": test_status.report,
+            },
+            "next_step": _suggest_next(args, feature_mode=feature_mode, tests_passed=test_status.passed),
+        }
+
+    result = with_lock_update(ws_ctx.path, "developing", do_dev)
+    _sync_coding_stats()
+    return result
+
+
+def cmd_submit(args) -> dict:
+    """Simplified submit: supports both --repos and --workspace. Auto-releases on success.
+
+    All repo resolution goes through repo_target module.
+    """
+    from repo_target import (
+        resolve_repo_target, find_active_workspaces_by_repos, RepoTargetBinding,
+    )
+
+    config = ConfigManager()
+
+    # ── Resolve target (unified) ──
+    repos_arg = getattr(args, "repos", None)
+    workspace_arg = getattr(args, "workspace", None)
+    repo_arg = getattr(args, "repo", None)
+
+    if not workspace_arg and repos_arg:
+        # Use formal repo→workspace finder
+        repo_names = [r.strip() for r in repos_arg.split(",") if r.strip()]
+        matches = find_active_workspaces_by_repos(config, repo_names)
+
+        if len(matches) == 0:
+            return {
+                "ok": False,
+                "error": f"no active workspace found for repos: {repos_arg}",
+                "error_code": "NO_WORKSPACE",
+                "hint": "先运行 auto-dev 创建 workspace，或用 --workspace 指定",
+            }
+        if len(matches) > 1:
+            return {
+                "ok": False,
+                "error": "multiple active workspaces found",
+                "error_code": "AMBIGUOUS_WORKSPACE",
+                "hint": "请显式传 --workspace，避免提交到错误分支",
+            }
+        workspace_arg = matches[0]["name"]
+        if len(repo_names) == 1 and not repo_arg:
+            repo_arg = repo_names[0]
+
+    if not workspace_arg:
+        return {"ok": False, "error": "either --workspace or --repos is required",
+                "error_code": "INVALID_ARGS"}
+
+    binding = resolve_repo_target(
+        config=config,
+        workspace_arg=workspace_arg,
+        repo_arg=repo_arg,
+    )
+    if isinstance(binding, dict):
+        return binding  # error
+
+    ws_ctx = binding.workspace
+    target = binding.target
+
+    # ── Submit PR using RepoTarget ──
+    git = GitOps(target.git_root)
+
+    def do_submit():
+        result = git.submit_pr(
+            title=args.title,
+            body=getattr(args, "body", "") or "",
+            commit_message=args.title,
+        )
+        if result.get("ok"):
+            lock = LockFile(ws_ctx.path)
+            if lock.exists():
+                lock.load()
+                lock.data["pushed_to_remote"] = True
+                lock.save()
+        return result
+
+    result = with_lock_update(ws_ctx.path, "submitted", do_submit)
+
+    # Auto-release on success unless --keep-lock
+    if result.get("ok") and not getattr(args, "keep_lock", False):
+        import argparse as _ap
+        release_args = _ap.Namespace(workspace=workspace_arg, **{"all": False}, cleanup=False)
+        cmd_release(release_args)
+
+    _sync_coding_stats()
+    return result
 
 
 def cmd_release(args) -> dict:
@@ -1015,6 +1386,37 @@ def _build_parser() -> argparse.ArgumentParser:
     qe.add_argument("--env", required=True)
     qe.add_argument("--commands", nargs="*", default=None)
 
+    # ── Aliases for simplified interface ─────────────────────
+    sub.add_parser("status", help="Alias for quick-status").add_argument("--workspace", default=None)
+    sub._name_parser_map["status"].add_argument("--repos", default=None)
+
+    sub.add_parser("find", help="Alias for quick-find").add_argument("--workspace", default=None)
+    sub._name_parser_map["find"].add_argument("--repos", default=None)
+    sub._name_parser_map["find"].add_argument("--query", required=True)
+    sub._name_parser_map["find"].add_argument("--glob", default=None)
+
+    # ── auto-dev ──────────────────────────────────────────
+    ad = sub.add_parser("auto-dev", help="One-step development: workspace-check + develop + test")
+    ad.add_argument("--repos", default=None, help="Comma-separated repo names (single repo only)")
+    ad.add_argument("--workspace", default=None, help="Use existing workspace")
+    ad.add_argument("--task", default=None, help="Task description")
+    ad.add_argument("--branch", default=None, help="Branch name (auto-generated if omitted)")
+    ad.add_argument("--engine", default=None, help="Engine: claude or codex")
+    ad.add_argument("--feature", default=None, help="'next' to develop next feature from plan")
+    ad.add_argument("--repo", default=None, help="Target repo in multi-repo workspace")
+    ad.add_argument("--plan", default=None, help="Implementation plan")
+    ad.add_argument("--allow-complex", action="store_true", help="Skip complexity check")
+    ad.add_argument("--reset-worktree", action="store_true", help="Clean uncommitted changes before developing")
+
+    # ── submit ────────────────────────────────────────────
+    sm = sub.add_parser("submit", help="Commit, push, create PR (auto-releases workspace)")
+    sm.add_argument("--workspace", default=None, help="Workspace name")
+    sm.add_argument("--repos", default=None, help="Comma-separated repo names")
+    sm.add_argument("--repo", default=None, help="Repo name within workspace")
+    sm.add_argument("--title", required=True, help="PR title")
+    sm.add_argument("--body", default="", help="PR body")
+    sm.add_argument("--keep-lock", action="store_true", help="Don't auto-release workspace after submit")
+
     # ── Workflow ────────────────────────────────────────────
     wc = sub.add_parser("workspace-check", help="Check and acquire workspace")
     wc.add_argument("--workspace", default=None, help="Workspace name (required in direct mode, optional with --repos)")
@@ -1109,10 +1511,18 @@ COMMANDS = {
     "config-add": cmd_config_add,
     "config-set": cmd_config_set,
     "config-remove": cmd_config_remove,
+    # Simplified aliases
+    "status": cmd_quick_status,
+    "find": cmd_quick_find,
+    # Original names (kept for backward compatibility)
     "quick-status": cmd_quick_status,
     "quick-test": cmd_quick_test,
     "quick-find": cmd_quick_find,
     "quick-env": cmd_quick_env,
+    # New commands
+    "auto-dev": cmd_auto_dev,
+    "submit": cmd_submit,
+    # Workflow
     "workspace-check": cmd_workspace_check,
     "env-probe": cmd_env_probe,
     "analyze": cmd_analyze,
@@ -1122,6 +1532,7 @@ COMMANDS = {
     "env-verify": cmd_env_verify,
     "release": cmd_release,
     "renew-lease": cmd_renew_lease,
+    # Feature management
     "feature-plan": cmd_feature_plan,
     "feature-next": cmd_feature_next,
     "feature-done": cmd_feature_done,
@@ -1211,12 +1622,16 @@ def _sync_coding_stats() -> None:
         lines.append("")
         lines.append(
             "- **所有代码开发、测试、搜索操作必须通过 coding-master skill 的 dispatch 命令执行**"
-            "（`$D test`, `$D quick-test`, `$D quick-find` 等），"
+            "（`$D auto-dev`, `$D test`, `$D status`, `$D find` 等），"
             "**禁止**直接用 `_bash` 拼 `cd ... && pytest/pip install/python -m pytest` 命令。"
         )
         lines.append(
             "- dispatch 会自动处理正确的 Python 解释器、pytest 路径、"
             "依赖安装和 workspace 上下文，裸 bash 无法保证这些。"
+        )
+        lines.append(
+            "- 标准开发流程: `$D auto-dev --repos <name> --task \"...\"` 一步完成开发+测试。"
+            "测试通过后: `$D submit --repos <name> --title \"...\"`。"
         )
         lines.append("")
 
@@ -1237,7 +1652,7 @@ def _append_workspace_details(lines: list[str], ws: dict) -> None:
 
     # Enrich from artifacts if available
     ws_path = ws["path"]
-    test_report = _load_artifact(ws_path, "test_report.json")
+    test_report = _load_artifact_or_none(ws_path, "test_report.json")
     if test_report:
         try:
             report = json.loads(test_report)
@@ -1290,7 +1705,7 @@ def _collect_expired_workspace_status() -> list[dict]:
     return expired
 
 
-def _load_artifact(ws_path: str, filename: str) -> str | None:
+def _load_artifact_or_none(ws_path: str, filename: str) -> str | None:
     """Read an artifact file from .coding-master/ dir, return content or None."""
     art = Path(ws_path) / ARTIFACT_DIR / filename
     if art.is_file():

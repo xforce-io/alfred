@@ -1,66 +1,66 @@
 ---
 name: coding-master
-description: "Code review, analysis, development, and ops for registered repos — review uncommitted changes, check git status, search code, run tests, fix bugs, develop features, and submit PRs"
-version: "0.1.0"
+description: "Code review, development, and ops for registered repos"
+version: "0.2.0"
 tags: [coding, review, development, bugfix, pr, automation]
 ---
 
 # Coding Master Skill
 
-All commands use: `$D = python $SKILL_DIR/scripts/dispatch.py`
+`$D = python $SKILL_DIR/scripts/dispatch.py`
 
-All commands return JSON: `{"ok": true, "data": {...}}` or `{"ok": false, "error": "...", "error_code": "..."}`. Always check `ok`. On error, check `error_code` and `hint` field for actionable recovery.
+All commands return JSON `{"ok": true, "data": {...}}` or `{"ok": false, "error_code": "...", "hint": "..."}`.
+On failure, follow `hint` to recover.
 
-## Available Operations
+## Core Commands
 
-根据用户意图自主选择操作并组合执行，不强制走预定义流程。参数不确定时先跑 `$D <command> --help`。
+| Command | Description | timeout |
+|---------|-------------|---------|
+| `$D status --repos <name>` | git status / diff overview | default |
+| `$D find --repos <name> --query <pattern>` | Search code | default |
+| `$D analyze --repos <name> --task "<desc>"` | Engine deep analysis | 600 |
+| `$D auto-dev --repos <name> --task "<desc>"` | Develop + test (one step) | 600 |
+| `$D submit --repos <name> --title "<title>"` | Commit + push + create PR (auto-releases workspace) | default |
+| `$D release --workspace <ws>` | Release workspace lock | default |
 
-### 只读操作（无需 workspace lock）
+> Commands without explicit timeout use 120s default.
 
-| 命令 | 说明 |
-|------|------|
-| `$D quick-status --repos <name>` | git 状态/diff |
-| `$D quick-test --repos <name> [--path PATH] [--lint]` | 跑测试 |
-| `$D quick-find --repos <name> --query <pattern> [--glob GLOB]` | 搜索代码 |
-| `$D analyze --repos <name> --task "<desc>" [--engine ENGINE]` | 引擎深度分析（timeout=600） |
+### auto-dev Options
 
-### 写入操作（需要 workspace lock）
+- `--branch <name>` — specify branch name (auto-generated if omitted)
+- `--engine <claude|codex>` — specify engine (default from config)
+- `--feature next` — develop next task from feature plan
+- `--workspace <name>` — use existing workspace (required for feature mode)
+- `--repo <name>` — target repo in multi-repo workspace
+- `--plan "<desc>"` — specify implementation plan
+- `--allow-complex` — skip complexity check, force single auto-dev
+- `--reset-worktree` — clean uncommitted changes before developing
 
-流程：`workspace-check` → 写入操作 → `release`。workspace-check 返回的 `data.snapshot.workspace.name` 即 `<ws>`。
+### auto-dev Behavior
 
-| 命令 | 说明 |
-|------|------|
-| `$D workspace-check --repos <name> --task "<desc>" [--engine ENGINE]` | 获取锁，返回 workspace |
-| `$D develop --workspace <ws> --task "<desc>" [--engine ENGINE]` | 引擎写代码（timeout=600） |
-| `$D test --workspace <ws>` | 工作区内跑测试 |
-| `$D submit-pr --workspace <ws> [--repo <name>] --title "<title>" [--body "<body>"]` | 提交 PR（多 repo workspace 须指定 `--repo`） |
-| `$D release --workspace <ws>` | 释放锁（必须） |
+- Execution unit is a **single target repo**
+- `--repos <name>` only supports single repo; multiple repos → `TASK_TOO_COMPLEX`
+- Multi-repo workspace requires explicit `--repo <name>`; otherwise → `NEED_EXPLICIT_REPO`
+- Engine develops code, runs tests, and fixes until tests pass (internal loop)
+- Dispatch runs final verification independently after engine completes
 
-### 复杂度判断
+### Submitting PRs
 
-**直接组合操作**（多数场景）：单步或明确指令，直接组合上面的命令
-- "提交 pr" → workspace-check + submit-pr + release
-- "跑下测试" → quick-test --repos
-- "看看有什么问题" → analyze --repos
+auto-dev does NOT auto-submit PRs. After tests pass:
 
-**启动 workflow**（复杂任务）：需要 research→plan→implement→verify 闭环、预计超 20 次工具调用、多文件修改+测试验证 → 加载 SOP 后按流程执行
+- repo mode: `$D submit --repos <name> --title "<title>"`
+- workspace / feature mode: `$D submit --workspace <ws> --title "<title>"`
 
-### 参考文档（复杂任务时加载）
+`submit` auto-releases workspace on success. Add `--keep-lock` to keep working.
 
-| 文档 | 加载命令 |
-|------|---------|
-| sop-quick-queries.md | `_load_skill_resource("coding-master", "references/sop-quick-queries.md")` |
-| sop-deep-review.md | `_load_skill_resource("coding-master", "references/sop-deep-review.md")` |
-| sop-bugfix-workflow.md | `_load_skill_resource("coding-master", "references/sop-bugfix-workflow.md")` |
-| sop-feature-dev.md | `_load_skill_resource("coding-master", "references/sop-feature-dev.md")` |
+## Rules
 
-## Common Rules
+- **All code operations must go through $D commands** — never use bare `_bash` for repo operations
+- Engine commands (analyze, auto-dev) need `timeout=600`
+- On failure, check `error_code` + `hint` and follow instructions
+- After `auto-dev` / `submit`, release workspace if not continuing development
+- Never push to main/master. Never force push. Never auto-merge PRs.
 
-- **禁止裸 bash 执行开发/测试操作**: 所有测试、搜索、开发操作**必须**通过 `$D` 命令执行（`$D test`, `$D quick-test --repos`, `$D quick-find` 等）。**严禁**直接用 `_bash` 拼写 `cd ... && pytest`、`pip install`、`python -m pytest` 等命令。dispatch 会自动处理正确的 Python 解释器、venv 路径、依赖和 workspace 上下文。
-- **`--workspace` 可省略**: 当只有一个活跃 workspace 时，`test`、`develop`、`submit-pr` 等命令会自动检测，无需手动指定 `--workspace`。
-- **Review uses `--repos`**: Review/analysis is read-only — use `analyze --repos <name>` directly. No `workspace-check` or `release` needed. Only bugfix and feature-dev flows require workspace lock.
-- **Engine commands need long timeout**: `analyze` and `develop` take 2-5 minutes. Always use `_bash(cmd="...", timeout=600)` for engine commands. If timeout returns a `command_id`, continue waiting with `_bash(command_id="...", timeout=300)` — do NOT cancel.
-- **Engine fallback**: If `ENGINE_ERROR`, retry with the other engine (`codex`↔`claude`). If both fail, do it yourself, but `test`, `submit-pr`, `release` **must** go through `$D`.
-- **Error handling**: Always check `error_code` + `hint`. `PATH_NOT_FOUND` → run `config-list` for correct names. `WORKSPACE_LOCKED` → use `--repos` for read-only fallback.
-- **Safety**: Never push to main/master. Never force push. Never auto-merge PRs. Always release workspace when done.
-- **User confirmation**: WAIT for user at workspace-check, plan confirmation, test results, and PR submission.
+> More commands (workspace management, feature splitting, env probing, etc.):
+> `_load_skill_resource("coding-master", "references/full-command-reference.md")`
+> or `$D --help`
