@@ -774,9 +774,9 @@ class SessionManager:
                 self._timeline_events.pop(session_id, None)
         return removed
 
-    async def restore_to_agent(self, agent: Any, session_data: SessionData):
+    async def restore_to_agent(self, agent: Any, session_data: SessionData, **kwargs):
         """恢复 Session 到 Agent"""
-        await self.persistence.restore_to_agent(agent, session_data)
+        await self.persistence.restore_to_agent(agent, session_data, **kwargs)
 
     def append_timeline_event(self, session_id: str, event: Dict[str, Any]):
         """

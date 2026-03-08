@@ -14,7 +14,7 @@ import logging
 
 from ...infra.dolphin_state_adapter import DolphinStateAdapter
 from .compressor import SessionCompressor
-from .history_utils import _is_heartbeat, _is_placeholder, prepare_for_restore
+from .history_utils import _is_heartbeat, _is_placeholder, prepare_for_restore, extract_recent_heartbeat
 from .session_data import SessionData
 from . import session_ids as _sid
 
@@ -429,7 +429,13 @@ class SessionPersistence:
             session_file.unlink()
             logger.info("Session 文件已删除: %s", session_id)
 
-    async def restore_to_agent(self, agent: Any, session_data: SessionData):
+    async def restore_to_agent(
+        self,
+        agent: Any,
+        session_data: SessionData,
+        *,
+        heartbeat_context: Optional[List[Dict]] = None,
+    ):
         """Restore session data into a Dolphin agent.
 
         Responsibility boundary
@@ -448,6 +454,9 @@ class SessionPersistence:
         Args:
             agent: DolphinAgent instance.
             session_data: Session data loaded from disk.
+            heartbeat_context: Optional list of normalized heartbeat messages
+                from the primary session, prepended to history so the LLM can
+                reference recent async task results in follow-up turns.
         """
         try:
             # 0a. Strip bare empty assistant messages (content="" with no tool_calls).
@@ -462,6 +471,22 @@ class SessionPersistence:
             #     Heartbeat results are preserved as normal assistant messages
             #     so the LLM can reference them in follow-up turns.
             history = prepare_for_restore(history)
+
+            # 0c. Prepend cross-session heartbeat context (from primary session).
+            #     These are already-normalized assistant messages; prepending
+            #     ensures the LLM sees recent async results even if the channel
+            #     session missed the in-process inject (e.g. daemon restart).
+            #     Deduplication: skip any heartbeat whose content already appears
+            #     in the channel session history.
+            if heartbeat_context:
+                existing_contents = {
+                    (m.get("content") or "")
+                    for m in history
+                    if isinstance(m, dict) and m.get("role") == "assistant"
+                }
+                for hb in heartbeat_context:
+                    if (hb.get("content") or "") not in existing_contents:
+                        history.append(hb)
 
             # 1. Build portable state, filtering non-restorable variables.
             #    workspace_instructions is re-injected at runtime; _history is

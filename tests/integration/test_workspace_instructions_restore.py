@@ -76,7 +76,7 @@ def _make_session_manager_mock(tmp_path: Path, *, clear_workspace_on_restore: bo
     )
 
     # Simulates the real restore that strips workspace_instructions
-    async def _restore_to_agent(agent, session_data):
+    async def _restore_to_agent(agent, session_data, **kwargs):
         if clear_workspace_on_restore:
             agent.executor.context._vars.pop("workspace_instructions", None)
 

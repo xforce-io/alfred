@@ -580,3 +580,152 @@ class TestEndToEnd:
         # Heartbeat content preserved (normalized) — count matches post-eviction cap
         hb_restored = [m for m in restored if m.get("role") == "assistant"]
         assert len(hb_restored) == MAX_HEARTBEAT_MESSAGES
+
+
+# ── 7. extract_recent_heartbeat ──────────────────────────────────────
+
+
+class TestExtractRecentHeartbeat:
+    """Tests for cross-session heartbeat context extraction."""
+
+    def test_extracts_heartbeat_messages(self):
+        from src.everbot.core.session.history_utils import extract_recent_heartbeat
+
+        history = [
+            _user("hi"),
+            _assistant("hello"),
+            _heartbeat_msg("hb_1", "report 1"),
+            _user("thanks"),
+            _heartbeat_msg("hb_2", "report 2"),
+        ]
+        result = extract_recent_heartbeat(history)
+        assert len(result) == 2
+        assert result[0]["content"] == "report 1"
+        assert result[1]["content"] == "report 2"
+        # Should be normalized (no heartbeat metadata.source)
+        for m in result:
+            meta = m.get("metadata") or {}
+            assert meta.get("source") != "heartbeat"
+
+    def test_respects_max_count(self):
+        from src.everbot.core.session.history_utils import extract_recent_heartbeat
+
+        history = [_heartbeat_msg(f"hb_{i}", f"report {i}") for i in range(10)]
+        result = extract_recent_heartbeat(history, max_count=3)
+        assert len(result) == 3
+        assert result[0]["content"] == "report 7"
+        assert result[2]["content"] == "report 9"
+
+    def test_empty_history(self):
+        from src.everbot.core.session.history_utils import extract_recent_heartbeat
+
+        assert extract_recent_heartbeat([]) == []
+
+    def test_no_heartbeat_messages(self):
+        from src.everbot.core.session.history_utils import extract_recent_heartbeat
+
+        history = [_user("hi"), _assistant("hello")]
+        assert extract_recent_heartbeat(history) == []
+
+    def test_normalizes_legacy_prefix(self):
+        from src.everbot.core.session.history_utils import extract_recent_heartbeat
+
+        history = [_legacy_heartbeat("legacy content")]
+        result = extract_recent_heartbeat(history)
+        assert len(result) == 1
+        assert result[0]["content"] == "legacy content"
+
+
+class TestRestoreWithHeartbeatContext:
+    """Tests for restore_to_agent with cross-session heartbeat context."""
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_context_appended(self):
+        """Heartbeat context messages should be appended to channel session history."""
+        persistence = SessionPersistence(tmp_path := __import__("tempfile").mkdtemp())
+        agent = MagicMock()
+        agent.snapshot.import_portable_session = MagicMock(return_value={})
+
+        from src.everbot.core.session.session_data import SessionData
+        session_data = SessionData(
+            session_id="tg_session_alice__123",
+            agent_name="alice",
+            model_name="test",
+            session_type="channel",
+            history_messages=[_user("hi"), _assistant("hello")],
+            variables={},
+            created_at="2026-01-01",
+            updated_at="2026-01-01",
+        )
+        heartbeat_ctx = [
+            {"role": "assistant", "content": "daily report"},
+            {"role": "assistant", "content": "investment signal"},
+        ]
+
+        await persistence.restore_to_agent(agent, session_data, heartbeat_context=heartbeat_ctx)
+
+        call_args = agent.snapshot.import_portable_session.call_args
+        history = call_args[0][0]["history_messages"]
+        # Original 2 + 2 heartbeat context = 4
+        assert len(history) == 4
+        assert history[2]["content"] == "daily report"
+        assert history[3]["content"] == "investment signal"
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_context_deduplicates(self):
+        """Heartbeat messages already in channel session should not be duplicated."""
+        persistence = SessionPersistence(tmp_path := __import__("tempfile").mkdtemp())
+        agent = MagicMock()
+        agent.snapshot.import_portable_session = MagicMock(return_value={})
+
+        from src.everbot.core.session.session_data import SessionData
+        session_data = SessionData(
+            session_id="tg_session_alice__123",
+            agent_name="alice",
+            model_name="test",
+            session_type="channel",
+            history_messages=[
+                _user("hi"),
+                _assistant("daily report"),  # already present
+            ],
+            variables={},
+            created_at="2026-01-01",
+            updated_at="2026-01-01",
+        )
+        heartbeat_ctx = [
+            {"role": "assistant", "content": "daily report"},  # duplicate
+            {"role": "assistant", "content": "new signal"},    # new
+        ]
+
+        await persistence.restore_to_agent(agent, session_data, heartbeat_context=heartbeat_ctx)
+
+        call_args = agent.snapshot.import_portable_session.call_args
+        history = call_args[0][0]["history_messages"]
+        # Original 2 + 1 new (duplicate skipped) = 3
+        assert len(history) == 3
+        assert history[2]["content"] == "new signal"
+
+    @pytest.mark.asyncio
+    async def test_no_heartbeat_context(self):
+        """Without heartbeat_context, restore behaves as before."""
+        persistence = SessionPersistence(tmp_path := __import__("tempfile").mkdtemp())
+        agent = MagicMock()
+        agent.snapshot.import_portable_session = MagicMock(return_value={})
+
+        from src.everbot.core.session.session_data import SessionData
+        session_data = SessionData(
+            session_id="tg_session_alice__123",
+            agent_name="alice",
+            model_name="test",
+            session_type="channel",
+            history_messages=[_user("hi"), _assistant("hello")],
+            variables={},
+            created_at="2026-01-01",
+            updated_at="2026-01-01",
+        )
+
+        await persistence.restore_to_agent(agent, session_data)
+
+        call_args = agent.snapshot.import_portable_session.call_args
+        history = call_args[0][0]["history_messages"]
+        assert len(history) == 2

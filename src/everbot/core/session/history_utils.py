@@ -6,6 +6,7 @@ Public API:
 - _estimate_tokens(messages) — estimate token count (chars // 3)
 - evict_oldest_heartbeat(history, max_heartbeat) — cap heartbeat count with FIFO eviction
 - prepare_for_restore(messages) — strip placeholders and normalize heartbeat results for LLM context
+- extract_recent_heartbeat(messages, max_count) — extract recent heartbeat messages from primary session
 """
 
 from __future__ import annotations
@@ -187,3 +188,23 @@ def prepare_for_restore(messages: List[dict]) -> List[dict]:
             msg = _normalize_heartbeat(msg)
         result.append(msg)
     return result
+
+
+# ── Cross-session heartbeat context ───────────────────────────────
+
+
+def extract_recent_heartbeat(
+    messages: List[dict],
+    max_count: int = 5,
+) -> List[dict]:
+    """Extract the most recent heartbeat messages from a session history.
+
+    Returns normalized copies (via _normalize_heartbeat) so they can be
+    injected into another session as plain assistant messages.
+    """
+    heartbeats: List[dict] = []
+    for msg in messages:
+        if isinstance(msg, dict) and _is_heartbeat(msg):
+            heartbeats.append(msg)
+    recent = heartbeats[-max_count:] if len(heartbeats) > max_count else heartbeats
+    return [_normalize_heartbeat(m) for m in recent]

@@ -144,7 +144,10 @@ class ChannelCoreService:
             session_data = await self.session_manager.load_session(session_id)
             if session_data:
                 self.session_manager.restore_timeline(session_id, session_data.timeline or [])
-                await self.session_manager.restore_to_agent(agent, session_data)
+                heartbeat_ctx = await self._load_heartbeat_context(session_data, agent_name)
+                await self.session_manager.restore_to_agent(
+                    agent, session_data, heartbeat_context=heartbeat_ctx,
+                )
             _restore_ok = True
             self._inject_skill_updates_if_needed(agent, session_id, session_data)
             if isinstance(message, list):
@@ -709,6 +712,31 @@ class ChannelCoreService:
         value = get_var("workspace_instructions")
         if isinstance(value, str):
             self._runtime_workspace_instructions_by_agent[agent_name] = value
+
+    async def _load_heartbeat_context(
+        self,
+        session_data: Any,
+        agent_name: str,
+    ) -> Optional[list]:
+        """Load recent heartbeat messages from primary session for channel sessions.
+
+        Returns None for primary/heartbeat sessions (they don't need cross-session
+        context). For channel sessions (e.g. Telegram), loads the primary session
+        and extracts recent heartbeat results so the LLM can reference them.
+        """
+        from ..session.session_ids import infer_session_type, get_primary_session_id
+        from ..session.history_utils import extract_recent_heartbeat
+
+        sid = getattr(session_data, "session_id", None) or ""
+        session_type = infer_session_type(sid) if sid else ""
+        if session_type != "channel":
+            return None
+        primary_id = get_primary_session_id(agent_name)
+        primary = await self.session_manager.load_session(primary_id)
+        if not primary or not primary.history_messages:
+            return None
+        heartbeats = extract_recent_heartbeat(primary.history_messages)
+        return heartbeats or None
 
     def _compose_turn_message(
         self,
