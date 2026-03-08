@@ -73,8 +73,12 @@ class SessionScanner(BaseScanner):
         from datetime import datetime, timezone, timedelta
 
         now = datetime.now(timezone.utc)
-        cutoff = (now - timedelta(days=max_age_days)).isoformat()
-        age_mtime_cutoff = (now - timedelta(days=max_age_days)).timestamp()
+        # Use start-of-day for age cutoff so the filter has day-level
+        # granularity — "7 days ago" means any time on that calendar day.
+        cutoff_dt = (now - timedelta(days=max_age_days)).replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        )
+        age_mtime_cutoff = cutoff_dt.timestamp()
         # Use watermark as mtime lower bound: files not modified since watermark
         # cannot have updated_at > watermark, so skip them without reading content.
         wm_mtime_cutoff = 0.0
@@ -132,8 +136,15 @@ class SessionScanner(BaseScanner):
             if watermark and updated_at <= watermark:
                 continue
 
-            # Age filter
-            if updated_at < cutoff:
+            # Age filter — parse updated_at to datetime for correct comparison
+            # (avoids string comparison pitfalls with timezone suffixes)
+            try:
+                ua_dt = datetime.fromisoformat(updated_at)
+                if ua_dt.tzinfo is None:
+                    ua_dt = ua_dt.replace(tzinfo=timezone.utc)
+                if ua_dt < cutoff_dt:
+                    continue
+            except (ValueError, TypeError):
                 continue
 
             session_type = meta.get("session_type", "")

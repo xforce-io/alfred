@@ -7,6 +7,15 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+# Relative timestamps for tests — avoids hardcoded dates that become stale.
+_NOW = datetime.now(timezone.utc)
+_1D_AGO = (_NOW - timedelta(days=1)).replace(tzinfo=None).isoformat()
+_2D_AGO = (_NOW - timedelta(days=2)).replace(tzinfo=None).isoformat()
+_3D_AGO = (_NOW - timedelta(days=3)).replace(tzinfo=None).isoformat()
+_5D_AGO = (_NOW - timedelta(days=5)).replace(tzinfo=None).isoformat()
+_6D_AGO = (_NOW - timedelta(days=6)).replace(tzinfo=None).isoformat()
+_10D_AGO = (_NOW - timedelta(days=10)).replace(tzinfo=None).isoformat()
+
 # ── Scanner Tests ──────────────────────────────────────────────
 
 
@@ -51,41 +60,41 @@ class TestSessionScanner:
 
     def test_check_finds_new_sessions(self, sessions_dir):
         from src.everbot.core.scanners.session_scanner import SessionScanner
-        self._write_session(sessions_dir, "web_session_test-agent_001", "2026-03-01T10:00:00")
-        self._write_session(sessions_dir, "web_session_test-agent_002", "2026-03-02T10:00:00")
+        self._write_session(sessions_dir, "web_session_test-agent_001", _3D_AGO)
+        self._write_session(sessions_dir, "web_session_test-agent_002", _2D_AGO)
         scanner = SessionScanner(sessions_dir)
-        result = scanner.check("2026-03-01T00:00:00", "test-agent")
+        result = scanner.check(_5D_AGO, "test-agent")
         assert result.has_changes
         assert len(result.payload) == 2
 
     def test_check_respects_watermark(self, sessions_dir):
         from src.everbot.core.scanners.session_scanner import SessionScanner
-        self._write_session(sessions_dir, "web_session_test-agent_001", "2026-03-01T10:00:00")
-        self._write_session(sessions_dir, "web_session_test-agent_002", "2026-03-02T10:00:00")
+        self._write_session(sessions_dir, "web_session_test-agent_001", _3D_AGO)
+        self._write_session(sessions_dir, "web_session_test-agent_002", _2D_AGO)
         scanner = SessionScanner(sessions_dir)
-        result = scanner.check("2026-03-01T10:00:00", "test-agent")
+        result = scanner.check(_3D_AGO, "test-agent")
         assert result.has_changes
         assert len(result.payload) == 1
         assert result.payload[0].id == "web_session_test-agent_002"
 
     def test_skips_heartbeat_sessions(self, sessions_dir):
         from src.everbot.core.scanners.session_scanner import SessionScanner
-        self._write_session(sessions_dir, "heartbeat_session_test-agent", "2026-03-01T10:00:00")
+        self._write_session(sessions_dir, "heartbeat_session_test-agent", _1D_AGO)
         scanner = SessionScanner(sessions_dir)
         result = scanner.check("", "test-agent")
         assert not result.has_changes
 
     def test_skips_workflow_sessions(self, sessions_dir):
         from src.everbot.core.scanners.session_scanner import SessionScanner
-        self._write_session(sessions_dir, "workflow_test-agent_001", "2026-03-01T10:00:00")
+        self._write_session(sessions_dir, "workflow_test-agent_001", _1D_AGO)
         scanner = SessionScanner(sessions_dir)
         result = scanner.check("", "test-agent")
         assert not result.has_changes
 
     def test_agent_name_filter(self, sessions_dir):
         from src.everbot.core.scanners.session_scanner import SessionScanner
-        self._write_session(sessions_dir, "web_session_agent-a_001", "2026-03-01T10:00:00")
-        self._write_session(sessions_dir, "web_session_agent-b_001", "2026-03-01T10:00:00")
+        self._write_session(sessions_dir, "web_session_agent-a_001", _2D_AGO)
+        self._write_session(sessions_dir, "web_session_agent-b_001", _2D_AGO)
         scanner = SessionScanner(sessions_dir)
         result = scanner.check("", "agent-a")
         assert result.has_changes
@@ -95,9 +104,9 @@ class TestSessionScanner:
     def test_max_sessions_limit(self, sessions_dir):
         from src.everbot.core.scanners.session_scanner import SessionScanner
         for i in range(10):
+            ts = (_NOW - timedelta(days=6, hours=-i)).replace(tzinfo=None).isoformat()
             self._write_session(
-                sessions_dir, f"web_session_test_{i:03d}",
-                f"2026-03-{i+1:02d}T10:00:00",
+                sessions_dir, f"web_session_test_{i:03d}", ts,
             )
         scanner = SessionScanner(sessions_dir)
         sessions = scanner.get_reviewable_sessions("", max_sessions=3)
@@ -110,7 +119,7 @@ class TestSessionScanner:
             {"role": "assistant", "content": "Hi there!"},
             {"role": "tool", "content": "tool output"},
         ]
-        self._write_session(sessions_dir, "web_session_test_001", "2026-03-01T10:00:00", history)
+        self._write_session(sessions_dir, "web_session_test_001", _1D_AGO, history)
         scanner = SessionScanner(sessions_dir)
         path = sessions_dir / "web_session_test_001.json"
         digest = scanner.extract_digest(path)
@@ -126,7 +135,7 @@ class TestSessionScanner:
                 {"type": "tool_use", "id": "123", "name": "bash"},
             ]},
         ]
-        self._write_session(sessions_dir, "web_session_test_001", "2026-03-01T10:00:00", history)
+        self._write_session(sessions_dir, "web_session_test_001", _1D_AGO, history)
         scanner = SessionScanner(sessions_dir)
         path = sessions_dir / "web_session_test_001.json"
         digest = scanner.extract_digest(path)
@@ -137,7 +146,7 @@ class TestSessionScanner:
         history = [
             {"role": "user", "content": "A" * 5000},
         ]
-        self._write_session(sessions_dir, "web_session_test_001", "2026-03-01T10:00:00", history)
+        self._write_session(sessions_dir, "web_session_test_001", _1D_AGO, history)
         scanner = SessionScanner(sessions_dir)
         path = sessions_dir / "web_session_test_001.json"
         digest = scanner.extract_digest(path, max_chars=100)
@@ -145,8 +154,8 @@ class TestSessionScanner:
 
     def test_sorted_by_updated_at(self, sessions_dir):
         from src.everbot.core.scanners.session_scanner import SessionScanner
-        self._write_session(sessions_dir, "web_session_test_002", "2026-03-02T10:00:00")
-        self._write_session(sessions_dir, "web_session_test_001", "2026-03-01T10:00:00")
+        self._write_session(sessions_dir, "web_session_test_002", _1D_AGO)
+        self._write_session(sessions_dir, "web_session_test_001", _2D_AGO)
         scanner = SessionScanner(sessions_dir)
         sessions = scanner.get_reviewable_sessions("")
         assert sessions[0].updated_at < sessions[1].updated_at
@@ -459,7 +468,7 @@ class TestSkillWithoutScanner:
         from src.everbot.core.runtime.skill_context import SkillContext
         from src.everbot.core.memory.manager import MemoryManager
 
-        self._write_session(sessions_dir, "web_session_test-agent_001", "2026-03-01T10:00:00")
+        self._write_session(sessions_dir, "web_session_test-agent_001", _1D_AGO)
 
         mm = MemoryManager(tmp_path / "MEMORY.md")
         mock_llm = AsyncMock()
@@ -507,7 +516,7 @@ class TestSkillWithoutScanner:
         from src.everbot.core.runtime.skill_context import SkillContext
         from src.everbot.core.memory.manager import MemoryManager
 
-        self._write_session(sessions_dir, "web_session_test-agent_001", "2026-03-01T10:00:00")
+        self._write_session(sessions_dir, "web_session_test-agent_001", _1D_AGO)
 
         mm = MemoryManager(tmp_path / "MEMORY.md")
         mock_llm = AsyncMock()
@@ -536,7 +545,7 @@ class TestSkillWithoutScanner:
         from src.everbot.core.scanners.session_scanner import SessionSummary
 
         # Write a session but provide scan_result with different data
-        self._write_session(sessions_dir, "web_session_test-agent_001", "2026-03-01T10:00:00")
+        self._write_session(sessions_dir, "web_session_test-agent_001", _1D_AGO)
 
         gate_session = SessionSummary(
             id="web_session_test-agent_001",
