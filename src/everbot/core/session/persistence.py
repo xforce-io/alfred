@@ -14,7 +14,7 @@ import logging
 
 from ...infra.dolphin_state_adapter import DolphinStateAdapter
 from .compressor import SessionCompressor
-from .history_utils import _is_heartbeat, _is_placeholder
+from .history_utils import _is_heartbeat, _is_placeholder, prepare_for_restore
 from .session_data import SessionData
 from . import session_ids as _sid
 
@@ -457,10 +457,11 @@ class SessionPersistence:
                 session_data.history_messages or []
             )
 
-            # 0b. Strip heartbeat-injected messages and placeholder artifacts.
-            #     Heartbeat results are for async notification only; they must not
-            #     be restored into the LLM conversation context.
-            history = self._filter_heartbeat_messages(history)
+            # 0b. Strip structural placeholders and normalize heartbeat results.
+            #     Placeholders (role-alternation artifacts) are removed.
+            #     Heartbeat results are preserved as normal assistant messages
+            #     so the LLM can reference them in follow-up turns.
+            history = prepare_for_restore(history)
 
             # 1. Build portable state, filtering non-restorable variables.
             #    workspace_instructions is re-injected at runtime; _history is

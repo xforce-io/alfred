@@ -5,6 +5,7 @@ Public API:
 - _is_placeholder(msg) — identify placeholder messages (metadata + legacy content)
 - _estimate_tokens(messages) — estimate token count (chars // 3)
 - evict_oldest_heartbeat(history, max_heartbeat) — cap heartbeat count with FIFO eviction
+- prepare_for_restore(messages) — strip placeholders and normalize heartbeat results for LLM context
 """
 
 from __future__ import annotations
@@ -132,5 +133,57 @@ def evict_oldest_heartbeat(
             if i + 1 < len(history) and _is_placeholder(history[i + 1]):
                 continue
 
+        result.append(msg)
+    return result
+
+
+# ── Restore preparation ─────────────────────────────────────────────
+
+
+def _normalize_heartbeat(msg: dict) -> dict:
+    """Convert a heartbeat message to a normal assistant message for LLM context.
+
+    Strips heartbeat-specific markers (metadata.source, content prefix) so the
+    message becomes a regular assistant message that the LLM can reference in
+    follow-up turns.  Traceability fields (run_id, injected_at) are preserved.
+    """
+    msg = dict(msg)
+
+    # Strip legacy content prefix
+    content = msg.get("content") or ""
+    if isinstance(content, str) and content.startswith(_HEARTBEAT_PREFIX):
+        content = content[len(_HEARTBEAT_PREFIX):].lstrip("\n")
+        msg["content"] = content
+
+    # Remove heartbeat source marker; keep other metadata intact
+    meta = msg.get("metadata")
+    if isinstance(meta, dict):
+        meta = {k: v for k, v in meta.items() if k != "source"}
+        msg["metadata"] = meta if meta else None
+
+    return msg
+
+
+def prepare_for_restore(messages: List[dict]) -> List[dict]:
+    """Prepare history messages for LLM context restoration.
+
+    Two concerns separated:
+    - **Placeholders** (structural role-alternation artifacts) → removed
+    - **Heartbeat results** (content-bearing async task output) → normalized
+      to regular assistant messages so the LLM can reference them in follow-ups
+
+    After normalization, heartbeat results lose their source marker and become
+    indistinguishable from normal assistant messages.  This is intentional:
+    once restored, they follow normal context-budget management.  The write-path
+    eviction (evict_oldest_heartbeat) operates on raw disk data and is unaffected.
+    """
+    result: List[dict] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if _is_placeholder(msg):
+            continue
+        if _is_heartbeat(msg):
+            msg = _normalize_heartbeat(msg)
         result.append(msg)
     return result

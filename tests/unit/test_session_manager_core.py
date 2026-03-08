@@ -1195,38 +1195,32 @@ class TestHeartbeatResponseDoesNotPollutePrimaryConversation:
 # ===========================================================================
 
 class TestIsolatedJobResultNotRestoredToLLMContext:
-    """Production bug: isolated routine results (heartbeat-injected assistant
-    messages) are persisted in primary session's history_messages. When
-    restore_to_agent loads the session for the next chat turn, these heartbeat
-    messages appear in the LLM context as if they were normal conversation
-    messages.
+    """Heartbeat-injected messages are normalized during restore_to_agent:
 
-    Example from production history_messages:
+    - Placeholders ((acknowledged), [Background notification follows]) are stripped
+    - Heartbeat results are preserved as normal assistant messages (source marker
+      and content prefix removed) so the LLM can reference them in follow-up turns
+
+    Example from production history_messages after restore:
         [0] user: "你好"
-        [1] assistant: "[此消息由心跳系统自动执行例行任务生成] MicroStrategy 吸引子分析..."
-        [2] user: "帮我搜索 Anthropic 新闻"
-        [3] assistant: "[此消息由心跳系统自动执行例行任务生成] 会话轨迹健康检测..."
-
-    The LLM sees these heartbeat results as part of the conversation, which:
-    - Confuses the model about what the user is asking
-    - Wastes context window with irrelevant heartbeat output
-    - Can cause the model to reference heartbeat analysis in unrelated replies
+        [1] assistant: "你好！有什么可以帮助你的？"
+        [2] assistant: "MicroStrategy 吸引子分析：当前价格..."   ← heartbeat, normalized
+        [3] user: "帮我搜索 Anthropic 新闻"
+        [4] assistant: "会话轨迹健康检测结果..."               ← heartbeat, normalized
     """
 
     @pytest.mark.asyncio
-    async def test_heartbeat_messages_filtered_during_restore(self, tmp_path: Path):
-        """restore_to_agent should filter out heartbeat-injected messages so
-        the LLM only sees real user-assistant conversation turns."""
+    async def test_heartbeat_messages_normalized_during_restore(self, tmp_path: Path):
+        """restore_to_agent should normalize heartbeat messages: strip source marker
+        and content prefix, but preserve the actual content for follow-up context."""
         manager = SessionManager(tmp_path)
         session_id = "web_session_test_agent"
 
-        # Build a session with heartbeat messages mixed into conversation
         session_data = _make_session_data(
             session_id=session_id,
             history_messages=[
                 {"role": "user", "content": "你好"},
                 {"role": "assistant", "content": "你好！有什么可以帮助你的？"},
-                # Heartbeat result injected by _inject_result_to_primary_history
                 {"role": "assistant", "content": "(acknowledged)"},
                 {"role": "user", "content": "[Background notification follows]"},
                 {
@@ -1234,9 +1228,7 @@ class TestIsolatedJobResultNotRestoredToLLMContext:
                     "content": "[此消息由心跳系统自动执行例行任务生成]\n\nMicroStrategy 吸引子分析：当前价格...",
                     "metadata": {"source": "heartbeat", "run_id": "hb_001"},
                 },
-                # Another real conversation turn
                 {"role": "user", "content": "帮我搜索 Anthropic 最新的新闻"},
-                # Another heartbeat injection
                 {"role": "assistant", "content": "(acknowledged)"},
                 {"role": "user", "content": "[Background notification follows]"},
                 {
@@ -1251,12 +1243,11 @@ class TestIsolatedJobResultNotRestoredToLLMContext:
         agent = _make_mock_agent()
         await manager.restore_to_agent(agent, session_data)
 
-        # Check what was passed to import_portable_session
         call_args = agent.snapshot.import_portable_session.call_args
         portable = call_args[0][0]
         restored_history = portable["history_messages"]
 
-        # Heartbeat messages should NOT be in the restored context
+        # Heartbeat source marker should be stripped (normalized to normal messages)
         heartbeat_messages = [
             m for m in restored_history
             if isinstance(m, dict)
@@ -1264,10 +1255,17 @@ class TestIsolatedJobResultNotRestoredToLLMContext:
             and m["metadata"].get("source") == "heartbeat"
         ]
         assert len(heartbeat_messages) == 0, (
-            f"Found {len(heartbeat_messages)} heartbeat message(s) in restored history. "
-            "Heartbeat-injected messages should be filtered during restore_to_agent "
-            "to prevent isolated job results from polluting the LLM conversation context."
+            "Heartbeat source markers should be stripped during restore"
         )
+
+        # But heartbeat content should be preserved (prefix stripped)
+        contents = [m.get("content") for m in restored_history]
+        assert "MicroStrategy 吸引子分析：当前价格..." in contents
+        assert "会话轨迹健康检测结果..." in contents
+
+        # Placeholders should be gone
+        assert "(acknowledged)" not in contents
+        assert "[Background notification follows]" not in contents
 
     @pytest.mark.asyncio
     async def test_heartbeat_placeholder_messages_filtered_during_restore(self, tmp_path: Path):
@@ -1351,7 +1349,11 @@ class TestIsolatedJobResultNotRestoredToLLMContext:
             isinstance(m, dict) and m.get("content") == multimodal_content
             for m in restored_history
         ), "Multimodal message with list content should be preserved after filtering"
-        # Heartbeat and placeholders should still be filtered
-        assert len(restored_history) == 2, (
-            f"Expected 2 messages (multimodal user + assistant reply), got {len(restored_history)}"
+        # Placeholders stripped, heartbeat content preserved (normalized)
+        assert len(restored_history) == 3, (
+            f"Expected 3 messages (multimodal user + assistant reply + heartbeat result), got {len(restored_history)}"
         )
+        # Heartbeat result normalized: prefix stripped, no longer tagged
+        hb_msg = restored_history[2]
+        assert hb_msg["content"] == "结果..."
+        assert hb_msg.get("metadata", {}).get("source") is None

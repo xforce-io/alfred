@@ -10,7 +10,9 @@ from src.everbot.core.session.history_utils import (
     _is_heartbeat,
     _is_placeholder,
     _estimate_tokens,
+    _normalize_heartbeat,
     evict_oldest_heartbeat,
+    prepare_for_restore,
 )
 from src.everbot.core.session.compressor import (
     SessionCompressor,
@@ -408,44 +410,52 @@ class TestCompressHistory:
 
 
 class TestRestoreFilter:
-    def test_heartbeat_removed(self):
-        history = [_user("hi"), *_heartbeat_turn("hb_1"), _user("bye")]
-        result = SessionPersistence._filter_heartbeat_messages(history)
-        assert len(result) == 2
-        assert all(not _is_heartbeat(m) for m in result)
+    """Tests for prepare_for_restore: placeholders stripped, heartbeat content preserved."""
 
-    def test_placeholder_removed_with_heartbeat(self):
+    def test_heartbeat_content_preserved(self):
+        history = [_user("hi"), *_heartbeat_turn("hb_1"), _user("bye")]
+        result = prepare_for_restore(history)
+        # user("hi") + heartbeat_result(normalized) + user("bye") = 3
+        assert len(result) == 3
+        assert result[1]["role"] == "assistant"
+        assert result[1]["content"] == "检测正常"
+        assert not _is_heartbeat(result[1])  # no longer tagged as heartbeat
+
+    def test_placeholder_removed_heartbeat_kept(self):
         history = _heartbeat_turn("hb_1")
-        result = SessionPersistence._filter_heartbeat_messages(history)
-        assert len(result) == 0
+        result = prepare_for_restore(history)
+        # 2 placeholders removed, 1 heartbeat result kept
+        assert len(result) == 1
+        assert result[0]["content"] == "检测正常"
+        assert not _is_heartbeat(result[0])
 
     def test_legacy_placeholder_removed(self):
         history = [
             {"role": "assistant", "content": "(acknowledged)"},
             {"role": "user", "content": "[Background notification follows]"},
         ]
-        result = SessionPersistence._filter_heartbeat_messages(history)
+        result = prepare_for_restore(history)
         assert len(result) == 0
 
-    def test_legacy_heartbeat_removed(self):
+    def test_legacy_heartbeat_normalized(self):
         history = [_legacy_heartbeat("test")]
-        result = SessionPersistence._filter_heartbeat_messages(history)
-        assert len(result) == 0
+        result = prepare_for_restore(history)
+        assert len(result) == 1
+        assert result[0]["content"] == "test"  # prefix stripped
+        assert not _is_heartbeat(result[0])
 
-    def test_chat_preserved(self):
+    def test_chat_preserved_with_heartbeat(self):
         history = [_user("hi"), _assistant("hello"), *_heartbeat_turn("hb_1"), _user("q")]
-        result = SessionPersistence._filter_heartbeat_messages(history)
-        assert len(result) == 3
+        result = prepare_for_restore(history)
+        # user("hi") + assistant("hello") + heartbeat(normalized) + user("q") = 4
+        assert len(result) == 4
         assert result[0]["content"] == "hi"
         assert result[1]["content"] == "hello"
-        assert result[2]["content"] == "q"
+        assert result[2]["content"] == "检测正常"
+        assert result[3]["content"] == "q"
 
-    def test_filter_preserves_valid_structure(self):
-        """Heartbeat filter must not corrupt chat message structure.
-
-        After filtering, remaining messages must all be valid dicts with a
-        'role' field — no orphaned fragments from partial heartbeat turns.
-        """
+    def test_preserves_valid_structure(self):
+        """After prepare_for_restore, all messages are valid dicts with role."""
         history = [
             _user("hi"),
             _assistant("hello"),
@@ -453,11 +463,31 @@ class TestRestoreFilter:
             _user("follow-up"),
             _assistant("sure"),
         ]
-        result = SessionPersistence._filter_heartbeat_messages(history)
-        assert len(result) == 4
+        result = prepare_for_restore(history)
+        assert len(result) == 5
         assert all(isinstance(m, dict) and "role" in m for m in result)
         assert result[0]["content"] == "hi"
         assert result[-1]["content"] == "sure"
+
+    def test_normalize_preserves_traceability(self):
+        """run_id and injected_at survive normalization for debugging."""
+        hb = _heartbeat_msg("run_42", "paper report")
+        normalized = _normalize_heartbeat(hb)
+        assert normalized["metadata"]["run_id"] == "run_42"
+        assert "source" not in normalized["metadata"]
+
+    def test_normalize_strips_legacy_prefix(self):
+        legacy = _legacy_heartbeat("actual content")
+        normalized = _normalize_heartbeat(legacy)
+        assert normalized["content"] == "actual content"
+        assert "metadata" not in normalized or normalized.get("metadata") is None
+
+    def test_old_filter_still_works(self):
+        """_filter_heartbeat_messages still strips all heartbeat messages (backward compat)."""
+        history = [_user("hi"), *_heartbeat_turn("hb_1"), _user("bye")]
+        result = SessionPersistence._filter_heartbeat_messages(history)
+        assert len(result) == 2
+        assert all(not _is_heartbeat(m) for m in result)
 
 
 # ── 6.6 TestEndToEnd ────────────────────────────────────────────────
@@ -540,10 +570,13 @@ class TestEndToEnd:
         hb_count = sum(1 for m in evicted if _is_heartbeat(m))
         assert hb_count == MAX_HEARTBEAT_MESSAGES
 
-        # restore filter
-        filtered = SessionPersistence._filter_heartbeat_messages(evicted)
-        assert all(not _is_heartbeat(m) for m in filtered)
-        assert all(not _is_placeholder(m) for m in filtered)
+        # restore: placeholders stripped, heartbeat content preserved
+        restored = prepare_for_restore(evicted)
+        assert all(not _is_heartbeat(m) for m in restored)
+        assert all(not _is_placeholder(m) for m in restored)
         # Chat preserved
-        chat_msgs = [m for m in filtered if m.get("role") == "user"]
+        chat_msgs = [m for m in restored if m.get("role") == "user"]
         assert len(chat_msgs) == 5
+        # Heartbeat content preserved (normalized) — count matches post-eviction cap
+        hb_restored = [m for m in restored if m.get("role") == "assistant"]
+        assert len(hb_restored) == MAX_HEARTBEAT_MESSAGES
