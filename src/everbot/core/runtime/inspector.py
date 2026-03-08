@@ -11,6 +11,7 @@ that the Scheduler / HeartbeatRunner can call on a reflection tick.
 import hashlib
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -41,6 +42,7 @@ class InspectionContext:
     task_execution_stats: Dict[str, Any] = field(default_factory=dict)
     recent_events: List[Dict[str, Any]] = field(default_factory=list)
     existing_routines: List[Any] = field(default_factory=list)
+    idle_hours: Optional[float] = None
 
 
 @dataclass
@@ -55,6 +57,40 @@ class InspectionResult:
     applied: int = 0
     deposited: int = 0
     output: str = "HEARTBEAT_OK"
+
+
+async def emit_push_message(
+    push_message: str,
+    *,
+    primary_session_id: str,
+    agent_name: str,
+    run_id: str,
+    scope: str = "agent",
+) -> None:
+    """Emit an inspector push_message as a heartbeat_delivery event.
+
+    Shared by HeartbeatRunner and daemon's _run_inspector to avoid duplicated
+    event-building logic.
+    """
+    from .events import emit
+
+    await emit(
+        primary_session_id,
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": push_message,
+            "summary": push_message[:SUMMARY_MAX_CHARS],
+            "detail": push_message,
+            "source_type": "heartbeat_delivery",
+            "run_id": run_id,
+            "deliver": True,
+        },
+        agent_name=agent_name,
+        scope=scope,
+        source_type="heartbeat_delivery",
+        run_id=run_id,
+    )
 
 
 # ── Inspector ────────────────────────────────────────────────
@@ -203,6 +239,16 @@ class Inspector:
             except Exception as exc:
                 logger.debug("Failed to list routines: %s", exc)
 
+        # Compute idle hours since last user interaction
+        idle_hours = None
+        if session_manager:
+            try:
+                last_activity = session_manager.get_last_activity_time(self.agent_name)
+                if last_activity is not None and isinstance(last_activity, (int, float)):
+                    idle_hours = round((time.time() - last_activity) / 3600, 1)
+            except Exception as exc:
+                logger.debug("Failed to get last activity time: %s", exc)
+
         return InspectionContext(
             memory_content=memory_content,
             heartbeat_content=heartbeat_content,
@@ -210,6 +256,7 @@ class Inspector:
             task_execution_stats=task_stats,
             recent_events=recent_events,
             existing_routines=existing_routines,
+            idle_hours=idle_hours,
         )
 
     def _gather_task_stats(self) -> Dict[str, Any]:
@@ -285,6 +332,15 @@ class Inspector:
         Checks ReflectionManager's file-based logic first, then persisted
         context hashes for enriched change detection.
         """
+        state = self._load_state()
+
+        # Always inspect when idle_hours has grown significantly since last run,
+        # so the LLM gets a chance to decide whether to proactively reach out.
+        last_idle = state.get("last_idle_hours")
+        if ctx.idle_hours is not None and ctx.idle_hours >= 1.0:
+            if last_idle is None or ctx.idle_hours - last_idle >= 1.0:
+                return True
+
         # Check ReflectionManager's built-in file-change / force-interval logic
         rm_decision = None
         if hasattr(self._reflection, 'should_skip_reflection'):
@@ -296,7 +352,6 @@ class Inspector:
             except Exception:
                 pass
 
-        state = self._load_state()
         last_hashes = state.get("context_hashes", {})
         last_run_at = state.get("last_run_at")
 
@@ -376,6 +431,7 @@ class Inspector:
         state = {
             "last_run_at": datetime.now().isoformat(),
             "context_hashes": self._compute_context_hashes(ctx),
+            "last_idle_hours": ctx.idle_hours,
         }
         self._persist_state(state)
 
@@ -470,6 +526,10 @@ class Inspector:
         """Build reflection prompt with enriched context."""
         sections = []
 
+        # Idle duration section (placed first for prominence)
+        if ctx.idle_hours is not None:
+            sections.append(f"# 用户活跃状态\n距离用户上次互动已过去 {ctx.idle_hours} 小时。")
+
         # Memory section
         if ctx.memory_content:
             sections.append(f"# MEMORY.md\n{ctx.memory_content[:2000]}")
@@ -504,12 +564,13 @@ class Inspector:
         sections.append(
             """# Reflection Instructions
 
-Analyze the above context and determine:
-1. Is the system healthy? (heartbeat_ok: true/false)
-2. Are there urgent issues requiring immediate user attention? (push_message)
-3. Should any new routine tasks be proposed? (routines)
+你是用户的私人助理。根据上述上下文，做出以下判断：
 
-Respond in this exact JSON format:
+1. **系统健康检查**：系统是否正常运行？(heartbeat_ok)
+2. **主动沟通**：综合考虑用户的兴趣、习惯、当前任务状态和空闲时长，判断现在是否值得主动给用户发一条消息。这不限于紧急问题——可以是任务执行情况的总结、基于用户兴趣的洞察、对近期工作的回顾、或任何你认为用户会感兴趣的话题。用你自己的判断力决定是否发送以及发送什么内容。如果没有什么值得说的，保持沉默即可。(push_message)
+3. **Routine 提议**：是否需要提议新的定时任务？(routines)
+
+以如下 JSON 格式回复：
 ```json
 {
   "heartbeat_ok": true,
@@ -518,9 +579,9 @@ Respond in this exact JSON format:
 }
 ```
 
-- heartbeat_ok: false indicates system issues needing attention
-- push_message: optional urgent notification for the user (delivered immediately)
-- routines: array of routine task proposals (same format as before)"""
+- heartbeat_ok: false 表示系统存在需要关注的问题
+- push_message: 你想主动发给用户的消息内容（会立即推送），null 表示保持沉默
+- routines: routine 任务提议数组"""
         )
 
         return "\n\n".join(sections)

@@ -717,6 +717,17 @@ If not, reply with `HEARTBEAT_OK`.
                     # Refresh in-memory task snapshot if routines were added
                     if inspection.applied > 0:
                         self._read_heartbeat_md()
+                    # Emit push_message so Telegram (and other channels)
+                    # receive it in real-time instead of waiting for mailbox drain.
+                    if inspection.push_message:
+                        from .inspector import emit_push_message
+                        await emit_push_message(
+                            inspection.push_message,
+                            primary_session_id=self.primary_session_id,
+                            agent_name=self.agent_name,
+                            run_id=run_id,
+                            scope=self.broadcast_scope,
+                        )
                     result = inspection.output
                 elif self._file_mgr.heartbeat_mode == "corrupted":
                     self._write_heartbeat_event("corrupted")

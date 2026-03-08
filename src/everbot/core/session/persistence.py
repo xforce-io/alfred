@@ -472,21 +472,41 @@ class SessionPersistence:
             #     so the LLM can reference them in follow-up turns.
             history = prepare_for_restore(history)
 
-            # 0c. Prepend cross-session heartbeat context (from primary session).
-            #     These are already-normalized assistant messages; prepending
-            #     ensures the LLM sees recent async results even if the channel
-            #     session missed the in-process inject (e.g. daemon restart).
-            #     Deduplication: skip any heartbeat whose content already appears
-            #     in the channel session history.
+            # 0c. Merge cross-session heartbeat context (from primary session).
+            #     These are supplementary assistant messages inserted *before*
+            #     any trailing unanswered user message so the LLM does not
+            #     mistake heartbeat output for the reply to the user's question.
+            #     Dedup by run_id first, then fall back to content comparison.
             if heartbeat_context:
+                existing_run_ids = {
+                    (m.get("metadata") or {}).get("run_id")
+                    for m in history
+                    if isinstance(m, dict) and (m.get("metadata") or {}).get("run_id")
+                }
                 existing_contents = {
                     (m.get("content") or "")
                     for m in history
                     if isinstance(m, dict) and m.get("role") == "assistant"
                 }
+                new_hbs = []
                 for hb in heartbeat_context:
-                    if (hb.get("content") or "") not in existing_contents:
-                        history.append(hb)
+                    rid = (hb.get("metadata") or {}).get("run_id")
+                    if rid and rid in existing_run_ids:
+                        continue
+                    if (hb.get("content") or "") in existing_contents:
+                        continue
+                    new_hbs.append(hb)
+                if new_hbs:
+                    # Find insertion point: before trailing user messages
+                    # that have no assistant reply yet.
+                    insert_at = len(history)
+                    while (
+                        insert_at > 0
+                        and isinstance(history[insert_at - 1], dict)
+                        and history[insert_at - 1].get("role") == "user"
+                    ):
+                        insert_at -= 1
+                    history[insert_at:insert_at] = new_hbs
 
             # 1. Build portable state, filtering non-restorable variables.
             #    workspace_instructions is re-injected at runtime; _history is

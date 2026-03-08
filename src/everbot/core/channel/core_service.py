@@ -206,7 +206,14 @@ class ChannelCoreService:
                 await on_event(OutboundMessage(session_id, "", msg_type="end"))
 
             async def _deliver_deferred_result(result_text: str) -> None:
-                """Deliver deferred result from a timed-out turn via mailbox + events."""
+                """Deliver deferred result from a timed-out turn via history + events.
+
+                History injection persists the result for LLM context;
+                events.emit pushes it to connected channels in real-time.
+                Mailbox deposit is intentionally omitted — the result is
+                already in history_messages so prepending it again as a
+                "Background Updates" prefix would be redundant.
+                """
                 try:
                     msg = {
                         "role": "assistant",
@@ -223,20 +230,6 @@ class ChannelCoreService:
                     if hasattr(self.session_manager, "inject_history_message"):
                         await self.session_manager.inject_history_message(
                             session_id, msg, timeout=5.0, blocking=False,
-                        )
-                    if hasattr(self.session_manager, "deposit_mailbox_event"):
-                        await self.session_manager.deposit_mailbox_event(
-                            session_id,
-                            {
-                                "event_id": f"deferred:{run_id}",
-                                "dedupe_key": f"deferred:{run_id}",
-                                "summary": f"超时任务已完成",
-                                "detail": result_text,
-                                "source_type": "deferred_result",
-                                "run_id": run_id,
-                            },
-                            timeout=5.0,
-                            blocking=False,
                         )
                     await events.emit(
                         session_id,

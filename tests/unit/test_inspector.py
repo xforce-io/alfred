@@ -877,3 +877,139 @@ class TestStatePersistence:
         loaded = inspector._load_state()
 
         assert loaded["context_hashes"]["session_summary"] == "session_hash"
+
+
+# ── Idle-aware inspection ─────────────────────────────────────
+
+
+class TestIdleAwareInspection:
+    """Tests for idle_hours context and proactive inspection triggers."""
+
+    def test_gather_context_computes_idle_hours(self, tmp_path):
+        """_gather_context computes idle_hours from session_manager."""
+        import time
+
+        inspector = _make_inspector(tmp_path)
+        mock_sm = MagicMock()
+        mock_sm.get_last_activity_time = MagicMock(
+            return_value=time.time() - 3 * 3600,  # 3 hours ago
+        )
+
+        ctx = inspector._gather_context(
+            "heartbeat", session_manager=mock_sm, primary_session_id="p1",
+        )
+        assert ctx.idle_hours is not None
+        assert 2.9 <= ctx.idle_hours <= 3.1
+
+    def test_gather_context_idle_hours_none_without_session_manager(self, tmp_path):
+        """idle_hours is None when no session_manager is provided."""
+        inspector = _make_inspector(tmp_path)
+        ctx = inspector._gather_context("heartbeat")
+        assert ctx.idle_hours is None
+
+    def test_gather_context_idle_hours_none_when_no_activity(self, tmp_path):
+        """idle_hours is None when get_last_activity_time returns None."""
+        inspector = _make_inspector(tmp_path)
+        mock_sm = MagicMock()
+        mock_sm.get_last_activity_time = MagicMock(return_value=None)
+
+        ctx = inspector._gather_context(
+            "heartbeat", session_manager=mock_sm, primary_session_id="p1",
+        )
+        assert ctx.idle_hours is None
+
+    def test_should_inspect_true_when_idle_grows(self, tmp_path):
+        """_should_inspect returns True when idle_hours grows by >= 1 hour."""
+        inspector = _make_inspector(tmp_path)
+        (tmp_path / "MEMORY.md").write_text("memory")
+        (tmp_path / "HEARTBEAT.md").write_text("heartbeat")
+
+        ctx = InspectionContext(
+            memory_content="memory",
+            heartbeat_content="heartbeat",
+            idle_hours=3.0,
+        )
+        inspector.update_state(ctx, InspectionResult())
+
+        ctx_later = InspectionContext(
+            memory_content="memory",
+            heartbeat_content="heartbeat",
+            idle_hours=4.5,
+        )
+        assert inspector._should_inspect(ctx_later) is True
+
+    def test_should_inspect_false_when_idle_grows_less_than_1h(self, tmp_path):
+        """_should_inspect returns False when idle_hours grows by < 1 hour."""
+        inspector = _make_inspector(tmp_path)
+        (tmp_path / "MEMORY.md").write_text("memory")
+        (tmp_path / "HEARTBEAT.md").write_text("heartbeat")
+
+        ctx = InspectionContext(
+            memory_content="memory",
+            heartbeat_content="heartbeat",
+            idle_hours=3.0,
+        )
+        inspector.update_state(ctx, InspectionResult())
+
+        ctx_later = InspectionContext(
+            memory_content="memory",
+            heartbeat_content="heartbeat",
+            idle_hours=3.5,
+        )
+        assert inspector._should_inspect(ctx_later) is False
+
+    def test_should_inspect_true_first_idle_above_1h(self, tmp_path):
+        """_should_inspect returns True when first seeing idle >= 1h (no prior state)."""
+        inspector = _make_inspector(tmp_path)
+
+        ctx = InspectionContext(
+            memory_content="memory",
+            heartbeat_content="heartbeat",
+            idle_hours=2.0,
+        )
+        assert inspector._should_inspect(ctx) is True
+
+    def test_should_inspect_skips_idle_below_1h(self, tmp_path):
+        """_should_inspect ignores idle_hours below 1.0 for proactive trigger."""
+        inspector = _make_inspector(tmp_path)
+        (tmp_path / "MEMORY.md").write_text("memory")
+        (tmp_path / "HEARTBEAT.md").write_text("heartbeat")
+
+        ctx = InspectionContext(
+            memory_content="memory",
+            heartbeat_content="heartbeat",
+            idle_hours=0.5,
+        )
+        inspector.update_state(ctx, InspectionResult())
+
+        ctx_later = InspectionContext(
+            memory_content="memory",
+            heartbeat_content="heartbeat",
+            idle_hours=0.9,
+        )
+        # Should fall through to normal hash-based check (unchanged -> False)
+        assert inspector._should_inspect(ctx_later) is False
+
+    def test_idle_hours_persisted_in_state(self, tmp_path):
+        """update_state persists last_idle_hours."""
+        inspector = _make_inspector(tmp_path)
+        ctx = InspectionContext(idle_hours=5.0)
+        inspector.update_state(ctx, InspectionResult())
+
+        state = inspector._load_state()
+        assert state["last_idle_hours"] == 5.0
+
+    def test_build_reflect_prompt_includes_idle(self, tmp_path):
+        """_build_reflect_prompt includes idle duration when present."""
+        inspector = _make_inspector(tmp_path)
+        ctx = InspectionContext(idle_hours=6.2)
+        prompt = inspector._build_reflect_prompt(ctx)
+        assert "6.2" in prompt
+        assert "用户上次互动" in prompt
+
+    def test_build_reflect_prompt_no_idle_section_when_none(self, tmp_path):
+        """_build_reflect_prompt omits idle section when idle_hours is None."""
+        inspector = _make_inspector(tmp_path)
+        ctx = InspectionContext(idle_hours=None)
+        prompt = inspector._build_reflect_prompt(ctx)
+        assert "用户活跃状态" not in prompt

@@ -191,7 +191,7 @@ class EverBotDaemon:
                 except OSError:
                     pass
             run_id = f"inspect_{uuid.uuid4().hex[:8]}"
-            await inspector.inspect(
+            inspection = await inspector.inspect(
                 run_agent=runner._run_agent,
                 inject_context=runner._inject_heartbeat_context,
                 agent=agent,
@@ -200,6 +200,15 @@ class EverBotDaemon:
                 session_manager=runner.session_manager,
                 primary_session_id=runner.primary_session_id,
             )
+            if inspection.push_message:
+                from everbot.core.runtime.inspector import emit_push_message
+                await emit_push_message(
+                    inspection.push_message,
+                    primary_session_id=runner.primary_session_id,
+                    agent_name=agent_name,
+                    run_id=run_id,
+                    scope=getattr(runner, "broadcast_scope", "agent"),
+                )
 
         # Build agent schedules from registered runners
         agent_schedules: Dict[str, AgentSchedule] = {}

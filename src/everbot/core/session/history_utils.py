@@ -142,11 +142,11 @@ def evict_oldest_heartbeat(
 
 
 def _normalize_heartbeat(msg: dict) -> dict:
-    """Convert a heartbeat message to a normal assistant message for LLM context.
+    """Normalize a heartbeat message for LLM context.
 
-    Strips heartbeat-specific markers (metadata.source, content prefix) so the
-    message becomes a regular assistant message that the LLM can reference in
-    follow-up turns.  Traceability fields (run_id, injected_at) are preserved.
+    Strips the legacy content prefix so the LLM sees clean text.
+    Preserves ``metadata.source = "heartbeat"`` so the message remains
+    identifiable after a channel session save→restore round-trip.
     """
     msg = dict(msg)
 
@@ -155,12 +155,6 @@ def _normalize_heartbeat(msg: dict) -> dict:
     if isinstance(content, str) and content.startswith(_HEARTBEAT_PREFIX):
         content = content[len(_HEARTBEAT_PREFIX):].lstrip("\n")
         msg["content"] = content
-
-    # Remove heartbeat source marker; keep other metadata intact
-    meta = msg.get("metadata")
-    if isinstance(meta, dict):
-        meta = {k: v for k, v in meta.items() if k != "source"}
-        msg["metadata"] = meta if meta else None
 
     return msg
 
@@ -171,12 +165,8 @@ def prepare_for_restore(messages: List[dict]) -> List[dict]:
     Two concerns separated:
     - **Placeholders** (structural role-alternation artifacts) → removed
     - **Heartbeat results** (content-bearing async task output) → normalized
-      to regular assistant messages so the LLM can reference them in follow-ups
-
-    After normalization, heartbeat results lose their source marker and become
-    indistinguishable from normal assistant messages.  This is intentional:
-    once restored, they follow normal context-budget management.  The write-path
-    eviction (evict_oldest_heartbeat) operates on raw disk data and is unaffected.
+      (legacy prefix stripped) but ``metadata.source`` preserved so they
+      remain identifiable after a channel session save→restore round-trip.
     """
     result: List[dict] = []
     for msg in messages:
@@ -199,8 +189,8 @@ def extract_recent_heartbeat(
 ) -> List[dict]:
     """Extract the most recent heartbeat messages from a session history.
 
-    Returns normalized copies (via _normalize_heartbeat) so they can be
-    injected into another session as plain assistant messages.
+    Returns normalized copies (legacy prefix stripped, metadata preserved)
+    so they can be injected into another session while remaining identifiable.
     """
     heartbeats: List[dict] = []
     for msg in messages:

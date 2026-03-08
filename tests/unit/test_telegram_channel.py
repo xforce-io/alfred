@@ -265,7 +265,8 @@ class TestEventFiltering:
     async def test_deferred_result_skips_history_injection(self, channel):
         """deferred_result events should NOT call inject_history_message
         because core_service already handles injection (Bug 1 fix)."""
-        await channel._on_background_event("session_1", {
+        # session_id must match the tg session pattern for chat 111
+        await channel._on_background_event("tg_session_my_agent__111", {
             "source_type": "deferred_result",
             "agent_name": "my_agent",
             "detail": "Deferred task completed",
@@ -279,6 +280,59 @@ class TestEventFiltering:
         # But inject_history_message should NOT be called (core_service already did it)
         sm = channel._session_manager
         sm.inject_history_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_deferred_result_scoped_to_originating_chat(self, channel):
+        """deferred_result must only be pushed to the chat that initiated the
+        timed-out turn, not broadcast to all chats bound to the same agent."""
+        channel._bindings = {"111": "my_agent", "222": "my_agent"}
+        # Event originated from chat 222
+        await channel._on_background_event("tg_session_my_agent__222", {
+            "source_type": "deferred_result",
+            "agent_name": "my_agent",
+            "detail": "Result for chat 222",
+            "deliver": True,
+        })
+        # Only chat 222 should receive the message
+        assert channel._send_message.await_count == 1
+        assert channel._send_message.call_args[0][0] == "222"
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_delivery_broadcasts_to_all_chats(self, channel):
+        """heartbeat_delivery should broadcast to all chats bound to the agent."""
+        channel._bindings = {"111": "my_agent", "222": "my_agent"}
+        await channel._on_background_event("primary_session", {
+            "source_type": "heartbeat_delivery",
+            "agent_name": "my_agent",
+            "detail": "Heartbeat report",
+            "deliver": True,
+        })
+        assert channel._send_message.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_deferred_result_from_web_session_not_pushed(self, channel):
+        """deferred_result from a web session should NOT be pushed to any
+        Telegram chat — the result belongs to the web channel."""
+        channel._bindings = {"111": "my_agent", "222": "my_agent"}
+        await channel._on_background_event("web_session_my_agent", {
+            "source_type": "deferred_result",
+            "agent_name": "my_agent",
+            "detail": "Web deferred result",
+            "deliver": True,
+        })
+        channel._send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_deferred_result_from_primary_session_not_pushed(self, channel):
+        """deferred_result from a primary/unknown session should NOT leak to Telegram."""
+        channel._bindings = {"111": "my_agent"}
+        await channel._on_background_event("my_agent_primary", {
+            "source_type": "deferred_result",
+            "agent_name": "my_agent",
+            "detail": "Primary session deferred result",
+            "deliver": True,
+        })
+        channel._send_message.assert_not_awaited()
 
 
 # ===========================================================================

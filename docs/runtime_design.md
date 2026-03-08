@@ -1,6 +1,6 @@
 # EverBot 运行时架构设计（Runtime Architecture Design）
 
-最后更新：2026-02-12
+最后更新：2026-03-08
 
 ## 1. 文档目标
 
@@ -118,7 +118,7 @@
 
 1. **并发单元是 session，不是进程**——同一 session 内 turn 串行，不同 session 间 turn 并发。
 2. **背景 session 永远不读 primary 的 history**——如需用户上下文，只传结构化 briefing。
-3. **桥接只传摘要/结构化结果**——不传完整 tool chain，不伪造 assistant message。
+3. **桥接双路：history inject + mailbox deposit**——心跳结果以 assistant message 注入 Primary history（保留 `metadata.source` 标记，可追溯、可驱逐），同时 deposit 到 mailbox 主动提醒 LLM。不传完整 tool chain。
 4. **推理会话与投递目标解耦**——session 决定上下文；delivery 决定发到哪。
 5. **单写入口**——所有 session 落盘都走 `update_atomic`（进程间文件锁 + 版本校验）。
 
@@ -244,7 +244,17 @@ class TurnOrchestrator:
 │  └───────────────────────────────────────────────┘  │
 │                                                     │
 │  ┌───────────────────────────────────────────────┐  │
-│  │  Sub Session  (用户窗口分支, 首期不做克隆)     │  │
+│  │  Channel Session  (per 外部渠道 chat)         │  │
+│  │                                               │  │
+│  │  session_id: tg_session_{agent}__{chat_id}    │  │
+│  │              discord_session_{agent}__{ch_id}  │  │
+│  │  - Telegram/Discord 等渠道各 chat 独立持久化   │  │
+│  │  - restore 时从 Primary 拉取最近心跳上下文     │  │
+│  │  - 通过 ChannelSessionResolver 映射 ID        │  │
+│  └───────────────────────────────────────────────┘  │
+│                                                     │
+│  ┌───────────────────────────────────────────────┐  │
+│  │  Sub Session  (Web 窗口分支)                   │  │
 │  │                                               │  │
 │  │  session_id: web_session_{agent_name}__*      │  │
 │  │  - 独立持久化                                  │  │
@@ -261,7 +271,7 @@ class TurnOrchestrator:
 @dataclass
 class Session:
     session_id: str
-    session_type: Literal["primary", "heartbeat", "job", "sub"]
+    session_type: Literal["primary", "heartbeat", "job", "channel", "sub"]
     agent_name: str
 
     # 对话状态
@@ -1060,7 +1070,11 @@ sequenceDiagram
 
 **问题**：当前实现在 Web 聊天时一刀切剥离所有心跳消息（`strip_heartbeat_turns`），同时 deliver 路径又可能出现“实时推送 + 下次对话再注入”的重复可见性。
 
-**设计**：由 Agent 自主决定一条心跳结果是否需要 deliver；**用户可见正文的唯一来源是 Primary mailbox**。WebSocket 只做“有新后台更新”的状态提示，不直接写聊天气泡正文。
+**设计**：由 Agent 自主决定一条心跳结果是否需要 deliver。deliver 结果通过**三条并行路径**到达用户（详见 Section 7.5 Session 同步与投递全景）：
+
+1. **持久化**：`inject_history_message` 写入 Primary history（LLM 后续 turn 可引用）
+2. **Mailbox**：`deposit_mailbox_event` 写入 Primary mailbox（下次 turn 主动提醒 LLM）
+3. **实时推送**：`events.emit` 推给 Web WebSocket / Telegram（用户立即可见）
 
 #### 核心规则
 
@@ -1102,10 +1116,12 @@ def _should_deliver(self, response: str) -> bool:
 
 1. HeartbeatRunner 执行后，根据 `_should_deliver()` 判断结果。
 2. **suppress**：只写入 Heartbeat Session 历史（用于心跳上下文连续），不投递到 Primary Session。
-3. **deliver**：先写入 Heartbeat Session 历史，再通过 SystemEvent 桥接到 Primary Session 的 `mailbox`。
-4. 对 deliver 事件，仅广播轻量 envelope（`type=status`, `has_unread_background_updates=true`, `event_id=...`）到同 agent 窗口，不发送正文。
+3. **deliver**：先写入 Heartbeat Session 历史，再三路并行投递：
+   - `inject_history_message(primary_id, msg)` — 永久写入 Primary history
+   - `deposit_mailbox_event(primary_id, event)` — 写入 mailbox，下次 turn 主动提醒 LLM
+   - `events.emit(primary_id, ..., scope=broadcast_scope)` — 实时推送到 Web/Telegram
 
-**前端侧**：收到状态事件后更新状态栏/角标；聊天正文仍由 primary turn 在 drain mailbox 时统一产出，保证单一可见路径。
+**inject vs mailbox 不是冗余**：inject 是被动记忆（LLM 能看到但不会主动提及），mailbox 是主动提醒（拼到下次 user message 前缀，强制 LLM 回应）。两者解决不同的"下次交互"场景。
 
 #### 与现有 strip 逻辑的关系
 
@@ -1219,6 +1235,161 @@ async def restore_to_agent(self, agent, session_data):
 
 1. `event.session_id == currentSessionId`：按原逻辑写入聊天流。
 2. `event.session_id != currentSessionId && source_type=heartbeat`：仅更新状态栏提示，不写入 chat bubbles，可写入 timeline。
+
+### 7.5 Session 同步与投递全景
+
+本节描述各类 Session 之间的数据同步全貌，以及心跳/Inspector/deferred_result 的完整投递路径。
+
+#### Session 拓扑
+
+每个 Agent 维护 1 个 Primary + 1 个 Heartbeat + N 个 Channel Session：
+
+```
+┌──────────────────┐      ┌──────────────────────────┐      ┌──────────────────┐
+│  Heartbeat       │      │  Primary Session         │      │  Channel Session │
+│  Session         │      │  ({agent_name})          │      │  (per chat/tab)  │
+│                  │      │                          │      │                  │
+│  隔离执行环境     │      │  所有数据的 Hub           │      │  tg_session_*    │
+│  定时任务 / cron  │      │  history_messages[]      │      │  web_session_*   │
+│  Inspector 反思  │      │  mailbox[]               │      │                  │
+└────────┬─────────┘      └─────────┬────────────────┘      └────────┬─────────┘
+         │                          │                                │
+```
+
+#### Flow ①：心跳执行结果 → Primary（持久化，供后续 restore 拉取）
+
+```
+ Heartbeat Session                    Primary Session
+ ┌─────────────┐                      ┌─────────────────────┐
+ │ _run_agent() │                      │                     │
+ │  ↓ result    │                      │  history_messages[] │
+ │  ↓           │───(A) inject────────▶│  ← append {        │
+ │  _should_    │   history_message    │      role: assistant│
+ │   deliver()  │                      │      content: ...   │
+ │  ↓ True      │───(B) deposit───────▶│      metadata: {    │
+ │              │   mailbox_event      │        source:      │
+ └─────────────┘                       │        "heartbeat"  │
+                                       │        run_id: ...  │
+  (A) = inject_history_message()       │      }              │
+       原子追加到 history，run_id 去重   │  }                  │
+  (B) = deposit_mailbox_event()        │                     │
+       写入 mailbox，下次 turn 合并     │  mailbox[]          │
+       compose 到用户消息中             │  ← append event     │
+                                       └─────────────────────┘
+```
+
+**inject vs mailbox 的角色区分**：inject 是被动记忆（LLM 在 context 中能看到但不会主动提及），mailbox 是主动提醒（拼到下次 user message 前缀 `## Background Updates`，强制 LLM 回应）。
+
+#### Flow ②：Primary 心跳上下文 → Channel Session（restore 时拉取）
+
+Channel session（Telegram/Web）在每次用户消息触发 turn 前，从 Primary session 拉取最近的心跳结果：
+
+```
+ Channel Session restore                Primary Session (disk)
+ ┌──────────────────────┐               ┌──────────────────────┐
+ │ core_service          │               │                      │
+ │ .process_message()    │               │  history_messages[   │
+ │  ↓                    │               │    ...               │
+ │  load_session(ch_id) │               │    {source:heartbeat}│◄─┐
+ │  ↓                    │               │    {source:heartbeat}│  │
+ │  _load_heartbeat_    │──── read ─────▶│    ...               │  │
+ │   context()           │               │  ]                   │  │
+ │  ↓                    │               └──────────────────────┘  │
+ │  extract_recent_     │                                          │
+ │   heartbeat()         │◄─── 最近 5 条 normalized heartbeat msg ──┘
+ │  ↓                    │
+ │  restore_to_agent(    │
+ │   heartbeat_context)  │
+ │  ↓                    │
+ │  插入位置：末尾未回答  │
+ │  的 user msg 之前     │
+ │  ↓                    │
+ │  去重：run_id 优先,    │
+ │  content fallback     │
+ └──────────────────────┘
+```
+
+关键点：heartbeat context 插入到 **trailing unanswered user messages 之前**，而非追加到末尾。否则 LLM 会误以为心跳输出是对用户问题的回答。
+
+#### Flow ③：实时推送（events.emit → 各 Channel 订阅者）
+
+```
+                    events.emit(session_id, envelope)
+                                 │
+                    ┌────────────┴────────────┐
+                    ▼                         ▼
+          Telegram Subscriber          Web Subscriber
+          _on_background_event         _on_background_event
+                    │                         │
+           ┌───────┴───────┐          ┌──────┴──────┐
+           │ source_type?  │          │ scope?      │
+           └───┬───────┬───┘          └──┬──────┬───┘
+               │       │                 │      │
+    heartbeat_ │       │ deferred_       │      │
+    delivery   │       │ result     agent│      │session
+               ▼       ▼                 ▼      ▼
+          ┌────────┐ ┌──────────┐  ┌───────┐ ┌──────────┐
+          │广播:    │ │定向:      │  │广播:   │ │定向:      │
+          │all chat│ │origin    │  │agent  │ │session_id│
+          │bound to│ │chat only │  │所有 ws│ │单个 ws   │
+          │agent   │ │          │  │连接   │ │连接      │
+          └────────┘ └──────────┘  └───────┘ └──────────┘
+                       │
+                       ├─ tg_session_* → 推送到该 chat
+                       ├─ web_session_* → 不推送到 Telegram（return）
+                       └─ 未知来源 → 不推送到 Telegram（return）
+```
+
+Telegram 对 `deferred_result` 的路由规则：只有当 `session_id` 是 `tg_session_*` 格式时才推送到对应 chat，非 Telegram 来源直接忽略，避免跨渠道泄露。`heartbeat_delivery` 是 agent 级广播，推送到所有绑定该 agent 的 chat。
+
+#### Flow ④：deferred_result 双路投递（超时后台任务完成时）
+
+用户消息执行超时后，turn 在后台继续运行。完成时通过 `_deliver_deferred_result()` 双路投递：
+
+```
+ core_service._deliver_deferred_result(result_text)
+ │
+ ├─(A) inject_history_message(session_id, msg)
+ │      → 写入发起会话的 history（Web/Telegram/Primary 均可）
+ │      → LLM 后续 turn 可引用
+ │
+ └─(B) events.emit(session_id, ..., source_type="deferred_result")
+        → 实时推送（见 Flow ③ 的 deferred_result 分支）
+        → Telegram: 仅当 session_id 是 tg_session_* 时推送到对应 chat
+        → Web: scope="session"，仅推到该 session 的 ws 连接
+```
+
+注：不使用 mailbox deposit——结果已在 history_messages 中，再通过 mailbox 以 "Background Updates" 前缀重复呈现给 LLM 是纯冗余。
+
+#### Flow ⑤：Inspector push_message（主动沟通）
+
+Inspector 是心跳的反思模块，分析上下文后可决定主动给用户发消息：
+
+```
+ Inspector.inspect()
+ │
+ ├─ LLM 返回 push_message（主动给用户的消息）
+ │
+ ├─(A) emit_push_message()
+ │      → events.emit(primary_session_id, source_type="heartbeat_delivery")
+ │      → Telegram: 广播到 agent 所有绑定 chat
+ │      → Web: agent scope 广播到所有 ws 连接
+ │
+ └─(B) _deliver_push_message()  (mailbox 落盘)
+        → deposit_mailbox_event(primary_session_id, event)
+        → 即使实时推送失败，下次 turn 也能看到
+```
+
+Inspector 触发条件包括：文件变更（MEMORY.md/HEARTBEAT.md）、force interval 到期、用户空闲时长增长 ≥ 1 小时。反思 prompt 包含空闲时长、记忆、任务状态等上下文，LLM 自主决定是否值得主动沟通。
+
+#### 推送语义对照表
+
+| 事件类型 | 语义 | Telegram 行为 | Web 行为 |
+|----------|------|---------------|----------|
+| `heartbeat_delivery` | agent 级 | 广播所有绑定 chat | agent scope 广播 |
+| Inspector `push_message` | agent 级 | 同上（复用 heartbeat_delivery） | 同上 |
+| `deferred_result` | 会话级 | 仅原 tg chat / 非 tg 来源忽略 | 仅原 session ws |
+| heartbeat inject（非实时） | 拉取式 | restore 时从 Primary 拉取最近 5 条 | 同左 |
 
 ---
 
@@ -1427,25 +1598,28 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-  PS["Primary Session<br/>web_session_{agent_name}<br/>↳ 用户主对话上下文<br/>↳ 接收 mailbox"]
+  PS["Primary Session<br/>web_session_{agent_name}<br/>↳ 用户主对话上下文<br/>↳ 接收 mailbox + inject"]
   HS["Heartbeat Session<br/>heartbeat_session_{agent_name}<br/>↳ 心跳推理上下文"]
   JS["Job Sessions<br/>job_{task_id}_{run_id}<br/>↳ Cron 任务隔离执行"]
+  CS["Channel Sessions<br/>tg_session_{agent}__{chat_id}<br/>↳ 外部渠道 per-chat"]
   SS["Sub Sessions<br/>web_session_{agent_name}__*<br/>↳ 用户窗口分支"]
   HB["HEARTBEAT.md<br/>↳ 任务定义（JSON 块）"]
 
   Sched2["Scheduler"] -->|"trigger heartbeat"| HS
   Sched2 -->|"trigger cron job"| JS
   Sched2 -->|"read/update"| HB
-  HS -->|"deposit to mailbox"| PS
+  HS -->|"inject + deposit"| PS
   JS -->|"deposit to mailbox"| PS
+  CS -->|"restore 时拉取心跳上下文"| PS
   PS <-.->|"可选：克隆/恢复（future）"| SS
 ```
 
 **读图要点：**
 1. Scheduler 统一管理心跳间隔和 cron 触发，HeartbeatRunner 是纯执行器。
 2. TurnOrchestrator 是共享执行层，提供重试、tool budget、streaming 事件归一化；ChatService 和 HeartbeatRunner 各自管理会话锁和结果投递。
-3. 心跳和 Job 的结果通过 SystemEvent 桥接到 Primary Session，而非共享推理历史。
-4. Primary Session 在用户下次发消息时消费 mailbox，注入 context。
+3. 心跳结果双路桥接到 Primary Session：`inject_history_message`（永久写入 history）+ `deposit_mailbox_event`（下次 turn 主动提醒）。同时 `events.emit` 实时推送到 Web/Telegram。
+4. Channel Session（Telegram/Discord）在 restore 时从 Primary 拉取最近心跳上下文，实现跨渠道信息同步。
+5. 详细投递流程见 Section 7.5。
 
 ---
 

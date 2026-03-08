@@ -189,37 +189,52 @@ class TelegramChannel:
             f"{msg_prefix} {agent_name}\n\n{detail}"
         )
 
-        # Push to all chats bound to this agent and inject into session history
+        # Push to bound chats.  deferred_result is scoped to the single chat
+        # that initiated the timed-out turn; if the turn originated from a
+        # non-Telegram session (web / primary), skip entirely — the result
+        # is already delivered via inject_history_message + mailbox on that
+        # channel.  heartbeat_delivery is agent-wide and reaches all chats.
         run_id = data.get("run_id") or ""
+        if source_type == "deferred_result":
+            if ChannelSessionResolver.extract_channel_type(session_id) != "telegram":
+                return  # not originated from Telegram — nothing to push here
+            target_chat = ChannelSessionResolver.extract_channel_session_id(session_id)
+            if not target_chat:
+                return  # malformed tg session_id — skip rather than broadcast
+        else:
+            target_chat = None  # broadcast
         for chat_id, bound_agent in list(self._bindings.items()):
-            if bound_agent == agent_name:
-                await self._send_message(chat_id, text, entities)
-                # Inject the delivered message into the Telegram session history
-                # so follow-up questions have the result in context.
-                tg_session_id = ChannelSessionResolver.resolve(
-                    "telegram", agent_name, chat_id,
+            if bound_agent != agent_name:
+                continue
+            if target_chat and str(chat_id) != target_chat:
+                continue
+            await self._send_message(chat_id, text, entities)
+            # Inject the delivered message into the Telegram session history
+            # so follow-up questions have the result in context.
+            tg_session_id = ChannelSessionResolver.resolve(
+                "telegram", agent_name, chat_id,
+            )
+            prefixed_detail = history_prefix + detail
+            msg = {
+                "role": "assistant",
+                "content": prefixed_detail,
+                "metadata": {
+                    "source": source_type,
+                    "run_id": run_id,
+                    "injected_at": datetime.now(timezone.utc).isoformat(),
+                },
+            }
+            # For deferred_result, core_service already injected into
+            # the primary session history — skip here to avoid duplicates.
+            if source_type != "deferred_result" and hasattr(self._session_manager, "inject_history_message"):
+                ok = await self._session_manager.inject_history_message(
+                    tg_session_id, msg, timeout=5.0, blocking=False,
                 )
-                prefixed_detail = history_prefix + detail
-                msg = {
-                    "role": "assistant",
-                    "content": prefixed_detail,
-                    "metadata": {
-                        "source": source_type,
-                        "run_id": run_id,
-                        "injected_at": datetime.now(timezone.utc).isoformat(),
-                    },
-                }
-                # For deferred_result, core_service already injected into
-                # the primary session history — skip here to avoid duplicates.
-                if source_type != "deferred_result" and hasattr(self._session_manager, "inject_history_message"):
-                    ok = await self._session_manager.inject_history_message(
-                        tg_session_id, msg, timeout=5.0, blocking=False,
+                if not ok:
+                    logger.warning(
+                        "Failed to inject %s result into tg session %s",
+                        source_type, tg_session_id,
                     )
-                    if not ok:
-                        logger.warning(
-                            "Failed to inject %s result into tg session %s",
-                            source_type, tg_session_id,
-                        )
 
     # ------------------------------------------------------------------
     # Long-polling loop

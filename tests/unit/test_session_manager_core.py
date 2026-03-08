@@ -1247,15 +1247,16 @@ class TestIsolatedJobResultNotRestoredToLLMContext:
         portable = call_args[0][0]
         restored_history = portable["history_messages"]
 
-        # Heartbeat source marker should be stripped (normalized to normal messages)
+        # Heartbeat source marker must be preserved so messages remain
+        # identifiable after a channel session save→restore round-trip.
         heartbeat_messages = [
             m for m in restored_history
             if isinstance(m, dict)
             and isinstance(m.get("metadata"), dict)
             and m["metadata"].get("source") == "heartbeat"
         ]
-        assert len(heartbeat_messages) == 0, (
-            "Heartbeat source markers should be stripped during restore"
+        assert len(heartbeat_messages) == 2, (
+            "Heartbeat source markers must be preserved during restore"
         )
 
         # But heartbeat content should be preserved (prefix stripped)
@@ -1353,7 +1354,7 @@ class TestIsolatedJobResultNotRestoredToLLMContext:
         assert len(restored_history) == 3, (
             f"Expected 3 messages (multimodal user + assistant reply + heartbeat result), got {len(restored_history)}"
         )
-        # Heartbeat result normalized: prefix stripped, no longer tagged
+        # Heartbeat result normalized: prefix stripped, source preserved
         hb_msg = restored_history[2]
         assert hb_msg["content"] == "结果..."
-        assert hb_msg.get("metadata", {}).get("source") is None
+        assert hb_msg.get("metadata", {}).get("source") == "heartbeat"
