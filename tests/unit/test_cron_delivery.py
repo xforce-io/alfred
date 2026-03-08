@@ -2,6 +2,7 @@
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
 
 import pytest
 
@@ -98,3 +99,24 @@ class TestDepositJobEvent:
         sm.deposit_mailbox_event.assert_called_once()
         event = sm.deposit_mailbox_event.call_args[0][1]
         assert "job_result:test_agent:run_3:job_abc_123" in event["dedupe_key"]
+
+
+class TestRealtimeEmit:
+    @pytest.mark.asyncio
+    async def test_session_scope_emit_sets_target_session_id(self, monkeypatch):
+        emitted = []
+        d = _make_delivery(broadcast_scope="session")
+
+        async def _fake_emit(source_session_id, data, **kwargs):
+            emitted.append((source_session_id, data, kwargs))
+
+        monkeypatch.setattr("src.everbot.core.runtime.cron_delivery.emit", _fake_emit, raising=False)
+        monkeypatch.setattr("src.everbot.core.runtime.events.emit", _fake_emit)
+
+        await d._emit_realtime("hello", "run_4")
+
+        assert len(emitted) == 1
+        source_session_id, _data, kwargs = emitted[0]
+        assert source_session_id == "web_session_test"
+        assert kwargs["scope"] == "session"
+        assert kwargs["target_session_id"] == "web_session_test"

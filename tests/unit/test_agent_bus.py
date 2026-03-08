@@ -29,7 +29,7 @@ class TestEmitEnvelope:
 
         assert len(received) == 1
         assert received[0]["scope"] == "session"
-        assert received[0]["session_id"] == "sess1"
+        assert received[0]["source_session_id"] == "sess1"
         assert "event_id" in received[0]
         assert "timestamp" in received[0]
         assert received[0]["schema"] == "everbot.event"
@@ -58,6 +58,84 @@ class TestEmitEnvelope:
         assert d["run_id"] == "run_123"
         assert d["schema"] == "everbot.event"
         assert d["schema_version"] == 1
+
+    def test_resolve_routing_prefers_explicit_target_fields(self):
+        decision = events.resolve_routing(
+            {
+                "event_id": "evt_1",
+                "scope": "session",
+                "agent_name": "bot1",
+                "source_session_id": "primary_bot1",
+                "target_session_id": "tg_session_bot1__123",
+                "target_channel": "telegram",
+                "deliver": True,
+            }
+        )
+
+        assert decision.deliver is True
+        assert decision.scope == "session"
+        assert decision.target_session_id == "tg_session_bot1__123"
+        assert decision.target_channel == "telegram"
+
+    def test_resolve_routing_keeps_target_channel_none_when_not_provided(self):
+        decision = events.resolve_routing(
+            {
+                "event_id": "evt_no_channel",
+                "scope": "session",
+                "target_session_id": "web_session_bot1",
+                "deliver": True,
+            }
+        )
+
+        assert decision.deliver is True
+        assert decision.target_session_id == "web_session_bot1"
+        assert decision.target_channel is None
+
+    def test_resolve_routing_rejects_session_scope_without_target(self):
+        decision = events.resolve_routing(
+            {
+                "event_id": "evt_missing",
+                "scope": "session",
+                "source_session_id": "web_session_bot1",
+                "deliver": True,
+            }
+        )
+
+        assert decision.deliver is False
+        assert decision.target_session_id is None
+        assert decision.reason == "missing_target_session_id"
+
+    def test_resolve_routing_drops_target_channel_mismatch(self):
+        decision = events.resolve_routing(
+            {
+                "event_id": "evt_bad",
+                "scope": "session",
+                "target_session_id": "web_session_bot1",
+                "target_channel": "telegram",
+                "deliver": True,
+            }
+        )
+
+        assert decision.deliver is False
+        assert decision.reason == "target_channel_mismatch"
+
+    @pytest.mark.asyncio
+    async def test_emit_preserves_invalid_target_channel_for_resolver(self):
+        received = []
+
+        async def handler(_sid, data):
+            received.append(data)
+
+        events.subscribe(handler)
+        await events.emit(
+            "sess1",
+            {"type": "status"},
+            scope="session",
+            target_session_id="web_session_bot1",
+            target_channel="invalid",
+        )
+
+        assert received[0]["target_channel"] == "invalid"
 
     @pytest.mark.asyncio
     async def test_no_subscribers_is_noop(self):
@@ -190,6 +268,8 @@ class TestChatServiceRouting:
         data = {
             "type": "delta",
             "scope": "session",
+            "target_session_id": "sess_a",
+            "target_channel": "web",
             "content": "user reply",
         }
         await svc._on_background_event("sess_a", data)

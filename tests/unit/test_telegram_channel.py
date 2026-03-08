@@ -194,6 +194,7 @@ class TestEventFiltering:
             "agent_name": "my_agent",
             "detail": "Task completed",
             "deliver": True,
+            "scope": "agent",
         })
         channel._send_message.assert_awaited_once()
         msg = channel._send_message.call_args[0][1]
@@ -257,6 +258,7 @@ class TestEventFiltering:
             "agent_name": "my_agent",
             "detail": "update",
             "deliver": True,
+            "scope": "agent",
         })
         assert channel._send_message.await_count == 1
         assert channel._send_message.call_args[0][0] == "111"
@@ -271,6 +273,9 @@ class TestEventFiltering:
             "agent_name": "my_agent",
             "detail": "Deferred task completed",
             "deliver": True,
+            "scope": "session",
+            "target_session_id": "tg_session_my_agent__111",
+            "target_channel": "telegram",
         })
         # Message should still be sent to Telegram chat
         channel._send_message.assert_awaited_once()
@@ -292,6 +297,9 @@ class TestEventFiltering:
             "agent_name": "my_agent",
             "detail": "Result for chat 222",
             "deliver": True,
+            "scope": "session",
+            "target_session_id": "tg_session_my_agent__222",
+            "target_channel": "telegram",
         })
         # Only chat 222 should receive the message
         assert channel._send_message.await_count == 1
@@ -306,6 +314,7 @@ class TestEventFiltering:
             "agent_name": "my_agent",
             "detail": "Heartbeat report",
             "deliver": True,
+            "scope": "agent",
         })
         assert channel._send_message.await_count == 2
 
@@ -319,6 +328,9 @@ class TestEventFiltering:
             "agent_name": "my_agent",
             "detail": "Web deferred result",
             "deliver": True,
+            "scope": "session",
+            "target_session_id": "web_session_my_agent",
+            "target_channel": "web",
         })
         channel._send_message.assert_not_awaited()
 
@@ -331,6 +343,22 @@ class TestEventFiltering:
             "agent_name": "my_agent",
             "detail": "Primary session deferred result",
             "deliver": True,
+            "scope": "session",
+            "target_session_id": "my_agent_primary",
+        })
+        channel._send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_ignores_target_channel_mismatch(self, channel):
+        channel._bindings = {"111": "my_agent"}
+        await channel._on_background_event("tg_session_my_agent__111", {
+            "source_type": "deferred_result",
+            "agent_name": "my_agent",
+            "detail": "Mismatch result",
+            "deliver": True,
+            "scope": "session",
+            "target_session_id": "tg_session_my_agent__111",
+            "target_channel": "web",
         })
         channel._send_message.assert_not_awaited()
 

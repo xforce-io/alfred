@@ -12,6 +12,7 @@ from src.everbot.core.runtime.inspector import (
     InspectionResult,
     InspectionContext,
     INSPECTOR_STATE_FILE,
+    emit_push_message,
 )
 from src.everbot.core.runtime.reflection import ReflectionManager
 from src.everbot.core.tasks.routine_manager import RoutineManager
@@ -151,6 +152,31 @@ class TestShouldSkip:
             session_manager=session_manager,
             primary_session_id="primary_1",
         ) is False
+
+
+class TestEmitPushMessage:
+    @pytest.mark.asyncio
+    async def test_session_scope_emit_sets_target_session_id(self, monkeypatch):
+        emitted = []
+
+        async def _fake_emit(source_session_id, data, **kwargs):
+            emitted.append((source_session_id, data, kwargs))
+
+        monkeypatch.setattr("src.everbot.core.runtime.events.emit", _fake_emit)
+
+        await emit_push_message(
+            "Need attention",
+            primary_session_id="web_session_test_agent",
+            agent_name="test_agent",
+            run_id="run_1",
+            scope="session",
+        )
+
+        assert len(emitted) == 1
+        source_session_id, _data, kwargs = emitted[0]
+        assert source_session_id == "web_session_test_agent"
+        assert kwargs["scope"] == "session"
+        assert kwargs["target_session_id"] == "web_session_test_agent"
 
 
 # ── _should_inspect with enriched context ─────────────────────

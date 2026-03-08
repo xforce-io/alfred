@@ -225,6 +225,15 @@ If not, reply with `HEARTBEAT_OK`.
             reflect_force_interval_hours=max(1, int(reflect_force_interval_hours or 24)),
         )
 
+    def _event_scope_kwargs(self) -> dict[str, Optional[str]]:
+        """Build routing kwargs for heartbeat realtime events."""
+        return {
+            "scope": self.broadcast_scope,
+            "target_session_id": (
+                self.primary_session_id if self.broadcast_scope == "session" else None
+            ),
+        }
+
     # --- Backward-compatible accessors for extracted _file_mgr state ---
 
     @property
@@ -642,6 +651,7 @@ If not, reply with `HEARTBEAT_OK`.
         async def _run_locked_body() -> str:
             nonlocal post_message
             self._record_timeline_event("turn_start", run_id, trigger="heartbeat")
+            event_scope_kwargs = self._event_scope_kwargs()
 
             # 2. Pre-check: read HEARTBEAT.md BEFORE creating agent to skip
             #    unnecessary agent creation / session I/O for idle ticks.
@@ -652,11 +662,11 @@ If not, reply with `HEARTBEAT_OK`.
                     self._record_timeline_event("turn_end", run_id, status="completed", result="HEARTBEAT_IDLE")
                     from .events import emit
                     await emit(self.primary_session_id, {"type": "status", "content": "心跳预检：暂无待办任务"},
-                               agent_name=self.agent_name, scope=self.broadcast_scope,
+                               agent_name=self.agent_name, **event_scope_kwargs,
                                source_type="heartbeat", run_id=run_id)
                     await asyncio.sleep(1)
                     await emit(self.primary_session_id, {"type": "status", "content": ""},
-                               agent_name=self.agent_name, scope=self.broadcast_scope,
+                               agent_name=self.agent_name, **event_scope_kwargs,
                                source_type="heartbeat", run_id=run_id)
                     return "HEARTBEAT_IDLE"
 
@@ -803,7 +813,7 @@ If not, reply with `HEARTBEAT_OK`.
                 self.primary_session_id,
                 post_message,
                 agent_name=self.agent_name,
-                scope=self.broadcast_scope,
+                **self._event_scope_kwargs(),
                 source_type="heartbeat_delivery",
                 run_id=run_id,
             )
@@ -942,7 +952,7 @@ If not, reply with `HEARTBEAT_OK`.
                     "deliver": True,
                 },
                 agent_name=self.agent_name,
-                scope=self.broadcast_scope,
+                **self._event_scope_kwargs(),
                 source_type="heartbeat_delivery",
                 run_id=run_id,
             )
@@ -980,7 +990,7 @@ If not, reply with `HEARTBEAT_OK`.
                     "deliver": True,
                 },
                 agent_name=self.agent_name,
-                scope=self.broadcast_scope,
+                **self._event_scope_kwargs(),
                 source_type="heartbeat_delivery",
                 run_id=run_id,
             )
@@ -1365,7 +1375,7 @@ If not, reply with `HEARTBEAT_OK`.
             ensure_continue_chat_compatibility()
 
             from .events import emit
-            _emit_kw = dict(agent_name=self.agent_name, scope=self.broadcast_scope,
+            _emit_kw = dict(agent_name=self.agent_name, **self._event_scope_kwargs(),
                             source_type="heartbeat", run_id=getattr(self, '_current_run_id', None))
             await emit(self.primary_session_id, {"type": "status", "content": "后台心跳检查中..."}, **_emit_kw)
             try:
@@ -1408,7 +1418,7 @@ If not, reply with `HEARTBEAT_OK`.
             ensure_continue_chat_compatibility()
 
             from .events import emit
-            _emit_kw = dict(agent_name=self.agent_name, scope=self.broadcast_scope,
+            _emit_kw = dict(agent_name=self.agent_name, **self._event_scope_kwargs(),
                             source_type="heartbeat", run_id=getattr(self, '_current_run_id', None))
             await emit(self.primary_session_id, {"type": "status", "content": "后台心跳检查中..."}, **_emit_kw)
             try:

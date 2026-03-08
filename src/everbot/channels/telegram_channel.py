@@ -31,6 +31,7 @@ from ..core.channel.core_service import ChannelCoreService
 from ..core.channel.models import OutboundMessage
 from ..core.channel.session_resolver import ChannelSessionResolver
 from ..core.runtime import events
+from ..core.runtime.events import resolve_routing
 from ..core.runtime.control import get_local_status
 from ..core.session.session import SessionManager
 from ..infra.user_data import get_user_data_manager
@@ -160,11 +161,15 @@ class TelegramChannel:
     # ------------------------------------------------------------------
 
     async def _on_background_event(
-        self, session_id: str, data: Dict[str, Any]
+        self, source_session_id: str, data: Dict[str, Any]
     ) -> None:
         """Filter heartbeat_delivery / deferred_result events and push to Telegram."""
-        if data.get("deliver") is False:
+        routing = resolve_routing(data)
+        if not routing.deliver:
             return
+        if routing.target_channel not in (None, "telegram"):
+            return
+
         source_type = data.get("source_type")
         if source_type not in ("heartbeat_delivery", "deferred_result"):
             return
@@ -189,20 +194,15 @@ class TelegramChannel:
             f"{msg_prefix} {agent_name}\n\n{detail}"
         )
 
-        # Push to bound chats.  deferred_result is scoped to the single chat
-        # that initiated the timed-out turn; if the turn originated from a
-        # non-Telegram session (web / primary), skip entirely — the result
-        # is already delivered via inject_history_message + mailbox on that
-        # channel.  heartbeat_delivery is agent-wide and reaches all chats.
         run_id = data.get("run_id") or ""
-        if source_type == "deferred_result":
-            if ChannelSessionResolver.extract_channel_type(session_id) != "telegram":
-                return  # not originated from Telegram — nothing to push here
-            target_chat = ChannelSessionResolver.extract_channel_session_id(session_id)
+        target_chat = None
+        if routing.scope == "session":
+            target_chat = ChannelSessionResolver.extract_channel_session_id(
+                routing.target_session_id or ""
+            )
             if not target_chat:
-                return  # malformed tg session_id — skip rather than broadcast
-        else:
-            target_chat = None  # broadcast
+                return
+
         for chat_id, bound_agent in list(self._bindings.items()):
             if bound_agent != agent_name:
                 continue

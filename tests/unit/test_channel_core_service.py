@@ -47,6 +47,8 @@ def _make_session_manager_mock():
         release_session=lambda sid: None,
         file_lock=lambda sid, blocking=False: _LockCtx(),
         ack_mailbox_events=AsyncMock(return_value=True),
+        inject_history_message=AsyncMock(return_value=True),
+        deposit_mailbox_event=AsyncMock(return_value=True),
         clear_timeline=lambda sid: None,
         append_timeline_event=append_timeline_event,
         get_primary_session_id=lambda agent_name: f"web_session_{agent_name}",
@@ -288,6 +290,44 @@ async def test_process_message_saves_session_after_turn():
         await core.process_message(agent, "demo_agent", "web_session_demo_agent", "hi", collector)
 
     core.session_manager.save_session.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deferred_result_emit_uses_explicit_target_fields(monkeypatch):
+    """Deferred result events should carry explicit routing metadata."""
+    agent = _TurnErrorAgent()
+    emitted = []
+
+    class _FakeTurnOrchestrator:
+        def __init__(self, _policy):
+            return None
+
+        async def run_turn(self, *_args, **kwargs):
+            on_deferred_result = kwargs.get("on_deferred_result")
+            assert on_deferred_result is not None
+            await on_deferred_result("Deferred answer")
+            if False:
+                yield None
+
+    async def _fake_emit(source_session_id, data, **kwargs):
+        emitted.append((source_session_id, data, kwargs))
+
+    monkeypatch.setattr("src.everbot.core.channel.core_service.TurnOrchestrator", _FakeTurnOrchestrator)
+    monkeypatch.setattr("src.everbot.core.channel.core_service.events.emit", _fake_emit)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        core = _make_core_service(Path(tmp))
+        collector = _EventCollector()
+
+        await core.process_message(agent, "demo_agent", "web_session_demo_agent", "hi", collector)
+
+    assert len(emitted) == 1
+    source_session_id, data, kwargs = emitted[0]
+    assert source_session_id == "web_session_demo_agent"
+    assert data["source_type"] == "deferred_result"
+    assert kwargs["scope"] == "session"
+    assert kwargs["target_session_id"] == "web_session_demo_agent"
+    assert kwargs["target_channel"] == "web"
 
 
 @pytest.mark.asyncio

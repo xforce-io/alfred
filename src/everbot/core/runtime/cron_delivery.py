@@ -163,6 +163,15 @@ class CronDelivery:
             blocking=True,
         )
 
+    def _event_scope_kwargs(self) -> dict[str, Optional[str]]:
+        """Build routing kwargs for realtime events."""
+        return {
+            "scope": self.broadcast_scope,
+            "target_session_id": (
+                self.primary_session_id if self.broadcast_scope == "session" else None
+            ),
+        }
+
     async def _emit_realtime(self, result: str, run_id: str) -> None:
         """Emit realtime push event (SSE / Telegram)."""
         from .events import emit
@@ -181,7 +190,7 @@ class CronDelivery:
             self.primary_session_id,
             message,
             agent_name=self.agent_name,
-            scope=self.broadcast_scope,
+            **self._event_scope_kwargs(),
             source_type="heartbeat_delivery",
             run_id=run_id,
         )

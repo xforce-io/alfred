@@ -22,6 +22,7 @@ from dolphin.core.agent.agent_state import AgentState
 from dolphin.core.common.constants import KEY_HISTORY
 
 from .models import OutboundMessage
+from .session_resolver import ChannelSessionResolver
 from . import skill_change_detector as _skill_detect
 from ...core.runtime.context_strategy import PrimaryContextStrategy, RuntimeDeps
 from ...core.runtime.mailbox import compose_message_with_mailbox_updates
@@ -241,6 +242,9 @@ class ChannelCoreService:
                             "deliver": True,
                         },
                         agent_name=agent_name,
+                        scope="session",
+                        target_session_id=session_id,
+                        target_channel=ChannelSessionResolver.extract_channel_type(session_id),
                         source_type="deferred_result",
                         run_id=run_id,
                     )

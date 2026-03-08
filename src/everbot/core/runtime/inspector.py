@@ -73,6 +73,10 @@ async def emit_push_message(
     event-building logic.
     """
     from .events import emit
+    routing_kwargs = {
+        "scope": scope,
+        "target_session_id": primary_session_id if scope == "session" else None,
+    }
 
     await emit(
         primary_session_id,
@@ -87,7 +91,7 @@ async def emit_push_message(
             "deliver": True,
         },
         agent_name=agent_name,
-        scope=scope,
+        **routing_kwargs,
         source_type="heartbeat_delivery",
         run_id=run_id,
     )

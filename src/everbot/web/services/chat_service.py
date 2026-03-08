@@ -19,6 +19,7 @@ from dolphin.core.agent.agent_state import AgentState, PauseType
 from .agent_service import AgentService
 from ...core.channel.core_service import ChannelCoreService
 from ...core.channel.models import OutboundMessage
+from ...core.runtime.events import resolve_routing
 from ...core.runtime.mailbox import compose_message_with_mailbox_updates
 from ...core.runtime.turn_orchestrator import CHAT_POLICY
 from ...core.session.session import SessionManager
@@ -71,7 +72,7 @@ class ChatService:
         now = time.time()
         self._last_activity[session_id] = now
 
-    async def _on_background_event(self, session_id: str, data: Dict[str, Any]):
+    async def _on_background_event(self, source_session_id: str, data: Dict[str, Any]):
         """Handle events from background tasks (like heartbeats).
 
         Routing by scope:
@@ -82,13 +83,16 @@ class ChatService:
         - Events with "deliver": false are suppressed (not pushed to WebSocket)
         - Events with "deliver": true or without "deliver" key are pushed normally
         """
-        # Suppress heartbeat messages marked as non-deliverable
-        if data.get("deliver") is False:
+        routing = resolve_routing(data)
+        if not routing.deliver:
+            return
+        if routing.target_channel not in (None, "web"):
             return
 
-        scope = data.get("scope", "session")
-        agent_name = data.get("agent_name")
+        agent_name = routing.agent_name
         source_type = data.get("source_type")
+        # Display-level filtering lives after routing resolution so event scope
+        # and terminal targeting remain centralized in resolve_routing().
         if source_type == "heartbeat":
             event_type = str(data.get("type") or "")
             # Heartbeat body content must be visible only via primary-session mailbox drain.
@@ -96,7 +100,7 @@ class ChatService:
                 return
         bypass_idle_gate = source_type in {"time_reminder", "heartbeat", "heartbeat_delivery"}
 
-        if scope == "agent" and agent_name:
+        if routing.scope == "agent" and agent_name:
             # Agent-scope idle gate: throttle by last broadcast time (not user activity)
             now = time.time()
             last_t = self._last_agent_broadcast.get(agent_name, 0)
@@ -113,16 +117,19 @@ class ChatService:
             self._last_agent_broadcast[agent_name] = now
         else:
             # Session-scope (default)
-            websocket = self._active_connections.get(session_id)
+            target_session_id = routing.target_session_id
+            if not target_session_id:
+                return
+            websocket = self._active_connections.get(target_session_id)
             if not websocket:
                 return
-            last_t = self._last_activity.get(session_id, 0)
+            last_t = self._last_activity.get(target_session_id, 0)
             if (not bypass_idle_gate) and (time.time() - last_t < 20):
                 return
             try:
                 await websocket.send_json(data)
             except Exception:
-                self._active_connections.pop(session_id, None)
+                self._active_connections.pop(target_session_id, None)
 
     def _resolve_session_id_for_agent(self, agent_name: str, requested_session_id: Optional[str]) -> str:
         """Resolve session id and enforce agent-scoped id prefix."""

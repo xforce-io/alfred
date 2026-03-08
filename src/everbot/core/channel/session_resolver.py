@@ -24,6 +24,11 @@ class ChannelSessionResolver:
     }
 
     @classmethod
+    def list_supported_channels(cls) -> tuple[str, ...]:
+        """Return supported channel types for routing validation."""
+        return tuple(cls._PREFIX_MAP.keys())
+
+    @classmethod
     def resolve(cls, channel_type: str, agent_name: str, channel_session_id: str) -> str:
         """Map a channel-side session identifier to an EverBot session_id.
 

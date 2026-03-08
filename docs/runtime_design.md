@@ -1194,15 +1194,17 @@ async def restore_to_agent(self, agent, session_data):
 
 ### 7.1 事件 Envelope
 
-在现有 `events.emit(session_id, data)` 之上升级为带 envelope 的事件：
+在现有 `events.emit(source_session_id, data)` 之上升级为带 envelope 的事件：
 
 ```json
 {
   "event_id": "evt_xxx",
   "timestamp": "2026-02-10T13:00:00+00:00",
   "agent_name": "demo_agent",
-  "session_id": "web_session_demo_agent",
+  "source_session_id": "web_session_demo_agent",
   "scope": "agent",
+  "target_session_id": null,
+  "target_channel": null,
   "source_type": "heartbeat",
   "run_id": "heartbeat_xxx",
   "type": "status",
@@ -1210,9 +1212,16 @@ async def restore_to_agent(self, agent, session_data):
 }
 ```
 
+字段职责：
+1. `source_session_id`: 事件来源，仅用于溯源/审计，不参与路由。
+2. `scope`: 路由范围，`session` 或 `agent`。
+3. `target_session_id`: `scope=session` 时的精确目标。
+4. `target_channel`: 可选的终端过滤器（`web` / `telegram` / `discord`），不是主路由键。
+5. `source_type`: 事件类型、展示样式和处理语义，不决定路由范围。
+
 `scope` 约定：
-1. `session`: 仅当前会话（如用户输入回显）
-2. `agent`: 同一 agent 的所有活跃连接（如心跳状态）
+1. `session`: 必须带 `target_session_id`，仅投递到该会话。
+2. `agent`: 投递到同一 `agent_name` 的所有活跃连接；可选用 `target_channel` 做终端过滤。
 
 ### 7.2 投递失败处理
 
@@ -1228,13 +1237,16 @@ async def restore_to_agent(self, agent, session_data):
 2. `connections_by_agent: agent_name → set[(session_id, ws)]`
 
 路由规则：
-1. `scope=session`：只发到对应 `session_id`。
-2. `scope=agent`：发到同 `agent_name` 全连接；客户端按 `event.session_id === currentSessionId` 决定展示层级。
+1. `scope=session`：只发到 `target_session_id`。
+2. `scope=agent`：发到同 `agent_name` 全连接。
+3. `target_channel`：作为额外过滤条件，subscriber 只处理与自身 channel 类型匹配的事件。
+4. Subscriber 一律通过 `resolve_routing()` 解析 envelope，不再根据 `source_type` 或 `session_id` 前缀自行猜测路由。
+5. `resolve_routing()` 不再提供 legacy fallback；`scope=session` 缺失 `target_session_id` 的事件直接丢弃并记录 warning。
 
 ### 7.4 前端展示策略
 
-1. `event.session_id == currentSessionId`：按原逻辑写入聊天流。
-2. `event.session_id != currentSessionId && source_type=heartbeat`：仅更新状态栏提示，不写入 chat bubbles，可写入 timeline。
+1. `target_session_id == currentSessionId`：按原逻辑写入聊天流。
+2. `scope=agent && target_session_id != currentSessionId && source_type=heartbeat`：仅更新状态栏提示，不写入 chat bubbles，可写入 timeline。
 
 ### 7.5 Session 同步与投递全景
 
@@ -1335,12 +1347,12 @@ Channel session（Telegram/Web）在每次用户消息触发 turn 前，从 Prim
           │agent   │ │          │  │连接   │ │连接      │
           └────────┘ └──────────┘  └───────┘ └──────────┘
                        │
-                       ├─ tg_session_* → 推送到该 chat
-                       ├─ web_session_* → 不推送到 Telegram（return）
-                       └─ 未知来源 → 不推送到 Telegram（return）
+                       ├─ scope=agent → 广播给绑定该 agent 的 chat
+                       ├─ scope=session + target_channel=telegram → 仅推送到 target_session_id 对应 chat
+                       └─ target_channel!=telegram → Telegram subscriber 直接忽略
 ```
 
-Telegram 对 `deferred_result` 的路由规则：只有当 `session_id` 是 `tg_session_*` 格式时才推送到对应 chat，非 Telegram 来源直接忽略，避免跨渠道泄露。`heartbeat_delivery` 是 agent 级广播，推送到所有绑定该 agent 的 chat。
+Telegram/Web subscriber 的路由逻辑已统一：都先调用 `resolve_routing()`，再按 `scope + target_session_id + target_channel` 执行投递。`source_type` 只决定展示和后处理，不再承担路由职责。
 
 #### Flow ④：deferred_result 双路投递（超时后台任务完成时）
 
@@ -1353,10 +1365,13 @@ Telegram 对 `deferred_result` 的路由规则：只有当 `session_id` 是 `tg_
  │      → 写入发起会话的 history（Web/Telegram/Primary 均可）
  │      → LLM 后续 turn 可引用
  │
- └─(B) events.emit(session_id, ..., source_type="deferred_result")
+ └─(B) events.emit(source_session_id=session_id, ..., source_type="deferred_result",
+                   scope="session",
+                   target_session_id=session_id,
+                   target_channel=extract_channel_type(session_id))
         → 实时推送（见 Flow ③ 的 deferred_result 分支）
-        → Telegram: 仅当 session_id 是 tg_session_* 时推送到对应 chat
-        → Web: scope="session"，仅推到该 session 的 ws 连接
+        → Telegram: 仅当 target_channel=telegram 时推送到对应 chat
+        → Web: 仅当 target_channel=web 时推到该 session 的 ws 连接
 ```
 
 注：不使用 mailbox deposit——结果已在 history_messages 中，再通过 mailbox 以 "Background Updates" 前缀重复呈现给 LLM 是纯冗余。
@@ -1388,7 +1403,7 @@ Inspector 触发条件包括：文件变更（MEMORY.md/HEARTBEAT.md）、force 
 |----------|------|---------------|----------|
 | `heartbeat_delivery` | agent 级 | 广播所有绑定 chat | agent scope 广播 |
 | Inspector `push_message` | agent 级 | 同上（复用 heartbeat_delivery） | 同上 |
-| `deferred_result` | 会话级 | 仅原 tg chat / 非 tg 来源忽略 | 仅原 session ws |
+| `deferred_result` | 会话级 | `target_channel=telegram` 时仅目标 chat | `target_channel=web` 时仅目标 ws |
 | heartbeat inject（非实时） | 拉取式 | restore 时从 Primary 拉取最近 5 条 | 同左 |
 
 ---
@@ -1827,7 +1842,7 @@ Agent 在心跳 tick 中收到损坏上下文后，利用 Routine Tool 自主修
 
 **通信层：**
 
-10. 扩展事件 envelope：`agent_name/session_id/scope/source_type/run_id/deliver`。
+10. 扩展事件 envelope：`agent_name/source_session_id/scope/target_session_id/target_channel/source_type/run_id/deliver`，并由 `resolve_routing()` 统一解释路由语义。
 11. ChatService 增加 `connections_by_agent` 路由与 agent 维度广播。
 
 验收：
