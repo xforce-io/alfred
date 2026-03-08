@@ -26,6 +26,19 @@ class _Session:
     variables: Dict[str, Any] = field(default_factory=dict)
 
 
+def _make_llm_event(delta: str = "", answer: str = "") -> Dict[str, Any]:
+    """Build a raw dolphin-style event with an LLM progress entry."""
+    return {"_progress": [{"stage": "llm", "delta": delta, "answer": answer}]}
+
+
+def _make_tool_call_event(name: str = "_bash", args: str = "ls", pid: str = "p1") -> Dict[str, Any]:
+    return {"_progress": [{"stage": "tool_call", "tool_name": name, "args": args, "id": pid, "status": "running"}]}
+
+
+def _make_tool_output_event(output: str = "ok", pid: str = "p1") -> Dict[str, Any]:
+    return {"_progress": [{"stage": "tool_output", "tool_name": "_bash", "output": output, "id": pid, "status": "completed"}]}
+
+
 class _DummyAgent:
     def __init__(self, events: List[Dict[str, Any]]):
         self._events = events
@@ -103,7 +116,7 @@ async def test_turn_executor_heartbeat_strategy_includes_due_tasks():
         agent_name="demo",
         session_type="heartbeat",
     )
-    agent = _DummyAgent(events=[{"type": "delta", "content": "ok"}])
+    agent = _DummyAgent(events=[_make_llm_event(delta="done")])
     deps = RuntimeDeps(
         load_workspace_instructions=lambda agent_name: f"SYS:{agent_name}",
         list_due_tasks=lambda _agent_name: [{"id": "t1", "title": "Task", "description": "desc"}],
@@ -132,6 +145,91 @@ async def test_turn_executor_heartbeat_strategy_includes_due_tasks():
     assert "## Due Tasks" in agent.calls[0]["message"]
     assert "[t1] Task: desc" in agent.calls[0]["message"]
     assert "HB_INSTR" in agent.calls[0]["system_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_turn_executor_heartbeat_enforces_tool_budget():
+    """Heartbeat turn stops after exceeding HEARTBEAT_POLICY.max_tool_calls."""
+    session = _Session(
+        session_id="heartbeat_session_demo",
+        agent_name="demo",
+        session_type="heartbeat",
+    )
+    # Generate 20 tool call rounds (exceeds heartbeat max_tool_calls=10)
+    events: List[Dict[str, Any]] = []
+    for i in range(20):
+        pid = f"p{i}"
+        events.append(_make_tool_call_event(name="_bash", args=f"cmd_{i}", pid=pid))
+        events.append(_make_tool_output_event(output=f"output_{i}", pid=pid))
+        events.append(_make_llm_event(delta=f"round {i} "))
+
+    agent = _DummyAgent(events=events)
+    deps = RuntimeDeps(
+        load_workspace_instructions=lambda _: "SYS",
+        heartbeat_instructions="HB",
+    )
+    executor = TurnExecutor(deps)
+
+    async def _load_session(_sid: str):
+        return session
+
+    async def _get_or_create(_session: Any):
+        return agent
+
+    saved: list[str] = []
+
+    async def _save_session(_sid: str, _agent: Any):
+        saved.append(_sid)
+
+    result = await executor.execute_turn(
+        session_id=session.session_id,
+        trigger="tick",
+        load_session=_load_session,
+        get_or_create_agent=_get_or_create,
+        save_session=_save_session,
+    )
+
+    # Should have a _turn_error event from budget exceeded
+    error_events = [e for e in result.events if "_turn_error" in e]
+    assert error_events, "Expected TOOL_CALL_BUDGET_EXCEEDED error"
+    assert "TOOL_CALL_BUDGET_EXCEEDED" in error_events[0]["_turn_error"]
+    # Session should still be saved even after error
+    assert saved == [session.session_id]
+
+
+@pytest.mark.asyncio
+async def test_turn_executor_primary_bypasses_orchestrator():
+    """Primary sessions stream raw events without TurnOrchestrator wrapping."""
+    session = _Session(
+        session_id="web_session_demo",
+        agent_name="demo",
+        session_type="primary",
+        mailbox=[],
+    )
+    raw_event = {"type": "delta", "content": "hello"}
+    agent = _DummyAgent(events=[raw_event])
+    deps = RuntimeDeps(load_workspace_instructions=lambda _: "SYS")
+    executor = TurnExecutor(deps)
+
+    async def _load_session(_sid: str):
+        return session
+
+    async def _get_or_create(_session: Any):
+        return agent
+
+    async def _save_session(_sid: str, _agent: Any):
+        return None
+
+    result = await executor.execute_turn(
+        session_id=session.session_id,
+        trigger="hi",
+        load_session=_load_session,
+        get_or_create_agent=_get_or_create,
+        save_session=_save_session,
+    )
+
+    # Primary sessions pass through raw events unchanged
+    assert result.events == [raw_event]
 
 
 # ---------------------------------------------------------------------------

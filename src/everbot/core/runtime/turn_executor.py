@@ -7,6 +7,22 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from .context_strategy import ContextStrategy, RuntimeDeps, build_default_context_strategies
+from .turn_orchestrator import TurnOrchestrator
+from .turn_policy import (
+    TurnPolicy,
+    HEARTBEAT_POLICY,
+    JOB_POLICY,
+    CHAT_POLICY,
+    WORKFLOW_POLICY,
+    TurnEventType,
+)
+
+# Map session types to their turn policies.
+_SESSION_TYPE_POLICIES: Dict[str, TurnPolicy] = {
+    "heartbeat": HEARTBEAT_POLICY,
+    "job": JOB_POLICY,
+    "workflow": WORKFLOW_POLICY,
+}
 
 
 @dataclass
@@ -73,16 +89,54 @@ class TurnExecutor:
             system_prompt = strategy.build_system_prompt(session, self._runtime_deps)
             built = strategy.build_message(session, trigger, self._runtime_deps)
 
-            async for event in agent.continue_chat(
-                message=built.message,
-                stream_mode=stream_mode,
-                system_prompt=system_prompt,
-            ):
-                yield event
+            policy = _SESSION_TYPE_POLICIES.get(session_type)
+            if policy is not None:
+                orchestrator = TurnOrchestrator(policy)
+                async for event in orchestrator.run_turn(
+                    agent,
+                    built.message,
+                    system_prompt=system_prompt,
+                    stream_mode=stream_mode,
+                ):
+                    if event.type == TurnEventType.TURN_ERROR:
+                        yield {"_turn_error": event.error}
+                        break
+                    elif event.type == TurnEventType.TURN_COMPLETE:
+                        break
+                    else:
+                        yield self._turn_event_to_raw(event)
+            else:
+                async for event in agent.continue_chat(
+                    message=built.message,
+                    stream_mode=stream_mode,
+                    system_prompt=system_prompt,
+                ):
+                    yield event
 
             await save_session(session_id, agent)
             if ack_mailbox_events is not None and built.mailbox_ack_ids:
                 await ack_mailbox_events(session_id, built.mailbox_ack_ids)
+
+    @staticmethod
+    def _turn_event_to_raw(event: Any) -> Dict[str, Any]:
+        """Convert a TurnEvent back to raw dolphin-style event dict for consumers."""
+        progress: Dict[str, Any] = {}
+        if event.type == TurnEventType.LLM_DELTA:
+            progress = {"stage": "llm", "delta": event.content, "answer": ""}
+        elif event.type == TurnEventType.TOOL_CALL:
+            progress = {"stage": "tool_call", "tool_name": event.tool_name, "args": event.tool_args,
+                        "id": event.pid, "status": event.status}
+        elif event.type == TurnEventType.TOOL_OUTPUT:
+            progress = {"stage": "tool_output", "tool_name": event.tool_name, "output": event.tool_output,
+                        "id": event.pid, "status": event.status, "reference_id": event.reference_id}
+        elif event.type == TurnEventType.SKILL:
+            progress = {"stage": "skill", "skill_info": {"name": event.skill_name, "args": event.skill_args},
+                        "answer": event.skill_output, "id": event.pid, "status": event.status}
+        elif event.type == TurnEventType.STATUS:
+            progress = {"stage": "llm", "delta": "", "answer": ""}
+        else:
+            return {}
+        return {"_progress": [progress]}
 
     async def execute_turn(
         self,
