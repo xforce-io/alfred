@@ -148,6 +148,95 @@ class SessionPersistence:
             and not _is_placeholder(m)
         ]
 
+    @staticmethod
+    def _heal_orphan_tool_messages(messages: list) -> list:
+        """Promote orphan tool messages to user context so SDK repair won't drop them.
+
+        An orphan tool message is one with ``role=tool`` that has no preceding
+        ``role=assistant`` message containing a matching ``tool_call_id`` in its
+        ``tool_calls`` list.  This happens when the assistant tool_use message
+        is lost (e.g. during context compression or portable-session export).
+
+        Rather than letting the SDK silently discard these (losing skill docs,
+        folder listings, etc.), we merge each orphan's content into the nearest
+        preceding ``role=user`` message as a context appendix.
+        """
+        if not messages:
+            return messages
+
+        # Build set of tool_call_ids that have a parent assistant message.
+        paired_ids: set = set()
+        for m in messages:
+            if (isinstance(m, dict)
+                    and m.get("role") == "assistant"
+                    and m.get("tool_calls")):
+                for tc in m["tool_calls"]:
+                    tc_id = tc.get("id")
+                    if tc_id:
+                        paired_ids.add(tc_id)
+
+        # Identify orphan indices.
+        orphan_indices: set = set()
+        for i, m in enumerate(messages):
+            if (isinstance(m, dict)
+                    and m.get("role") == "tool"
+                    and m.get("tool_call_id") not in paired_ids):
+                orphan_indices.add(i)
+
+        if not orphan_indices:
+            return messages
+
+        # Merge each orphan into the nearest preceding user message.
+        result: list = []
+        pending_orphan_texts: list = []
+
+        for i, m in enumerate(messages):
+            if i in orphan_indices:
+                content = m.get("content", "")
+                if content:
+                    pending_orphan_texts.append(content)
+                continue  # drop the tool message itself
+
+            if m.get("role") == "user" and pending_orphan_texts:
+                # Shouldn't happen (orphan before any user), but guard.
+                pass
+
+            if pending_orphan_texts and m.get("role") != "tool":
+                # Flush orphan texts into the LAST user message in result.
+                for j in range(len(result) - 1, -1, -1):
+                    if result[j].get("role") == "user":
+                        existing = result[j].get("content", "")
+                        sep = "\n\n---\n" if existing else ""
+                        result[j] = dict(result[j])  # avoid mutating original
+                        result[j]["content"] = existing + sep + "\n".join(pending_orphan_texts)
+                        break
+                else:
+                    # No preceding user message — create one.
+                    result.insert(0, {
+                        "role": "user",
+                        "content": "\n".join(pending_orphan_texts),
+                    })
+                pending_orphan_texts = []
+
+            result.append(m)
+
+        # Handle orphans at the very end (after all messages).
+        if pending_orphan_texts:
+            for j in range(len(result) - 1, -1, -1):
+                if result[j].get("role") == "user":
+                    existing = result[j].get("content", "")
+                    sep = "\n\n---\n" if existing else ""
+                    result[j] = dict(result[j])
+                    result[j]["content"] = existing + sep + "\n".join(pending_orphan_texts)
+                    break
+            else:
+                result.insert(0, {
+                    "role": "user",
+                    "content": "\n".join(pending_orphan_texts),
+                })
+
+        return result
+
     def _get_session_path(self, session_id: str) -> Path:
         """获取 Session 文件路径"""
         if not self.is_safe_session_id(session_id):
@@ -469,6 +558,14 @@ class SessionPersistence:
             #     into history are normalized but kept for backward compatibility
             #     with existing session files.
             history = prepare_for_restore(history)
+
+            # 0c. Heal orphan tool messages before SDK import.
+            #     A tool message without a preceding assistant tool_use (e.g.
+            #     _load_resource_skill result whose assistant message was lost
+            #     during compression/export) would be dropped by SDK repair.
+            #     Promote orphan tool content into the preceding user message
+            #     so the context is preserved.
+            history = self._heal_orphan_tool_messages(history)
 
             # NOTE: heartbeat_context merging has been removed.
             # Channel sessions now receive heartbeat results via their own

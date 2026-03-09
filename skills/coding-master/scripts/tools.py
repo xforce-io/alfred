@@ -2280,14 +2280,27 @@ def cmd_start(args) -> dict:
 # ══════════════════════════════════════════════════════════
 
 
+def _add_global_args(parser: argparse.ArgumentParser, *, is_parent: bool = False) -> None:
+    """Register --repo and --agent on *parser*.
+
+    On the parent parser, use ``default=None`` so the value is always present.
+    On sub-parsers, use ``default=SUPPRESS`` so the sub-parser only sets the
+    attribute when the user explicitly passes the flag — otherwise the parent's
+    value is preserved.
+    """
+    default = None if is_parent else argparse.SUPPRESS
+    parser.add_argument("--repo", "-r", default=default, help="Target repo name")
+    parser.add_argument("--agent", default=default, help="Agent identity")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="cm", description="Coding Master v3")
-    parser.add_argument("--repo", "-r", default=None, help="Target repo name")
-    parser.add_argument("--agent", default=None, help="Agent identity")
+    _add_global_args(parser, is_parent=True)
     sub = parser.add_subparsers(dest="command")
 
     # start
     p_start = sub.add_parser("start", help="One-shot: lock + plan + plan-ready")
+    _add_global_args(p_start)
     p_start.add_argument("--branch", default=None)
     p_start.add_argument("--plan-file", default=None, help="Path to PLAN.md to copy")
     p_start.add_argument("--mode", default="deliver", choices=list(MODES.keys()),
@@ -2295,28 +2308,31 @@ def main():
 
     # lock
     p_lock = sub.add_parser("lock", help="Lock workspace")
+    _add_global_args(p_lock)
     p_lock.add_argument("--branch", default=None)
     p_lock.add_argument("--mode", default="deliver", choices=list(MODES.keys()),
                         help="Session mode: deliver, review, debug, analyze")
 
     # unlock
-    sub.add_parser("unlock", help="Release lock")
+    _add_global_args(sub.add_parser("unlock", help="Release lock"))
 
     # status
-    sub.add_parser("status", help="Show lock status")
+    _add_global_args(sub.add_parser("status", help="Show lock status"))
 
     # renew
-    sub.add_parser("renew", help="Renew lease")
+    _add_global_args(sub.add_parser("renew", help="Renew lease"))
 
     # plan-ready
-    sub.add_parser("plan-ready", help="Validate PLAN.md")
+    _add_global_args(sub.add_parser("plan-ready", help="Validate PLAN.md"))
 
     # claim
     p_claim = sub.add_parser("claim", help="Claim a feature")
+    _add_global_args(p_claim)
     p_claim.add_argument("--feature", "-f", required=True, type=int)
 
     # scope (review/debug/analyze modes)
     p_scope = sub.add_parser("scope", help="Define analysis/review scope")
+    _add_global_args(p_scope)
     p_scope.add_argument("--diff", default=None, help="Diff range (e.g. HEAD~3..HEAD)")
     p_scope.add_argument("--files", nargs="*", default=None, help="File paths or globs")
     p_scope.add_argument("--pr", default=None, help="PR number or URL")
@@ -2324,49 +2340,59 @@ def main():
 
     # report (review/debug/analyze modes)
     p_report = sub.add_parser("report", help="Write session report or diagnosis")
+    _add_global_args(p_report)
     p_report.add_argument("--content", default=None, help="Report content (inline)")
     p_report.add_argument("--file", default=None, help="Path to report file to copy")
 
     # delegate-prepare
     p_delegate_prepare = sub.add_parser("delegate-prepare", help="Prepare delegation request for a feature")
+    _add_global_args(p_delegate_prepare)
     p_delegate_prepare.add_argument("--feature", "-f", required=True, type=int)
 
     # delegate-complete
     p_delegate_complete = sub.add_parser("delegate-complete", help="Mark delegation complete when artifacts exist")
+    _add_global_args(p_delegate_complete)
     p_delegate_complete.add_argument("--feature", "-f", required=True, type=int)
 
     # dev
     p_dev = sub.add_parser("dev", help="Advance to developing")
+    _add_global_args(p_dev)
     p_dev.add_argument("--feature", "-f", required=True, type=int)
 
     # test
     p_test = sub.add_parser("test", help="Run tests for feature")
+    _add_global_args(p_test)
     p_test.add_argument("--feature", "-f", required=True, type=int)
 
     # done
     p_done = sub.add_parser("done", help="Mark feature done")
+    _add_global_args(p_done)
     p_done.add_argument("--feature", "-f", required=True, type=int)
 
     # reopen
     p_reopen = sub.add_parser("reopen", help="Reopen done feature")
+    _add_global_args(p_reopen)
     p_reopen.add_argument("--feature", "-f", required=True, type=int)
 
     # integrate
-    sub.add_parser("integrate", help="Merge + integration tests")
+    _add_global_args(sub.add_parser("integrate", help="Merge + integration tests"))
 
     # submit
     p_submit = sub.add_parser("submit", help="Push + PR + cleanup")
+    _add_global_args(p_submit)
     p_submit.add_argument("--title", "-t", required=True)
 
     # progress
-    sub.add_parser("progress", help="Show progress + action guidance")
+    _add_global_args(sub.add_parser("progress", help="Show progress + action guidance"))
 
     # journal
     p_journal = sub.add_parser("journal", help="Append to JOURNAL.md")
+    _add_global_args(p_journal)
     p_journal.add_argument("--message", "-m", required=True)
 
     # doctor
     p_doctor = sub.add_parser("doctor", help="Diagnose + fix state")
+    _add_global_args(p_doctor)
     p_doctor.add_argument("--fix", action="store_true")
 
     args = parser.parse_args()

@@ -62,6 +62,15 @@ class Task:
         filtered.setdefault("enabled", True)
         filtered.setdefault("timezone", None)
         filtered.setdefault("execution_mode", "inline")
+        # Normalize unknown state values to pending
+        _valid_states = {s.value for s in TaskState}
+        raw_state = filtered.get("state")
+        if raw_state is not None and raw_state not in _valid_states:
+            logger.warning(
+                "Task %s has invalid state %r, normalizing to pending",
+                filtered.get("id", "?"), raw_state,
+            )
+            filtered["state"] = TaskState.PENDING.value
         return cls(**filtered)
 
 
@@ -407,6 +416,18 @@ def heal_stuck_scheduled_tasks(
                 "Healed stuck done task %s (%s): re-armed as pending, next_run=%s",
                 task.id, task.title, task.next_run_at,
             )
+        elif task.schedule and task.state not in {s.value for s in TaskState}:
+            # Unknown state (e.g. "completed" written by LLM editing file
+            # directly) — treat as stuck and re-arm.
+            logger.warning(
+                "Healed task %s (%s) with unknown state %r: re-armed as pending",
+                task.id, task.title, task.state,
+            )
+            task.state = TaskState.PENDING.value
+            task.retry = 0
+            task.error_message = None
+            task.next_run_at = _compute_next_run(task.schedule, now, task.timezone)
+            healed += 1
     return healed
 
 
