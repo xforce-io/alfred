@@ -144,7 +144,7 @@ def _atomic_json_read(path: Path) -> dict:
         try:
             content = f.read()
             return json.loads(content) if content.strip() else {}
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return {}
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
