@@ -29,6 +29,7 @@ def _make_session_manager_mock():
     sm.restore_to_agent = AsyncMock()
     sm.append_timeline_event = MagicMock()
     sm.inject_history_message = AsyncMock(return_value=True)
+    sm.deposit_mailbox_event = AsyncMock(return_value=True)
     sm.persistence = MagicMock()
     sm.persistence._get_lock_path.return_value = Path("/tmp/test_lock")
     return sm
@@ -200,17 +201,15 @@ class TestEventFiltering:
         msg = channel._send_message.call_args[0][1]
         assert "Heartbeat" in msg
         assert "Task completed" in msg
-        # Verify the result was injected into the Telegram session history
+        # Verify the result was deposited into the Telegram session mailbox
         sm = channel._session_manager
-        sm.inject_history_message.assert_awaited_once()
-        call_args = sm.inject_history_message.call_args
-        injected_session_id = call_args[0][0]
-        injected_msg = call_args[0][1]
-        assert injected_session_id == "tg_session_my_agent__111"
-        assert injected_msg["role"] == "assistant"
-        assert "Task completed" in injected_msg["content"]
-        assert injected_msg["content"].startswith("[此消息由心跳系统自动执行例行任务生成]")
-        assert injected_msg["metadata"]["source"] == "heartbeat_delivery"
+        sm.deposit_mailbox_event.assert_awaited_once()
+        call_args = sm.deposit_mailbox_event.call_args
+        deposited_session_id = call_args[0][0]
+        deposited_event = call_args[0][1]
+        assert deposited_session_id == "tg_session_my_agent__111"
+        assert deposited_event["event_type"] == "heartbeat_result"
+        assert "Task completed" in deposited_event["detail"]
 
     @pytest.mark.asyncio
     async def test_ignores_non_heartbeat_delivery(self, channel):

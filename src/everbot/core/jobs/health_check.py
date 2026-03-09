@@ -13,6 +13,7 @@ Bot API to ensure delivery even when the session pipeline is broken.
 import json
 import logging
 import os
+import resource
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -93,6 +94,9 @@ async def run(context: SkillContext) -> str:
 
     # 4. Session storage health
     results.append(_check_session_storage(context))
+
+    # 5. Process resource usage
+    results.append(_check_process_resources())
 
     # Evaluate results
     failures = [r for r in results if not r.ok]
@@ -260,6 +264,58 @@ def _check_session_storage(context: SkillContext) -> CheckResult:
         )
     except Exception as e:
         return CheckResult(name="sessions", ok=False, message=str(e), critical=False)
+
+
+def _check_process_resources() -> CheckResult:
+    """Check process memory and uptime."""
+    try:
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        # maxrss is in bytes on Linux, kilobytes on macOS
+        import sys
+        if sys.platform == "darwin":
+            rss_mb = usage.ru_maxrss / (1024 * 1024)
+        else:
+            rss_mb = usage.ru_maxrss / 1024
+
+        pid = os.getpid()
+        # Process uptime via /proc on Linux, or ps on macOS
+        uptime_str = "unknown"
+        try:
+            if sys.platform == "darwin":
+                import subprocess
+                result = subprocess.run(
+                    ["ps", "-o", "etime=", "-p", str(pid)],
+                    capture_output=True, text=True, timeout=5,
+                )
+                uptime_str = result.stdout.strip() if result.returncode == 0 else "unknown"
+            else:
+                stat_path = Path(f"/proc/{pid}/stat")
+                if stat_path.exists():
+                    # Use clock ticks from /proc/stat
+                    boot_ticks = int(stat_path.read_text().split(")")[1].split()[19])
+                    clk_tck = os.sysconf("SC_CLK_TCK")
+                    uptime_secs = time.time() - boot_ticks / clk_tck
+                    hours, remainder = divmod(int(uptime_secs), 3600)
+                    mins, _ = divmod(remainder, 60)
+                    uptime_str = f"{hours}h{mins}m"
+        except Exception:
+            pass
+
+        # Warn if RSS > 512MB
+        if rss_mb > 512:
+            return CheckResult(
+                name="process",
+                ok=False,
+                message=f"high memory: {rss_mb:.0f}MB RSS, pid={pid}, uptime={uptime_str}",
+                critical=False,
+            )
+        return CheckResult(
+            name="process",
+            ok=True,
+            message=f"{rss_mb:.0f}MB RSS, pid={pid}, uptime={uptime_str}",
+        )
+    except Exception as e:
+        return CheckResult(name="process", ok=False, message=str(e), critical=False)
 
 
 # ── Alerting ──────────────────────────────────────────────────

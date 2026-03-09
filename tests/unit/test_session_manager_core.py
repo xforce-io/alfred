@@ -1259,14 +1259,14 @@ class TestIsolatedJobResultNotRestoredToLLMContext:
             "Heartbeat source markers must be preserved during restore"
         )
 
-        # But heartbeat content should be preserved (prefix stripped)
-        contents = [m.get("content") for m in restored_history]
-        assert "MicroStrategy 吸引子分析：当前价格..." in contents
-        assert "会话轨迹健康检测结果..." in contents
+        # Heartbeat content should be preserved (original prefix normalized)
+        all_content = " ".join(m.get("content", "") for m in restored_history)
+        assert "MicroStrategy 吸引子分析：当前价格..." in all_content
+        assert "会话轨迹健康检测结果..." in all_content
 
         # Placeholders should be gone
-        assert "(acknowledged)" not in contents
-        assert "[Background notification follows]" not in contents
+        assert "(acknowledged)" not in all_content
+        assert "[Background notification follows]" not in all_content
 
     @pytest.mark.asyncio
     async def test_heartbeat_placeholder_messages_filtered_during_restore(self, tmp_path: Path):
@@ -1354,7 +1354,7 @@ class TestIsolatedJobResultNotRestoredToLLMContext:
         assert len(restored_history) == 3, (
             f"Expected 3 messages (multimodal user + assistant reply + heartbeat result), got {len(restored_history)}"
         )
-        # Heartbeat result normalized: prefix stripped, source preserved
+        # Heartbeat result normalized: prefix replaced with standard label, source preserved
         hb_msg = restored_history[2]
-        assert hb_msg["content"] == "结果..."
+        assert "结果..." in hb_msg["content"]
         assert hb_msg.get("metadata", {}).get("source") == "heartbeat"

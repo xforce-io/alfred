@@ -179,6 +179,7 @@ If not, reply with `HEARTBEAT_OK`.
         self._reflect_force_interval = timedelta(hours=max(1, int(reflect_force_interval_hours or 24)))
         self._idle_cooldown_seconds = max(0, int(idle_cooldown_minutes or 15)) * 60
         self._reflection = ReflectionManager(workspace_path, self._reflect_force_interval)
+        self._pending_delivery_details: list[str] = []
         if summary_max_chars is not None:
             self.SUMMARY_MAX_CHARS = max(1, int(summary_max_chars))
 
@@ -710,6 +711,10 @@ If not, reply with `HEARTBEAT_OK`.
                         include_inline=include_inline,
                         include_isolated=include_isolated,
                     )
+                    # Buffer deliverable results so the inspector can attach
+                    # them as delivery_detail alongside the push_message.
+                    if self._should_deliver(result):
+                        self._pending_delivery_details.append(result)
                 elif self._file_mgr.heartbeat_mode == "structured_reflect":
                     inspection = await self._inspector.inspect(
                         run_agent=self._run_agent,
@@ -727,6 +732,17 @@ If not, reply with `HEARTBEAT_OK`.
                     # Refresh in-memory task snapshot if routines were added
                     if inspection.applied > 0:
                         self._read_heartbeat_md()
+                    # Attach buffered job results as delivery_detail if the
+                    # inspector didn't already set it.  This ensures the
+                    # push_message (summary) and job result (detail) travel
+                    # together in a single delivery event.
+                    if inspection.push_message and not inspection.delivery_detail:
+                        if self._pending_delivery_details:
+                            inspection.delivery_detail = "\n\n---\n\n".join(
+                                self._pending_delivery_details
+                            )
+                    # Clear buffer after inspector has had a chance to use it
+                    self._pending_delivery_details.clear()
                     # Emit push_message so Telegram (and other channels)
                     # receive it in real-time instead of waiting for mailbox drain.
                     if inspection.push_message:
@@ -737,6 +753,7 @@ If not, reply with `HEARTBEAT_OK`.
                             agent_name=self.agent_name,
                             run_id=run_id,
                             scope=self.broadcast_scope,
+                            detail=inspection.delivery_detail,
                         )
                     result = inspection.output
                 elif self._file_mgr.heartbeat_mode == "corrupted":
@@ -760,7 +777,9 @@ If not, reply with `HEARTBEAT_OK`.
                 await self._save_session_atomic(agent)
 
                 if deliver:
-                    await self._inject_result_to_primary_history(result, run_id)
+                    # Mailbox-only: no longer inject as fake assistant message
+                    # into history. Results are delivered via mailbox deposit
+                    # and consumed as "## Background Updates" on next user turn.
                     await self._deposit_deliver_event_to_primary_session(result, run_id)
                 if deliver and self.realtime_status_hint:
                     post_message = {
@@ -932,9 +951,8 @@ If not, reply with `HEARTBEAT_OK`.
                 detail=result,
                 run_id=run_id,
             )
-            # Persist the actual result into primary session history so it
-            # survives page refreshes (mailbox events are ACKed on drain).
-            await self._inject_result_to_primary_history(result, run_id)
+            # Mailbox-only: job result is delivered via mailbox deposit above.
+            # No longer inject as fake assistant message into history.
             # Emit heartbeat_delivery event so Telegram (and other
             # subscribers) push the result in real time.
             from .events import emit
@@ -1071,7 +1089,7 @@ If not, reply with `HEARTBEAT_OK`.
             context = self._build_skill_context(scan_result)
 
             # Import and run skill
-            skill_module = importlib.import_module(f"everbot.core.skills.{skill_name.replace('-', '_')}")
+            skill_module = importlib.import_module(f"everbot.core.jobs.{skill_name.replace('-', '_')}")
             result = await skill_module.run(context)
 
             duration_ms = int(_time.time() * 1000) - start_ms

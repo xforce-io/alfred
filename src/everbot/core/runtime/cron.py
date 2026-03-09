@@ -553,7 +553,7 @@ class CronExecutor:
 
         try:
             context = self._build_skill_context(scan_result)
-            skill_module = importlib.import_module(f"everbot.core.skills.{skill_name.replace('-', '_')}")
+            skill_module = importlib.import_module(f"everbot.core.jobs.{skill_name.replace('-', '_')}")
             result = await skill_module.run(context)
 
             duration_ms = int(_time.time() * 1000) - start_ms

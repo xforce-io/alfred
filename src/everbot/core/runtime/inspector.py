@@ -43,6 +43,7 @@ class InspectionContext:
     recent_events: List[Dict[str, Any]] = field(default_factory=list)
     existing_routines: List[Any] = field(default_factory=list)
     idle_hours: Optional[float] = None
+    system_health: Optional[str] = None
 
 
 @dataclass
@@ -51,6 +52,7 @@ class InspectionResult:
 
     heartbeat_ok: bool = True
     push_message: Optional[str] = None
+    delivery_detail: Optional[str] = None
     proposals: List[dict] = field(default_factory=list)
     skipped: bool = False
     skip_reason: Optional[str] = None
@@ -66,11 +68,17 @@ async def emit_push_message(
     agent_name: str,
     run_id: str,
     scope: str = "agent",
+    detail: Optional[str] = None,
 ) -> None:
     """Emit an inspector push_message as a heartbeat_delivery event.
 
     Shared by HeartbeatRunner and daemon's _run_inspector to avoid duplicated
     event-building logic.
+
+    Args:
+        push_message: Concise user-facing summary (sent to Telegram).
+        detail: Full job result for LLM context. Falls back to push_message
+                if not provided (backward compatibility).
     """
     from .events import emit
     routing_kwargs = {
@@ -85,7 +93,7 @@ async def emit_push_message(
             "role": "assistant",
             "content": push_message,
             "summary": push_message[:SUMMARY_MAX_CHARS],
-            "detail": push_message,
+            "detail": detail or push_message,
             "source_type": "heartbeat_delivery",
             "run_id": run_id,
             "deliver": True,
@@ -243,6 +251,20 @@ class Inspector:
             except Exception as exc:
                 logger.debug("Failed to list routines: %s", exc)
 
+        # System health snapshot (process resources + disk)
+        system_health = None
+        try:
+            from ..jobs.health_check import _check_process_resources, _check_session_storage
+            proc = _check_process_resources()
+            storage = _check_session_storage(
+                type("_Ctx", (), {"sessions_dir": self.workspace_path / "sessions"})()
+            )
+            parts = [f"进程: {proc.message}"]
+            parts.append(f"存储: {storage.message}")
+            system_health = "; ".join(parts)
+        except Exception as exc:
+            logger.debug("Failed to gather system health: %s", exc)
+
         # Compute idle hours since last user interaction
         idle_hours = None
         if session_manager:
@@ -261,6 +283,7 @@ class Inspector:
             recent_events=recent_events,
             existing_routines=existing_routines,
             idle_hours=idle_hours,
+            system_health=system_health,
         )
 
     def _gather_task_stats(self) -> Dict[str, Any]:
@@ -556,6 +579,10 @@ class Inspector:
             events_text = json.dumps(ctx.recent_events[:5], indent=2)
             sections.append(f"# Recent Events (last 24h)\n{events_text}")
 
+        # System health section
+        if ctx.system_health:
+            sections.append(f"# System Health\n{ctx.system_health}")
+
         # Existing routines section
         if ctx.existing_routines:
             routines_text = "\n".join(
@@ -570,7 +597,7 @@ class Inspector:
 
 你是用户的私人助理。根据上述上下文，做出以下判断：
 
-1. **系统健康检查**：系统是否正常运行？(heartbeat_ok)
+1. **系统健康**：系统是否正常运行？(heartbeat_ok)
 2. **主动沟通**：综合考虑用户的兴趣、习惯、当前任务状态和空闲时长，判断现在是否值得主动给用户发一条消息。这不限于紧急问题——可以是任务执行情况的总结、基于用户兴趣的洞察、对近期工作的回顾、或任何你认为用户会感兴趣的话题。用你自己的判断力决定是否发送以及发送什么内容。如果没有什么值得说的，保持沉默即可。(push_message)
 3. **Routine 提议**：是否需要提议新的定时任务？(routines)
 
@@ -585,7 +612,14 @@ class Inspector:
 
 - heartbeat_ok: false 表示系统存在需要关注的问题
 - push_message: 你想主动发给用户的消息内容（会立即推送），null 表示保持沉默
-- routines: routine 任务提议数组"""
+- routines: routine 任务提议数组
+
+## push_message 语气要求
+push_message 是直接发送给用户的消息。请用**自然的助手口吻**书写，就像你在和用户聊天一样。
+- 不要用"【系统健康快照】"这类标题，不要用编号列表罗列问题
+- 如果发现了系统异常，用关心的语气简要提醒，比如："我注意到最近 kimi 的接口不太稳定，连着失败了好几次，我先用备选模型顶上了，你看需要我做什么调整吗？"
+- 如果一切正常想主动聊聊，就像朋友随口说一句，比如："今天跑了几个任务都挺顺利的，没什么需要操心的。"
+- 避免使用技术术语堆砌（如"工具级故障密度偏高"），用大白话说清楚就好"""
         )
 
         return "\n\n".join(sections)
@@ -670,7 +704,7 @@ class Inspector:
                 event_type="inspector_push",
                 source_session_id=f"inspector:{self.agent_name}",
                 summary=result.push_message[:SUMMARY_MAX_CHARS],
-                detail=result.push_message,
+                detail=result.delivery_detail or result.push_message,
                 artifacts=[],
                 priority=1,
                 suppress_if_stale=False,

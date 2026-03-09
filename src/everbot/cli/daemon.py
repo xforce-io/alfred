@@ -502,12 +502,18 @@ class EverBotDaemon:
         self._write_status_snapshot()
 
     def health_check(self) -> Dict:
+        import resource as _resource
+        import sys as _sys
+        usage = _resource.getrusage(_resource.RUSAGE_SELF)
+        rss_mb = usage.ru_maxrss / (1024 * 1024) if _sys.platform == "darwin" else usage.ru_maxrss / 1024
         return {
             "status": "running" if self._running else "stopped",
             "timestamp": datetime.now().isoformat(),
             "agents": list(self.heartbeat_runners.keys()),
             "heartbeats": self._heartbeat_state,
             "session_count": len(self.session_manager._agents) if self.session_manager else 0,
+            "pid": os.getpid(),
+            "rss_mb": round(rss_mb, 1),
         }
 
 
