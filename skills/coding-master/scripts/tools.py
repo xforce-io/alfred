@@ -1174,6 +1174,10 @@ def _doctor_auto_fix(repo: Path, issues: list[str]):
             wt_path = issue.split(": ", 1)[1] if ": " in issue else ""
             if wt_path and Path(wt_path).exists():
                 _remove_worktree(repo, wt_path)
+                # Fallback: if git worktree remove didn't work (e.g. not a real worktree)
+                import shutil
+                if Path(wt_path).exists():
+                    shutil.rmtree(wt_path, ignore_errors=True)
 
         elif "worktree" in issue and "does not exist" in issue:
             # Reset feature to pending
