@@ -7,6 +7,7 @@ from src.everbot.core.session.history_utils import (
     MAX_HEARTBEAT_MESSAGES,
     COMPACT_TOKEN_BUDGET,
     COMPACT_WINDOW_TOKENS,
+    _HEARTBEAT_CONTEXT_MARKER,
     _is_heartbeat,
     _is_placeholder,
     _estimate_tokens,
@@ -418,7 +419,7 @@ class TestRestoreFilter:
         # user("hi") + heartbeat_result(normalized) + user("bye") = 3
         assert len(result) == 3
         assert result[1]["role"] == "assistant"
-        assert result[1]["content"] == "检测正常"
+        assert result[1]["content"] == _HEARTBEAT_CONTEXT_MARKER + "检测正常"
         # metadata.source must be preserved so heartbeat stays identifiable
         assert _is_heartbeat(result[1])
 
@@ -427,7 +428,7 @@ class TestRestoreFilter:
         result = prepare_for_restore(history)
         # 2 placeholders removed, 1 heartbeat result kept
         assert len(result) == 1
-        assert result[0]["content"] == "检测正常"
+        assert result[0]["content"] == _HEARTBEAT_CONTEXT_MARKER + "检测正常"
         assert _is_heartbeat(result[0])
 
     def test_legacy_placeholder_removed(self):
@@ -442,8 +443,8 @@ class TestRestoreFilter:
         history = [_legacy_heartbeat("test")]
         result = prepare_for_restore(history)
         assert len(result) == 1
-        assert result[0]["content"] == "test"  # prefix stripped
-        assert not _is_heartbeat(result[0])
+        assert result[0]["content"] == _HEARTBEAT_CONTEXT_MARKER + "test"
+        assert _is_heartbeat(result[0])
 
     def test_chat_preserved_with_heartbeat(self):
         history = [_user("hi"), _assistant("hello"), *_heartbeat_turn("hb_1"), _user("q")]
@@ -452,7 +453,7 @@ class TestRestoreFilter:
         assert len(result) == 4
         assert result[0]["content"] == "hi"
         assert result[1]["content"] == "hello"
-        assert result[2]["content"] == "检测正常"
+        assert result[2]["content"] == _HEARTBEAT_CONTEXT_MARKER + "检测正常"
         assert result[3]["content"] == "q"
 
     def test_preserves_valid_structure(self):
@@ -480,7 +481,7 @@ class TestRestoreFilter:
     def test_normalize_strips_legacy_prefix(self):
         legacy = _legacy_heartbeat("actual content")
         normalized = _normalize_heartbeat(legacy)
-        assert normalized["content"] == "actual content"
+        assert normalized["content"] == _HEARTBEAT_CONTEXT_MARKER + "actual content"
         assert "metadata" not in normalized or normalized.get("metadata") is None
 
     def test_old_filter_still_works(self):
@@ -600,8 +601,8 @@ class TestExtractRecentHeartbeat:
         ]
         result = extract_recent_heartbeat(history)
         assert len(result) == 2
-        assert result[0]["content"] == "report 1"
-        assert result[1]["content"] == "report 2"
+        assert result[0]["content"] == _HEARTBEAT_CONTEXT_MARKER + "report 1"
+        assert result[1]["content"] == _HEARTBEAT_CONTEXT_MARKER + "report 2"
         # metadata.source preserved for identification across round-trips
         for m in result:
             meta = m.get("metadata") or {}
@@ -613,8 +614,8 @@ class TestExtractRecentHeartbeat:
         history = [_heartbeat_msg(f"hb_{i}", f"report {i}") for i in range(10)]
         result = extract_recent_heartbeat(history, max_count=3)
         assert len(result) == 3
-        assert result[0]["content"] == "report 7"
-        assert result[2]["content"] == "report 9"
+        assert result[0]["content"] == _HEARTBEAT_CONTEXT_MARKER + "report 7"
+        assert result[2]["content"] == _HEARTBEAT_CONTEXT_MARKER + "report 9"
 
     def test_empty_history(self):
         from src.everbot.core.session.history_utils import extract_recent_heartbeat
@@ -633,7 +634,7 @@ class TestExtractRecentHeartbeat:
         history = [_legacy_heartbeat("legacy content")]
         result = extract_recent_heartbeat(history)
         assert len(result) == 1
-        assert result[0]["content"] == "legacy content"
+        assert result[0]["content"] == _HEARTBEAT_CONTEXT_MARKER + "legacy content"
 
 
 class TestRestoreWithHeartbeatContext:

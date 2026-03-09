@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# EverBot Watchdog — cron-driven health check with Telegram alerting
+#
+# Install:
+#   crontab -e
+#   */2 * * * * /home/ecs-user/dev/github/alfred/bin/everbot-watchdog
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Source secrets (for TELEGRAM_BOT_TOKEN)
+if [[ -f "${HOME}/.env.secrets" ]]; then
+  set -a
+  source "${HOME}/.env.secrets"
+  set +a
+fi
+
+ALFRED_HOME="${ALFRED_HOME:-$HOME/.alfred}"
+PID_FILE="${ALFRED_HOME}/everbot.pid"
+WATCHDOG_STATE="${ALFRED_HOME}/watchdog.state"
+LOG_FILE="${ALFRED_HOME}/logs/watchdog.log"
+
+# Telegram alert config
+BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+ALERT_CHAT_ID="${EVERBOT_ALERT_CHAT_ID:-${EVERBOT_OWNER_CHAT_ID:-}}"
+
+# Cooldown: don't spam alerts (seconds between alerts)
+ALERT_COOLDOWN=300
+
+mkdir -p "$(dirname "${LOG_FILE}")"
+
+log() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "${LOG_FILE}"
+}
+
+send_telegram() {
+  local message="$1"
+  if [[ -z "${BOT_TOKEN}" || -z "${ALERT_CHAT_ID}" ]]; then
+    log "WARN: Cannot send alert — BOT_TOKEN or ALERT_CHAT_ID not set"
+    return 1
+  fi
+  curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+    -d chat_id="${ALERT_CHAT_ID}" \
+    -d text="${message}" \
+    -d parse_mode="Markdown" \
+    --max-time 10 > /dev/null 2>&1 || true
+}
+
+should_alert() {
+  if [[ ! -f "${WATCHDOG_STATE}" ]]; then
+    return 0
+  fi
+  local last_alert
+  last_alert="$(cat "${WATCHDOG_STATE}" 2>/dev/null || echo 0)"
+  local now
+  now="$(date +%s)"
+  if (( now - last_alert >= ALERT_COOLDOWN )); then
+    return 0
+  fi
+  return 1
+}
+
+mark_alerted() {
+  date +%s > "${WATCHDOG_STATE}"
+}
+
+clear_alert_state() {
+  rm -f "${WATCHDOG_STATE}"
+}
+
+# ── Main check ──────────────────────────────────────────────────────
+
+if [[ ! -f "${PID_FILE}" ]]; then
+  log "FAIL: PID file missing"
+  if should_alert; then
+    send_telegram "⚠️ *EverBot Down*
+Daemon PID file not found. Attempting auto-restart...
+\`$(hostname)\` $(date '+%H:%M')"
+    mark_alerted
+  fi
+
+  # Auto-restart
+  log "Attempting auto-restart..."
+  "${SCRIPT_DIR}/everbot" restart >> "${LOG_FILE}" 2>&1 && {
+    log "Auto-restart succeeded"
+    send_telegram "✅ *EverBot Recovered*
+Auto-restart succeeded.
+\`$(hostname)\` $(date '+%H:%M')"
+    clear_alert_state
+  } || {
+    log "Auto-restart FAILED"
+  }
+  exit 1
+fi
+
+pid="$(tr -d ' \n\r\t' < "${PID_FILE}" || true)"
+
+if [[ -z "${pid}" ]]; then
+  log "FAIL: PID file empty"
+  exit 1
+fi
+
+if ! kill -0 "${pid}" 2>/dev/null; then
+  log "FAIL: Daemon (pid=${pid}) not running"
+  if should_alert; then
+    send_telegram "⚠️ *EverBot Down*
+Daemon process (pid=${pid}) is dead. Attempting auto-restart...
+\`$(hostname)\` $(date '+%H:%M')"
+    mark_alerted
+  fi
+
+  # Auto-restart
+  log "Attempting auto-restart..."
+  "${SCRIPT_DIR}/everbot" restart >> "${LOG_FILE}" 2>&1 && {
+    log "Auto-restart succeeded"
+    send_telegram "✅ *EverBot Recovered*
+Auto-restart succeeded.
+\`$(hostname)\` $(date '+%H:%M')"
+    clear_alert_state
+  } || {
+    log "Auto-restart FAILED"
+  }
+  exit 1
+fi
+
+# All good — clear any previous alert state
+if [[ -f "${WATCHDOG_STATE}" ]]; then
+  clear_alert_state
+  log "OK: Daemon recovered (pid=${pid})"
+fi
+
+exit 0

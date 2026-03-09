@@ -219,7 +219,7 @@ class TelegramChannel:
                 "role": "assistant",
                 "content": prefixed_detail,
                 "metadata": {
-                    "source": source_type,
+                    "source": "heartbeat" if source_type == "heartbeat_delivery" else source_type,
                     "run_id": run_id,
                     "injected_at": datetime.now(timezone.utc).isoformat(),
                 },

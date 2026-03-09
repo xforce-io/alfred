@@ -18,6 +18,7 @@ COMPACT_TOKEN_BUDGET = 40_000
 COMPACT_WINDOW_TOKENS = 20_000
 
 _HEARTBEAT_PREFIX = "[此消息由心跳系统自动执行例行任务生成]"
+_HEARTBEAT_CONTEXT_MARKER = "[以下是系统后台任务自动推送的报告]\n\n"
 _PLACEHOLDER_CONTENTS = {"(acknowledged)", "[Background notification follows]"}
 
 # ── Token estimation ─────────────────────────────────────────────────
@@ -63,13 +64,26 @@ def _estimate_tokens(messages: List[dict]) -> int:
 # ── Message classification ───────────────────────────────────────────
 
 
+_HEARTBEAT_SOURCES = {"heartbeat", "heartbeat_delivery"}
+
+
 def _is_heartbeat(msg: dict) -> bool:
-    """Identify heartbeat messages (new metadata format + legacy content prefix)."""
+    """Identify heartbeat messages (metadata, flattened source, or content prefix).
+
+    Detection must survive Dolphin SDK round-trips which drop custom fields,
+    so content-based detection (legacy prefix + context marker) is the
+    authoritative mechanism.
+    """
     meta = msg.get("metadata")
-    if isinstance(meta, dict) and meta.get("source") == "heartbeat":
+    if isinstance(meta, dict) and meta.get("source") in _HEARTBEAT_SOURCES:
+        return True
+    # Dolphin export flattens metadata → top-level fields
+    if msg.get("source") in _HEARTBEAT_SOURCES:
         return True
     content = msg.get("content") or ""
-    return isinstance(content, str) and content.startswith(_HEARTBEAT_PREFIX)
+    if not isinstance(content, str):
+        return False
+    return content.startswith(_HEARTBEAT_PREFIX) or content.startswith(_HEARTBEAT_CONTEXT_MARKER)
 
 
 def _is_placeholder(msg: dict) -> bool:
@@ -144,17 +158,30 @@ def evict_oldest_heartbeat(
 def _normalize_heartbeat(msg: dict) -> dict:
     """Normalize a heartbeat message for LLM context.
 
-    Strips the legacy content prefix so the LLM sees clean text.
-    Preserves ``metadata.source = "heartbeat"`` so the message remains
-    identifiable after a channel session save→restore round-trip.
+    Replaces the verbose legacy prefix with a short context marker so the LLM
+    can distinguish system-delivered reports from its own prior responses.
+    Canonicalizes ``metadata.source`` to ``"heartbeat"`` so the message stays
+    identifiable by :func:`_is_heartbeat` across save→restore round-trips.
     """
     msg = dict(msg)
 
-    # Strip legacy content prefix
+    # Replace legacy content prefix with shorter context marker
     content = msg.get("content") or ""
     if isinstance(content, str) and content.startswith(_HEARTBEAT_PREFIX):
         content = content[len(_HEARTBEAT_PREFIX):].lstrip("\n")
-        msg["content"] = content
+        msg["content"] = _HEARTBEAT_CONTEXT_MARKER + content
+    elif isinstance(content, str) and not content.startswith(_HEARTBEAT_CONTEXT_MARKER):
+        msg["content"] = _HEARTBEAT_CONTEXT_MARKER + content
+
+    # Canonicalize source so _is_heartbeat works after prefix replacement
+    meta = msg.get("metadata")
+    if isinstance(meta, dict) and meta.get("source") in _HEARTBEAT_SOURCES:
+        meta = dict(meta)
+        meta["source"] = "heartbeat"
+        msg["metadata"] = meta
+    # Handle Dolphin-flattened top-level source
+    if msg.get("source") in _HEARTBEAT_SOURCES:
+        msg["source"] = "heartbeat"
 
     return msg
 
