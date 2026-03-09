@@ -1287,14 +1287,14 @@ def cmd_test(args) -> dict:
     claims_path = repo / CM_DIR / "claims.json"
     feature_id = str(args.feature)
 
-    # 检查 worktree 是否 clean
+    # 检查 tracked 文件是否有未提交修改（untracked 文件不阻塞测试）
     worktree = _get_feature_worktree(claims_path, feature_id)
     wt_path = Path(worktree) if worktree else repo
     git_status = subprocess.run(
-        ["git", "status", "--porcelain"], cwd=wt_path, capture_output=True, text=True
+        ["git", "status", "--porcelain", "-uno"], cwd=wt_path, capture_output=True, text=True
     )
     if git_status.stdout.strip():
-        return {"ok": False, "error": "worktree not clean, commit changes before testing"}
+        return {"ok": False, "error": "uncommitted changes to tracked files, commit before testing"}
 
     # 获取当前 HEAD + feature branch commit count
     head = subprocess.run(

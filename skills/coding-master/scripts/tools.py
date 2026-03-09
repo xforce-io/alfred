@@ -704,10 +704,10 @@ def cmd_test(args) -> dict:
     worktree = _get_feature_worktree(claims_path, feature_id)
     wt_path = Path(worktree) if worktree else repo
 
-    # Verify worktree clean
-    git_status = _run_git(wt_path, ["status", "--porcelain"], check=False)
+    # Verify no uncommitted changes to tracked files (untracked files are OK)
+    git_status = _run_git(wt_path, ["status", "--porcelain", "-uno"], check=False)
     if git_status.stdout.strip():
-        return {"ok": False, "error": "worktree not clean, commit changes before testing"}
+        return {"ok": False, "error": "uncommitted changes to tracked files, commit before testing"}
 
     # Get HEAD + commit count
     head = _run_git(wt_path, ["rev-parse", "HEAD"], check=False).stdout.strip()
