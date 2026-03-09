@@ -1,6 +1,6 @@
 # EverBot 运行时架构设计（Runtime Architecture Design）
 
-最后更新：2026-03-08
+最后更新：2026-03-09
 
 ## 1. 文档目标
 
@@ -118,7 +118,7 @@
 
 1. **并发单元是 session，不是进程**——同一 session 内 turn 串行，不同 session 间 turn 并发。
 2. **背景 session 永远不读 primary 的 history**——如需用户上下文，只传结构化 briefing。
-3. **桥接双路：history inject + mailbox deposit**——心跳结果以 assistant message 注入 Primary history（保留 `metadata.source` 标记，可追溯、可驱逐），同时 deposit 到 mailbox 主动提醒 LLM。不传完整 tool chain。
+3. **Mailbox-only 桥接**——心跳结果通过 `deposit_mailbox_event` 写入 Primary mailbox，下次 primary turn 以 `## Background Updates` 前缀注入 user message。不再使用 `inject_history_message` 写入 Primary history（避免伪造 assistant message 导致的 role 交替违规、答案槽抢占、上下文污染）。
 4. **推理会话与投递目标解耦**——session 决定上下文；delivery 决定发到哪。
 5. **单写入口**——所有 session 落盘都走 `update_atomic`（进程间文件锁 + 版本校验）。
 
@@ -1070,11 +1070,12 @@ sequenceDiagram
 
 **问题**：当前实现在 Web 聊天时一刀切剥离所有心跳消息（`strip_heartbeat_turns`），同时 deliver 路径又可能出现“实时推送 + 下次对话再注入”的重复可见性。
 
-**设计**：由 Agent 自主决定一条心跳结果是否需要 deliver。deliver 结果通过**三条并行路径**到达用户（详见 Section 7.5 Session 同步与投递全景）：
+**设计**：由 Agent 自主决定一条心跳结果是否需要 deliver。deliver 结果通过**两条并行路径**到达用户（详见 Section 7.5 Session 同步与投递全景）：
 
-1. **持久化**：`inject_history_message` 写入 Primary history（LLM 后续 turn 可引用）
-2. **Mailbox**：`deposit_mailbox_event` 写入 Primary mailbox（下次 turn 主动提醒 LLM）
-3. **实时推送**：`events.emit` 推给 Web WebSocket / Telegram（用户立即可见）
+1. **Mailbox**：`deposit_mailbox_event` 写入 Primary mailbox（下次 turn 以 `## Background Updates` 前缀注入 user message，LLM 自然回应）
+2. **实时推送**：`events.emit` 推给 Web WebSocket / Telegram（用户立即可见）
+
+> **历史变更**：早期设计使用三路投递（inject_history_message + mailbox + 实时推送），但 inject_history_message 会伪造 assistant message 写入 Primary history，导致 role 交替违规、答案槽抢占等结构性问题。已迁移至 mailbox-only 架构。
 
 #### 核心规则
 
@@ -1116,18 +1117,17 @@ def _should_deliver(self, response: str) -> bool:
 
 1. HeartbeatRunner 执行后，根据 `_should_deliver()` 判断结果。
 2. **suppress**：只写入 Heartbeat Session 历史（用于心跳上下文连续），不投递到 Primary Session。
-3. **deliver**：先写入 Heartbeat Session 历史，再三路并行投递：
-   - `inject_history_message(primary_id, msg)` — 永久写入 Primary history
-   - `deposit_mailbox_event(primary_id, event)` — 写入 mailbox，下次 turn 主动提醒 LLM
+3. **deliver**：先写入 Heartbeat Session 历史，再双路并行投递：
+   - `deposit_mailbox_event(primary_id, event)` — 写入 mailbox，下次 turn 以 `## Background Updates` 前缀注入 user message
    - `events.emit(primary_id, ..., scope=broadcast_scope)` — 实时推送到 Web/Telegram
 
-**inject vs mailbox 不是冗余**：inject 是被动记忆（LLM 能看到但不会主动提及），mailbox 是主动提醒（拼到下次 user message 前缀，强制 LLM 回应）。两者解决不同的"下次交互"场景。
+**为什么 mailbox-only 而不需要 inject**：mailbox event 以 user message 前缀形式注入，LLM 理解为"系统通知"，自然决定如何转达。注入 Primary history 的 assistant message 是伪造的，会导致 role 交替违规（连续 assistant 消息）、答案槽抢占（心跳消息插到用户问题后面，LLM 误以为已回答）、上下文污染等结构性问题。
 
 #### 与现有 strip 逻辑的关系
 
 - **删除** `chat_service.py` 中对 `strip_heartbeat_turns` 的调用。
 - **保留** 心跳消息在 Heartbeat Session 的 `history_messages` 中（保障心跳自身上下文连续）。
-- **仅 deliver 消息**以 SystemEvent 形式进入 Primary Session 的 `mailbox`（正文来源唯一）。
+- **仅 deliver 消息**以 SystemEvent 形式进入 Primary Session 的 `mailbox`（正文来源唯一）。不再向 Primary history 注入 assistant message。
 - **WebSocket** 只广播状态提示，不广播正文，避免重复通知。
 
 #### 配置
@@ -1268,60 +1268,48 @@ async def restore_to_agent(self, agent, session_data):
          │                          │                                │
 ```
 
-#### Flow ①：心跳执行结果 → Primary（持久化，供后续 restore 拉取）
+#### Flow ①：心跳执行结果 → Primary（Mailbox-only）
 
 ```
  Heartbeat Session                    Primary Session
  ┌─────────────┐                      ┌─────────────────────┐
  │ _run_agent() │                      │                     │
- │  ↓ result    │                      │  history_messages[] │
- │  ↓           │───(A) inject────────▶│  ← append {        │
- │  _should_    │   history_message    │      role: assistant│
- │   deliver()  │                      │      content: ...   │
- │  ↓ True      │───(B) deposit───────▶│      metadata: {    │
- │              │   mailbox_event      │        source:      │
- └─────────────┘                       │        "heartbeat"  │
-                                       │        run_id: ...  │
-  (A) = inject_history_message()       │      }              │
-       原子追加到 history，run_id 去重   │  }                  │
-  (B) = deposit_mailbox_event()        │                     │
-       写入 mailbox，下次 turn 合并     │  mailbox[]          │
-       compose 到用户消息中             │  ← append event     │
-                                       └─────────────────────┘
+ │  ↓ result    │                      │                     │
+ │  _should_    │                      │                     │
+ │   deliver()  │                      │                     │
+ │  ↓ True      │───── deposit ───────▶│  mailbox[]          │
+ │              │   mailbox_event      │  ← append event {   │
+ └─────────────┘                       │    summary: "..."   │
+                                       │    detail: "..."    │
+  deposit_mailbox_event()              │    dedupe_key: ...  │
+  写入 mailbox，下次 primary turn      │  }                  │
+  以 ## Background Updates 前缀         │                     │
+  注入 user message                    └─────────────────────┘
 ```
 
-**inject vs mailbox 的角色区分**：inject 是被动记忆（LLM 在 context 中能看到但不会主动提及），mailbox 是主动提醒（拼到下次 user message 前缀 `## Background Updates`，强制 LLM 回应）。
+> **历史变更**：早期设计使用 inject_history_message + deposit_mailbox_event 双路投递。inject 会伪造 assistant message 写入 Primary history，导致 role 交替违规（连续 assistant 消息）和答案槽抢占（心跳消息插到用户问题后面，LLM 误以为已回答）。已迁移至 mailbox-only 架构。
 
-#### Flow ②：Primary 心跳上下文 → Channel Session（restore 时拉取）
+#### Flow ②：Channel Session 心跳感知（Mailbox 统一）
 
-Channel session（Telegram/Web）在每次用户消息触发 turn 前，从 Primary session 拉取最近的心跳结果：
+Channel session（Telegram/Web）不再从 Primary session 拉取心跳上下文。心跳结果通过两条路径到达 Channel session：
+
+1. **实时推送**（Flow ③）：`events.emit(scope=agent)` → Telegram/Web subscriber → `deposit_mailbox_event` 到 channel session mailbox
+2. **Mailbox 消费**：Channel session 下次 turn 时 `compose_message_with_mailbox_updates` 将 mailbox 事件注入 user message 前缀
 
 ```
- Channel Session restore                Primary Session (disk)
- ┌──────────────────────┐               ┌──────────────────────┐
- │ core_service          │               │                      │
- │ .process_message()    │               │  history_messages[   │
- │  ↓                    │               │    ...               │
- │  load_session(ch_id) │               │    {source:heartbeat}│◄─┐
- │  ↓                    │               │    {source:heartbeat}│  │
- │  _load_heartbeat_    │──── read ─────▶│    ...               │  │
- │   context()           │               │  ]                   │  │
- │  ↓                    │               └──────────────────────┘  │
- │  extract_recent_     │                                          │
- │   heartbeat()         │◄─── 最近 5 条 normalized heartbeat msg ──┘
- │  ↓                    │
- │  restore_to_agent(    │
- │   heartbeat_context)  │
- │  ↓                    │
- │  插入位置：末尾未回答  │
- │  的 user msg 之前     │
- │  ↓                    │
- │  去重：run_id 优先,    │
- │  content fallback     │
- └──────────────────────┘
+ Heartbeat Session                  Channel Session (Telegram)
+ ┌─────────────┐                    ┌────────────────────────┐
+ │ deliver      │                    │                        │
+ │  ↓           │── events.emit ──►  │  _on_background_event  │
+ │              │   scope=agent      │  ↓                     │
+ └─────────────┘                     │  deposit_mailbox_event │
+                                     │  ↓                     │
+                                     │  mailbox[]             │
+                                     │  ← append event        │
+                                     └────────────────────────┘
 ```
 
-关键点：heartbeat context 插入到 **trailing unanswered user messages 之前**，而非追加到末尾。否则 LLM 会误以为心跳输出是对用户问题的回答。
+> **历史变更**：早期设计通过 `_load_heartbeat_context()` 从 Primary session 的 history 拉取最近心跳 assistant messages，在 restore 时注入 Channel session。这依赖 inject_history_message 写入 Primary history 的旧路径，已随 mailbox-only 迁移一起移除。`persistence.py` 中 `heartbeat_context` 参数保留但被忽略（向后兼容）。
 
 #### Flow ③：实时推送（events.emit → 各 Channel 订阅者）
 
@@ -1376,35 +1364,95 @@ Telegram/Web subscriber 的路由逻辑已统一：都先调用 `resolve_routing
 
 注：不使用 mailbox deposit——结果已在 history_messages 中，再通过 mailbox 以 "Background Updates" 前缀重复呈现给 LLM 是纯冗余。
 
-#### Flow ⑤：Inspector push_message（主动沟通）
+#### Flow ⑤：Inspector 作为唯一投递门（Sole Delivery Gate）
 
-Inspector 是心跳的反思模块，分析上下文后可决定主动给用户发消息：
+Inspector 是心跳的反思模块，也是结果投递到用户的**唯一出口**。它确保 Telegram 通知和 LLM 上下文看到的是**同一内容**（content parity）。
+
+**设计要点**：
+
+1. Cron job 执行后产出 `job_result`（详细的任务执行结果）。
+2. Inspector 反思后产出 `push_message`（面向用户的简洁通知标题）和可选的 `delivery_detail`（附带的详细结果）。
+3. 投递事件携带 `summary=push_message`（Telegram 通知 + LLM 标题行）和 `detail=delivery_detail`（LLM 上下文详情）。
+4. 用户在 Telegram 看到 push_message，LLM 在 `## Background Updates` 中也看到同一 push_message 作为标题，用户引用时 LLM 能匹配。
 
 ```
- Inspector.inspect()
- │
- ├─ LLM 返回 push_message（主动给用户的消息）
- │
- ├─(A) emit_push_message()
- │      → events.emit(primary_session_id, source_type="heartbeat_delivery")
- │      → Telegram: 广播到 agent 所有绑定 chat
- │      → Web: agent scope 广播到所有 ws 连接
- │
- └─(B) _deliver_push_message()  (mailbox 落盘)
-        → deposit_mailbox_event(primary_session_id, event)
-        → 即使实时推送失败，下次 turn 也能看到
+ HeartbeatRunner                          Inspector
+ ┌──────────────────┐                     ┌──────────────────────────┐
+ │ cron job 执行     │                     │ inspect()                │
+ │  ↓ job_result    │                     │  ↓                       │
+ │  _should_deliver │                     │  LLM 返回:               │
+ │  ↓ True          │── buffer ──►        │   push_message           │
+ │  _pending_       │                     │   delivery_detail (opt)  │
+ │   delivery_      │                     │  ↓                       │
+ │   details[]      │── fill ────►        │  InspectionResult {      │
+ └──────────────────┘                     │   push_message,          │
+                                          │   delivery_detail        │
+                                          │  }                       │
+                                          └───────────┬──────────────┘
+                                                      │
+                                    ┌─────────────────┴─────────────────┐
+                                    │                                   │
+                               (A) emit_push_message()            (B) _deliver_push_message()
+                                    │                                   │
+                                events.emit(                    deposit_mailbox_event(
+                                 primary_session_id,              primary_session_id,
+                                 source_type=                     event = {
+                                  "heartbeat_delivery",            summary: push_message,
+                                 summary: push_message,            detail: delivery_detail
+                                 detail: delivery_detail,            or push_message,
+                                )                                 })
+                                    │                                   │
+                              Telegram/Web                       下次 primary turn
+                              实时通知                            ## Background Updates
+                              用户看到                            - [heartbeat_result]
+                              push_message                          {push_message}  ← 标题
+                                                                    Detail: {detail} ← 详情
+```
+
+**Content Parity（内容一致性）**：
+
+| 位置 | 用户/LLM 看到的内容 | 来源字段 |
+|------|---------------------|---------|
+| Telegram 通知 | push_message（如"【系统健康快照】轨迹审查发现3项高优先级信号"） | `summary` |
+| Background Updates 标题行 | 同上 push_message | `summary` |
+| Background Updates 详情 | job_result（如"Routine Task Summary: ..."） | `detail` |
+
+这解决了早期的 content parity gap：Telegram 通知用 push_message，但 LLM 上下文用 job_result 的标题，两者不同，用户引用 push_message 措辞时 LLM 无法匹配。
+
+**`_pending_delivery_details` 缓冲机制**：
+
+Cron job 和 Inspector 反思在不同的心跳 tick 阶段执行。Cron job 先执行产出 job_result，Inspector 后执行产出 push_message。HeartbeatRunner 通过 `_pending_delivery_details` 列表缓冲可投递的 cron 结果，在 Inspector 产出 push_message 后填充 `inspection.delivery_detail`：
+
+```python
+# HeartbeatRunner.__init__:
+self._pending_delivery_details: list[str] = []
+
+# Cron job 执行后:
+if self._should_deliver(result):
+    self._pending_delivery_details.append(result)
+
+# Inspector 反思后:
+if inspection.push_message and not inspection.delivery_detail:
+    if self._pending_delivery_details:
+        inspection.delivery_detail = "\n\n---\n\n".join(
+            self._pending_delivery_details
+        )
+self._pending_delivery_details.clear()
 ```
 
 Inspector 触发条件包括：文件变更（MEMORY.md/HEARTBEAT.md）、force interval 到期、用户空闲时长增长 ≥ 1 小时。反思 prompt 包含空闲时长、记忆、任务状态等上下文，LLM 自主决定是否值得主动沟通。
+
+> **剩余架构事项**：Cron job 执行后仍通过 `_execute_isolated_task` 中的 `emit()` 独立发送事件到 event bus。理论上 Inspector 应是唯一投递门，cron job 不应独立投递。当前保留此路径作为降级保障，后续可移除。
 
 #### 推送语义对照表
 
 | 事件类型 | 语义 | Telegram 行为 | Web 行为 |
 |----------|------|---------------|----------|
-| `heartbeat_delivery` | agent 级 | 广播所有绑定 chat | agent scope 广播 |
+| `heartbeat_delivery` | agent 级 | 广播所有绑定 chat + deposit mailbox | agent scope 广播 |
 | Inspector `push_message` | agent 级 | 同上（复用 heartbeat_delivery） | 同上 |
 | `deferred_result` | 会话级 | `target_channel=telegram` 时仅目标 chat | `target_channel=web` 时仅目标 ws |
-| heartbeat inject（非实时） | 拉取式 | restore 时从 Primary 拉取最近 5 条 | 同左 |
+
+> **已移除**：早期的 "heartbeat inject（拉取式）" 路径——Channel session restore 时从 Primary 拉取最近心跳 assistant messages。随 mailbox-only 迁移一并移除。
 
 ---
 
@@ -1613,7 +1661,7 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-  PS["Primary Session<br/>web_session_{agent_name}<br/>↳ 用户主对话上下文<br/>↳ 接收 mailbox + inject"]
+  PS["Primary Session<br/>web_session_{agent_name}<br/>↳ 用户主对话上下文<br/>↳ 接收 mailbox 事件"]
   HS["Heartbeat Session<br/>heartbeat_session_{agent_name}<br/>↳ 心跳推理上下文"]
   JS["Job Sessions<br/>job_{task_id}_{run_id}<br/>↳ Cron 任务隔离执行"]
   CS["Channel Sessions<br/>tg_session_{agent}__{chat_id}<br/>↳ 外部渠道 per-chat"]
@@ -1623,17 +1671,18 @@ flowchart TB
   Sched2["Scheduler"] -->|"trigger heartbeat"| HS
   Sched2 -->|"trigger cron job"| JS
   Sched2 -->|"read/update"| HB
-  HS -->|"inject + deposit"| PS
+  HS -->|"deposit to mailbox"| PS
   JS -->|"deposit to mailbox"| PS
-  CS -->|"restore 时拉取心跳上下文"| PS
+  CS -->|"mailbox 事件（经 events.emit）"| PS
   PS <-.->|"可选：克隆/恢复（future）"| SS
 ```
 
 **读图要点：**
 1. Scheduler 统一管理心跳间隔和 cron 触发，HeartbeatRunner 是纯执行器。
 2. TurnOrchestrator 是共享执行层，提供重试、tool budget、streaming 事件归一化；ChatService 和 HeartbeatRunner 各自管理会话锁和结果投递。
-3. 心跳结果双路桥接到 Primary Session：`inject_history_message`（永久写入 history）+ `deposit_mailbox_event`（下次 turn 主动提醒）。同时 `events.emit` 实时推送到 Web/Telegram。
-4. Channel Session（Telegram/Discord）在 restore 时从 Primary 拉取最近心跳上下文，实现跨渠道信息同步。
+3. 心跳结果通过 `deposit_mailbox_event` 写入 Primary Session mailbox（mailbox-only），下次 primary turn 以 `## Background Updates` 前缀注入 user message。同时 `events.emit` 实时推送到 Web/Telegram。
+4. Channel Session（Telegram/Discord）通过 events.emit 的 subscriber 接收心跳事件并 deposit 到自身 mailbox，不再从 Primary 拉取心跳上下文。
+5. Inspector 是心跳结果投递到用户的唯一出口（sole delivery gate），确保 Telegram 通知和 LLM 上下文的内容一致性（content parity）。投递事件携带 `summary=push_message`（Telegram 标题）和 `detail=delivery_detail`（LLM 详情）。
 5. 详细投递流程见 Section 7.5。
 
 ---

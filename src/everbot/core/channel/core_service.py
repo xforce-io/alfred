@@ -145,10 +145,7 @@ class ChannelCoreService:
             session_data = await self.session_manager.load_session(session_id)
             if session_data:
                 self.session_manager.restore_timeline(session_id, session_data.timeline or [])
-                heartbeat_ctx = await self._load_heartbeat_context(session_data, agent_name)
-                await self.session_manager.restore_to_agent(
-                    agent, session_data, heartbeat_context=heartbeat_ctx,
-                )
+                await self.session_manager.restore_to_agent(agent, session_data)
             _restore_ok = True
             self._inject_skill_updates_if_needed(agent, session_id, session_data)
             if isinstance(message, list):

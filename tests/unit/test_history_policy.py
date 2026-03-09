@@ -638,23 +638,17 @@ class TestExtractRecentHeartbeat:
 
 
 class TestRestoreWithHeartbeatContext:
-    """Tests for restore_to_agent with cross-session heartbeat context."""
+    """Tests verifying heartbeat_context is ignored (mailbox-only architecture).
+
+    After the mailbox-only migration, heartbeat results are delivered via
+    session mailbox (deposit_mailbox_event) and consumed as "## Background
+    Updates" prefix on the next user turn. The heartbeat_context parameter
+    in restore_to_agent is deprecated and ignored.
+    """
 
     @pytest.mark.asyncio
-    async def test_heartbeat_context_not_after_unanswered_user_message(self):
-        """REPRO for production bug: heartbeat context appended after an
-        unanswered user message makes the LLM think the heartbeat output is
-        the reply to the user's question.
-
-        Scenario (from tg_session_demo_agent):
-          [58] user: "Ki Editor - 基于AST操作的编辑器 // 这个是什么"
-          [59] assistant: (Ki Editor explanation)
-          [60] user: "为什么突然火起来..."
-          [61] assistant: (explanation)
-          [62] user: "是给人用的还是给机器用的"   ← unanswered
-          [63] assistant: "Health Check Report"     ← heartbeat injected here!
-        The LLM then believed the health check was the answer to [62].
-        """
+    async def test_heartbeat_context_ignored_history_unchanged(self):
+        """Passing heartbeat_context should not alter restored history."""
         persistence = SessionPersistence(tmp_path := __import__("tempfile").mkdtemp())
         agent = MagicMock()
         agent.snapshot.import_portable_session = MagicMock(return_value={})
@@ -668,8 +662,6 @@ class TestRestoreWithHeartbeatContext:
             history_messages=[
                 _user("Ki Editor 是什么"),
                 _assistant("Ki Editor 是一个基于 AST 操作的编辑器..."),
-                _user("为什么突然火起来"),
-                _assistant("AST 编辑器在 AI 时代找到了新定位..."),
                 _user("是给人用的还是给机器用的"),  # unanswered
             ],
             variables={},
@@ -677,7 +669,7 @@ class TestRestoreWithHeartbeatContext:
             updated_at="2026-01-01",
         )
         heartbeat_ctx = [
-            {"role": "assistant", "content": "## Session Health Check - Complete ✅"},
+            {"role": "assistant", "content": "## Session Health Check - Complete"},
         ]
 
         await persistence.restore_to_agent(agent, session_data, heartbeat_context=heartbeat_ctx)
@@ -685,138 +677,12 @@ class TestRestoreWithHeartbeatContext:
         call_args = agent.snapshot.import_portable_session.call_args
         history = call_args[0][0]["history_messages"]
 
-        # Find the unanswered user question
-        user_q_idx = None
-        for i, m in enumerate(history):
-            if "给人用" in (m.get("content") or ""):
-                user_q_idx = i
-                break
-        assert user_q_idx is not None
-
-        # The unanswered user question must be the last message — heartbeat
-        # context should be inserted before it, not after.
-        assert history[-1].get("content") == "是给人用的还是给机器用的", (
-            f"Unanswered user question should remain at the end of history. "
-            f"Got last message: {history[-1]}"
-        )
-        # Heartbeat should appear before the unanswered user question
-        assert any(
-            "Health Check" in (m.get("content") or "")
-            for m in history[:user_q_idx]
-        ), "Heartbeat context should be inserted before the unanswered user question"
-
-    @pytest.mark.asyncio
-    async def test_heartbeat_context_with_multiple_unanswered_and_links(self):
-        """Extended repro: multiple heartbeat messages interleaved with user
-        messages, simulating the full production failure chain."""
-        persistence = SessionPersistence(tmp_path := __import__("tempfile").mkdtemp())
-        agent = MagicMock()
-        agent.snapshot.import_portable_session = MagicMock(return_value={})
-
-        from src.everbot.core.session.session_data import SessionData
-        session_data = SessionData(
-            session_id="tg_session_alice__123",
-            agent_name="alice",
-            model_name="test",
-            session_type="channel",
-            history_messages=[
-                _user("hi"),
-                _assistant("你好！"),
-                _user("是给人用的还是给机器用的"),  # unanswered
-            ],
-            variables={},
-            created_at="2026-01-01",
-            updated_at="2026-01-01",
-        )
-        heartbeat_ctx = [
-            {"role": "assistant", "content": "Health Check Report #1"},
-            {"role": "assistant", "content": "Health Check Report #2"},
-        ]
-
-        await persistence.restore_to_agent(agent, session_data, heartbeat_context=heartbeat_ctx)
-
-        call_args = agent.snapshot.import_portable_session.call_args
-        history = call_args[0][0]["history_messages"]
-
-        # The unanswered user question must remain at the end.
-        assert history[-1].get("content") == "是给人用的还是给机器用的"
-        # Both heartbeat messages should appear before it.
-        hb_indices = [
-            i for i, m in enumerate(history)
-            if "Health Check" in (m.get("content") or "")
-        ]
-        user_q_idx = len(history) - 1
-        assert len(hb_indices) == 2, f"Expected 2 heartbeat messages, got {len(hb_indices)}"
-        assert all(i < user_q_idx for i in hb_indices), (
-            f"Heartbeat messages at {hb_indices} should all be before "
-            f"unanswered user question at {user_q_idx}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_heartbeat_context_appended(self):
-        """Heartbeat context messages should be appended to channel session history."""
-        persistence = SessionPersistence(tmp_path := __import__("tempfile").mkdtemp())
-        agent = MagicMock()
-        agent.snapshot.import_portable_session = MagicMock(return_value={})
-
-        from src.everbot.core.session.session_data import SessionData
-        session_data = SessionData(
-            session_id="tg_session_alice__123",
-            agent_name="alice",
-            model_name="test",
-            session_type="channel",
-            history_messages=[_user("hi"), _assistant("hello")],
-            variables={},
-            created_at="2026-01-01",
-            updated_at="2026-01-01",
-        )
-        heartbeat_ctx = [
-            {"role": "assistant", "content": "daily report"},
-            {"role": "assistant", "content": "investment signal"},
-        ]
-
-        await persistence.restore_to_agent(agent, session_data, heartbeat_context=heartbeat_ctx)
-
-        call_args = agent.snapshot.import_portable_session.call_args
-        history = call_args[0][0]["history_messages"]
-        # Original 2 + 2 heartbeat context = 4
-        assert len(history) == 4
-        assert history[2]["content"] == "daily report"
-        assert history[3]["content"] == "investment signal"
-
-    @pytest.mark.asyncio
-    async def test_heartbeat_context_deduplicates(self):
-        """Heartbeat messages already in channel session should not be duplicated."""
-        persistence = SessionPersistence(tmp_path := __import__("tempfile").mkdtemp())
-        agent = MagicMock()
-        agent.snapshot.import_portable_session = MagicMock(return_value={})
-
-        from src.everbot.core.session.session_data import SessionData
-        session_data = SessionData(
-            session_id="tg_session_alice__123",
-            agent_name="alice",
-            model_name="test",
-            session_type="channel",
-            history_messages=[
-                _user("hi"),
-                _assistant("daily report"),  # already present
-            ],
-            variables={},
-            created_at="2026-01-01",
-            updated_at="2026-01-01",
-        )
-        heartbeat_ctx = [
-            {"role": "assistant", "content": "daily report"},  # duplicate
-            {"role": "assistant", "content": "new signal"},    # new
-        ]
-
-        await persistence.restore_to_agent(agent, session_data, heartbeat_context=heartbeat_ctx)
-
-        call_args = agent.snapshot.import_portable_session.call_args
-        history = call_args[0][0]["history_messages"]
-        # Original 2 + 1 new (duplicate skipped) = 3
+        # heartbeat_context is ignored — history should only contain the original 3 messages
         assert len(history) == 3
-        assert history[2]["content"] == "new signal"
+        assert history[-1].get("content") == "是给人用的还是给机器用的"
+        assert not any(
+            "Health Check" in (m.get("content") or "") for m in history
+        ), "heartbeat_context should be ignored under mailbox-only architecture"
 
     @pytest.mark.asyncio
     async def test_no_heartbeat_context(self):
@@ -842,113 +708,3 @@ class TestRestoreWithHeartbeatContext:
         call_args = agent.snapshot.import_portable_session.call_args
         history = call_args[0][0]["history_messages"]
         assert len(history) == 2
-
-    @pytest.mark.asyncio
-    async def test_heartbeat_metadata_survives_restore(self):
-        """Heartbeat messages must keep metadata.source after restore so they
-        remain identifiable in a channel session save→restore round-trip.
-
-        Without this, heartbeats get 'laundered' into normal assistant messages
-        on the channel session disk, causing:
-        - _is_heartbeat() returns False → eviction/cleanup stops working
-        - Content dedup becomes the only guard → fragile
-        - Heartbeat messages permanently pollute channel session history
-        """
-        persistence = SessionPersistence(tmp_path := __import__("tempfile").mkdtemp())
-        agent = MagicMock()
-        agent.snapshot.import_portable_session = MagicMock(return_value={})
-
-        from src.everbot.core.session.session_data import SessionData
-        session_data = SessionData(
-            session_id="tg_session_alice__123",
-            agent_name="alice",
-            model_name="test",
-            session_type="channel",
-            history_messages=[_user("hi"), _assistant("hello")],
-            variables={},
-            created_at="2026-01-01",
-            updated_at="2026-01-01",
-        )
-        heartbeat_ctx = [
-            {
-                "role": "assistant",
-                "content": "Health Check Report",
-                "metadata": {"source": "heartbeat", "run_id": "hb_001"},
-            },
-        ]
-
-        await persistence.restore_to_agent(agent, session_data, heartbeat_context=heartbeat_ctx)
-
-        call_args = agent.snapshot.import_portable_session.call_args
-        history = call_args[0][0]["history_messages"]
-
-        # Find the heartbeat message
-        hb_msgs = [m for m in history if "Health Check" in (m.get("content") or "")]
-        assert len(hb_msgs) == 1
-        hb = hb_msgs[0]
-        # metadata.source must be preserved
-        assert isinstance(hb.get("metadata"), dict), (
-            f"Heartbeat metadata was stripped: {hb}"
-        )
-        assert hb["metadata"].get("source") == "heartbeat", (
-            f"Heartbeat lost metadata.source after restore: {hb['metadata']}"
-        )
-        assert hb["metadata"].get("run_id") == "hb_001"
-
-    @pytest.mark.asyncio
-    async def test_heartbeat_dedup_by_run_id_across_roundtrips(self):
-        """After a channel session save→restore, heartbeats already in the
-        channel history (with preserved metadata) should not be re-injected
-        when the same heartbeat_context is loaded from PRIMARY again."""
-        persistence = SessionPersistence(tmp_path := __import__("tempfile").mkdtemp())
-        agent = MagicMock()
-        agent.snapshot.import_portable_session = MagicMock(return_value={})
-
-        from src.everbot.core.session.session_data import SessionData
-
-        # Simulate: channel session already has a heartbeat from a previous round-trip
-        session_data = SessionData(
-            session_id="tg_session_alice__123",
-            agent_name="alice",
-            model_name="test",
-            session_type="channel",
-            history_messages=[
-                _user("hi"),
-                _assistant("hello"),
-                {
-                    "role": "assistant",
-                    "content": "Health Check #1",
-                    "metadata": {"source": "heartbeat", "run_id": "hb_001"},
-                },
-            ],
-            variables={},
-            created_at="2026-01-01",
-            updated_at="2026-01-01",
-        )
-        # PRIMARY still has the same heartbeat + a new one
-        heartbeat_ctx = [
-            {
-                "role": "assistant",
-                "content": "Health Check #1",
-                "metadata": {"source": "heartbeat", "run_id": "hb_001"},
-            },
-            {
-                "role": "assistant",
-                "content": "Health Check #2",
-                "metadata": {"source": "heartbeat", "run_id": "hb_002"},
-            },
-        ]
-
-        await persistence.restore_to_agent(agent, session_data, heartbeat_context=heartbeat_ctx)
-
-        call_args = agent.snapshot.import_portable_session.call_args
-        history = call_args[0][0]["history_messages"]
-
-        hb_msgs = [m for m in history if "Health Check" in (m.get("content") or "")]
-        assert len(hb_msgs) == 2, (
-            f"Expected exactly 2 heartbeat messages (1 existing + 1 new), "
-            f"got {len(hb_msgs)}: {[m['content'] for m in hb_msgs]}"
-        )
-        contents = [m["content"] for m in hb_msgs]
-        assert "Health Check #1" in contents
-        assert "Health Check #2" in contents

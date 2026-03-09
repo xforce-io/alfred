@@ -396,12 +396,12 @@ class TestSkillContext:
 
 class TestTaskDiscoverState:
     def test_load_empty(self, tmp_path):
-        from src.everbot.core.skills.task_discover import TaskDiscoverState
+        from src.everbot.core.jobs.task_discover import TaskDiscoverState
         state = TaskDiscoverState.load(tmp_path)
         assert len(state.pending_tasks) == 0
 
     def test_save_and_load(self, tmp_path):
-        from src.everbot.core.skills.task_discover import TaskDiscoverState, DiscoveredTask
+        from src.everbot.core.jobs.task_discover import TaskDiscoverState, DiscoveredTask
         from datetime import datetime, timezone, timedelta
 
         now = datetime.now(timezone.utc)
@@ -422,7 +422,7 @@ class TestTaskDiscoverState:
         assert not loaded.pending_tasks[0].expired
 
     def test_expired_task(self):
-        from src.everbot.core.skills.task_discover import DiscoveredTask
+        from src.everbot.core.jobs.task_discover import DiscoveredTask
         task = DiscoveredTask(
             title="Old task",
             description="",
@@ -464,7 +464,7 @@ class TestSkillWithoutScanner:
     @pytest.mark.asyncio
     async def test_memory_review_no_scan_result_queries_directly(self, tmp_path, sessions_dir):
         """memory_review.run() with scan_result=None should query sessions itself."""
-        from src.everbot.core.skills.memory_review import run
+        from src.everbot.core.jobs.memory_review import run
         from src.everbot.core.runtime.skill_context import SkillContext
         from src.everbot.core.memory.manager import MemoryManager
 
@@ -491,7 +491,7 @@ class TestSkillWithoutScanner:
     @pytest.mark.asyncio
     async def test_memory_review_no_scan_result_empty_watermark(self, tmp_path, sessions_dir):
         """memory_review with no scan_result and no sessions returns early."""
-        from src.everbot.core.skills.memory_review import run
+        from src.everbot.core.jobs.memory_review import run
         from src.everbot.core.runtime.skill_context import SkillContext
         from src.everbot.core.memory.manager import MemoryManager
 
@@ -512,7 +512,7 @@ class TestSkillWithoutScanner:
     @pytest.mark.asyncio
     async def test_task_discover_no_scan_result_queries_directly(self, tmp_path, sessions_dir):
         """task_discover.run() with scan_result=None should query sessions itself."""
-        from src.everbot.core.skills.task_discover import run
+        from src.everbot.core.jobs.task_discover import run
         from src.everbot.core.runtime.skill_context import SkillContext
         from src.everbot.core.memory.manager import MemoryManager
 
@@ -538,7 +538,7 @@ class TestSkillWithoutScanner:
     @pytest.mark.asyncio
     async def test_skill_prefers_scan_result_when_available(self, tmp_path, sessions_dir):
         """When scan_result has payload, skill should use it instead of querying."""
-        from src.everbot.core.skills.memory_review import run
+        from src.everbot.core.jobs.memory_review import run
         from src.everbot.core.runtime.skill_context import SkillContext
         from src.everbot.core.memory.manager import MemoryManager
         from src.everbot.core.scanners.base import ScanResult

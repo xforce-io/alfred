@@ -209,30 +209,30 @@ class TelegramChannel:
             if target_chat and str(chat_id) != target_chat:
                 continue
             await self._send_message(chat_id, text, entities)
-            # Inject the delivered message into the Telegram session history
-            # so follow-up questions have the result in context.
-            tg_session_id = ChannelSessionResolver.resolve(
-                "telegram", agent_name, chat_id,
-            )
-            prefixed_detail = history_prefix + detail
-            msg = {
-                "role": "assistant",
-                "content": prefixed_detail,
-                "metadata": {
-                    "source": "heartbeat" if source_type == "heartbeat_delivery" else source_type,
-                    "run_id": run_id,
-                    "injected_at": datetime.now(timezone.utc).isoformat(),
-                },
-            }
-            # For deferred_result, core_service already injected into
-            # the primary session history — skip here to avoid duplicates.
-            if source_type != "deferred_result" and hasattr(self._session_manager, "inject_history_message"):
-                ok = await self._session_manager.inject_history_message(
-                    tg_session_id, msg, timeout=5.0, blocking=False,
+            # Deposit heartbeat result into channel session mailbox so the
+            # next user turn sees it via "## Background Updates" prefix.
+            # This replaces the old inject_history_message approach which
+            # created fake assistant messages and placeholder pairs that
+            # broke role alternation on restore.
+            if source_type != "deferred_result" and hasattr(self._session_manager, "deposit_mailbox_event"):
+                from ..core.models.system_event import build_system_event
+
+                tg_session_id = ChannelSessionResolver.resolve(
+                    "telegram", agent_name, chat_id,
+                )
+                event = build_system_event(
+                    event_type="heartbeat_result",
+                    source_session_id=source_session_id,
+                    summary=detail[:300],
+                    detail=detail,
+                    dedupe_key=f"heartbeat:{agent_name}:{run_id}",
+                )
+                ok = await self._session_manager.deposit_mailbox_event(
+                    tg_session_id, event, timeout=5.0, blocking=False,
                 )
                 if not ok:
                     logger.warning(
-                        "Failed to inject %s result into tg session %s",
+                        "Failed to deposit %s event into tg session %s mailbox",
                         source_type, tg_session_id,
                     )
 

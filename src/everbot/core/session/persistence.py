@@ -451,12 +451,9 @@ class SessionPersistence:
         restore does NOT truncate history by message count — doing so silently
         discards context that save() already paid the cost to compress.
 
-        Args:
-            agent: DolphinAgent instance.
-            session_data: Session data loaded from disk.
-            heartbeat_context: Optional list of normalized heartbeat messages
-                from the primary session, prepended to history so the LLM can
-                reference recent async task results in follow-up turns.
+        Note: heartbeat_context parameter is retained for backward compatibility
+        but is no longer used.  Heartbeat results are now delivered exclusively
+        via mailbox deposit and consumed as user-message prefix on the next turn.
         """
         try:
             # 0a. Strip bare empty assistant messages (content="" with no tool_calls).
@@ -467,46 +464,16 @@ class SessionPersistence:
             )
 
             # 0b. Strip structural placeholders and normalize heartbeat results.
-            #     Placeholders (role-alternation artifacts) are removed.
-            #     Heartbeat results are preserved as normal assistant messages
-            #     so the LLM can reference them in follow-up turns.
+            #     Placeholders (role-alternation artifacts from legacy inject path)
+            #     are removed.  Heartbeat results that were previously injected
+            #     into history are normalized but kept for backward compatibility
+            #     with existing session files.
             history = prepare_for_restore(history)
 
-            # 0c. Merge cross-session heartbeat context (from primary session).
-            #     These are supplementary assistant messages inserted *before*
-            #     any trailing unanswered user message so the LLM does not
-            #     mistake heartbeat output for the reply to the user's question.
-            #     Dedup by run_id first, then fall back to content comparison.
-            if heartbeat_context:
-                existing_run_ids = {
-                    (m.get("metadata") or {}).get("run_id")
-                    for m in history
-                    if isinstance(m, dict) and (m.get("metadata") or {}).get("run_id")
-                }
-                existing_contents = {
-                    (m.get("content") or "")
-                    for m in history
-                    if isinstance(m, dict) and m.get("role") == "assistant"
-                }
-                new_hbs = []
-                for hb in heartbeat_context:
-                    rid = (hb.get("metadata") or {}).get("run_id")
-                    if rid and rid in existing_run_ids:
-                        continue
-                    if (hb.get("content") or "") in existing_contents:
-                        continue
-                    new_hbs.append(hb)
-                if new_hbs:
-                    # Find insertion point: before trailing user messages
-                    # that have no assistant reply yet.
-                    insert_at = len(history)
-                    while (
-                        insert_at > 0
-                        and isinstance(history[insert_at - 1], dict)
-                        and history[insert_at - 1].get("role") == "user"
-                    ):
-                        insert_at -= 1
-                    history[insert_at:insert_at] = new_hbs
+            # NOTE: heartbeat_context merging has been removed.
+            # Channel sessions now receive heartbeat results via their own
+            # mailbox (deposited by telegram_channel._on_background_event),
+            # consumed as "## Background Updates" prefix on next user turn.
 
             # 1. Build portable state, filtering non-restorable variables.
             #    workspace_instructions is re-injected at runtime; _history is
