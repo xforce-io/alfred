@@ -1,66 +1,132 @@
 ---
 name: coding-master
-description: "Code review, development, and ops for registered repos"
-version: "0.2.0"
-tags: [coding, review, development, bugfix, pr, automation]
+description: "Convention-driven code development with minimal tooling"
+version: "3.0.0"
+tags: [coding, development, pr, automation, parallel]
 ---
 
-# Coding Master Skill
+# Coding Master
 
-`$D = python $SKILL_DIR/scripts/dispatch.py`
+`$CM = python $SKILL_DIR/scripts/tools.py`
 
-All commands return JSON `{"ok": true, "data": {...}}` or `{"ok": false, "error_code": "...", "hint": "..."}`.
-On failure, follow `hint` to recover.
+All commands return JSON `{"ok": true, "data": {...}}` or `{"ok": false, "error": "..."}`.
 
-## Core Commands
+## Working Directory
 
-| Command | Description | timeout |
-|---------|-------------|---------|
-| `$D status --repos <name>` | git status / diff overview | default |
-| `$D find --repos <name> --query <pattern>` | Search code | default |
-| `$D analyze --repos <name> --task "<desc>"` | Engine deep analysis | 600 |
-| `$D auto-dev --repos <name> --task "<desc>"` | Develop + test (one step) | 600 |
-| `$D submit --repos <name> --title "<title>"` | Commit + push + create PR (auto-releases workspace) | default |
-| `$D release --workspace <ws>` | Release workspace lock | default |
+All dev state lives in the target repo's `.coding-master/` directory (gitignored):
 
-> Commands without explicit timeout use 120s default.
+| File | Format | Purpose | Maintained by |
+|------|--------|---------|---------------|
+| `lock.json` | JSON | workspace lock | tools |
+| `PLAN.md` | MD | feature specs | you create, then read-only |
+| `JOURNAL.md` | MD | dev log (append-only) | tools auto + you via cm journal |
+| `claims.json` | JSON | feature claim state | tools |
+| `features/XX.md` | MD | per-feature workspace | feature owner |
 
-### auto-dev Options
+**Principle**: JSON for tool atomics (lock, claim), MD for you to read/write (specs, logs).
+**SKILL.md is immutable**: you must not modify it.
 
-- `--branch <name>` — specify branch name (auto-generated if omitted)
-- `--engine <claude|codex>` — specify engine (default from config)
-- `--feature next` — develop next task from feature plan
-- `--workspace <name>` — use existing workspace (required for feature mode)
-- `--repo <name>` — target repo in multi-repo workspace
-- `--plan "<desc>"` — specify implementation plan
-- `--allow-complex` — skip complexity check, force single auto-dev
-- `--reset-worktree` — clean uncommitted changes before developing
+## Development Flow
 
-### auto-dev Behavior
+### Session Level
+1. **Lock** — `$CM lock --repo <name>` (session: locked)
+2. **Plan** — Create `.coding-master/PLAN.md` defining features + acceptance criteria
+3. **Review** — `$CM plan-ready` validates PLAN.md (session: locked → reviewed)
 
-- Execution unit is a **single target repo**
-- `--repos <name>` only supports single repo; multiple repos → `TASK_TOO_COMPLEX`
-- Multi-repo workspace requires explicit `--repo <name>`; otherwise → `NEED_EXPLICIT_REPO`
-- Engine develops code, runs tests, and fixes until tests pass (internal loop)
-- Dispatch runs final verification independently after engine completes
+### Feature Level (repeat per feature)
+4. **Claim** — `$CM claim --feature <n>` (feature: pending → analyzing, session: working)
+5. **Analyze** — Write Analysis + Plan in `features/XX.md`
+6. **Enter dev** — `$CM dev --feature <n>` (feature: analyzing → developing)
+7. **Code** — Edit code in worktree, git commit
+8. **Test** — `$CM test --feature <n>` (updates test_status)
+9. **Fix loop** — If failed: read test_output → fix → commit → `$CM test` → until passed
+10. **Done** — `$CM done --feature <n>` (feature: developing → done, requires test_status=passed && test_commit=HEAD)
+11. **Next** — Claim next available feature, repeat 4-10
 
-### Submitting PRs
+### Wrap-up
+12. **Progress** — `$CM progress` shows status + action guidance at any time
+13. **Integrate** — All done → `$CM integrate` (merge branches → full tests → session: integrating)
+14. **Fix integration** — If failed: `$CM reopen --feature <n>` → fix → test → done → retry integrate
+15. **Submit** — `$CM submit --title "..."` (push + PR + cleanup → session: done)
 
-auto-dev does NOT auto-submit PRs. After tests pass:
+### Parallel Development
+- Multiple agents claim different features simultaneously (`$CM claim`)
+- Each agent edits only their own `features/XX.md` — no conflicts
+- `$CM claim` auto-checks dependencies; blocked features cannot be claimed
+- `$CM done` reports newly unblocked features
 
-- repo mode: `$D submit --repos <name> --title "<title>"`
-- workspace / feature mode: `$D submit --workspace <ws> --title "<title>"`
+## Tools
 
-`submit` auto-releases workspace on success. Add `--keep-lock` to keep working.
+| Tool | Purpose |
+|------|---------|
+| `$CM lock --repo <name>` | Lock workspace, create dev branch |
+| `$CM unlock --repo <name>` | Release lock |
+| `$CM plan-ready` | Validate PLAN.md → session: locked → reviewed |
+| `$CM claim --feature <n>` | Claim feature, create branch/worktree/feature-MD |
+| `$CM dev --feature <n>` | Check Analysis+Plan → analyzing → developing |
+| `$CM test --feature <n>` | Run tests → write test_status/test_commit/test_output |
+| `$CM done --feature <n>` | Check tests passed + no new commits → developing → done |
+| `$CM reopen --feature <n>` | Integration fix: done → developing (reset test_status) |
+| `$CM integrate` | All done → merge feature branches → full tests → session: integrating |
+| `$CM progress` | Show session + feature status + step-by-step action guidance |
+| `$CM submit --title "..."` | Idempotent: push → PR → cleanup → unlock |
+| `$CM renew` | Renew lock lease (long tasks) |
+| `$CM journal --message "..."` | Append to JOURNAL.md (flock protected) |
+| `$CM doctor --repo <name>` | Diagnose state, `--fix` to auto-repair |
+| `$CM status --repo <name>` | Show lock status |
 
 ## Rules
 
-- **All code operations must go through $D commands** — never use bare `_bash` for repo operations
-- Engine commands (analyze, auto-dev) need `timeout=600`
-- On failure, check `error_code` + `hint` and follow instructions
-- After `auto-dev` / `submit`, release workspace if not continuing development
-- Never push to main/master. Never force push. Never auto-merge PRs.
+1. **All code changes stay in the target repo**
+2. **Never push main/master** — always on feature branches
+3. **Never force push**
+4. **Don't modify SKILL.md** — immutable convention
+5. **Keep feature MD updated** — `features/XX.md` is your work record
+6. **JOURNAL.md is append-only** — use `$CM journal` to add entries
+7. **Test before done** — `$CM done` checks test_status=passed && test_commit=HEAD; code changes require re-test
+8. **Release lock when done**
+9. **Only edit your own feature MD** — don't touch others' files
+10. **Only work in your own worktree** — don't enter others' worktrees
 
-> More commands (workspace management, feature splitting, env probing, etc.):
-> `_load_skill_resource("coding-master", "references/full-command-reference.md")`
-> or `$D --help`
+## Templates
+
+### PLAN.md
+
+    # Feature Plan
+
+    ## Origin Task
+    <!-- original task description -->
+
+    ## Features
+
+    ### Feature 1: ...
+    **Depends on**: —
+
+    #### Task
+    <!-- description -->
+
+    #### Acceptance Criteria
+    - [ ] ...
+
+    ---
+
+    ### Feature 2: ...
+    **Depends on**: Feature 1
+
+    #### Task
+    #### Acceptance Criteria
+
+### features/XX.md
+
+    # Feature N: <title>
+
+    ## Spec
+    > Copied from PLAN.md
+
+    **Acceptance Criteria**:
+    - [ ] ...
+
+    ## Analysis
+    ## Plan
+    ## Test Results
+    ## Dev Log
