@@ -534,26 +534,499 @@ This is the recommended way to work. `cm progress` always knows the best local n
 
 ---
 
+## Phase 4: Delegation-First — 结构化委托 + 探索/执行分离
+
+> **目标**: 不再让前台 agent 在 chat turn 里边猜边写；探索工作和执行工作都可托管给 codex/claude code
+> **改动量**: ~200 行 workflow/contract 代码 + SKILL.md / workflow 文档更新
+
+### 4.1 核心原则：前台协调，后台执行
+
+这次轨迹暴露的问题不是单纯 timeout 太短，而是：
+
+- 探索阶段（读实现、确认行为）和执行阶段（写测试、跑验证）混在一个 chat turn
+- 前台 agent 同时承担 orchestrator 和 worker 两个角色
+- 一旦理解不足，就会进入写-跑-修-再写的低效循环
+
+v4 之后，CM 的职责应明确拆分：
+
+- **前台 agent / session orchestrator**
+  - 识别任务类型
+  - 选择目标文件/函数/feature
+  - 决定是否委托
+  - 消费委托结果并推进 session 状态
+- **后台 engine worker（codex / claude code）**
+  - 读源码
+  - 跑命令
+  - 产出结构化分析结论
+  - 写代码 / 写测试 / 跑验证
+
+一句话：**前台不再亲自探索，前台只调度探索。**
+
+### 4.2 新的阶段划分：Analyze → Execute
+
+对 coding/master 类任务，显式区分两种阶段：
+
+#### Analyze
+
+输入：
+- 目标 repo / 文件 / 函数 / feature
+- 当前任务说明
+- 已有测试（可选）
+- 失败日志（若是 repair）
+
+输出：
+- `behavior_summary.md`：实现行为摘要
+- `edge_case_matrix.json`：边界条件矩阵
+- `unknowns.md`：仍需确认的点
+- `recommended_next_step`：建议进入 execute / 继续 analyze / 停止
+
+约束：
+- Analyze 阶段**禁止**直接批量写测试或写实现
+- 若 `unknowns` 非空，默认不能直接进入 execute
+
+#### Execute
+
+输入：
+- analyze 产物
+- 明确的 acceptance criteria
+- 目标改动范围
+
+输出：
+- code diff / test diff
+- verify evidence
+- unresolved issues
+
+约束：
+- Execute 阶段必须依赖 analyze 产物
+- 若 analyze 不存在或不完整，拒绝直接进入 execute
+
+### 4.3 “必须委托”门槛
+
+不是“可以委托”，而是命中以下条件时**必须委托给 engine**：
+
+1. 任务类型包含：
+   - test enhancement
+   - edge cases
+   - behavior verification
+   - bugfix with unclear root cause
+2. 需要读取 2 个及以上源码文件才能判断行为
+3. 当前任务要求“先理解实现，再写测试/修复”
+4. 第一次失败已经暴露“行为假设错误”
+5. 同类失败连续出现 2 次
+6. 同一回合中开始生成第二个替代文件（例如 `*_enhanced.py`）
+7. context compression 在短时间内高频触发
+
+命中后，前台 agent 不应继续自己试，而应切成标准委托任务。
+
+### 4.3.1 当前缺口：系统还不能真正“保证必须委托”
+
+必须明确一点：如果只有 `SKILL.md` 规则和自然语言提示，系统并不能真正保证 delegation 会发生。
+
+要做到“命中 must_delegate 时一定调用 delegation”，至少需要下面 4 个闭环部件：
+
+1. **机器可判定的 delegation 状态**
+2. **execute 类动作的 hard gate**
+3. **delegation artifact 作为 phase 前置条件**
+4. **状态转移必须经过 delegation result**
+
+如果缺少这 4 个中的任意一个，系统都会退化成“建议委托，但 agent 仍可能继续自己试”。
+
+### 4.3.2 新增状态：`must_delegate`
+
+在 session / feature 状态中增加 delegation 子状态。建议放在 `claims.json` 的 feature 记录下，或单独放到 `.coding-master/delegation/state.json`。
+
+最小 schema：
+
+```json
+{
+  "features": {
+    "2": {
+      "phase": "analyzing",
+      "delegation": {
+        "required": true,
+        "task_type": "analyze-implementation",
+        "reason": "test_enhancement_requires_behavior_analysis",
+        "status": "pending"
+      }
+    }
+  }
+}
+```
+
+字段语义：
+- `required`: 当前 feature 是否必须先委托
+- `task_type`: 需要委托的标准子任务类型
+- `reason`: 机器可判定原因，不依赖自然语言理解
+- `status`: `pending` / `running` / `completed` / `failed`
+
+### 4.3.3 Hard Gate：命中 `must_delegate` 后禁止继续 execute
+
+这是“保证委托”的关键。
+
+只要某个 feature 处于：
+
+```json
+{
+  "delegation": {
+    "required": true,
+    "status": "pending"
+  }
+}
+```
+
+则以下动作必须直接拒绝：
+
+- `cm dev --feature N`
+- `cm test --feature N`
+- `cm done --feature N`
+- 任何 execute 类 workflow phase
+
+返回错误示例：
+
+```json
+{
+  "ok": false,
+  "error": "delegation required before execute",
+  "data": {
+    "feature": "2",
+    "task_type": "analyze-implementation",
+    "reason": "test_enhancement_requires_behavior_analysis"
+  }
+}
+```
+
+注意：
+- `cm progress`
+- delegation request/result 读写
+- 纯 read-only 查询
+
+这些动作不受阻断。
+
+也就是说，**一旦 must_delegate 命中，系统不是“建议你委托”，而是“除了委托相关动作，别的都不让做”。**
+
+### 4.3.4 delegation 完成前置条件
+
+要从 `analyze_required` 进入 `execute_ready`，不能只靠 agent 说“我已经分析完了”，必须依赖 artifact。
+
+建议前置条件如下：
+
+```text
+execute_ready iff:
+1. delegation.required = true
+2. delegation.status = completed
+3. delegation/result.json exists
+4. required artifacts exist:
+   - behavior_summary.md
+   - edge_case_matrix.json (if task_type=analyze-implementation)
+5. result.recommended_next_step = execute-*
+```
+
+任一条件不满足，都不得进入 execute。
+
+### 4.3.5 状态机
+
+建议的最小状态机如下：
+
+```text
+normal_analyzing
+    │
+    ├─(hit must_delegate rule)──────────────────────► analyze_required
+    │                                                  │
+    │                                                  ├─ write delegation request
+    │                                                  ▼
+    │                                             delegation_running
+    │                                                  │
+    │                           delegation failed ─────┤────► delegation_failed
+    │                                                  │
+    │                           delegation completed ──┘
+    │                                                  ▼
+    └────────────────────────────────────────────── execute_ready ───► executing
+```
+
+含义：
+- `analyze_required`: 命中规则，但 delegation 还没启动
+- `delegation_running`: 已提交给 engine，等待结果
+- `delegation_failed`: engine 未返回合法结果，需要 repair / retry
+- `execute_ready`: delegation artifact 合法，允许进入 execute
+
+### 4.3.6 `cm progress` 必须返回 `must_delegate`
+
+如果系统要让 agent 稳定执行 delegation，`progress` 不能只返回 `next_action`，还应返回显式标记：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "must_delegate": true,
+    "delegation": {
+      "task_type": "analyze-implementation",
+      "reason": "test_enhancement_requires_behavior_analysis",
+      "status": "pending"
+    },
+    "next_action": {
+      "command": "delegate analyze-implementation --feature 2",
+      "scope": "local"
+    }
+  }
+}
+```
+
+要求：
+- 当 `must_delegate=true` 时，`next_action` 只能是 delegation 相关动作
+- 不得再返回 `cm test` / `cm done` / `cm dev` 这类 execute 动作
+
+### 4.3.7 inspector / workflow 层的兜底
+
+即使有 hard gate，也要有兜底检测，防止 agent 直接绕过工具：
+
+- inspector 发现：
+  - feature 已命中 `must_delegate`
+  - 但工作区出现新的 execute 类改动 / 新测试文件 / 新提交
+- 则应发出结构化告警：
+  - `delegation_bypassed`
+  - 附带 feature / reason / changed_files
+
+workflow runner 也应把这类情况视为非法状态，而不是继续推进。
+
+### 4.3.8 实现落点
+
+| 文件 | 变更 |
+|------|------|
+| `tools.py` | 增加 `must_delegate` 读写、hard gate 检查、delegation status 更新 |
+| `claims.json` / `delegation/state.json` | 增加 delegation 子状态 |
+| `cm progress` | 返回 `must_delegate` 与 delegation 详情 |
+| `workflow` / `phase_runner` | `execute` phase 前检查 delegation 前置条件 |
+| `inspector` | 新增 `delegation_bypassed` 检测 |
+
+### 4.4 标准子任务 Contract
+
+定义 3 类可托管子任务。重点不是 prompt，而是 **input/output contract**。
+
+#### Contract A: `analyze-implementation`
+
+适用：
+- 测试增强
+- 行为确认
+- 边界梳理
+- 失败后重新理解实现
+
+输入：
+
+```json
+{
+  "task_type": "analyze-implementation",
+  "repo": "alfred",
+  "targets": [
+    {"path": "skills/coding-master/scripts/tools.py", "symbol": "_slugify"}
+  ],
+  "related_tests": [
+    "skills/coding-master/tests/test_tools_e2e.py"
+  ],
+  "goal": "Add edge-case tests without guessing implementation behavior"
+}
+```
+
+输出：
+
+```json
+{
+  "ok": true,
+  "artifacts": {
+    "behavior_summary": ".coding-master/delegation/behavior_summary.md",
+    "edge_case_matrix": ".coding-master/delegation/edge_case_matrix.json",
+    "unknowns": ".coding-master/delegation/unknowns.md"
+  },
+  "recommended_next_step": "execute-tests",
+  "confidence": "high"
+}
+```
+
+#### Contract B: `implement-change`
+
+适用：
+- 已有明确分析结论后的代码/测试生成
+
+输入：
+
+```json
+{
+  "task_type": "implement-change",
+  "repo": "alfred",
+  "analysis_artifacts": {
+    "behavior_summary": ".coding-master/delegation/behavior_summary.md"
+  },
+  "edit_targets": [
+    "skills/coding-master/tests/test_tools_edge_cases.py"
+  ],
+  "acceptance_criteria": [
+    "New tests reflect actual _slugify behavior",
+    "Target test file passes"
+  ]
+}
+```
+
+输出：
+
+```json
+{
+  "ok": true,
+  "changed_files": [
+    "skills/coding-master/tests/test_tools_edge_cases.py"
+  ],
+  "verify": {
+    "passed": true,
+    "command": "pytest -q skills/coding-master/tests/test_tools_edge_cases.py"
+  },
+  "unresolved": []
+}
+```
+
+#### Contract C: `repair-after-failure`
+
+适用：
+- 失败后不清楚该修测试、修代码，还是补理解
+
+输入：
+
+```json
+{
+  "task_type": "repair-after-failure",
+  "repo": "alfred",
+  "failure_output": "5 slugify assertions failed",
+  "related_files": [
+    "skills/coding-master/scripts/tools.py",
+    "skills/coding-master/tests/test_tools_edge_cases.py"
+  ]
+}
+```
+
+输出：
+
+```json
+{
+  "ok": true,
+  "root_cause": "tests assumed behavior not implemented by _slugify",
+  "recommended_mode": "analyze-implementation",
+  "minimal_fix_plan": [
+    "Read _slugify",
+    "Rewrite assertions to match actual behavior",
+    "Re-run target tests"
+  ]
+}
+```
+
+### 4.5 新的 session 工件
+
+为了支持委托，不把状态藏在 prompt 里，新增本地工件：
+
+```text
+.coding-master/
+└── delegation/
+    ├── analyze_request.json
+    ├── analyze_result.json
+    ├── behavior_summary.md
+    ├── edge_case_matrix.json
+    ├── unknowns.md
+    ├── execute_request.json
+    └── repair_result.json
+```
+
+原则：
+- 这些文件是 **repo-local、session-local** 状态，不进入 git
+- 工具写 JSON contract，engine / agent 读写 MD/JSON 产物
+- 下一轮恢复时，优先读 delegation 工件，而不是重放全部 chat 历史
+
+### 4.6 止损机制：失败两次后强制切策略
+
+新增轻量 stop-loss 规则：
+
+- 同类失败连续 2 次：
+  - 不允许继续直接写测试/写代码
+  - 强制进入 `repair-after-failure`
+- 同一任务新建第二个替代文件：
+  - 停止继续扩写
+  - 回到 analyze 或 repair
+- 若 `recommended_next_step` = `analyze-implementation`：
+  - 前台 agent 不得继续 execute
+
+这是为了防止长任务在 chat turn 中无限自旋。
+
+补充：
+- stop-loss 触发后，系统应自动写入：
+
+```json
+{
+  "delegation": {
+    "required": true,
+    "task_type": "repair-after-failure",
+    "reason": "repeated_failures",
+    "status": "pending"
+  }
+}
+```
+
+- 也就是说，stop-loss 不是单纯“提醒换策略”，而是**把系统状态推进到 must_delegate**。
+
+### 4.7 Context Budget 感知
+
+将 context inflation 作为一等信号：
+
+- 当 session 出现高频 compression
+- 或连续多轮大文件读取 + 大 patch
+- 或重复失败导致历史越来越长
+
+CM 应主动：
+- 停止继续前台执行
+- 产出当前理解摘要
+- 切到 delegated worker / job / workflow
+
+这不是“额外优化”，而是避免 chat session 成为长任务的主执行环境。
+
+### 4.8 实现落点
+
+| 文件 | 变更 |
+|------|------|
+| `SKILL.md` | 增加 Analyze/Execute 两阶段规则与“必须委托”门槛 |
+| `tools.py` | 新增 delegation artifact helpers（读写 request/result JSON） |
+| `workflows/*.yaml` | 新增 analyze → execute → repair 分支 |
+| `phase_runner.py` / workflow runner | 后续可接入 delegation contract，但 Phase 4 先不强耦合 |
+
+### Phase 4 测试计划
+
+| 测试 | 验证点 |
+|------|--------|
+| `test_delegation_required_for_test_enhancement` | test enhancement 任务命中“必须委托” |
+| `test_progress_returns_must_delegate` | 命中 must_delegate 时 progress 返回 delegation-only next_action |
+| `test_execute_hard_gated_by_must_delegate` | must_delegate=true 时 cm dev/test/done 被拒绝 |
+| `test_execute_unlocked_after_delegation_artifacts` | delegation result + artifacts 存在后才能进入 execute |
+| `test_execute_rejected_without_analysis_artifact` | 无 analyze 产物时 execute 被拒绝 |
+| `test_repair_after_second_failure_switches_mode` | 连续失败两次后切到 repair/analyze |
+| `test_stop_loss_sets_must_delegate` | stop-loss 触发后状态写为 must_delegate |
+| `test_inspector_detects_delegation_bypassed` | 绕过 delegation 直接执行时被 inspector 标记 |
+| `test_delegation_artifacts_survive_resume` | session 恢复时能复用 delegation 工件 |
+
+---
+
 ## 实施顺序与依赖
 
 ```
-Phase 1 (强反馈)           Phase 2 (闭环恢复)         Phase 3 (平台对接)
-┌─────────────────┐      ┌──────────────────┐      ┌──────────────────┐
-│ 1.1 evidence/   │      │ 2.1 precondition │      │ 3.1 cm start     │
-│     N-verify    │─┐    │     assert       │      │     + contract   │
-│                 │ │    │                  │      │                  │
-│ 1.2 cm done     │◄┘    │ 2.2 integration  │      │ 3.2 autonomous   │
-│     gate check  │      │     report       │─┐    │     mode doc     │
-│                 │      │                  │ │    │                  │
-│ 1.3 progress    │      │ 2.3 cm reopen    │◄┘    │ 3.3 rules update │
-│     next_action │      │     with context │      │                  │
-│                 │      │                  │      │                  │
-│ 1.4 SKILL.md    │      │                  │      │                  │
-└─────────────────┘      └──────────────────┘      └──────────────────┘
-       ▲                         ▲                         ▲
-       │                         │                         │
-   可独立交付              依赖 Phase 1              依赖 Phase 1+2
-                        (evidence/ 目录)          (evidence + report)
+Phase 1 (强反馈)           Phase 2 (闭环恢复)         Phase 3 (平台对接)        Phase 4 (结构化委托)
+┌─────────────────┐      ┌──────────────────┐      ┌──────────────────┐      ┌────────────────────┐
+│ 1.1 evidence/   │      │ 2.1 precondition │      │ 3.1 cm start     │      │ 4.1 analyze/execute│
+│     N-verify    │─┐    │     assert       │      │     + contract   │      │     split          │
+│                 │ │    │                  │      │                  │      │                    │
+│ 1.2 cm done     │◄┘    │ 2.2 integration  │      │ 3.2 autonomous   │      │ 4.2 delegation     │
+│     gate check  │      │     report       │─┐    │     mode doc     │      │     contracts      │
+│                 │      │                  │ │    │                  │      │                    │
+│ 1.3 progress    │      │ 2.3 cm reopen    │◄┘    │ 3.3 rules update │      │ 4.3 stop-loss +    │
+│     next_action │      │     with context │      │                  │      │     mode switch    │
+│                 │      │                  │      │                  │      │                    │
+│ 1.4 SKILL.md    │      │                  │      │                  │      │ 4.4 artifacts      │
+└─────────────────┘      └──────────────────┘      └──────────────────┘      └────────────────────┘
+       ▲                         ▲                         ▲                           ▲
+       │                         │                         │                           │
+   可独立交付              依赖 Phase 1              依赖 Phase 1+2               依赖 Phase 1+3
+                        (evidence/ 目录)          (evidence + report)          (progress + contract)
 ```
 
 ## 不做的事情（显式排除）

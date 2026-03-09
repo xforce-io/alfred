@@ -30,8 +30,55 @@ from config_manager import ConfigManager
 
 CM_DIR = ".coding-master"
 EVIDENCE_DIR = "evidence"
+DELEGATION_DIR = "delegation"
 LEASE_MINUTES = 120
 TEST_OUTPUT_MAX = 500
+
+# ── Mode definitions: constraints, not pipelines ──
+MODES = {
+    "deliver": {
+        "required_artifacts": [],  # checked per-feature via evidence/N-verify.json
+        "allowed_commands": [
+            "lock", "unlock", "status", "renew", "start",
+            "plan-ready", "claim", "dev", "test", "done", "reopen",
+            "integrate", "submit", "progress", "journal", "doctor",
+            "delegate-prepare", "delegate-complete",
+        ],
+        "completion_gate": "all features done + evidence pass",
+        "description": "Feature delivery: plan → claim → dev → test → done → submit",
+    },
+    "review": {
+        "required_artifacts": ["scope.json", "report.md"],
+        "allowed_commands": [
+            "lock", "unlock", "status", "renew", "start",
+            "scope", "report", "progress", "journal", "doctor",
+            "delegate-prepare", "delegate-complete",
+        ],
+        "completion_gate": "report.md exists",
+        "description": "Code review: structured analysis and feedback",
+    },
+    "debug": {
+        "required_artifacts": ["scope.json", "diagnosis.md"],
+        "allowed_commands": [
+            "lock", "unlock", "status", "renew", "start",
+            "scope", "report", "progress", "journal", "doctor",
+            "delegate-prepare", "delegate-complete",
+            "dev", "test",  # debug may need code changes
+        ],
+        "completion_gate": "diagnosis.md exists",
+        "description": "Debug: investigate, diagnose, optionally fix",
+    },
+    "analyze": {
+        "required_artifacts": ["scope.json", "report.md"],
+        "allowed_commands": [
+            "lock", "unlock", "status", "renew", "start",
+            "scope", "report", "progress", "journal", "doctor",
+            "delegate-prepare", "delegate-complete",
+        ],
+        "completion_gate": "report.md exists",
+        "description": "Analysis: understand code, produce structured conclusions",
+    },
+}
 
 FEATURE_TEMPLATE = """\
 # Feature {id}: {title}
@@ -186,6 +233,111 @@ def _run_git(repo: Path, cmd: list[str], check: bool = True) -> subprocess.Compl
 def _write_file(path: Path, content: str):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
+
+
+def _delegation_feature_dir(repo: Path, feature_id: str) -> Path:
+    return repo / CM_DIR / DELEGATION_DIR / feature_id
+
+
+def _delegation_request_path(repo: Path, feature_id: str) -> Path:
+    return _delegation_feature_dir(repo, feature_id) / "request.json"
+
+
+def _delegation_result_path(repo: Path, feature_id: str) -> Path:
+    return _delegation_feature_dir(repo, feature_id) / "result.json"
+
+
+def _delegation_behavior_summary_path(repo: Path, feature_id: str) -> Path:
+    return _delegation_feature_dir(repo, feature_id) / "behavior_summary.md"
+
+
+def _delegation_edge_case_matrix_path(repo: Path, feature_id: str) -> Path:
+    return _delegation_feature_dir(repo, feature_id) / "edge_case_matrix.json"
+
+
+def _delegation_artifacts_ready(repo: Path, feature_id: str, delegation: dict) -> tuple[bool, list[str]]:
+    """Check whether delegation artifacts are complete for execute unlock."""
+    task_type = delegation.get("task_type")
+    required = [_delegation_result_path(repo, feature_id)]
+    if task_type == "analyze-implementation":
+        required.extend(
+            [
+                _delegation_behavior_summary_path(repo, feature_id),
+                _delegation_edge_case_matrix_path(repo, feature_id),
+            ]
+        )
+    missing = [str(path) for path in required if not path.exists()]
+    return len(missing) == 0, missing
+
+
+def _delegation_gate_error(feature_id: str, delegation: dict) -> dict:
+    """Build a structured hard-gate error for execute commands."""
+    return {
+        "ok": False,
+        "error": "delegation required before execute",
+        "data": {
+            "feature": feature_id,
+            "task_type": delegation.get("task_type"),
+            "reason": delegation.get("reason"),
+            "status": delegation.get("status"),
+        },
+    }
+
+
+def _check_delegation_gate(repo: Path, feature_id: str) -> dict | None:
+    """Return hard-gate error when execute commands are blocked by must_delegate."""
+    claims = _atomic_json_read(repo / CM_DIR / "claims.json")
+    feature = claims.get("features", {}).get(feature_id, {})
+    if not feature:
+        return None
+    delegation = feature.get("delegation", {})
+    if delegation.get("required") and delegation.get("status") != "completed":
+        return _delegation_gate_error(feature_id, delegation)
+    return None
+
+
+def _get_session_mode(repo: Path) -> str:
+    """Read session mode from lock.json, default to 'deliver'."""
+    lock = _atomic_json_read(repo / CM_DIR / "lock.json")
+    return lock.get("mode", "deliver")
+
+
+def _check_mode_gate(repo: Path, command: str) -> dict | None:
+    """Return error if command is not allowed in the current session mode."""
+    mode = _get_session_mode(repo)
+    mode_def = MODES.get(mode)
+    if not mode_def:
+        return None  # unknown mode, allow everything
+    if command not in mode_def["allowed_commands"]:
+        return {
+            "ok": False,
+            "error": f"command '{command}' not available in '{mode}' mode",
+            "data": {
+                "mode": mode,
+                "allowed_commands": mode_def["allowed_commands"],
+                "description": mode_def["description"],
+            },
+        }
+    return None
+
+
+def _get_mode_artifact_status(repo: Path) -> dict:
+    """Check which required artifacts exist for the current mode."""
+    mode = _get_session_mode(repo)
+    mode_def = MODES.get(mode, MODES["deliver"])
+    required = mode_def["required_artifacts"]
+    status = {}
+    for artifact in required:
+        path = repo / CM_DIR / artifact
+        status[artifact] = "exists" if path.exists() else "missing"
+    return status
+
+
+def _check_mode_completion(repo: Path) -> tuple[bool, list[str]]:
+    """Check if all required artifacts exist for session completion."""
+    status = _get_mode_artifact_status(repo)
+    missing = [name for name, st in status.items() if st == "missing"]
+    return len(missing) == 0, missing
 
 
 def _find_feature_md(repo: Path, feature_id: str) -> Path | None:
@@ -559,6 +711,11 @@ def cmd_lock(args) -> dict:
     agent = _resolve_agent(args)
     reserved = {}
 
+    raw_mode = getattr(args, "mode", None)
+    mode = raw_mode if isinstance(raw_mode, str) else "deliver"
+    if mode not in MODES:
+        return {"ok": False, "error": f"unknown mode: {mode}", "data": {"available_modes": list(MODES.keys())}}
+
     def reserve_lock(data):
         if data and not _is_expired(data):
             return {"ok": False, "error": "already locked", "data": data}
@@ -567,6 +724,7 @@ def cmd_lock(args) -> dict:
         branch = getattr(args, "branch", None) or f"dev/{args.repo}-{now.strftime('%m%d-%H%M')}"
         reserved.update({
             "repo": args.repo,
+            "mode": mode,
             "session_phase": "locked",
             "branch": branch,
             "locked_by": agent,
@@ -888,6 +1046,9 @@ def cmd_dev(args) -> dict:
     pre_err = _precondition_check(repo, feature_id)
     if pre_err:
         return pre_err
+    delegate_err = _check_delegation_gate(repo, feature_id)
+    if delegate_err:
+        return delegate_err
 
     feature_md = _find_feature_md(repo, feature_id)
     has_analysis, has_plan = _check_feature_md_sections(feature_md)
@@ -935,6 +1096,9 @@ def cmd_test(args) -> dict:
     pre_err = _precondition_check(repo, feature_id)
     if pre_err:
         return pre_err
+    delegate_err = _check_delegation_gate(repo, feature_id)
+    if delegate_err:
+        return delegate_err
 
     worktree = _get_feature_worktree(claims_path, feature_id)
     wt_path = Path(worktree) if worktree else repo
@@ -1039,6 +1203,9 @@ def cmd_done(args) -> dict:
     pre_err = _precondition_check(repo, feature_id)
     if pre_err:
         return pre_err
+    delegate_err = _check_delegation_gate(repo, feature_id)
+    if delegate_err:
+        return delegate_err
 
     # Read actual git HEAD (outside flock to avoid blocking)
     worktree = _get_feature_worktree(claims_path, feature_id)
@@ -1392,16 +1559,209 @@ def cmd_submit(args) -> dict:
     }}
 
 
+def cmd_scope(args) -> dict:
+    """Define the scope of analysis/review/debug work. Writes scope.json."""
+    repo = _resolve_locked_repo(args)
+    mode = _get_session_mode(repo)
+    if mode == "deliver":
+        return {"ok": False, "error": "scope is not used in deliver mode; use PLAN.md instead"}
+
+    scope = {}
+    if getattr(args, "diff", None):
+        scope["type"] = "diff"
+        scope["diff_range"] = args.diff
+    elif getattr(args, "files", None):
+        scope["type"] = "files"
+        scope["files"] = args.files
+    elif getattr(args, "pr", None):
+        scope["type"] = "pr"
+        scope["pr"] = args.pr
+    else:
+        scope["type"] = "repo"
+
+    if getattr(args, "goal", None):
+        scope["goal"] = args.goal
+
+    scope["created_at"] = datetime.now(timezone.utc).isoformat()
+    scope["mode"] = mode
+
+    scope_path = repo / CM_DIR / "scope.json"
+    scope_path.parent.mkdir(parents=True, exist_ok=True)
+    scope_path.write_text(json.dumps(scope, indent=2, ensure_ascii=False))
+    agent = _resolve_agent(args)
+    _append_journal(repo, agent, "scope", f"Scope defined: {scope.get('type')}")
+    return {"ok": True, "data": {"scope_path": str(scope_path), "scope": scope}}
+
+
+def cmd_report(args) -> dict:
+    """Write or finalize the session report/diagnosis. Writes report.md or diagnosis.md."""
+    repo = _resolve_locked_repo(args)
+    mode = _get_session_mode(repo)
+    if mode == "deliver":
+        return {"ok": False, "error": "report is not used in deliver mode; use cm submit"}
+
+    # Determine output filename based on mode
+    if mode == "debug":
+        filename = "diagnosis.md"
+    else:
+        filename = "report.md"
+
+    content = getattr(args, "content", None) or ""
+    report_file = getattr(args, "file", None)
+
+    if report_file:
+        src = Path(report_file)
+        if not src.exists():
+            return {"ok": False, "error": f"report file not found: {report_file}"}
+        content = src.read_text()
+
+    if not content.strip():
+        return {"ok": False, "error": "report content is empty; provide --content or --file"}
+
+    report_path = repo / CM_DIR / filename
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(content)
+    agent = _resolve_agent(args)
+    _append_journal(repo, agent, "report", f"Report written: {filename}")
+    return {"ok": True, "data": {"report_path": str(report_path), "filename": filename}}
+
+
+def cmd_delegate_prepare(args) -> dict:
+    """Write delegation request and move feature delegation state to running."""
+    repo = _resolve_locked_repo(args)
+    claims_path = repo / CM_DIR / "claims.json"
+    feature_id = str(args.feature)
+    plan = _parse_plan_md(repo / CM_DIR / "PLAN.md")
+    spec = plan.get(feature_id)
+    if not spec:
+        return {"ok": False, "error": f"Feature {feature_id} not found in PLAN.md"}
+
+    def do_prepare(data):
+        features = data.setdefault("features", {})
+        feature = features.get(feature_id)
+        if not feature:
+            return {"ok": False, "error": f"Feature {feature_id} not found"}
+        delegation = feature.setdefault("delegation", {})
+        if not delegation.get("required"):
+            delegation.update(
+                {
+                    "required": True,
+                    "task_type": "analyze-implementation",
+                    "reason": "explicit_delegate_prepare",
+                    "status": "pending",
+                }
+            )
+        if delegation.get("status") == "completed":
+            return {"ok": True}
+        delegation["status"] = "running"
+        delegation["prepared_at"] = datetime.now(timezone.utc).isoformat()
+        return {"ok": True}
+
+    result = _atomic_json_update(claims_path, do_prepare)
+    if not result.get("ok"):
+        return result
+
+    request = {
+        "task_type": "analyze-implementation",
+        "repo": repo.name,
+        "feature_id": feature_id,
+        "targets": [
+            {
+                "path": str(_find_feature_md(repo, feature_id) or ""),
+                "symbol": None,
+            }
+        ],
+        "goal": spec.get("task", "") or spec.get("title", ""),
+        "acceptance_criteria": spec.get("criteria", ""),
+    }
+    req_path = _delegation_request_path(repo, feature_id)
+    req_path.parent.mkdir(parents=True, exist_ok=True)
+    req_path.write_text(json.dumps(request, indent=2, ensure_ascii=False))
+    return {
+        "ok": True,
+        "data": {
+            "feature": feature_id,
+            "request_path": str(req_path),
+            "required_artifacts": [
+                str(_delegation_result_path(repo, feature_id)),
+                str(_delegation_behavior_summary_path(repo, feature_id)),
+                str(_delegation_edge_case_matrix_path(repo, feature_id)),
+            ],
+        },
+    }
+
+
+def cmd_delegate_complete(args) -> dict:
+    """Validate delegation artifacts and unlock execute for the feature."""
+    repo = _resolve_locked_repo(args)
+    claims_path = repo / CM_DIR / "claims.json"
+    feature_id = str(args.feature)
+    claims = _atomic_json_read(claims_path)
+    feature = claims.get("features", {}).get(feature_id)
+    if not feature:
+        return {"ok": False, "error": f"Feature {feature_id} not found"}
+    delegation = feature.get("delegation")
+    if not delegation or not delegation.get("required"):
+        return {"ok": False, "error": f"Feature {feature_id} does not require delegation"}
+
+    ready, missing = _delegation_artifacts_ready(repo, feature_id, delegation)
+    if not ready:
+        return {
+            "ok": False,
+            "error": "delegation artifacts incomplete",
+            "data": {"feature": feature_id, "missing": missing},
+        }
+
+    result_payload = {}
+    result_path = _delegation_result_path(repo, feature_id)
+    try:
+        result_payload = json.loads(result_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {"ok": False, "error": "invalid delegation result.json"}
+
+    def do_complete(data):
+        features = data.setdefault("features", {})
+        current = features.get(feature_id)
+        if not current:
+            return {"ok": False, "error": f"Feature {feature_id} not found"}
+        current_delegation = current.get("delegation")
+        if not current_delegation or not current_delegation.get("required"):
+            return {"ok": False, "error": f"Feature {feature_id} does not require delegation"}
+        current_delegation["status"] = "completed"
+        current_delegation["completed_at"] = datetime.now(timezone.utc).isoformat()
+        return {"ok": True}
+
+    result = _atomic_json_update(claims_path, do_complete)
+    if not result.get("ok"):
+        return result
+
+    return {
+        "ok": True,
+        "data": {
+            "feature": feature_id,
+            "delegation_status": "completed",
+            "recommended_next_step": result_payload.get("recommended_next_step"),
+        },
+    }
+
+
 def cmd_progress(args) -> dict:
     """Read-only: show session + feature status + action guidance."""
     repo = _resolve_locked_repo(args)
     lock = _atomic_json_read(repo / CM_DIR / "lock.json")
+    mode = lock.get("mode", "deliver")
+    session_phase = lock.get("session_phase", "unknown")
+
+    # Non-deliver modes: artifact-gap based progress
+    if mode != "deliver":
+        return _progress_artifact_mode(repo, lock, mode, session_phase, args)
+
+    # Deliver mode: feature-based progress (existing logic)
     plan_path = repo / CM_DIR / "PLAN.md"
     plan = _parse_plan_md(plan_path)
     claims = _atomic_json_read(repo / CM_DIR / "claims.json")
     features_claims = claims.get("features", {})
 
-    session_phase = lock.get("session_phase", "unknown")
     plan_exists = plan_path.exists() and bool(plan)
 
     session_steps = _generate_session_steps(session_phase, plan_exists)
@@ -1430,18 +1790,24 @@ def cmd_progress(args) -> dict:
             "agent": claim.get("agent"),
             "worktree": claim.get("worktree"),
             "feature_md": str(feature_md) if feature_md else None,
+            "delegation": claim.get("delegation"),
             "action_steps": action_steps,
         })
 
     suggestions = _generate_suggestions(result, lock)
 
     agent = _resolve_agent(args)
-    next_action = _compute_next_action(result, features_claims, lock, agent)
-    session_next_action = _compute_session_next_action(result, features_claims, lock)
+    next_action = _compute_next_action(repo, result, features_claims, lock, agent)
+    session_next_action = _compute_session_next_action(repo, result, features_claims, lock)
+    delegation_info = _compute_local_delegation(result, features_claims, agent)
+    must_delegate = delegation_info is not None
 
     return {"ok": True, "data": {
+        "mode": mode,
         "session_phase": session_phase,
         "session_steps": session_steps,
+        "must_delegate": must_delegate,
+        "delegation": delegation_info,
         "next_action": next_action,
         "session_next_action": session_next_action,
         "total": len(result),
@@ -1455,8 +1821,61 @@ def cmd_progress(args) -> dict:
     }}
 
 
+def _progress_artifact_mode(repo: Path, lock: dict, mode: str, session_phase: str, args) -> dict:
+    """Progress for non-deliver modes: report artifact gaps and suggest next steps."""
+    mode_def = MODES.get(mode, MODES["deliver"])
+    artifact_status = _get_mode_artifact_status(repo)
+    completion_ready, missing = _check_mode_completion(repo)
+
+    # Read scope if it exists
+    scope_path = repo / CM_DIR / "scope.json"
+    scope = {}
+    if scope_path.exists():
+        try:
+            scope = json.loads(scope_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Compute suggestions based on what's missing
+    suggestions = []
+    if "scope.json" in artifact_status and artifact_status["scope.json"] == "missing":
+        suggestions.append("Define scope: cm scope --diff HEAD~3..HEAD or cm scope --files 'src/*.py'")
+    if completion_ready:
+        suggestions.append("All artifacts ready. Run cm unlock to finish.")
+    else:
+        for name in missing:
+            if name == "report.md":
+                suggestions.append("Write report: cm report --content '...' or cm report --file report.md")
+            elif name == "diagnosis.md":
+                suggestions.append("Write diagnosis: cm report --content '...' or cm report --file diagnosis.md")
+
+    # Next action
+    next_action = None
+    if not scope and "scope.json" in {a for a in mode_def["required_artifacts"]}:
+        next_action = {"command": "cm scope", "reason": "Define what to analyze", "scope": "local"}
+    elif completion_ready:
+        next_action = {"command": "cm unlock", "reason": "Work complete, release session", "scope": "local"}
+    elif "scope.json" in artifact_status and artifact_status["scope.json"] == "exists":
+        if mode == "debug":
+            next_action = {"command": None, "reason": "Investigate and write diagnosis", "scope": "local"}
+        else:
+            next_action = {"command": None, "reason": "Analyze scope and write report", "scope": "local"}
+
+    return {"ok": True, "data": {
+        "mode": mode,
+        "mode_description": mode_def["description"],
+        "session_phase": session_phase,
+        "artifact_status": artifact_status,
+        "completion_ready": completion_ready,
+        "missing_artifacts": missing,
+        "scope": scope,
+        "next_action": next_action,
+        "suggestions": suggestions,
+    }}
+
+
 def _compute_next_action(
-    features: list[dict], claims: dict, lock: dict, agent: str,
+    repo: Path, features: list[dict], claims: dict, lock: dict, agent: str,
 ) -> dict | None:
     """Compute the best next action for the current agent (local scope)."""
     session_phase = lock.get("session_phase", "unknown")
@@ -1471,6 +1890,24 @@ def _compute_next_action(
         claim = claims.get(fid, {})
         if claim.get("agent") != agent:
             continue
+        delegation = claim.get("delegation", {})
+        if delegation.get("required") and delegation.get("status") != "completed":
+            if delegation.get("status") == "pending":
+                return {
+                    "command": f"cm delegate-prepare --feature {fid}",
+                    "reason": delegation.get("reason", "delegation required"),
+                    "worktree": claim.get("worktree"),
+                    "scope": "local",
+                }
+            ready, missing = _delegation_artifacts_ready(repo, fid, delegation)
+            if ready:
+                return {
+                    "command": f"cm delegate-complete --feature {fid}",
+                    "reason": "Delegation artifacts are ready, unlock execute",
+                    "worktree": claim.get("worktree"),
+                    "scope": "local",
+                }
+            return None
         dev = claim.get("developing", {})
 
         if f["phase"] == "developing":
@@ -1507,7 +1944,7 @@ def _compute_next_action(
 
 
 def _compute_session_next_action(
-    features: list[dict], claims: dict, lock: dict,
+    repo: Path, features: list[dict], claims: dict, lock: dict,
 ) -> dict | None:
     """Compute the best next action for the session (global scope)."""
     session_phase = lock.get("session_phase", "unknown")
@@ -1519,6 +1956,22 @@ def _compute_session_next_action(
     for f in features:
         fid = f["id"]
         claim = claims.get(fid, {})
+        delegation = claim.get("delegation", {})
+        if delegation.get("required") and delegation.get("status") != "completed":
+            if delegation.get("status") == "pending":
+                return {
+                    "command": f"cm delegate-prepare --feature {fid}",
+                    "reason": f"Feature {fid} requires delegation before execute",
+                    "scope": "session",
+                }
+            ready, missing = _delegation_artifacts_ready(repo, fid, delegation)
+            if ready:
+                return {
+                    "command": f"cm delegate-complete --feature {fid}",
+                    "reason": f"Feature {fid} delegation artifacts ready, unlock execute",
+                    "scope": "session",
+                }
+            continue
         dev = claim.get("developing", {})
         owner = claim.get("agent", "unknown")
 
@@ -1560,6 +2013,24 @@ def _compute_session_next_action(
     if all(f["phase"] == "done" for f in features) and session_phase == "working":
         return {"command": "cm integrate", "reason": "All features done, ready to integrate", "scope": "session"}
 
+    return None
+
+
+def _compute_local_delegation(features: list[dict], claims: dict, agent: str) -> dict | None:
+    """Return delegation summary for the current agent if delegation is required."""
+    for f in features:
+        fid = f["id"]
+        claim = claims.get(fid, {})
+        if claim.get("agent") != agent:
+            continue
+        delegation = claim.get("delegation", {})
+        if delegation.get("required") and delegation.get("status") != "completed":
+            return {
+                "feature": fid,
+                "task_type": delegation.get("task_type"),
+                "reason": delegation.get("reason"),
+                "status": delegation.get("status"),
+            }
     return None
 
 
@@ -1819,10 +2290,14 @@ def main():
     p_start = sub.add_parser("start", help="One-shot: lock + plan + plan-ready")
     p_start.add_argument("--branch", default=None)
     p_start.add_argument("--plan-file", default=None, help="Path to PLAN.md to copy")
+    p_start.add_argument("--mode", default="deliver", choices=list(MODES.keys()),
+                         help="Session mode: deliver, review, debug, analyze")
 
     # lock
     p_lock = sub.add_parser("lock", help="Lock workspace")
     p_lock.add_argument("--branch", default=None)
+    p_lock.add_argument("--mode", default="deliver", choices=list(MODES.keys()),
+                        help="Session mode: deliver, review, debug, analyze")
 
     # unlock
     sub.add_parser("unlock", help="Release lock")
@@ -1839,6 +2314,26 @@ def main():
     # claim
     p_claim = sub.add_parser("claim", help="Claim a feature")
     p_claim.add_argument("--feature", "-f", required=True, type=int)
+
+    # scope (review/debug/analyze modes)
+    p_scope = sub.add_parser("scope", help="Define analysis/review scope")
+    p_scope.add_argument("--diff", default=None, help="Diff range (e.g. HEAD~3..HEAD)")
+    p_scope.add_argument("--files", nargs="*", default=None, help="File paths or globs")
+    p_scope.add_argument("--pr", default=None, help="PR number or URL")
+    p_scope.add_argument("--goal", default=None, help="What to look for / investigate")
+
+    # report (review/debug/analyze modes)
+    p_report = sub.add_parser("report", help="Write session report or diagnosis")
+    p_report.add_argument("--content", default=None, help="Report content (inline)")
+    p_report.add_argument("--file", default=None, help="Path to report file to copy")
+
+    # delegate-prepare
+    p_delegate_prepare = sub.add_parser("delegate-prepare", help="Prepare delegation request for a feature")
+    p_delegate_prepare.add_argument("--feature", "-f", required=True, type=int)
+
+    # delegate-complete
+    p_delegate_complete = sub.add_parser("delegate-complete", help="Mark delegation complete when artifacts exist")
+    p_delegate_complete.add_argument("--feature", "-f", required=True, type=int)
 
     # dev
     p_dev = sub.add_parser("dev", help="Advance to developing")
@@ -1892,6 +2387,10 @@ def main():
         "renew": cmd_renew,
         "plan-ready": cmd_plan_ready,
         "claim": cmd_claim,
+        "scope": cmd_scope,
+        "report": cmd_report,
+        "delegate-prepare": cmd_delegate_prepare,
+        "delegate-complete": cmd_delegate_complete,
         "dev": cmd_dev,
         "test": cmd_test,
         "done": cmd_done,
@@ -1912,6 +2411,18 @@ def main():
         _fail(f"unknown command: {args.command}")
 
     try:
+        # Mode gate: check command is allowed in current session mode
+        # Skip for commands that don't require a lock (lock, start, status, doctor, unlock)
+        no_gate_commands = {"lock", "start", "status", "doctor", "unlock"}
+        if args.command not in no_gate_commands:
+            repo = _repo_path(args.repo)
+            lock_path = repo / CM_DIR / "lock.json"
+            if lock_path.exists():
+                gate_err = _check_mode_gate(repo, args.command)
+                if gate_err:
+                    _output(gate_err)
+                    sys.exit(1)
+
         result = handler(args)
         _output(result)
     except SystemExit:
