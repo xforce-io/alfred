@@ -146,32 +146,11 @@ class WorkspaceLoader:
         if instructions.user_md:
             parts.append(f"# 用户画像\n\n{instructions.user_md}")
 
-        # NOTE: Lazy import from core — workspace prompt assembly needs memory
-        # business logic. Accepted as pragmatic boundary crossing with fallback.
-        try:
-            from ..core.memory.manager import MemoryManager
-            memory_prompt = MemoryManager(self.workspace_path / "MEMORY.md").get_prompt_memories(top_k=15)
-            if memory_prompt:
-                parts.append(memory_prompt)
-            elif instructions.memory_md:
-                # Fallback：旧格式 MEMORY.md
-                memory_lines = instructions.memory_md.split('\n')[:50]
-                parts.append(f"# 历史记忆\n\n" + '\n'.join(memory_lines))
-        except Exception:
-            if instructions.memory_md:
-                memory_lines = instructions.memory_md.split('\n')[:50]
-                parts.append(f"# 历史记忆\n\n" + '\n'.join(memory_lines))
-
-        if instructions.heartbeat_md:
-            parts.append(f"# 心跳任务\n\n{self._slim_heartbeat(instructions.heartbeat_md)}")
-
-        coding_parts = []
-        if instructions.coding_stats_md:
-            coding_parts.append(instructions.coding_stats_md)
-        if instructions.coding_md:
-            coding_parts.append(instructions.coding_md)
-        if coding_parts:
-            parts.append("# 开发状态\n\n" + "\n\n".join(coding_parts))
+        # Memory, heartbeat, coding sections removed from system prompt.
+        # These are now loaded on-demand:
+        # - 原始记忆 → memory-review 压缩后写入 USER.md，通过上方 user_md 注入
+        # - 心跳任务 → routine-manager skill 的 list 命令
+        # - 开发状态 → coding-master skill 的 status/progress 命令
 
         if not parts:
             return ""

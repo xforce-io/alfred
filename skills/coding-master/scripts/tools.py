@@ -32,6 +32,7 @@ CM_DIR = ".coding-master"
 EVIDENCE_DIR = "evidence"
 DELEGATION_DIR = "delegation"
 LEASE_MINUTES = 120
+READ_ONLY_MODES = {"review", "analyze"}  # These modes must not modify git state
 TEST_OUTPUT_MAX = 500
 
 # ── Mode definitions: constraints, not pipelines ──
@@ -696,17 +697,9 @@ def _append_journal(repo: Path, agent: str, action: str, message: str = ""):
 
 
 def cmd_lock(args) -> dict:
-    """Lock workspace, create dev branch."""
+    """Lock workspace, create dev branch (or read-only lock for review/analyze)."""
     repo = _repo_path(args.repo)
     lock_path = repo / CM_DIR / "lock.json"
-
-    # Verify clean working tree (exclude .coding-master/ artifacts and .gitignore)
-    status = _run_git(repo, [
-        "status", "--porcelain", "--", ".",
-        ":(exclude).coding-master", ":(exclude).gitignore",
-    ], check=False)
-    if status.stdout.strip():
-        return {"ok": False, "error": "working tree not clean, commit or stash first"}
 
     agent = _resolve_agent(args)
     reserved = {}
@@ -716,17 +709,34 @@ def cmd_lock(args) -> dict:
     if mode not in MODES:
         return {"ok": False, "error": f"unknown mode: {mode}", "data": {"available_modes": list(MODES.keys())}}
 
+    read_only = mode in READ_ONLY_MODES
+
+    # Read-only modes allow dirty working tree; write modes require clean state
+    if not read_only:
+        status = _run_git(repo, [
+            "status", "--porcelain", "--", ".",
+            ":(exclude).coding-master", ":(exclude).gitignore",
+        ], check=False)
+        if status.stdout.strip():
+            return {"ok": False, "error": "working tree not clean, commit or stash first"}
+
+    # Capture current branch for read-only modes (before lock, no git mutation)
+    current_branch = _run_git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip() if read_only else None
+
     def reserve_lock(data):
         if data and not _is_expired(data):
             return {"ok": False, "error": "already locked", "data": data}
 
         now = datetime.now(timezone.utc)
-        branch = getattr(args, "branch", None) or f"dev/{args.repo}-{now.strftime('%m%d-%H%M')}"
+        branch = current_branch if read_only else (
+            getattr(args, "branch", None) or f"dev/{args.repo}-{now.strftime('%m%d-%H%M')}"
+        )
         reserved.update({
             "repo": args.repo,
             "mode": mode,
             "session_phase": "locked",
             "branch": branch,
+            "read_only": read_only,
             "locked_by": agent,
             "locked_at": now.isoformat(),
             "lease_expires_at": (now + timedelta(minutes=LEASE_MINUTES)).isoformat(),
@@ -740,6 +750,14 @@ def cmd_lock(args) -> dict:
     if not result.get("ok"):
         return result
 
+    _ensure_gitignore(repo)
+
+    # Read-only modes: no branch creation, no git state changes
+    if read_only:
+        _append_journal(repo, agent, "lock", f"Read-only lock ({mode}), branch: {current_branch}")
+        return {"ok": True, "data": {"branch": current_branch, "read_only": True}}
+
+    # Write modes: create dev branch
     try:
         _run_git(repo, ["checkout", "-b", reserved["branch"]])
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -747,7 +765,6 @@ def cmd_lock(args) -> dict:
         err = getattr(exc, "stderr", "") or str(exc)
         return {"ok": False, "error": f"git checkout failed: {err}"}
 
-    _ensure_gitignore(repo)
     _append_journal(repo, agent, "lock", f"Workspace locked, branch: {reserved['branch']}")
     return {"ok": True, "data": {"branch": reserved["branch"]}}
 
