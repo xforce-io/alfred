@@ -1,11 +1,10 @@
 """LLM-based memory extraction from conversation history."""
 
-import asyncio
 import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from .models import MemoryEntry
 

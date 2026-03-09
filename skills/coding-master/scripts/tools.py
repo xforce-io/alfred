@@ -29,6 +29,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 from config_manager import ConfigManager
 
 CM_DIR = ".coding-master"
+EVIDENCE_DIR = "evidence"
 LEASE_MINUTES = 120
 TEST_OUTPUT_MAX = 500
 
@@ -377,6 +378,145 @@ def _run_tests(cwd: Path) -> dict:
     }
 
 
+def _run_lint(cwd: Path) -> dict:
+    """Run lint in the given directory. Returns {passed, command, output}."""
+    from test_runner import _exec, _has_tool
+
+    lint_cmd = None
+    if (cwd / "pyproject.toml").exists():
+        if _has_tool(cwd / "pyproject.toml", "ruff"):
+            lint_cmd = "ruff check ."
+    elif (cwd / "package.json").exists():
+        lint_cmd = "npm run lint"
+    elif (cwd / "Cargo.toml").exists():
+        lint_cmd = "cargo clippy"
+
+    if not lint_cmd:
+        return {"passed": True, "command": None, "output": "no lint command detected (skipped)"}
+
+    stdout, stderr, rc = _exec(str(cwd), lint_cmd)
+    combined = stdout + stderr
+    output = combined[-TEST_OUTPUT_MAX:] if len(combined) > TEST_OUTPUT_MAX else combined
+    return {"passed": rc == 0, "command": lint_cmd, "output": output}
+
+
+def _run_typecheck(cwd: Path) -> dict:
+    """Run typecheck in the given directory. Returns {passed, command, output}."""
+    from test_runner import _exec, _has_tool, _resolve_pytest_command
+
+    tc_cmd = _resolve_typecheck_command(cwd)
+    if not tc_cmd:
+        return {"passed": True, "command": None, "output": "no typecheck command detected (skipped)"}
+
+    stdout, stderr, rc = _exec(str(cwd), tc_cmd)
+    combined = stdout + stderr
+    output = combined[-TEST_OUTPUT_MAX:] if len(combined) > TEST_OUTPUT_MAX else combined
+    return {"passed": rc == 0, "command": tc_cmd, "output": output}
+
+
+def _resolve_typecheck_command(cwd: Path) -> str | None:
+    """Detect typecheck command for a project."""
+    from test_runner import _has_tool
+
+    if (cwd / "pyproject.toml").exists():
+        if _has_tool(cwd / "pyproject.toml", "mypy"):
+            venv_mypy = cwd / ".venv" / "bin" / "mypy"
+            if venv_mypy.is_file():
+                return f"{venv_mypy.resolve()} ."
+            return "mypy ."
+        venv_mypy = cwd / ".venv" / "bin" / "mypy"
+        if venv_mypy.is_file():
+            return f"{venv_mypy.resolve()} ."
+    elif (cwd / "tsconfig.json").exists():
+        return "npx tsc --noEmit"
+    return None
+
+
+def _write_evidence(repo: Path, feature_id: str, evidence: dict):
+    """Write evidence JSON file for a feature."""
+    evidence_dir = repo / CM_DIR / EVIDENCE_DIR
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    evidence_path = evidence_dir / f"{feature_id}-verify.json"
+    evidence_path.write_text(json.dumps(evidence, indent=2, ensure_ascii=False))
+
+
+def _delete_evidence(repo: Path, feature_id: str):
+    """Delete feature evidence file if it exists."""
+    evidence_path = repo / CM_DIR / EVIDENCE_DIR / f"{feature_id}-verify.json"
+    try:
+        evidence_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _read_evidence(repo: Path, feature_id: str) -> dict | None:
+    """Read evidence JSON file for a feature. Returns None if not found."""
+    evidence_path = repo / CM_DIR / EVIDENCE_DIR / f"{feature_id}-verify.json"
+    if not evidence_path.exists():
+        return None
+    try:
+        return json.loads(evidence_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _git_current_branch(path: str | Path) -> str:
+    """Get the current git branch name for a path."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(path), capture_output=True, text=True, timeout=10,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _delete_integration_report(repo: Path):
+    """Delete integration report if it exists."""
+    report_path = repo / CM_DIR / EVIDENCE_DIR / "integration-report.json"
+    try:
+        report_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+# ══════════════════════════════════════════════════════════
+#  Precondition checks
+# ══════════════════════════════════════════════════════════
+
+
+def _precondition_check(repo: Path, feature_id: str | None = None) -> dict | None:
+    """Check preconditions before mutation commands.
+
+    Returns error dict if precondition violated, None if OK.
+    Checks: lease validity, branch consistency, session not done.
+    """
+    # 1. Lease not expired
+    lease = _check_lease(repo)
+    if not lease["ok"]:
+        return lease
+
+    # 2. Target worktree branch matches claims record
+    if feature_id:
+        claims = _atomic_json_read(repo / CM_DIR / "claims.json")
+        feat = claims.get("features", {}).get(feature_id, {})
+        expected_branch = feat.get("branch")
+        wt = feat.get("worktree")
+        if expected_branch and wt and Path(wt).exists():
+            actual_branch = _git_current_branch(wt)
+            if actual_branch and actual_branch != expected_branch:
+                return {"ok": False, "error": f"Branch mismatch for feature {feature_id}: "
+                        f"expected {expected_branch}, worktree on {actual_branch}"}
+
+    # 3. Session not already done
+    lock = _atomic_json_read(repo / CM_DIR / "lock.json")
+    if lock.get("session_phase") == "done":
+        return {"ok": False, "error": "Session already done. Start a new session with cm lock."}
+
+    return None
+
+
 # ══════════════════════════════════════════════════════════
 #  JOURNAL.md
 # ══════════════════════════════════════════════════════════
@@ -467,19 +607,104 @@ def cmd_unlock(args) -> dict:
 
 
 def cmd_status(args) -> dict:
-    """Show current lock status (read-only)."""
+    """Show current lock status with exit_status/blocking_reason (read-only)."""
     repo = _repo_path(args.repo)
     lock = _atomic_json_read(repo / CM_DIR / "lock.json")
     if not lock:
         return {"ok": True, "data": {"locked": False}}
-    return {"ok": True, "data": {
+
+    data = {
         "locked": True, "expired": _is_expired(lock),
         "branch": lock.get("branch"),
         "locked_by": lock.get("locked_by"),
         "session_phase": lock.get("session_phase"),
         "lease_expires_at": lock.get("lease_expires_at"),
         "session_agents": lock.get("session_agents", []),
-    }}
+    }
+
+    # Extended status fields
+    plan = _parse_plan_md(repo / CM_DIR / "PLAN.md")
+    claims = _atomic_json_read(repo / CM_DIR / "claims.json")
+    features = claims.get("features", {})
+
+    if plan:
+        total = len(plan)
+        completed = sum(1 for f in features.values() if f.get("phase") == "done")
+        data["features_total"] = total
+        data["features_completed"] = completed
+        data["evidence_dir"] = str(repo / CM_DIR / EVIDENCE_DIR)
+
+        if lock.get("session_phase") == "done":
+            data["exit_status"] = "success"
+        elif total > 0 and completed == total:
+            data["exit_status"] = "ready"  # all done but not yet submitted
+        else:
+            data["exit_status"] = "partial"
+            # Compute blocking_reason with fixed priority
+            blocking_reason, resume_hint = _compute_blocking_reason(repo, lock, plan, features)
+            if blocking_reason:
+                data["blocking_reason"] = blocking_reason
+                data["resume_hint"] = resume_hint
+
+    return {"ok": True, "data": data}
+
+
+def _compute_blocking_reason(
+    repo: Path, lock: dict, plan: dict, features: dict
+) -> tuple[str | None, str | None]:
+    """Compute blocking reason and resume hint with fixed priority."""
+    # Priority 1: expired lease
+    if _is_expired(lock):
+        return "lease expired", "cm renew or cm unlock"
+
+    # Priority 2: integration failed
+    report_path = repo / CM_DIR / EVIDENCE_DIR / "integration-report.json"
+    if lock.get("session_phase") == "integrating":
+        pass  # integration succeeded, no blocking
+    elif report_path.exists():
+        try:
+            report = json.loads(report_path.read_text())
+            if report.get("overall") == "failed":
+                ft = report.get("failure_type", "unknown")
+                ff = report.get("failed_feature", "?")
+                return (f"integration {ft} on feature {ff}",
+                        f"cm reopen --feature {ff}, fix, then cm integrate")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Priority 3: any claimed feature with failed/stale verification
+    for fid, feat in features.items():
+        if feat.get("phase") == "developing":
+            dev = feat.get("developing", {})
+            ts = dev.get("test_status", "pending")
+            if ts == "failed":
+                return (f"feature {fid} verification failed",
+                        f"fix and run cm test --feature {fid}")
+            if ts == "passed":
+                current_head = None
+                wt = feat.get("worktree")
+                if wt and Path(wt).exists():
+                    current_head = _run_git(Path(wt), ["rev-parse", "HEAD"], check=False).stdout.strip()
+                else:
+                    current_head = dev.get("latest_commit")
+                if current_head and dev.get("test_commit") != current_head:
+                    return (f"feature {fid} verification stale",
+                            f"run cm test --feature {fid}")
+
+    # Priority 4: all remaining features blocked by dependencies
+    done_ids = {fid for fid, f in features.items() if f.get("phase") == "done"}
+    pending_unblocked = False
+    for fid, spec in plan.items():
+        if fid in features and features[fid].get("phase") != "pending":
+            continue
+        deps = spec.get("depends_on", [])
+        if not deps or all(d in done_ids for d in deps):
+            pending_unblocked = True
+            break
+    if not pending_unblocked and len(done_ids) < len(plan):
+        return "all remaining features blocked by dependencies", "complete in-progress features first"
+
+    return None, None
 
 
 def cmd_renew(args) -> dict:
@@ -561,10 +786,10 @@ def cmd_claim(args) -> dict:
     feature_id = str(args.feature)
     agent = _resolve_agent(args)
 
-    # Check lease
-    lease_check = _check_lease(repo)
-    if not lease_check["ok"]:
-        return lease_check
+    # Precondition check
+    pre_err = _precondition_check(repo)
+    if pre_err:
+        return pre_err
 
     # Check session_phase
     lock = _atomic_json_read(lock_path)
@@ -659,6 +884,11 @@ def cmd_dev(args) -> dict:
     claims_path = repo / CM_DIR / "claims.json"
     feature_id = str(args.feature)
 
+    # Precondition check
+    pre_err = _precondition_check(repo, feature_id)
+    if pre_err:
+        return pre_err
+
     feature_md = _find_feature_md(repo, feature_id)
     has_analysis, has_plan = _check_feature_md_sections(feature_md)
 
@@ -696,13 +926,26 @@ def cmd_dev(args) -> dict:
 
 
 def cmd_test(args) -> dict:
-    """Run tests in feature worktree, write results to claims.json."""
+    """Run lint+typecheck+tests, write evidence + claims.json."""
     repo = _resolve_locked_repo(args)
     claims_path = repo / CM_DIR / "claims.json"
     feature_id = str(args.feature)
 
+    # Precondition check
+    pre_err = _precondition_check(repo, feature_id)
+    if pre_err:
+        return pre_err
+
     worktree = _get_feature_worktree(claims_path, feature_id)
     wt_path = Path(worktree) if worktree else repo
+
+    # Verify feature is still in developing phase before running expensive checks
+    pre_claims = _atomic_json_read(claims_path)
+    feat = pre_claims.get("features", {}).get(feature_id)
+    if not feat:
+        return {"ok": False, "error": f"Feature {feature_id} not found"}
+    if feat.get("phase") != "developing":
+        return {"ok": False, "error": f"Feature {feature_id} is {feat.get('phase')}, expected developing"}
 
     # Verify no uncommitted changes to tracked files (untracked files are OK)
     git_status = _run_git(wt_path, ["status", "--porcelain", "-uno"], check=False)
@@ -718,8 +961,35 @@ def cmd_test(args) -> dict:
         .stdout.strip() or "0"
     )
 
-    # Run tests
+    # Run lint + typecheck + tests
+    lint_result = _run_lint(wt_path)
+    typecheck_result = _run_typecheck(wt_path)
     test_result = _run_tests(wt_path)
+
+    # Build evidence
+    now = datetime.now(timezone.utc).isoformat()
+    overall = "passed" if (lint_result["passed"] and typecheck_result["passed"] and test_result["ok"]) else "failed"
+    evidence = {
+        "feature_id": feature_id,
+        "created_at": now,
+        "commit": head,
+        "lint": {
+            "passed": lint_result["passed"],
+            "command": lint_result.get("command"),
+            "output": (lint_result.get("output", "") or "")[:TEST_OUTPUT_MAX],
+        },
+        "typecheck": {
+            "passed": typecheck_result["passed"],
+            "command": typecheck_result.get("command"),
+            "output": (typecheck_result.get("output", "") or "")[:TEST_OUTPUT_MAX],
+        },
+        "test": {
+            "passed": test_result["ok"],
+            "command": None,  # auto-detected
+            "output": (test_result.get("output", "") or "")[:TEST_OUTPUT_MAX],
+        },
+        "overall": overall,
+    }
     output_summary = (test_result.get("output", "") or "")[:TEST_OUTPUT_MAX]
 
     def update_test_state(data):
@@ -729,40 +999,54 @@ def cmd_test(args) -> dict:
         feat = features[feature_id]
         if feat.get("phase") != "developing":
             return {"ok": False, "error": f"Feature {feature_id} is {feat.get('phase')}, expected developing"}
-        now = datetime.now(timezone.utc).isoformat()
         dev = feat.setdefault("developing", {})
         dev["commit_count"] = commit_count
         dev["latest_commit"] = head
         dev["test_commit"] = head
         dev["test_output"] = output_summary
-        if test_result["ok"]:
+        if overall == "passed":
             dev["test_status"] = "passed"
             dev["test_passed_at"] = now
         else:
             dev["test_status"] = "failed"
             dev["test_passed_at"] = None
         return {"ok": True, "data": {
-            "test_passed": test_result["ok"],
+            "test_passed": overall == "passed",
             "test_status": dev["test_status"],
             "test_commit": head,
             "output": output_summary,
+            "evidence": evidence,
         }}
 
-    return _atomic_json_update(claims_path, update_test_state)
+    result = _atomic_json_update(claims_path, update_test_state)
+    if not result.get("ok"):
+        _delete_evidence(repo, feature_id)
+        return result
+
+    _write_evidence(repo, feature_id, evidence)
+    return result
 
 
 def cmd_done(args) -> dict:
-    """Check test state → mark feature done. Returns unblocked features."""
+    """Check verification evidence → mark feature done. Returns unblocked features."""
     repo = _resolve_locked_repo(args)
     claims_path = repo / CM_DIR / "claims.json"
     feature_id = str(args.feature)
     plan = _parse_plan_md(repo / CM_DIR / "PLAN.md")
     agent = _resolve_agent(args)
 
+    # Precondition check
+    pre_err = _precondition_check(repo, feature_id)
+    if pre_err:
+        return pre_err
+
     # Read actual git HEAD (outside flock to avoid blocking)
     worktree = _get_feature_worktree(claims_path, feature_id)
     wt_path = Path(worktree) if worktree else repo
     current_head = _run_git(wt_path, ["rev-parse", "HEAD"], check=False).stdout.strip()
+
+    # Check evidence file (v4 path) or fallback to legacy claims check
+    evidence = _read_evidence(repo, feature_id)
 
     def do_done(data):
         features = data.setdefault("features", {})
@@ -779,17 +1063,27 @@ def cmd_done(args) -> dict:
         if phase != "developing":
             return {"ok": False, "error": f"Feature {feature_id} is {phase}, expected developing"}
 
-        dev = feat.get("developing", {})
-        test_status = dev.get("test_status", "pending")
-        if test_status == "pending":
-            return {"ok": False, "error": "no test record, run cm test first"}
-        if test_status == "failed":
-            return {"ok": False, "error": f"last test failed: {dev.get('test_output', '')[:100]}. "
-                    "Fix and run cm test again"}
-        if dev.get("test_commit") != current_head:
-            return {"ok": False, "error": f"code changed after last test "
-                    f"(tested {dev.get('test_commit', '?')[:7]}, HEAD {current_head[:7]}), "
-                    "run cm test again"}
+        if evidence:
+            # v4 evidence-based verification
+            if evidence.get("commit") != current_head:
+                return {"ok": False, "error": "Evidence is stale (code changed after test). Re-run cm test."}
+            if evidence.get("overall") != "passed":
+                failed = [k for k in ("lint", "typecheck", "test")
+                          if not evidence.get(k, {}).get("passed", True)]
+                return {"ok": False, "error": f"Verification failed: {', '.join(failed)}. Fix and re-run cm test."}
+        else:
+            # Legacy fallback for pre-v4 features/sessions
+            dev = feat.get("developing", {})
+            test_status = dev.get("test_status", "pending")
+            if test_status == "pending":
+                return {"ok": False, "error": "no test record, run cm test first"}
+            if test_status == "failed":
+                return {"ok": False, "error": f"last test failed: {dev.get('test_output', '')[:100]}. "
+                        "Fix and run cm test again"}
+            if dev.get("test_commit") != current_head:
+                return {"ok": False, "error": f"code changed after last test "
+                        f"(tested {dev.get('test_commit', '?')[:7]}, HEAD {current_head[:7]}), "
+                        "run cm test again"}
 
         feat["phase"] = "done"
         feat["completed_at"] = datetime.now(timezone.utc).isoformat()
@@ -818,6 +1112,11 @@ def cmd_reopen(args) -> dict:
     repo = _resolve_locked_repo(args)
     claims_path = repo / CM_DIR / "claims.json"
     feature_id = str(args.feature)
+
+    # Precondition check (skip feature-level branch check since it's done, not developing)
+    pre_err = _precondition_check(repo)
+    if pre_err:
+        return pre_err
 
     def do_reopen(data):
         features = data.setdefault("features", {})
@@ -848,12 +1147,62 @@ def cmd_reopen(args) -> dict:
     )[1])
 
     worktree = _get_feature_worktree(claims_path, feature_id)
-    return {"ok": True, "data": {"worktree": worktree}}
+    response = {"ok": True, "data": {"worktree": worktree, "feature": feature_id, "phase": "developing"}}
+
+    # Extract failure context from integration report if available
+    report_path = repo / CM_DIR / EVIDENCE_DIR / "integration-report.json"
+    if report_path.exists():
+        try:
+            report = json.loads(report_path.read_text())
+            failure_context = _extract_failure_context(report, feature_id)
+            if failure_context:
+                response["data"]["failure_context"] = failure_context
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Clear stale integration failure context once recovery starts
+    _delete_integration_report(repo)
+
+    return response
+
+
+def _extract_failure_context(report: dict, feature_id: str) -> dict | None:
+    """Extract failure context for a feature from integration report."""
+    if report.get("overall") == "passed":
+        return None
+
+    failure_type = report.get("failure_type")
+    if failure_type == "merge_conflict":
+        failed_feature = report.get("failed_feature")
+        if failed_feature == feature_id:
+            return {
+                "type": "merge_conflict",
+                "error": report.get("error", ""),
+                "conflicting_with": report.get("failed_branch", ""),
+            }
+        # Feature wasn't the one that failed merge, but was reopened anyway
+        return {
+            "type": "merge_conflict",
+            "error": f"Merge conflict on feature {failed_feature}: {report.get('error', '')}",
+        }
+    elif failure_type == "test_failure":
+        test_info = report.get("test", {})
+        return {
+            "type": "test_failure",
+            "error": (test_info.get("output", "") or "")[:500],
+        }
+    return None
 
 
 def cmd_integrate(args) -> dict:
     """Merge all feature branches → run full tests → session: integrating."""
     repo = _resolve_locked_repo(args)
+
+    # Precondition check
+    pre_err = _precondition_check(repo)
+    if pre_err:
+        return pre_err
+
     plan = _parse_plan_md(repo / CM_DIR / "PLAN.md")
     claims = _atomic_json_read(repo / CM_DIR / "claims.json")
 
@@ -871,24 +1220,44 @@ def cmd_integrate(args) -> dict:
     _run_git(repo, ["checkout", branch])
     pre_merge_sha = _run_git(repo, ["rev-parse", "HEAD"]).stdout.strip()
 
-    feature_branches = [
-        claims["features"][fid]["branch"]
-        for fid in _topo_sort(plan)
-        if "branch" in claims["features"].get(fid, {})
-    ]
-    for fb in feature_branches:
+    # Build merge order and track results
+    merge_order = _topo_sort(plan)
+    merge_results = []
+
+    for fid in merge_order:
+        fb = claims["features"].get(fid, {}).get("branch")
+        if not fb:
+            continue
         merge_rc = subprocess.run(
             ["git", "merge", fb, "--no-edit"],
             cwd=repo, capture_output=True, text=True,
         )
         if merge_rc.returncode != 0:
+            merge_results.append({"feature": fid, "branch": fb, "status": "conflict",
+                                  "error": merge_rc.stderr.strip()})
             subprocess.run(["git", "merge", "--abort"], cwd=repo, capture_output=True)
             subprocess.run(
                 ["git", "reset", "--hard", pre_merge_sha],
                 cwd=repo, capture_output=True,
             )
+            # Write integration report (failure)
+            report = {
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "dev_branch": branch,
+                "merge_order": merge_order,
+                "merge_results": merge_results,
+                "overall": "failed",
+                "failure_type": "merge_conflict",
+                "failed_feature": fid,
+                "failed_branch": fb,
+                "error": merge_rc.stderr.strip(),
+            }
+            _write_integration_report(repo, report)
             return {"ok": False, "error": f"merge failed ({fb}): {merge_rc.stderr.strip()}. "
                     "Run cm reopen for the conflicting feature, resolve, then retry"}
+        else:
+            commit = _run_git(repo, ["rev-parse", "HEAD"], check=False).stdout.strip()
+            merge_results.append({"feature": fid, "branch": fb, "status": "merged", "commit": commit})
 
     # Run full tests on merged dev branch
     test_result = _run_tests(repo)
@@ -899,9 +1268,32 @@ def cmd_integrate(args) -> dict:
             ["git", "reset", "--hard", pre_merge_sha],
             cwd=repo, capture_output=True,
         )
+        # Write integration report (test failure)
+        report = {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "dev_branch": branch,
+            "merge_order": merge_order,
+            "merge_results": merge_results,
+            "overall": "failed",
+            "failure_type": "test_failure",
+            "all_merged": True,
+            "test": {"passed": False, "output": output_summary},
+        }
+        _write_integration_report(repo, report)
         return {"ok": False, "error": "integration tests failed",
                 "data": {"output": output_summary,
                          "hint": "cm reopen → fix → cm test → cm done → retry cm integrate"}}
+
+    # Write integration report (success)
+    report = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "dev_branch": branch,
+        "merge_order": merge_order,
+        "merge_results": merge_results,
+        "test": {"passed": True, "output": output_summary},
+        "overall": "passed",
+    }
+    _write_integration_report(repo, report)
 
     # Success → session_phase = integrating
     _atomic_json_update(repo / CM_DIR / "lock.json", lambda d: (
@@ -913,6 +1305,14 @@ def cmd_integrate(args) -> dict:
     agent = _resolve_agent(args)
     _append_journal(repo, agent, "integrate", "All features merged, integration tests passed")
     return {"ok": True, "data": {"test_output": output_summary}}
+
+
+def _write_integration_report(repo: Path, report: dict):
+    """Write integration report to evidence directory."""
+    evidence_dir = repo / CM_DIR / EVIDENCE_DIR
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    report_path = evidence_dir / "integration-report.json"
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False))
 
 
 def cmd_submit(args) -> dict:
@@ -975,7 +1375,21 @@ def cmd_submit(args) -> dict:
         return {"ok": True, "data": {"branch": branch, "pr_url": pr_url},
                 "warning": f"PR created but unlock failed: {exc}. Run cm doctor to fix."}
 
-    return {"ok": True, "data": {"branch": branch, "pr_url": pr_url}}
+    # Build extended contract response
+    plan = _parse_plan_md(repo / CM_DIR / "PLAN.md")
+    claims = _atomic_json_read(repo / CM_DIR / "claims.json")
+    features_total = len(plan)
+    features_completed = sum(1 for f in claims.get("features", {}).values() if f.get("phase") == "done")
+    evidence_dir = str(repo / CM_DIR / EVIDENCE_DIR)
+
+    return {"ok": True, "data": {
+        "branch": branch, "pr_url": pr_url,
+        "evidence_dir": evidence_dir,
+        "features_completed": features_completed,
+        "features_total": features_total,
+        "exit_status": "success",
+        "journal": str(repo / CM_DIR / "JOURNAL.md"),
+    }}
 
 
 def cmd_progress(args) -> dict:
@@ -1021,9 +1435,15 @@ def cmd_progress(args) -> dict:
 
     suggestions = _generate_suggestions(result, lock)
 
+    agent = _resolve_agent(args)
+    next_action = _compute_next_action(result, features_claims, lock, agent)
+    session_next_action = _compute_session_next_action(result, features_claims, lock)
+
     return {"ok": True, "data": {
         "session_phase": session_phase,
         "session_steps": session_steps,
+        "next_action": next_action,
+        "session_next_action": session_next_action,
         "total": len(result),
         "done": sum(1 for r in result if r["phase"] == "done"),
         "analyzing": sum(1 for r in result if r["phase"] == "analyzing"),
@@ -1033,6 +1453,114 @@ def cmd_progress(args) -> dict:
         "features": result,
         "suggestions": suggestions,
     }}
+
+
+def _compute_next_action(
+    features: list[dict], claims: dict, lock: dict, agent: str,
+) -> dict | None:
+    """Compute the best next action for the current agent (local scope)."""
+    session_phase = lock.get("session_phase", "unknown")
+
+    # Session-level actions that any agent can do
+    if session_phase == "integrating":
+        return {"command": "cm submit --title '...'", "reason": "Integration passed, ready to submit", "scope": "local"}
+
+    # Check agent's own features first
+    for f in features:
+        fid = f["id"]
+        claim = claims.get(fid, {})
+        if claim.get("agent") != agent:
+            continue
+        dev = claim.get("developing", {})
+
+        if f["phase"] == "developing":
+            ts = dev.get("test_status", "pending")
+            if ts == "failed":
+                output = (dev.get("test_output", "") or "")[:100]
+                return {"command": f"fix and cm test --feature {fid}",
+                        "reason": f"Test failed: {output}", "worktree": claim.get("worktree"), "scope": "local"}
+            if ts == "passed" and dev.get("test_commit") != dev.get("latest_commit"):
+                return {"command": f"cm test --feature {fid}",
+                        "reason": "Code changed after test (stale)", "worktree": claim.get("worktree"), "scope": "local"}
+            if ts == "passed" and dev.get("test_commit") == dev.get("latest_commit"):
+                return {"command": f"cm done --feature {fid}",
+                        "reason": "Verification passed, ready to mark done", "worktree": claim.get("worktree"), "scope": "local"}
+            if ts == "pending":
+                return {"command": f"Write code, commit, cm test --feature {fid}",
+                        "reason": "Feature in development, no tests yet", "worktree": claim.get("worktree"), "scope": "local"}
+
+        if f["phase"] == "analyzing":
+            return {"command": f"Write Analysis+Plan, cm dev --feature {fid}",
+                    "reason": "Feature needs analysis and planning", "worktree": claim.get("worktree"), "scope": "local"}
+
+    # Agent has no in-progress features — look for unclaimed/unblocked
+    for f in features:
+        if f["phase"] == "pending":
+            return {"command": f"cm claim --feature {f['id']}",
+                    "reason": f"Feature {f['id']} ({f['title']}) is available", "scope": "local"}
+
+    # All features done, suggest integrate
+    if all(f["phase"] == "done" for f in features) and session_phase == "working":
+        return {"command": "cm integrate", "reason": "All features done, ready to integrate", "scope": "local"}
+
+    return None
+
+
+def _compute_session_next_action(
+    features: list[dict], claims: dict, lock: dict,
+) -> dict | None:
+    """Compute the best next action for the session (global scope)."""
+    session_phase = lock.get("session_phase", "unknown")
+
+    if session_phase == "integrating":
+        return {"command": "cm submit --title '...'", "reason": "Integration passed, ready to submit", "scope": "session"}
+
+    # Any feature with failed/stale verification
+    for f in features:
+        fid = f["id"]
+        claim = claims.get(fid, {})
+        dev = claim.get("developing", {})
+        owner = claim.get("agent", "unknown")
+
+        if f["phase"] == "developing":
+            ts = dev.get("test_status", "pending")
+            if ts == "failed":
+                return {"command": f"cm test --feature {fid}",
+                        "reason": f"Feature {fid} verification failed (owner: {owner})", "scope": "session"}
+            if ts == "passed" and dev.get("test_commit") != dev.get("latest_commit"):
+                return {"command": f"cm test --feature {fid}",
+                        "reason": f"Feature {fid} test stale (owner: {owner})", "scope": "session"}
+
+    # Any feature ready to mark done
+    for f in features:
+        fid = f["id"]
+        claim = claims.get(fid, {})
+        dev = claim.get("developing", {})
+        owner = claim.get("agent", "unknown")
+        if f["phase"] == "developing":
+            ts = dev.get("test_status", "pending")
+            if ts == "passed" and dev.get("test_commit") == dev.get("latest_commit"):
+                return {"command": f"cm done --feature {fid}",
+                        "reason": f"Feature {fid} verified, ready to mark done (owner: {owner})", "scope": "session"}
+
+    # Any analyzing feature
+    for f in features:
+        if f["phase"] == "analyzing":
+            owner = claims.get(f["id"], {}).get("agent", "unknown")
+            return {"command": f"cm dev --feature {f['id']}",
+                    "reason": f"Feature {f['id']} needs analysis (owner: {owner})", "scope": "session"}
+
+    # Unclaimed/unblocked features
+    for f in features:
+        if f["phase"] == "pending":
+            return {"command": f"cm claim --feature {f['id']}",
+                    "reason": f"Feature {f['id']} ({f['title']}) available for claiming", "scope": "session"}
+
+    # All done
+    if all(f["phase"] == "done" for f in features) and session_phase == "working":
+        return {"command": "cm integrate", "reason": "All features done, ready to integrate", "scope": "session"}
+
+    return None
 
 
 def _generate_session_steps(session_phase: str, plan_exists: bool) -> list[str]:
@@ -1219,6 +1747,63 @@ def _generate_pr_body(repo: Path) -> str:
     return "\n".join(lines)
 
 
+def cmd_start(args) -> dict:
+    """One-shot session setup: lock + copy plan + plan-ready. Rolls back on failure."""
+    repo = _repo_path(args.repo)
+    lock_path = repo / CM_DIR / "lock.json"
+    plan_path = repo / CM_DIR / "PLAN.md"
+
+    # Check no existing lock
+    existing = _atomic_json_read(lock_path)
+    if existing and not _is_expired(existing):
+        return {"ok": False, "error": "already locked", "data": existing}
+
+    # Step 1: Lock
+    lock_result = cmd_lock(args)
+    if not lock_result.get("ok"):
+        return lock_result
+
+    plan_created = False
+    try:
+        # Step 2: Copy plan file
+        plan_file = getattr(args, "plan_file", None)
+        if plan_file:
+            src = Path(plan_file)
+            if not src.exists():
+                raise RuntimeError(f"plan file not found: {plan_file}")
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            plan_path.write_text(src.read_text())
+            plan_created = True
+
+        # Step 3: Plan-ready (only if plan exists)
+        if plan_path.exists() and plan_path.read_text().strip():
+            ready_result = cmd_plan_ready(args)
+            if not ready_result.get("ok"):
+                raise RuntimeError(ready_result.get("error", "plan-ready failed"))
+            return {"ok": True, "data": {
+                "branch": lock_result["data"]["branch"],
+                "plan": ready_result.get("data", {}),
+                "rolled_back": False,
+            }}
+        else:
+            # No plan yet — return locked state, user will create plan
+            return {"ok": True, "data": {
+                "branch": lock_result["data"]["branch"],
+                "session_phase": "locked",
+                "rolled_back": False,
+            }}
+
+    except Exception as exc:
+        # Best-effort rollback
+        if plan_created and plan_path.exists():
+            try:
+                plan_path.unlink()
+            except OSError:
+                pass
+        cmd_unlock(args)
+        return {"ok": False, "error": str(exc), "data": {"rolled_back": True}}
+
+
 # ══════════════════════════════════════════════════════════
 #  CLI
 # ══════════════════════════════════════════════════════════
@@ -1229,6 +1814,11 @@ def main():
     parser.add_argument("--repo", "-r", default=None, help="Target repo name")
     parser.add_argument("--agent", default=None, help="Agent identity")
     sub = parser.add_subparsers(dest="command")
+
+    # start
+    p_start = sub.add_parser("start", help="One-shot: lock + plan + plan-ready")
+    p_start.add_argument("--branch", default=None)
+    p_start.add_argument("--plan-file", default=None, help="Path to PLAN.md to copy")
 
     # lock
     p_lock = sub.add_parser("lock", help="Lock workspace")
@@ -1295,6 +1885,7 @@ def main():
             _fail("--repo required (or run from within a git repo)")
 
     commands = {
+        "start": cmd_start,
         "lock": cmd_lock,
         "unlock": cmd_unlock,
         "status": cmd_status,

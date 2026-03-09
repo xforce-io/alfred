@@ -16,7 +16,7 @@ import traceback
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Union
+from typing import Any, Awaitable, Callable, Dict, Optional, Union
 
 from dolphin.core.agent.agent_state import AgentState
 from dolphin.core.common.constants import KEY_HISTORY
@@ -39,6 +39,47 @@ from ...infra.workspace import WorkspaceLoader
 from ...infra.dolphin_compat import ensure_continue_chat_compatibility
 
 logger = logging.getLogger(__name__)
+
+
+def _build_circuit_break_summary(exc: Exception, kind: str) -> str:
+    """Build a user-friendly summary for circuit-breaker stops.
+
+    Extracts structured stats attached by the TURN_ERROR handler and
+    produces a concise Chinese message describing what happened.
+    """
+    n_calls = getattr(exc, "turn_tool_call_count", 0)
+    n_failed = getattr(exc, "turn_failed_count", 0)
+    tool_names: list = getattr(exc, "turn_tool_names", [])
+
+    # Deduplicate tool names while preserving order
+    seen: set = set()
+    unique_tools: list = []
+    for t in tool_names:
+        if t not in seen:
+            seen.add(t)
+            unique_tools.append(t)
+
+    # Build stats line
+    parts: list = []
+    if n_calls:
+        parts.append(f"执行了 {n_calls} 次工具调用")
+    if n_failed:
+        parts.append(f"其中 {n_failed} 次失败")
+    stats = "，".join(parts) if parts else "多次尝试后"
+
+    tools_desc = ""
+    if unique_tools:
+        tools_desc = f"（使用了 {', '.join(unique_tools[:5])}{'等' if len(unique_tools) > 5 else ''}）"
+
+    if kind == "budget":
+        reason = "工具调用次数已达上限，继续重试很可能是无效循环"
+    else:
+        reason = "同类错误连续出现，当前策略未能取得进展"
+
+    return (
+        f"已停止本轮自动重试：{stats}{tools_desc}，{reason}。"
+        "请换一种做法，或告诉我下一步方向。"
+    )
 
 
 class ChannelCoreService:
@@ -334,7 +375,12 @@ class ChannelCoreService:
                     await on_event(OutboundMessage(session_id, te.content, msg_type="status"))
 
                 elif te.type == TurnEventType.TURN_ERROR:
-                    raise RuntimeError(te.error)
+                    # Preserve structured stats from the orchestrator
+                    err = RuntimeError(te.error)
+                    err.turn_tool_call_count = te.tool_call_count or tool_call_count
+                    err.turn_tool_names = list(te.tool_names_executed or tool_names_executed)
+                    err.turn_failed_count = te.failed_tool_outputs or failed_tool_outputs
+                    raise err
 
                 elif te.type == TurnEventType.TURN_COMPLETE:
                     response = te.answer or response
@@ -420,16 +466,11 @@ class ChannelCoreService:
                 )
                 err_msg = str(e)
                 if err_msg.startswith(("TOOL_CALL_BUDGET_EXCEEDED", "REPEATED_TOOL_INTENT")):
-                    await on_event(OutboundMessage(session_id, (
-                        "我已停止本轮自动尝试：工具调用次数过多，继续重试很可能是无效循环。"
-                        "建议你指定一个替代路径（例如换信息源、缩小目标或提供可用入口）。"
-                    ), msg_type="text"))
+                    summary = _build_circuit_break_summary(e, "budget")
+                    await on_event(OutboundMessage(session_id, summary, msg_type="text"))
                 elif err_msg.startswith("REPEATED_TOOL_FAILURES"):
-                    await on_event(OutboundMessage(session_id, (
-                        "我已停止本轮自动重试：检测到重复失败（同类错误连续出现）。"
-                        "这通常说明当前策略没有产生新信息。"
-                        "请换一种做法，或直接告诉我下一步要缩小范围、改用别的工具、还是只基于现有结果给结论。"
-                    ), msg_type="text"))
+                    summary = _build_circuit_break_summary(e, "failure")
+                    await on_event(OutboundMessage(session_id, summary, msg_type="text"))
                 elif "timeout" in err_msg.lower():
                     await on_event(OutboundMessage(session_id, (
                         "本轮执行超时，但后台任务仍在继续。如果任务完成，我会自动推送结果给你。"

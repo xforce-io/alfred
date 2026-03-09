@@ -22,6 +22,8 @@ All dev state lives in the target repo's `.coding-master/` directory (gitignored
 | `JOURNAL.md` | MD | dev log (append-only) | tools auto + you via cm journal |
 | `claims.json` | JSON | feature claim state | tools |
 | `features/XX.md` | MD | per-feature workspace | feature owner |
+| `evidence/XX-verify.json` | JSON | lint+typecheck+test structured results | tools |
+| `evidence/integration-report.json` | JSON | integration merge+test report | tools |
 
 **Principle**: JSON for tool atomics (lock, claim), MD for you to read/write (specs, logs).
 **SKILL.md is immutable**: you must not modify it.
@@ -55,16 +57,26 @@ All dev state lives in the target repo's `.coding-master/` directory (gitignored
 - `$CM claim` auto-checks dependencies; blocked features cannot be claimed
 - `$CM done` reports newly unblocked features
 
+### Autonomous Mode
+After `cm plan-ready`, you can enter an autonomous loop:
+1. `$CM progress` → read `next_action`
+2. Execute `next_action` if present
+3. If `next_action` is null, inspect `session_next_action` for global status
+4. Repeat until `session_phase` = `done`
+
+This is the recommended way to work. `cm progress` always knows the best local next step and the best session-level next step.
+
 ## Tools
 
 | Tool | Purpose |
 |------|---------|
+| `$CM start --repo <name> [--plan-file path]` | One-shot: lock + copy plan + plan-ready |
 | `$CM lock --repo <name>` | Lock workspace, create dev branch |
 | `$CM unlock --repo <name>` | Release lock |
 | `$CM plan-ready` | Validate PLAN.md → session: locked → reviewed |
 | `$CM claim --feature <n>` | Claim feature, create branch/worktree/feature-MD |
 | `$CM dev --feature <n>` | Check Analysis+Plan → analyzing → developing |
-| `$CM test --feature <n>` | Run tests → write test_status/test_commit/test_output |
+| `$CM test --feature <n>` | Run lint+typecheck+tests → write evidence/N-verify.json + update claims |
 | `$CM done --feature <n>` | Check tests passed + no new commits → developing → done |
 | `$CM reopen --feature <n>` | Integration fix: done → developing (reset test_status) |
 | `$CM integrate` | All done → merge feature branches → full tests → session: integrating |
@@ -83,10 +95,13 @@ All dev state lives in the target repo's `.coding-master/` directory (gitignored
 4. **Don't modify SKILL.md** — immutable convention
 5. **Keep feature MD updated** — `features/XX.md` is your work record
 6. **JOURNAL.md is append-only** — use `$CM journal` to add entries
-7. **Test before done** — `$CM done` checks test_status=passed && test_commit=HEAD; code changes require re-test
+7. **Test before done** — `$CM done` checks evidence/N-verify.json (overall=passed + commit=HEAD); code changes require re-test
 8. **Release lock when done**
 9. **Only edit your own feature MD** — don't touch others' files
 10. **Only work in your own worktree** — don't enter others' worktrees
+11. **Evidence is mandatory after first v4 verify** — once a feature has `evidence/N-verify.json`, `cm done` uses that file
+12. **Trust local progress first** — when unsure, run `$CM progress` and follow `next_action`
+13. **Do not steal others' work** — `session_next_action` may describe a global need; only act on it if owner-safe
 
 ## Templates
 

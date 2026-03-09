@@ -3,10 +3,8 @@ CLI 命令接口
 """
 
 import asyncio
-import sys
 import argparse
 import logging
-import subprocess
 import signal
 from pathlib import Path
 

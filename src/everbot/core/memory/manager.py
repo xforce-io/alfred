@@ -3,7 +3,7 @@
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from .extractor import MemoryExtractor
 from .merger import MemoryMerger

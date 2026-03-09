@@ -30,9 +30,7 @@ from .inspector import Inspector
 from .ports import HeartbeatSessionPort
 from ..tasks.routine_manager import RoutineManager
 from ..tasks.task_manager import (
-    Task,
     get_due_tasks,
-    claim_task,
     update_task_state,
     write_task_block,
     purge_stale_tasks,
@@ -42,7 +40,6 @@ from ..tasks.task_manager import (
     TaskState,
     ParseStatus,
 )
-from ..tasks.execution_gate import TaskExecutionGate
 from ...infra.user_data import get_user_data_manager
 
 logger = logging.getLogger(__name__)

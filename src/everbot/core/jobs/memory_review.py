@@ -4,7 +4,6 @@ Silent execution, no user notification.
 Strategy: supplement first (re-extract missed sessions), then consolidate.
 """
 
-import json
 import logging
 from typing import List
 
@@ -203,5 +202,4 @@ Output format:
     except Exception as e:
         logger.error("Memory consolidation analysis failed: %s", e)
         return {}
-
 

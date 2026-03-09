@@ -14,16 +14,15 @@ import logging
 import time as _time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, List, Optional
 
 from ..tasks.execution_gate import TaskExecutionGate
 from ..tasks.task_manager import Task, TaskList, TaskState, get_due_tasks
 from .cron_delivery import CronDelivery
 from .heartbeat_utils import (
     build_job_session_id,
-    is_time_reminder_task,
     task_snapshot,
     try_deterministic_task,
 )
@@ -431,7 +430,7 @@ class CronExecutor:
         self._write_event("task_start", task_id=task.id, title=task.title, execution_mode="isolated")
 
         try:
-            result = await self._run_isolated_task(task, run_id, run_agent=run_agent)
+            await self._run_isolated_task(task, run_id, run_agent=run_agent)
             if verdict and verdict.scan_result:
                 gate.commit(task, verdict)
             self.routine_manager.update_task_state(task, TaskState.DONE)
@@ -454,8 +453,6 @@ class CronExecutor:
 
     async def _run_isolated_task(self, task: Task, run_id: str, *, run_agent: Callable) -> str:
         """Execute one isolated task with a dedicated job session."""
-        from ...infra.user_data import get_user_data_manager
-
         job_session_id = build_job_session_id(task)
         task_title = str(task.title or "")
         task_desc = str(task.description or "")

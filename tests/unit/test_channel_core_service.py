@@ -259,6 +259,9 @@ async def test_process_message_repeated_tool_failures_sends_generic_guidance(mon
             yield TurnEvent(
                 type=TurnEventType.TURN_ERROR,
                 error="REPEATED_TOOL_FAILURES: failed=4, signature=exit_code:2, count=4",
+                tool_call_count=8,
+                tool_names_executed=["web_search", "bash"],
+                failed_tool_outputs=4,
             )
 
     monkeypatch.setattr("src.everbot.core.channel.core_service.TurnOrchestrator", _FakeTurnOrchestrator)
@@ -270,8 +273,10 @@ async def test_process_message_repeated_tool_failures_sends_generic_guidance(mon
         await core.process_message(agent, "demo_agent", "web_session_demo_agent", "hi", collector)
 
     texts = collector.payloads_by_type("text")
-    assert any("当前策略没有产生新信息" in t.content for t in texts)
-    assert not any("更换站点/接口" in t.content for t in texts)
+    # Should contain structured summary with tool call stats
+    assert any("已停止本轮自动重试" in t.content for t in texts)
+    assert any("8 次工具调用" in t.content for t in texts)
+    assert any("4 次失败" in t.content for t in texts)
 
 
 @pytest.mark.asyncio

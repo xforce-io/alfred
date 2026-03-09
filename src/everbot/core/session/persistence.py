@@ -14,7 +14,7 @@ import logging
 
 from ...infra.dolphin_state_adapter import DolphinStateAdapter
 from .compressor import SessionCompressor
-from .history_utils import _is_heartbeat, _is_placeholder, prepare_for_restore, extract_recent_heartbeat
+from .history_utils import _is_heartbeat, _is_placeholder, prepare_for_restore
 from .session_data import SessionData
 from . import session_ids as _sid
 

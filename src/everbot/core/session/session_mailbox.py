@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from .session_data import SessionData
 from .history_utils import evict_oldest_heartbeat

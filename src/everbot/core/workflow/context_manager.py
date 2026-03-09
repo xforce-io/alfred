@@ -7,7 +7,7 @@ and context mode (clean/inherit) logic at phase boundaries.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, List
 
 from dolphin.core.common.constants import KEY_HISTORY
 

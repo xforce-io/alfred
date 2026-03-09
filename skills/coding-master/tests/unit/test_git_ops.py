@@ -171,11 +171,21 @@ class TestSubmitPR:
         assert "protected branch" in result["error"]
 
     @patch.object(GitOps, "get_current_branch", return_value="feat")
-    @patch.object(GitOps, "stage_and_commit", return_value={"ok": False, "error": "nothing to commit"})
+    @patch.object(GitOps, "stage_and_commit", return_value={"ok": False, "error": "index.lock exists"})
     def test_commit_failure_short_circuits(self, mock_commit, mock_branch, git):
         result = git.submit_pr("title", "body")
         assert result["ok"] is False
-        assert "nothing to commit" in result["error"]
+        assert "index.lock" in result["error"]
+
+    @patch.object(GitOps, "get_current_branch", return_value="feat")
+    @patch.object(GitOps, "stage_and_commit", return_value={"ok": False, "error": "nothing to commit"})
+    @patch.object(GitOps, "push", return_value={"ok": True, "data": {}})
+    @patch.object(GitOps, "create_pr", return_value={"ok": True, "data": {"pr_url": "https://x"}})
+    def test_clean_tree_continues_to_push(self, mock_pr, mock_push, mock_commit, mock_branch, git):
+        """'nothing to commit' is not a real failure — submit_pr continues to push."""
+        result = git.submit_pr("title", "body")
+        assert result["ok"] is True
+        mock_push.assert_called_once()
 
     @patch.object(GitOps, "get_current_branch", return_value="feat")
     @patch.object(GitOps, "stage_and_commit", return_value={"ok": True, "data": {}})

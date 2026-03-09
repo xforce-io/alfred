@@ -13,10 +13,7 @@ import asyncio
 import base64
 import json
 import logging
-import os
-import re
 from pathlib import Path
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Union
 
 import httpx
@@ -32,7 +29,6 @@ from ..core.channel.models import OutboundMessage
 from ..core.channel.session_resolver import ChannelSessionResolver
 from ..core.runtime import events
 from ..core.runtime.events import resolve_routing
-from ..core.runtime.control import get_local_status
 from ..core.session.session import SessionManager
 from ..infra.user_data import get_user_data_manager
 from ..core.agent.agent_service import AgentService
@@ -185,10 +181,8 @@ class TelegramChannel:
 
         if source_type == "deferred_result":
             msg_prefix = "[Deferred Result]"
-            history_prefix = "[此消息由超时后台任务完成后自动生成]\n\n"
         else:
             msg_prefix = "[Heartbeat]"
-            history_prefix = "[此消息由心跳系统自动执行例行任务生成]\n\n"
 
         text, entities = self._convert_markdown(
             f"{msg_prefix} {agent_name}\n\n{detail}"

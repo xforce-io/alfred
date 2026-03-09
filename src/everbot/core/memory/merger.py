@@ -1,9 +1,8 @@
 """Pure-logic memory merger — scoring, decay, and merge operations."""
 
-import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Set
 
 from .models import MemoryEntry, new_id
 
