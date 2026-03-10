@@ -10,6 +10,8 @@ tags: [coding, development, review, debug, analysis, pr, automation, parallel]
 > **MANDATORY**: All code work MUST go through `$CM` commands below.
 > Do NOT use raw bash/grep/read to substitute `$CM` workflows.
 > First command is always: `$CM lock --repo <name> [--mode M]`
+> **EXECUTE, DON'T DISPLAY**: Always run `$CM` commands via the `_bash` tool call.
+> NEVER output commands as text/code blocks — the user cannot run them.
 
 `$CM = python $SKILL_DIR/scripts/tools.py`
 

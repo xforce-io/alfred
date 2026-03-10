@@ -926,7 +926,9 @@ If not, reply with `HEARTBEAT_OK`.
         task_title = str(getattr(task, "title", "") or "")
         task_desc = str(getattr(task, "description", "") or "")
         prompt = (
-            "Execute this scheduled isolated routine task and summarize the result briefly.\n\n"
+            "Execute this scheduled isolated routine task and summarize the result briefly.\n"
+            "IMPORTANT: Respond in the SAME language as the task title/description. "
+            "Use a consistent, structured format (headings + bullet points).\n\n"
             f"Task ID: {getattr(task, 'id', 'task')}\n"
             f"Title: {task_title}\n"
             f"Description: {task_desc}\n"

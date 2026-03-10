@@ -18,6 +18,9 @@ from croniter import croniter
 
 logger = logging.getLogger(__name__)
 
+# Track (task_id, raw_state) combos already warned about to avoid log spam.
+_warned_invalid_states: set[tuple[str, str]] = set()
+
 
 class TaskState(str, Enum):
     PENDING = "pending"
@@ -62,14 +65,17 @@ class Task:
         filtered.setdefault("enabled", True)
         filtered.setdefault("timezone", None)
         filtered.setdefault("execution_mode", "inline")
-        # Normalize unknown state values to pending
+        # Normalize unknown state values to pending (warn once per combo)
         _valid_states = {s.value for s in TaskState}
         raw_state = filtered.get("state")
         if raw_state is not None and raw_state not in _valid_states:
-            logger.warning(
-                "Task %s has invalid state %r, normalizing to pending",
-                filtered.get("id", "?"), raw_state,
-            )
+            warn_key = (filtered.get("id", "?"), raw_state)
+            if warn_key not in _warned_invalid_states:
+                _warned_invalid_states.add(warn_key)
+                logger.warning(
+                    "Task %s has invalid state %r, normalizing to pending",
+                    warn_key[0], raw_state,
+                )
             filtered["state"] = TaskState.PENDING.value
         return cls(**filtered)
 
