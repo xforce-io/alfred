@@ -72,8 +72,10 @@ class TelegramChannel:
         session_manager: SessionManager,
         default_agent: str = "",
         allowed_chat_ids: Optional[List[str]] = None,
+        name: str = "",
     ) -> None:
         self._bot_token = bot_token
+        self._name = name
         self._base_url = f"https://api.telegram.org/bot{bot_token}"
         self._file_base_url = f"https://api.telegram.org/file/bot{bot_token}"
         self._session_manager = session_manager
@@ -92,7 +94,8 @@ class TelegramChannel:
 
         # chat_id -> agent_name
         self._bindings: Dict[str, str] = {}
-        self._bindings_path = self._user_data.alfred_home / "telegram_bindings.json"
+        bindings_suffix = f"_{name}" if name else ""
+        self._bindings_path = self._user_data.alfred_home / f"telegram_bindings{bindings_suffix}.json"
 
         self._client: Optional[httpx.AsyncClient] = None
         self._running = False
@@ -116,8 +119,9 @@ class TelegramChannel:
         events.subscribe(self._on_background_event)
         self._dispatcher_task = asyncio.create_task(self._dispatcher_loop())
         self._poll_task = asyncio.create_task(self._polling_loop())
+        tag = f"[{self._name}] " if self._name else ""
         logger.info(
-            "TelegramChannel started, restored %d binding(s)", len(self._bindings)
+            "%sTelegramChannel started, restored %d binding(s)", tag, len(self._bindings)
         )
 
     async def stop(self) -> None:
@@ -150,7 +154,8 @@ class TelegramChannel:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
-        logger.info("TelegramChannel stopped")
+        tag = f"[{self._name}] " if self._name else ""
+        logger.info("%sTelegramChannel stopped", tag)
 
     # ------------------------------------------------------------------
     # Event subscription (heartbeat delivery push)

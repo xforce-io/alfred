@@ -19,6 +19,12 @@ All commands return JSON `{"ok": true, "data": {...}}` or `{"ok": false, "error"
 
 ## Quick Start by Mode
 
+### Discovery — list available repos
+
+```
+$CM repos                              # list configured repos and workspaces
+```
+
 ### review / debug / analyze (most common)
 
 ```

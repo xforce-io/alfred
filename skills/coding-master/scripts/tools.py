@@ -2122,6 +2122,12 @@ def cmd_journal(args) -> dict:
     return {"ok": True}
 
 
+def cmd_repos(_args) -> dict:
+    """List configured repos and workspaces."""
+    cfg = ConfigManager()
+    return cfg.list_all()
+
+
 def cmd_doctor(args) -> dict:
     """Diagnose and fix state inconsistencies."""
     repo = _repo_path(args.repo)
@@ -2315,6 +2321,9 @@ def main():
     _add_global_args(parser, is_parent=True)
     sub = parser.add_subparsers(dest="command")
 
+    # repos (no --repo required)
+    sub.add_parser("repos", help="List configured repos and workspaces")
+
     # start
     p_start = sub.add_parser("start", help="One-shot: lock + plan + plan-ready")
     _add_global_args(p_start)
@@ -2414,8 +2423,11 @@ def main():
 
     args = parser.parse_args()
 
+    # Commands that don't require --repo
+    no_repo_commands = {"repos"}
+
     # Auto-detect repo from cwd if not specified
-    if not args.repo:
+    if args.command not in no_repo_commands and not args.repo:
         cwd = Path.cwd()
         if (cwd / ".git").exists():
             args.repo = cwd.name
@@ -2423,6 +2435,7 @@ def main():
             _fail("--repo required (or run from within a git repo)")
 
     commands = {
+        "repos": cmd_repos,
         "start": cmd_start,
         "lock": cmd_lock,
         "unlock": cmd_unlock,
@@ -2456,7 +2469,7 @@ def main():
     try:
         # Mode gate: check command is allowed in current session mode
         # Skip for commands that don't require a lock (lock, start, status, doctor, unlock)
-        no_gate_commands = {"lock", "start", "status", "doctor", "unlock"}
+        no_gate_commands = {"lock", "start", "status", "doctor", "unlock", "repos"}
         if args.command not in no_gate_commands:
             repo = _repo_path(args.repo)
             lock_path = repo / CM_DIR / "lock.json"
