@@ -780,6 +780,19 @@ class TurnOrchestrator:
         if not response and last_successful_tool_output:
             response = last_successful_tool_output
 
+        # Phantom tool call: model wrote ```bash/python blocks but never
+        # issued a real tool_use call — common with weaker models under
+        # long context.  Append a short note so the user knows.
+        if (
+            tool_call_count == 0
+            and response
+            and re.search(r"```(?:bash|sh|shell|python)\s*\n", response)
+        ):
+            response += (
+                "\n\n---\n⚠️ *[系统] 以上命令未实际执行，"
+                "模型仅输出了文本。请复制命令手动运行，或重新描述需求重试。*"
+            )
+
         # Stream exhausted without error → success
         # Estimate output tokens from total chars produced by LLM.
         # This is an approximation (≈ chars / 4 for English, fewer for CJK).
