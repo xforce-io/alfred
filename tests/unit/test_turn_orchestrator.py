@@ -296,6 +296,25 @@ def test_extract_tool_intent_signature():
     ).startswith("bash_exec:")
 
 
+def test_extract_tool_intent_web_search():
+    """Web search calls with different queries should share a single intent."""
+    cmd1 = 'python /path/to/skills/web-search/scripts/search.py "泡泡玛特 股价 大跌" --backend auto'
+    cmd2 = 'python /path/to/skills/web-search/scripts/search.py "bitcoin price crash" --type news'
+    cmd3 = 'python skills/web_search/scripts/search.py "any query"'
+    assert _extract_tool_intent_signature("_bash", cmd1) == "web_search"
+    assert _extract_tool_intent_signature("_bash", cmd2) == "web_search"
+    assert _extract_tool_intent_signature("_bash", cmd3) == "web_search"
+    # Non-search bash commands should NOT match
+    assert _extract_tool_intent_signature("_bash", "python scripts/analyze.py") != "web_search"
+
+
+def test_orchestrator_prior_failures_preseed():
+    """Prior failures should pre-seed failure counters in new orchestrator."""
+    prior = {"exit_code:1": 3}
+    orch = TurnOrchestrator(TurnPolicy(), prior_failures=prior)
+    assert orch.accumulated_failures == {"exit_code:1": 3}
+
+
 def test_truncate_preview():
     short = "hello"
     text, trunc, total = _truncate_preview(short, 100)

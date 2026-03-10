@@ -132,6 +132,7 @@ def _make_core_service(tmp_path: Path, agent_name: str = "test_agent"):
     core.session_manager = sm
     core.user_data = ud
     core.agent_service = None
+    core._session_failure_memory = {}
     return core
 
 
@@ -184,6 +185,7 @@ async def test_workspace_instructions_not_reloaded_when_present():
         core.session_manager = sm
         core.user_data = ud
         core.agent_service = None
+        core._session_failure_memory = {}
 
         original = "Original workspace instructions from create_agent"
         ctx = _DummyContext({"workspace_instructions": original})

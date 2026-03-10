@@ -125,6 +125,7 @@ def _make_core_service(tmp_path: Path):
     core.session_manager = sm
     core.user_data = ud
     core.agent_service = None
+    core._session_failure_memory = {}
     return core
 
 

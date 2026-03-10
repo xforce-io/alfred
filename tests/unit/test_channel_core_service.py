@@ -148,6 +148,7 @@ def _make_core_service(tmp_path: Path):
     core.session_manager = sm
     core.user_data = ud
     core.agent_service = None
+    core._session_failure_memory = {}
     return core
 
 
@@ -251,8 +252,8 @@ async def test_process_message_repeated_tool_failures_sends_generic_guidance(mon
     agent = _TurnErrorAgent()
 
     class _FakeTurnOrchestrator:
-        def __init__(self, _policy):
-            return None
+        def __init__(self, _policy, **_kw):
+            self.accumulated_failures = {}
 
         async def run_turn(self, *_args, **_kwargs):
             from src.everbot.core.runtime.turn_policy import TurnEvent, TurnEventType
@@ -304,8 +305,8 @@ async def test_deferred_result_emit_uses_explicit_target_fields(monkeypatch):
     emitted = []
 
     class _FakeTurnOrchestrator:
-        def __init__(self, _policy):
-            return None
+        def __init__(self, _policy, **_kw):
+            self.accumulated_failures = {}
 
         async def run_turn(self, *_args, **kwargs):
             on_deferred_result = kwargs.get("on_deferred_result")

@@ -717,14 +717,33 @@ def cmd_lock(args) -> dict:
             "status", "--porcelain", "--", ".",
             ":(exclude).coding-master", ":(exclude).gitignore",
         ], check=False)
-        if status.stdout.strip():
-            return {"ok": False, "error": "working tree not clean, commit or stash first"}
+        dirty_output = status.stdout.strip()
+        if dirty_output:
+            if getattr(args, "stash", False):
+                _run_git(repo, ["stash", "push", "-u", "-m", "CM auto-stash before lock"])
+            else:
+                lines = dirty_output.splitlines()
+                tracked = [l for l in lines if not l.startswith("??")]
+                untracked = [l for l in lines if l.startswith("??")]
+                return {
+                    "ok": False,
+                    "error": "working tree not clean",
+                    "data": {
+                        "dirty_files": [l.split(None, 1)[-1] for l in lines],
+                        "tracked_modified": len(tracked),
+                        "untracked": len(untracked),
+                    },
+                    "recovery_command": f"$CM lock --repo {args.repo} --mode {mode} --stash",
+                }
 
     # Capture current branch for read-only modes (before lock, no git mutation)
     current_branch = _run_git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip() if read_only else None
 
     def reserve_lock(data):
         if data and not _is_expired(data):
+            # Idempotent: same agent re-locking is a no-op success
+            if data.get("locked_by") == agent:
+                return {"ok": True, "data": data, "hint": "already locked by you"}
             return {"ok": False, "error": "already locked", "data": data}
 
         now = datetime.now(timezone.utc)
@@ -748,6 +767,10 @@ def cmd_lock(args) -> dict:
 
     result = _atomic_json_update(lock_path, reserve_lock)
     if not result.get("ok"):
+        return result
+
+    # Idempotent re-lock: skip branch creation and gitignore setup
+    if result.get("hint"):
         return result
 
     _ensure_gitignore(repo)
@@ -2338,6 +2361,8 @@ def main():
     p_lock.add_argument("--branch", default=None)
     p_lock.add_argument("--mode", default="deliver", choices=list(MODES.keys()),
                         help="Session mode: deliver, review, debug, analyze")
+    p_lock.add_argument("--stash", action="store_true",
+                        help="Auto-stash dirty working tree (including untracked) before locking")
 
     # unlock
     _add_global_args(sub.add_parser("unlock", help="Release lock"))

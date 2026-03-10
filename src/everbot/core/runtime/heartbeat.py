@@ -19,10 +19,11 @@ from . import RuntimeDeps, TurnExecutor
 from .heartbeat_file import HeartbeatFileManager
 from .reflection import ReflectionManager
 from .heartbeat_utils import (
-    is_time_reminder_task,
-    try_deterministic_task,
-    task_snapshot,
+    build_isolated_task_prompt,
     build_job_session_id,
+    is_time_reminder_task,
+    task_snapshot,
+    try_deterministic_task,
 )
 from .cron import CronExecutor
 from .cron_delivery import CronDelivery
@@ -925,14 +926,7 @@ If not, reply with `HEARTBEAT_OK`.
         self._record_runtime_metric("job_session_created")
         task_title = str(getattr(task, "title", "") or "")
         task_desc = str(getattr(task, "description", "") or "")
-        prompt = (
-            "Execute this scheduled isolated routine task and summarize the result briefly.\n"
-            "IMPORTANT: Respond in the SAME language as the task title/description. "
-            "Use a consistent, structured format (headings + bullet points).\n\n"
-            f"Task ID: {getattr(task, 'id', 'task')}\n"
-            f"Title: {task_title}\n"
-            f"Description: {task_desc}\n"
-        )
+        prompt = build_isolated_task_prompt(task)
         agent = await self._create_job_agent(job_session_id)
         job_system_prompt = self._build_job_system_prompt(agent, task)
         try:
