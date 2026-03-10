@@ -108,6 +108,10 @@ class ChannelCoreService:
         )
         self._runtime_workspace_instructions_by_agent: Dict[str, str] = {}
         self._default_orchestrator = TurnOrchestrator(CHAT_POLICY)
+        # Cross-turn failure memory: maps session_id → {failure_sig: count}.
+        # Allows circuit breakers to fire earlier when the same tool keeps
+        # failing across consecutive user messages.
+        self._session_failure_memory: Dict[str, Dict[str, int]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -292,7 +296,8 @@ class ChannelCoreService:
             # Build per-turn policy with config overrides (agent > global > default)
             from ...infra.config import get_config
             _turn_policy = build_chat_policy(get_config(), agent_name=agent_name)
-            _turn_orchestrator = TurnOrchestrator(_turn_policy)
+            _prior_failures = self._session_failure_memory.get(session_id, {})
+            _turn_orchestrator = TurnOrchestrator(_turn_policy, prior_failures=_prior_failures)
 
             async for te in _turn_orchestrator.run_turn(
                 agent,
@@ -388,6 +393,18 @@ class ChannelCoreService:
                     tool_execution_count = te.tool_execution_count
                     tool_names_executed = list(te.tool_names_executed)
                     failed_tool_outputs = te.failed_tool_outputs
+
+            # Persist cross-turn failure memory.  If this turn had no
+            # failures, clear the memory so successful turns reset the
+            # circuit breaker (avoids penalising a turn long after the
+            # network recovered).
+            if _turn_orchestrator.accumulated_failures:
+                if failed_tool_outputs > 0:
+                    self._session_failure_memory[session_id] = _turn_orchestrator.accumulated_failures
+                else:
+                    self._session_failure_memory.pop(session_id, None)
+            else:
+                self._session_failure_memory.pop(session_id, None)
 
             turn_end_time = datetime.now()
             total_duration_ms = int((turn_end_time - turn_start_time).total_seconds() * 1000)

@@ -9,7 +9,7 @@ tags: [coding, development, review, debug, analysis, pr, automation, parallel]
 
 > **MANDATORY**: All code work MUST go through `$CM` commands below.
 > Do NOT use raw bash/grep/read to substitute `$CM` workflows.
-> First command is always: `$CM lock --repo <name> [--mode M]`
+> **Session continuity**: If prior `$CM` results are visible in conversation history, you are already initialized — skip `$CM lock` / `$CM repos` / `$CM scope` and continue from where you left off. Only run `$CM lock` on the very first message of a session.
 > **EXECUTE, DON'T DISPLAY**: Always run `$CM` commands via the `_bash` tool call.
 > NEVER output commands as text/code blocks — the user cannot run them.
 
