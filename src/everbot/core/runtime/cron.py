@@ -22,6 +22,7 @@ from ..tasks.execution_gate import TaskExecutionGate
 from ..tasks.task_manager import Task, TaskList, TaskState, get_due_tasks
 from .cron_delivery import CronDelivery
 from .heartbeat_utils import (
+    build_isolated_task_prompt,
     build_job_session_id,
     task_snapshot,
     try_deterministic_task,
@@ -456,12 +457,7 @@ class CronExecutor:
         job_session_id = build_job_session_id(task)
         task_title = str(task.title or "")
         task_desc = str(task.description or "")
-        prompt = (
-            "Execute this scheduled isolated routine task and summarize the result briefly.\n\n"
-            f"Task ID: {task.id}\n"
-            f"Title: {task_title}\n"
-            f"Description: {task_desc}\n"
-        )
+        prompt = build_isolated_task_prompt(task)
 
         agent = await self._create_job_agent(job_session_id)
         job_system_prompt = self._build_job_system_prompt(agent, task)

@@ -54,3 +54,21 @@ def build_job_session_id(task: Any) -> str:
     """Build one isolated job session id."""
     task_id = str(getattr(task, "id", "task"))
     return f"job_{task_id}_{uuid.uuid4().hex[:8]}"
+
+
+def build_isolated_task_prompt(task: Any) -> str:
+    """Build the user-message prompt for an isolated task execution.
+
+    Single source of truth — used by both heartbeat.py and cron.py.
+    """
+    task_id = str(getattr(task, "id", "task"))
+    task_title = str(getattr(task, "title", "") or "")
+    task_desc = str(getattr(task, "description", "") or "")
+    return (
+        "Execute this scheduled isolated routine task and summarize the result briefly.\n"
+        "IMPORTANT: Respond in the SAME language as the task title/description. "
+        "Use a consistent, structured format (headings + bullet points).\n\n"
+        f"Task ID: {task_id}\n"
+        f"Title: {task_title}\n"
+        f"Description: {task_desc}\n"
+    )
