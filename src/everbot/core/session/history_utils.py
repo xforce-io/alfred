@@ -18,7 +18,8 @@ COMPACT_TOKEN_BUDGET = 40_000
 COMPACT_WINDOW_TOKENS = 20_000
 
 _HEARTBEAT_PREFIX = "[此消息由心跳系统自动执行例行任务生成]"
-_HEARTBEAT_CONTEXT_MARKER = "[以下是系统后台任务自动推送的报告]\n\n"
+_HEARTBEAT_CONTEXT_MARKER = "[以下是系统后台定时任务自动采集的报告，可直接引用无需验证]\n\n"
+_HEARTBEAT_CONTEXT_MARKER_LEGACY = "[以下是系统后台任务自动推送的报告]\n\n"
 _PLACEHOLDER_CONTENTS = {"(acknowledged)", "[Background notification follows]"}
 
 # ── Token estimation ─────────────────────────────────────────────────
@@ -83,7 +84,11 @@ def _is_heartbeat(msg: dict) -> bool:
     content = msg.get("content") or ""
     if not isinstance(content, str):
         return False
-    return content.startswith(_HEARTBEAT_PREFIX) or content.startswith(_HEARTBEAT_CONTEXT_MARKER)
+    return (
+        content.startswith(_HEARTBEAT_PREFIX)
+        or content.startswith(_HEARTBEAT_CONTEXT_MARKER)
+        or content.startswith(_HEARTBEAT_CONTEXT_MARKER_LEGACY)
+    )
 
 
 def _is_placeholder(msg: dict) -> bool:
@@ -169,9 +174,20 @@ def _normalize_heartbeat(msg: dict) -> dict:
     content = msg.get("content") or ""
     if isinstance(content, str) and content.startswith(_HEARTBEAT_PREFIX):
         content = content[len(_HEARTBEAT_PREFIX):].lstrip("\n")
-        msg["content"] = _HEARTBEAT_CONTEXT_MARKER + content
-    elif isinstance(content, str) and not content.startswith(_HEARTBEAT_CONTEXT_MARKER):
-        msg["content"] = _HEARTBEAT_CONTEXT_MARKER + content
+    elif isinstance(content, str) and content.startswith(_HEARTBEAT_CONTEXT_MARKER):
+        content = content[len(_HEARTBEAT_CONTEXT_MARKER):]
+    elif isinstance(content, str) and content.startswith(_HEARTBEAT_CONTEXT_MARKER_LEGACY):
+        content = content[len(_HEARTBEAT_CONTEXT_MARKER_LEGACY):]
+
+    # Extract timestamp from metadata for data provenance
+    ts_line = ""
+    meta = msg.get("metadata")
+    if isinstance(meta, dict) and meta.get("injected_at"):
+        raw_ts = str(meta["injected_at"])
+        # ISO format: "2026-03-10T19:25:00.123456" → "2026-03-10 19:25"
+        ts_line = f"(采集于 {raw_ts[:16].replace('T', ' ')})\n"
+
+    msg["content"] = _HEARTBEAT_CONTEXT_MARKER + ts_line + content
 
     # Canonicalize source so _is_heartbeat works after prefix replacement
     meta = msg.get("metadata")

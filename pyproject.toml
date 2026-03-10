@@ -42,6 +42,43 @@ filterwarnings = [
     "ignore::RuntimeWarning:.*coroutine.*was never awaited",
 ]
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Coverage Configuration (Added in Optimization)
+# ═══════════════════════════════════════════════════════════════════════════
+[tool.coverage.run]
+source = ["src", "skills"]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+    "*/.venv/*",
+    "*/.claude/*",
+    "*/.wt/*",
+]
+branch = true
+parallel = true
+
+[tool.coverage.report]
+# Minimum coverage threshold for CI
+fail_under = 75
+# Show missing lines in terminal output
+show_missing = true
+# Sort by line number
+sort = "-cover"
+# Exclude patterns
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "pass",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+title = "Everbot Coverage Report"
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
