@@ -140,7 +140,7 @@ def _extract_tool_intent_signature(tool_name: str, args) -> Optional[str]:
             return f"search_bash:{grep_match.group(1)}"
         normalized = re.sub(r"\s+", " ", args.strip())
         if normalized:
-            cmd_hash = hashlib.md5(normalized.encode()).hexdigest()[:12]
+            cmd_hash = hashlib.sha256(normalized.encode()).hexdigest()[:12]
             # Classify common read-only bash commands so they get the
             # higher max_same_readonly_intent limit instead of the
             # stricter write-intent limit.
@@ -152,7 +152,7 @@ def _extract_tool_intent_signature(tool_name: str, args) -> Optional[str]:
     # REPEATED_TOOL_INTENT guard even when they don't match file-path patterns.
     if tool_name == "_python":
         normalized = re.sub(r'\s+', ' ', args.strip())
-        code_hash = hashlib.md5(normalized.encode()).hexdigest()[:12]
+        code_hash = hashlib.sha256(normalized.encode()).hexdigest()[:12]
         return f"python_exec:{code_hash}"
     return None
 
@@ -468,7 +468,7 @@ class TurnOrchestrator:
             nonlocal _round_text, _prev_fp, _similar_rounds
             text = _round_text
             _round_text = ""
-            fp = hashlib.md5(text.strip()[:_FINGERPRINT_CHARS].encode()).hexdigest()[:12] if text else ""
+            fp = hashlib.sha256(text.strip()[:_FINGERPRINT_CHARS].encode()).hexdigest()[:12] if text else ""
             if fp and _prev_fp:
                 _similar_rounds = _similar_rounds + 1 if fp == _prev_fp else 0
             _prev_fp = fp

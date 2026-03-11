@@ -192,17 +192,17 @@ class Inspector:
     def _compute_context_hashes(self, ctx: InspectionContext) -> Dict[str, str]:
         """Compute hashes for all context components to detect changes."""
         hashes: Dict[str, str] = {
-            "session_summary": hashlib.md5(
+            "session_summary": hashlib.sha256(
                 str(ctx.session_summary or "").encode("utf-8")
             ).hexdigest(),
-            "task_stats": hashlib.md5(
+            "task_stats": hashlib.sha256(
                 json.dumps(ctx.task_execution_stats, sort_keys=True).encode("utf-8")
             ).hexdigest(),
-            "events": hashlib.md5(
+            "events": hashlib.sha256(
                 json.dumps(ctx.recent_events, sort_keys=True).encode("utf-8")
             ).hexdigest(),
-            "memory": hashlib.md5(str(ctx.memory_content or "").encode("utf-8")).hexdigest(),
-            "heartbeat": hashlib.md5(
+            "memory": hashlib.sha256(str(ctx.memory_content or "").encode("utf-8")).hexdigest(),
+            "heartbeat": hashlib.sha256(
                 str(ctx.heartbeat_content or "").encode("utf-8")
             ).hexdigest(),
         }
