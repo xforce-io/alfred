@@ -12,7 +12,6 @@ from .turn_policy import (
     TurnPolicy,
     HEARTBEAT_POLICY,
     JOB_POLICY,
-    CHAT_POLICY,
     WORKFLOW_POLICY,
     TurnEventType,
 )
@@ -163,4 +162,3 @@ class TurnExecutor:
             if isinstance(event, dict):
                 events.append(event)
         return TurnResult(session_id=session_id, events=events)
-

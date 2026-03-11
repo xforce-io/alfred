@@ -63,3 +63,5 @@ log/
 # Misc
 ~/
 .wt/
+.coding-master/
+.coding-master.lock

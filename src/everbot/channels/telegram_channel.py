@@ -13,10 +13,7 @@ import asyncio
 import base64
 import json
 import logging
-import os
-import re
 from pathlib import Path
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Union
 
 import httpx
@@ -32,7 +29,6 @@ from ..core.channel.models import OutboundMessage
 from ..core.channel.session_resolver import ChannelSessionResolver
 from ..core.runtime import events
 from ..core.runtime.events import resolve_routing
-from ..core.runtime.control import get_local_status
 from ..core.session.session import SessionManager
 from ..infra.user_data import get_user_data_manager
 from ..core.agent.agent_service import AgentService
@@ -76,8 +72,10 @@ class TelegramChannel:
         session_manager: SessionManager,
         default_agent: str = "",
         allowed_chat_ids: Optional[List[str]] = None,
+        name: str = "",
     ) -> None:
         self._bot_token = bot_token
+        self._name = name
         self._base_url = f"https://api.telegram.org/bot{bot_token}"
         self._file_base_url = f"https://api.telegram.org/file/bot{bot_token}"
         self._session_manager = session_manager
@@ -96,7 +94,8 @@ class TelegramChannel:
 
         # chat_id -> agent_name
         self._bindings: Dict[str, str] = {}
-        self._bindings_path = self._user_data.alfred_home / "telegram_bindings.json"
+        bindings_suffix = f"_{name}" if name else ""
+        self._bindings_path = self._user_data.alfred_home / f"telegram_bindings{bindings_suffix}.json"
 
         self._client: Optional[httpx.AsyncClient] = None
         self._running = False
@@ -120,8 +119,9 @@ class TelegramChannel:
         events.subscribe(self._on_background_event)
         self._dispatcher_task = asyncio.create_task(self._dispatcher_loop())
         self._poll_task = asyncio.create_task(self._polling_loop())
+        tag = f"[{self._name}] " if self._name else ""
         logger.info(
-            "TelegramChannel started, restored %d binding(s)", len(self._bindings)
+            "%sTelegramChannel started, restored %d binding(s)", tag, len(self._bindings)
         )
 
     async def stop(self) -> None:
@@ -154,7 +154,8 @@ class TelegramChannel:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
-        logger.info("TelegramChannel stopped")
+        tag = f"[{self._name}] " if self._name else ""
+        logger.info("%sTelegramChannel stopped", tag)
 
     # ------------------------------------------------------------------
     # Event subscription (heartbeat delivery push)
@@ -171,7 +172,7 @@ class TelegramChannel:
             return
 
         source_type = data.get("source_type")
-        if source_type not in ("heartbeat_delivery", "deferred_result"):
+        if source_type not in ("heartbeat_delivery", "deferred_result", "inspector_push"):
             return
 
         agent_name = data.get("agent_name")
@@ -185,14 +186,17 @@ class TelegramChannel:
 
         if source_type == "deferred_result":
             msg_prefix = "[Deferred Result]"
-            history_prefix = "[此消息由超时后台任务完成后自动生成]\n\n"
+        elif source_type == "inspector_push":
+            msg_prefix = None
         else:
             msg_prefix = "[Heartbeat]"
-            history_prefix = "[此消息由心跳系统自动执行例行任务生成]\n\n"
 
-        text, entities = self._convert_markdown(
-            f"{msg_prefix} {agent_name}\n\n{detail}"
-        )
+        if msg_prefix:
+            raw_text = f"{msg_prefix} {agent_name}\n\n{detail}"
+        else:
+            raw_text = detail
+
+        text, entities = self._convert_markdown(raw_text)
 
         run_id = data.get("run_id") or ""
         target_chat = None

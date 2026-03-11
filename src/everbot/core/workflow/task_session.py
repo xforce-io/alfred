@@ -14,9 +14,8 @@ import os
 import subprocess
 import time
 from datetime import datetime
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, List, Optional
 
-from .artifact import build_artifact_injection
 from .context_manager import PhaseContextManager
 from .exceptions import (
     BudgetExhaustedError,
@@ -26,13 +25,11 @@ from .exceptions import (
 from .models import (
     PhaseConfig,
     PhaseGroupConfig,
-    PhaseResult,
     PhaseTraceEntry,
     TaskSessionConfig,
     TaskSessionEvent,
     TaskSessionState,
     VerifyTraceEntry,
-    WorkflowReport,
 )
 from .phase_runner import PhaseRunner
 from .report import generate_report, render_report_markdown

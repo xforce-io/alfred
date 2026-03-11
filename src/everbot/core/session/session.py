@@ -36,6 +36,7 @@ class SessionManager:
 
     MAX_TIMELINE_EVENTS = 500  # 防止内存泄漏，限制每个 session 的 timeline 事件数
     _MAX_CACHED_LOCKS = 200
+    MEMORY_EXTRACTION_TIMEOUT = 120  # seconds; LLM-based memory extraction after session save
 
     # --- Delegated ID helpers (canonical implementations in session_ids.py) ---
 
@@ -485,10 +486,13 @@ class SessionManager:
                     history = portable.get("history_messages", [])
                     await asyncio.wait_for(
                         mm.process_session_end(history, session_id),
-                        timeout=30,
+                        timeout=self.MEMORY_EXTRACTION_TIMEOUT,
                     )
             except asyncio.TimeoutError:
-                logger.warning("Memory extraction timed out (30s); skipping")
+                logger.warning(
+                    "Memory extraction timed out (%ds); skipping",
+                    self.MEMORY_EXTRACTION_TIMEOUT,
+                )
             except Exception:
                 logger.warning("Memory extraction failed; skipping", exc_info=True)
 

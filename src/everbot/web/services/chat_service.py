@@ -399,7 +399,7 @@ class ChatService:
 
                 current_task.add_done_callback(task_done_callback)
 
-        except Exception as e:
+        except Exception:
             logger.error("WebSocket error:\n%s", traceback.format_exc())
         finally:
             self._unregister_connection(session_id, agent_name)

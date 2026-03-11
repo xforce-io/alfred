@@ -11,7 +11,7 @@ import json
 import logging
 import re
 
-from dolphin.sdk import DolphinAgent, Env, GlobalSkills
+from dolphin.sdk import DolphinAgent, GlobalSkills
 from dolphin.core.config.global_config import GlobalConfig
 from dolphin.core.common.constants import (
     KEY_HISTORY_COMPACT_ON_PERSIST,

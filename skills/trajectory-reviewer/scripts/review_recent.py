@@ -212,7 +212,7 @@ def extract_tool_error_signature(content_text: str) -> Optional[str]:
         normalized = re.sub(r"\s+", " ", line)
         if normalized.startswith("Command exited with code"):
             return normalized
-        digest = hashlib.md5(normalized.encode("utf-8")).hexdigest()[:12]
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
         return f"{normalized[:120]}::{digest}"
     return None
 

@@ -15,7 +15,6 @@ from ..tasks.task_manager import (
     parse_iso_datetime,
 )
 from ..tasks.execution_gate import TaskExecutionGate
-from .heartbeat_utils import task_snapshot
 
 logger = logging.getLogger(__name__)
 

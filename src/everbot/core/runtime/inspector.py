@@ -94,13 +94,13 @@ async def emit_push_message(
             "content": push_message,
             "summary": push_message[:SUMMARY_MAX_CHARS],
             "detail": detail or push_message,
-            "source_type": "heartbeat_delivery",
+            "source_type": "inspector_push",
             "run_id": run_id,
             "deliver": True,
         },
         agent_name=agent_name,
         **routing_kwargs,
-        source_type="heartbeat_delivery",
+        source_type="inspector_push",
         run_id=run_id,
     )
 
@@ -192,17 +192,17 @@ class Inspector:
     def _compute_context_hashes(self, ctx: InspectionContext) -> Dict[str, str]:
         """Compute hashes for all context components to detect changes."""
         hashes: Dict[str, str] = {
-            "session_summary": hashlib.md5(
+            "session_summary": hashlib.sha256(
                 str(ctx.session_summary or "").encode("utf-8")
             ).hexdigest(),
-            "task_stats": hashlib.md5(
+            "task_stats": hashlib.sha256(
                 json.dumps(ctx.task_execution_stats, sort_keys=True).encode("utf-8")
             ).hexdigest(),
-            "events": hashlib.md5(
+            "events": hashlib.sha256(
                 json.dumps(ctx.recent_events, sort_keys=True).encode("utf-8")
             ).hexdigest(),
-            "memory": hashlib.md5(str(ctx.memory_content or "").encode("utf-8")).hexdigest(),
-            "heartbeat": hashlib.md5(
+            "memory": hashlib.sha256(str(ctx.memory_content or "").encode("utf-8")).hexdigest(),
+            "heartbeat": hashlib.sha256(
                 str(ctx.heartbeat_content or "").encode("utf-8")
             ).hexdigest(),
         }
@@ -597,8 +597,8 @@ class Inspector:
 
 你是用户的私人助理。根据上述上下文，做出以下判断：
 
-1. **系统健康**：系统是否正常运行？(heartbeat_ok)
-2. **主动沟通**：综合考虑用户的兴趣、习惯、当前任务状态和空闲时长，判断现在是否值得主动给用户发一条消息。这不限于紧急问题——可以是任务执行情况的总结、基于用户兴趣的洞察、对近期工作的回顾、或任何你认为用户会感兴趣的话题。用你自己的判断力决定是否发送以及发送什么内容。如果没有什么值得说的，保持沉默即可。(push_message)
+1. **系统健康**：上述上下文是否显示系统存在需要用户关注的问题？(heartbeat_ok)
+2. **主动沟通**：综合考虑用户的兴趣、习惯、当前任务状态和空闲时长，判断现在是否值得主动给用户发一条消息。可以是任务执行情况的总结、基于用户兴趣的洞察、对近期工作的回顾、或任何你认为用户会感兴趣的话题。没什么值得说的就保持沉默。(push_message)
 3. **Routine 提议**：是否需要提议新的定时任务？(routines)
 
 以如下 JSON 格式回复：
@@ -616,10 +616,9 @@ class Inspector:
 
 ## push_message 语气要求
 push_message 是直接发送给用户的消息。请用**自然的助手口吻**书写，就像你在和用户聊天一样。
-- 不要用"【系统健康快照】"这类标题，不要用编号列表罗列问题
-- 如果发现了系统异常，用关心的语气简要提醒，比如："我注意到最近 kimi 的接口不太稳定，连着失败了好几次，我先用备选模型顶上了，你看需要我做什么调整吗？"
+- 用关心的语气，比如："我注意到最近 kimi 的接口不太稳定，连着失败了好几次，我先用备选模型顶上了，你看需要我做什么调整吗？"
 - 如果一切正常想主动聊聊，就像朋友随口说一句，比如："今天跑了几个任务都挺顺利的，没什么需要操心的。"
-- 避免使用技术术语堆砌（如"工具级故障密度偏高"），用大白话说清楚就好"""
+- 用大白话，不要写成系统报告的格式"""
         )
 
         return "\n\n".join(sections)

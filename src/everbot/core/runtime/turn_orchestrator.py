@@ -130,12 +130,17 @@ def _extract_tool_intent_signature(tool_name: str, args) -> Optional[str]:
         cid_match = re.search(r'command_id["\'\s]*[=:]\s*["\'\s]*([a-f0-9]{6,})', args)
         if cid_match:
             return f"bash_wait:{cid_match.group(1)}"
+        # Detect web-search script calls — group all search queries under a
+        # single intent so that repeated searches with different keywords are
+        # caught by the intent-dedup guard.
+        if re.search(r'(?:web-search|web_search)[/\\].*?search\.py\b', args):
+            return "web_search"
         grep_match = re.search(r'(?:grep|rg)\s+(?:-\w+\s+)*["\']?([^"\'|\s]+)', args)
         if grep_match:
             return f"search_bash:{grep_match.group(1)}"
         normalized = re.sub(r"\s+", " ", args.strip())
         if normalized:
-            cmd_hash = hashlib.md5(normalized.encode()).hexdigest()[:12]
+            cmd_hash = hashlib.sha256(normalized.encode()).hexdigest()[:12]
             # Classify common read-only bash commands so they get the
             # higher max_same_readonly_intent limit instead of the
             # stricter write-intent limit.
@@ -147,7 +152,7 @@ def _extract_tool_intent_signature(tool_name: str, args) -> Optional[str]:
     # REPEATED_TOOL_INTENT guard even when they don't match file-path patterns.
     if tool_name == "_python":
         normalized = re.sub(r'\s+', ' ', args.strip())
-        code_hash = hashlib.md5(normalized.encode()).hexdigest()[:12]
+        code_hash = hashlib.sha256(normalized.encode()).hexdigest()[:12]
         return f"python_exec:{code_hash}"
     return None
 
@@ -230,8 +235,20 @@ class TurnOrchestrator:
     according to their transport (WebSocket push, collect-and-summarise, …).
     """
 
-    def __init__(self, policy: Optional[TurnPolicy] = None):
+    def __init__(
+        self,
+        policy: Optional[TurnPolicy] = None,
+        prior_failures: Optional[Dict[str, int]] = None,
+    ):
         self.policy = policy or TurnPolicy()
+        # Cross-turn failure memory: maps failure signatures to counts
+        # accumulated from previous turns.  Callers can pass the
+        # ``accumulated_failures`` dict back on the next turn to carry
+        # over context.
+        self._prior_failures: Dict[str, int] = dict(prior_failures or {})
+        # After run_turn completes, callers can read this to persist
+        # accumulated failure counts for the next turn.
+        self.accumulated_failures: Dict[str, int] = dict(self._prior_failures)
 
     # -- public entry point -------------------------------------------------
 
@@ -418,13 +435,14 @@ class TurnOrchestrator:
                 drain_extra_seconds=policy.drain_extra_seconds or 300,
             )
 
-        # Tracking state
+        # Tracking state — pre-seed from prior turns so cross-turn
+        # repeated failures are caught early.
         response = ""
         tool_call_count = 0
         tool_execution_count = 0
         tool_names_executed: list[str] = []
-        failed_tool_outputs = 0
-        failure_signatures: Dict[str, int] = {}
+        failed_tool_outputs = sum(self._prior_failures.values())
+        failure_signatures: Dict[str, int] = dict(self._prior_failures)
         tool_intent_signatures: Dict[str, int] = {}
         warned_intents: set = set()
         pid_to_intent: Dict[str, str] = {}
@@ -450,7 +468,7 @@ class TurnOrchestrator:
             nonlocal _round_text, _prev_fp, _similar_rounds
             text = _round_text
             _round_text = ""
-            fp = hashlib.md5(text.strip()[:_FINGERPRINT_CHARS].encode()).hexdigest()[:12] if text else ""
+            fp = hashlib.sha256(text.strip()[:_FINGERPRINT_CHARS].encode()).hexdigest()[:12] if text else ""
             if fp and _prev_fp:
                 _similar_rounds = _similar_rounds + 1 if fp == _prev_fp else 0
             _prev_fp = fp
@@ -591,6 +609,7 @@ class TurnOrchestrator:
                         if fail_sig:
                             failed_tool_outputs += 1
                             failure_signatures[fail_sig] = failure_signatures.get(fail_sig, 0) + 1
+                            self.accumulated_failures[fail_sig] = failure_signatures[fail_sig]
                             if (
                                 failed_tool_outputs >= policy.max_failed_tool_outputs
                                 or failure_signatures[fail_sig] >= effective_same_failure_limit
@@ -720,6 +739,7 @@ class TurnOrchestrator:
                     if fail_sig:
                         failed_tool_outputs += 1
                         failure_signatures[fail_sig] = failure_signatures.get(fail_sig, 0) + 1
+                        self.accumulated_failures[fail_sig] = failure_signatures[fail_sig]
                         if (
                             failed_tool_outputs >= policy.max_failed_tool_outputs
                             or failure_signatures[fail_sig] >= effective_same_failure_limit
@@ -779,6 +799,19 @@ class TurnOrchestrator:
         # doesn't get an empty "(无响应)".
         if not response and last_successful_tool_output:
             response = last_successful_tool_output
+
+        # Phantom tool call: model wrote ```bash/python blocks but never
+        # issued a real tool_use call — common with weaker models under
+        # long context.  Append a short note so the user knows.
+        if (
+            tool_call_count == 0
+            and response
+            and re.search(r"```(?:bash|sh|shell|python)\s*\n", response)
+        ):
+            response += (
+                "\n\n---\n⚠️ *[系统] 以上命令未实际执行，"
+                "模型仅输出了文本。请复制命令手动运行，或重新描述需求重试。*"
+            )
 
         # Stream exhausted without error → success
         # Estimate output tokens from total chars produced by LLM.

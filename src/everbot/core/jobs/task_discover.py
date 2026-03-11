@@ -6,11 +6,10 @@ Notification strategy: notifies user via mailbox when new tasks are found.
 import json
 import logging
 import os
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 from ..runtime.skill_context import SkillContext
 from ..scanners.session_scanner import SessionScanner
@@ -237,5 +236,4 @@ def _format_task_proposals(tasks: List[DiscoveredTask]) -> str:
         lines.append(f"### {i}. {urgency_icon} {task.title}")
         lines.append(f"{task.description}\n")
     return "\n".join(lines)
-
 

@@ -4,7 +4,6 @@ Silent execution, no user notification.
 Strategy: supplement first (re-extract missed sessions), then consolidate.
 """
 
-import json
 import logging
 from typing import List
 
@@ -85,12 +84,15 @@ async def run(context: SkillContext) -> str:
             entries_before, entries_after,
         )
 
-    # 6. Advance watermark
+    # 6. Compress memories → USER.md
+    compress_result = await _compress_to_user_profile(context)
+
+    # 7. Advance watermark
     if last_successful_session:
         state.set_watermark("memory-review", last_successful_session.updated_at)
         state.save(context.workspace_path)
 
-    return f"Memory review: {review_stats}, re-extracted: {reextract_count}"
+    return f"Memory review: {review_stats}, re-extracted: {reextract_count}, profile: {compress_result}"
 
 
 async def _detect_missed_sessions(
@@ -204,4 +206,62 @@ Output format:
         logger.error("Memory consolidation analysis failed: %s", e)
         return {}
 
+
+async def _compress_to_user_profile(context: SkillContext) -> str:
+    """Compress all memory entries into structured tags and write to USER.md.
+
+    This replaces verbose narrative memories with a compact user profile
+    that is injected into the system prompt via the USER.md section.
+    """
+    entries = context.memory_manager.load_entries()
+    if not entries:
+        return "no entries"
+
+    # Only compress entries with reasonable score
+    active = [e for e in entries if e.score >= 0.5]
+    if not active:
+        return "no active entries"
+
+    entries_text = "\n".join(
+        f"- [{e.category}] {e.content}" for e in active
+    )
+
+    prompt = f"""Compress these user memory entries into a structured profile.
+
+## Memory Entries
+{entries_text}
+
+## Task
+Deduplicate and compress into a structured tag format. Rules:
+- Group by dimension (技术能力, 偏好, 工作流, 投资, etc.)
+- Each dimension is one line with comma-separated tags
+- Merge redundant entries (e.g. 5 entries about "user knows code" → one tag)
+- Keep only actionable information that affects how to interact with the user
+- Use Chinese, keep each tag under 15 characters
+- Total output should be under 200 characters
+
+## Output Format (exact format, no extra text)
+- 技术能力: tag1, tag2, tag3
+- 偏好: tag1, tag2
+- 工作流: tag1, tag2
+- 投资: tag1, tag2"""
+
+    try:
+        response = await context.llm.complete(
+            prompt,
+            system="You are a profile compression engine. Output only the structured tags, nothing else.",
+        )
+        profile_content = response.strip()
+
+        # Write to USER.md
+        user_md_path = context.workspace_path / "USER.md"
+        user_md_path.write_text(
+            f"# 用户画像\n\n{profile_content}\n",
+            encoding="utf-8",
+        )
+        logger.info("Compressed %d memory entries to USER.md", len(active))
+        return f"compressed {len(active)} entries"
+    except Exception as e:
+        logger.error("Memory compression to USER.md failed: %s", e)
+        return f"error: {e}"
 

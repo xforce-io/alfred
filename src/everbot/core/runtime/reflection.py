@@ -44,13 +44,13 @@ class ReflectionManager:
         self.last_reflect_file_hashes: Dict[str, str] = {}
 
     def compute_file_hashes(self) -> Dict[str, str]:
-        """Compute MD5 hashes for MEMORY.md and HEARTBEAT.md."""
+        """Compute SHA-256 hashes for MEMORY.md and HEARTBEAT.md."""
         hashes: Dict[str, str] = {}
         for name in ("MEMORY.md", "HEARTBEAT.md"):
             path = self.workspace_path / name
             try:
                 if path.exists():
-                    hashes[name] = hashlib.md5(path.read_bytes()).hexdigest()
+                    hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
                 else:
                     hashes[name] = ""
             except Exception:

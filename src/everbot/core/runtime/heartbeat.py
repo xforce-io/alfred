@@ -19,10 +19,11 @@ from . import RuntimeDeps, TurnExecutor
 from .heartbeat_file import HeartbeatFileManager
 from .reflection import ReflectionManager
 from .heartbeat_utils import (
-    is_time_reminder_task,
-    try_deterministic_task,
-    task_snapshot,
+    build_isolated_task_prompt,
     build_job_session_id,
+    is_time_reminder_task,
+    task_snapshot,
+    try_deterministic_task,
 )
 from .cron import CronExecutor
 from .cron_delivery import CronDelivery
@@ -30,9 +31,7 @@ from .inspector import Inspector
 from .ports import HeartbeatSessionPort
 from ..tasks.routine_manager import RoutineManager
 from ..tasks.task_manager import (
-    Task,
     get_due_tasks,
-    claim_task,
     update_task_state,
     write_task_block,
     purge_stale_tasks,
@@ -42,7 +41,6 @@ from ..tasks.task_manager import (
     TaskState,
     ParseStatus,
 )
-from ..tasks.execution_gate import TaskExecutionGate
 from ...infra.user_data import get_user_data_manager
 
 logger = logging.getLogger(__name__)
@@ -755,7 +753,13 @@ If not, reply with `HEARTBEAT_OK`.
                             scope=self.broadcast_scope,
                             detail=inspection.delivery_detail,
                         )
-                    result = inspection.output
+                    # If inspector already pushed a message to the user,
+                    # suppress the bare status string (e.g. "HEARTBEAT_ERROR")
+                    # from being delivered as a redundant notification.
+                    if inspection.push_message:
+                        result = "HEARTBEAT_OK"
+                    else:
+                        result = inspection.output
                 elif self._file_mgr.heartbeat_mode == "corrupted":
                     self._write_heartbeat_event("corrupted")
                     user_message = await self._inject_heartbeat_context(
@@ -928,12 +932,7 @@ If not, reply with `HEARTBEAT_OK`.
         self._record_runtime_metric("job_session_created")
         task_title = str(getattr(task, "title", "") or "")
         task_desc = str(getattr(task, "description", "") or "")
-        prompt = (
-            "Execute this scheduled isolated routine task and summarize the result briefly.\n\n"
-            f"Task ID: {getattr(task, 'id', 'task')}\n"
-            f"Title: {task_title}\n"
-            f"Description: {task_desc}\n"
-        )
+        prompt = build_isolated_task_prompt(task)
         agent = await self._create_job_agent(job_session_id)
         job_system_prompt = self._build_job_system_prompt(agent, task)
         try:

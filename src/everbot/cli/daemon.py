@@ -8,7 +8,7 @@ import os
 import signal
 import logging
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, List, Optional, Any
 from datetime import datetime
 import json
 import uuid
@@ -55,7 +55,7 @@ class EverBotDaemon:
         self._scheduler_cron_jobs = bool(runtime_cfg.get("scheduler_cron_jobs", True))
         self._scheduler: Optional[Scheduler] = None
         self._legacy_runner_tasks: Dict[str, asyncio.Task] = {}
-        self._telegram_channel: Optional[TelegramChannel] = None
+        self._telegram_channels: List[TelegramChannel] = []
         self._daemon_lock: Optional[DaemonLock] = None
 
         self.agent_factory = get_agent_factory(
@@ -351,37 +351,85 @@ class EverBotDaemon:
 
     # -- Telegram Channel ---------------------------------------------------
 
-    def _create_telegram_channel(self) -> Optional[TelegramChannel]:
-        """Create TelegramChannel from config if enabled."""
+    @staticmethod
+    def _resolve_env(value: str) -> str:
+        """Resolve ${ENV_VAR} references in a string."""
+        if value.startswith("${") and value.endswith("}"):
+            return os.environ.get(value[2:-1], "")
+        return value
+
+    def _create_telegram_channels(self) -> List[TelegramChannel]:
+        """Create TelegramChannel(s) from config.
+
+        Supports two config formats:
+
+        Legacy (single bot)::
+
+            channels:
+              telegram:
+                enabled: true
+                bot_token: ${TELEGRAM_BOT_TOKEN}
+                default_agent: alice
+
+        Multi-bot::
+
+            channels:
+              telegram:
+                - name: alice-bot
+                  bot_token: ${TELEGRAM_BOT_TOKEN}
+                  default_agent: alice
+                - name: coding-bot
+                  bot_token: ${TELEGRAM_CODING_BOT_TOKEN}
+                  default_agent: coding-master
+        """
         channels_cfg = (
             (self.config.get("everbot", {}) or {}).get("channels", {}) or {}
         )
-        tg_cfg = channels_cfg.get("telegram", {}) or {}
-        if not tg_cfg.get("enabled", False):
-            return None
+        tg_cfg = channels_cfg.get("telegram")
+        if not tg_cfg:
+            return []
 
-        bot_token = str(tg_cfg.get("bot_token", "") or "")
-        # Support ${ENV_VAR} references
-        if bot_token.startswith("${") and bot_token.endswith("}"):
-            env_key = bot_token[2:-1]
-            bot_token = os.environ.get(env_key, "")
-        if not bot_token:
-            raise RuntimeError(
-                "Telegram channel is enabled but bot_token is empty. "
-                "Set the TELEGRAM_BOT_TOKEN environment variable or disable the channel."
+        # Normalise to list of bot configs
+        if isinstance(tg_cfg, dict):
+            # Legacy single-bot format
+            if not tg_cfg.get("enabled", False):
+                return []
+            bot_configs = [tg_cfg]
+        elif isinstance(tg_cfg, list):
+            bot_configs = [c for c in tg_cfg if isinstance(c, dict) and c.get("enabled", True)]
+        else:
+            return []
+
+        result: List[TelegramChannel] = []
+        for cfg in bot_configs:
+            bot_token = self._resolve_env(str(cfg.get("bot_token", "") or ""))
+            if not bot_token:
+                name = cfg.get("name", "unnamed")
+                logger.warning(
+                    "Telegram bot '%s' skipped: bot_token is empty.", name,
+                )
+                continue
+
+            default_agent = str(cfg.get("default_agent", "") or "")
+            allowed_ids = cfg.get("allowed_chat_ids")
+            if allowed_ids and not isinstance(allowed_ids, list):
+                allowed_ids = None
+            bot_name = str(cfg.get("name", "") or "")
+
+            channel = TelegramChannel(
+                bot_token=bot_token,
+                session_manager=self.session_manager,
+                default_agent=default_agent,
+                allowed_chat_ids=allowed_ids,
+                name=bot_name,
+            )
+            result.append(channel)
+            logger.info(
+                "Telegram bot registered: %s (default_agent=%s)",
+                bot_name or "(default)", default_agent,
             )
 
-        default_agent = str(tg_cfg.get("default_agent", "") or "")
-        allowed_ids = tg_cfg.get("allowed_chat_ids")
-        if allowed_ids and not isinstance(allowed_ids, list):
-            allowed_ids = None
-
-        return TelegramChannel(
-            bot_token=bot_token,
-            session_manager=self.session_manager,
-            default_agent=default_agent,
-            allowed_chat_ids=allowed_ids,
-        )
+        return result
 
     # -- Config validation --------------------------------------------------
 
@@ -442,9 +490,9 @@ class EverBotDaemon:
             self._validate_env_refs()
             self._pid = write_pid_file(self.user_data.pid_file)
             self._create_heartbeat_runners()
-            self._telegram_channel = self._create_telegram_channel()
-            if self._telegram_channel is not None:
-                await self._telegram_channel.start()
+            self._telegram_channels = self._create_telegram_channels()
+            for tg_ch in self._telegram_channels:
+                await tg_ch.start()
             self._write_status_snapshot()
             cleanup_task = asyncio.create_task(self._run_job_cleanup_loop())
 
@@ -466,9 +514,9 @@ class EverBotDaemon:
             raise
         finally:
             self._running = False
-            if self._telegram_channel is not None:
+            for tg_ch in self._telegram_channels:
                 try:
-                    await self._telegram_channel.stop()
+                    await tg_ch.stop()
                 except Exception as exc:
                     logger.warning("TelegramChannel stop error: %s", exc)
             if cleanup_task is not None:
@@ -489,9 +537,9 @@ class EverBotDaemon:
     async def stop(self):
         """停止守护进程"""
         self._running = False
-        if self._telegram_channel is not None:
+        for tg_ch in self._telegram_channels:
             try:
-                await self._telegram_channel.stop()
+                await tg_ch.stop()
             except Exception as exc:
                 logger.warning("TelegramChannel stop error: %s", exc)
         if self._scheduler is not None:

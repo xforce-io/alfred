@@ -148,6 +148,7 @@ def _make_core_service(tmp_path: Path):
     core.session_manager = sm
     core.user_data = ud
     core.agent_service = None
+    core._session_failure_memory = {}
     return core
 
 
@@ -251,14 +252,17 @@ async def test_process_message_repeated_tool_failures_sends_generic_guidance(mon
     agent = _TurnErrorAgent()
 
     class _FakeTurnOrchestrator:
-        def __init__(self, _policy):
-            return None
+        def __init__(self, _policy, **_kw):
+            self.accumulated_failures = {}
 
         async def run_turn(self, *_args, **_kwargs):
             from src.everbot.core.runtime.turn_policy import TurnEvent, TurnEventType
             yield TurnEvent(
                 type=TurnEventType.TURN_ERROR,
                 error="REPEATED_TOOL_FAILURES: failed=4, signature=exit_code:2, count=4",
+                tool_call_count=8,
+                tool_names_executed=["web_search", "bash"],
+                failed_tool_outputs=4,
             )
 
     monkeypatch.setattr("src.everbot.core.channel.core_service.TurnOrchestrator", _FakeTurnOrchestrator)
@@ -270,8 +274,10 @@ async def test_process_message_repeated_tool_failures_sends_generic_guidance(mon
         await core.process_message(agent, "demo_agent", "web_session_demo_agent", "hi", collector)
 
     texts = collector.payloads_by_type("text")
-    assert any("当前策略没有产生新信息" in t.content for t in texts)
-    assert not any("更换站点/接口" in t.content for t in texts)
+    # Should contain structured summary with tool call stats
+    assert any("已停止本轮自动重试" in t.content for t in texts)
+    assert any("8 次工具调用" in t.content for t in texts)
+    assert any("4 次失败" in t.content for t in texts)
 
 
 @pytest.mark.asyncio
@@ -299,8 +305,8 @@ async def test_deferred_result_emit_uses_explicit_target_fields(monkeypatch):
     emitted = []
 
     class _FakeTurnOrchestrator:
-        def __init__(self, _policy):
-            return None
+        def __init__(self, _policy, **_kw):
+            self.accumulated_failures = {}
 
         async def run_turn(self, *_args, **kwargs):
             on_deferred_result = kwargs.get("on_deferred_result")

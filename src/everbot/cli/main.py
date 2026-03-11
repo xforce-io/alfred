@@ -3,10 +3,8 @@ CLI 命令接口
 """
 
 import asyncio
-import sys
 import argparse
 import logging
-import subprocess
 import signal
 from pathlib import Path
 
@@ -238,8 +236,8 @@ def cmd_doctor(args):
             print(f"    Hint: {item.hint}")
 
 
-def main():
-    """CLI 主入口"""
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser."""
     parser = argparse.ArgumentParser(
         description="EverBot - Ever Running Bot",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -302,6 +300,13 @@ def main():
 
     # skills 命令（技能管理）
     register_skills_cli(subparsers)
+
+    return parser
+
+
+def main():
+    """CLI 主入口"""
+    parser = _build_parser()
 
     args = parser.parse_args()
 
