@@ -32,6 +32,7 @@ class WorkspaceLoader:
     """
 
     SNAPSHOT_READ_RETRIES = 3
+    MAX_MEMORY_PROMPT_CHARS = 4000  # ~1k tokens budget for memory in system prompt
 
     INSTRUCTION_FILES = {
         'soul_md': 'SOUL.md',
@@ -144,9 +145,20 @@ class WorkspaceLoader:
         if instructions.user_md:
             parts.append(f"# 用户画像\n\n{instructions.user_md}")
 
-        # Memory, heartbeat, coding sections removed from system prompt.
-        # These are now loaded on-demand:
-        # - 原始记忆 → memory-review 压缩后写入 USER.md，通过上方 user_md 注入
+        # Inject memory when available and within budget.
+        # Once memory-review populates USER.md, this becomes redundant.
+        if instructions.memory_md:
+            memory_text = instructions.memory_md.strip()
+            if len(memory_text) <= self.MAX_MEMORY_PROMPT_CHARS:
+                parts.append(f"# 记忆\n\n{memory_text}")
+            else:
+                parts.append(
+                    f"# 记忆 (截断)\n\n"
+                    f"{memory_text[:self.MAX_MEMORY_PROMPT_CHARS]}\n\n"
+                    f"...（更多记忆请读取 MEMORY.md）"
+                )
+
+        # Heartbeat and coding sections loaded on-demand:
         # - 心跳任务 → routine-manager skill 的 list 命令
         # - 开发状态 → coding-master skill 的 status/progress 命令
 

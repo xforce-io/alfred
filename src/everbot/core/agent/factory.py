@@ -20,6 +20,7 @@ from dolphin.core.common.constants import (
 
 from ...infra.workspace import WorkspaceLoader
 from ...infra.user_data import get_user_data_manager
+from ...infra.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +239,7 @@ class AgentFactory:
         agent.executor.context.init_trajectory(trajectory_path, overwrite=True)
         logger.info("Trajectory initialized: %s", trajectory_path)
 
-        runtime_skills = self._extract_runtime_available_skills(agent.global_skills)
+        runtime_skills = self._extract_runtime_available_skills(agent.global_skills, agent_name)
         if runtime_skills:
             skills_section = self._build_skills_prompt_section(runtime_skills)
             workspace_instructions = self._upsert_skills_prompt_section(
@@ -572,7 +573,36 @@ Current time: $current_time
             logger.warning("Failed to read skills-state.json: %s", e)
             return set()
 
-    def _extract_runtime_available_skills(self, global_skills: Any) -> List[Dict[str, Any]]:
+    def _get_agent_skills_filter(self, agent_name: str) -> tuple[Optional[Set[str]], str]:
+        """Load per-agent skills include/exclude from config.yaml.
+
+        Returns:
+            (skill_names, mode) where mode is "include", "exclude", or "all".
+            Raises ValueError if both include and exclude are set,
+            or if any listed skill does not exist at runtime.
+        """
+        config = get_config()
+        agent_section = config.get("everbot", {}).get("agents", {}).get(agent_name, {})
+        skills_config = agent_section.get("skills", {})
+
+        include = skills_config.get("include")
+        exclude = skills_config.get("exclude")
+
+        if include and exclude:
+            raise ValueError(
+                f"Agent '{agent_name}' config has both skills.include and skills.exclude — "
+                f"only one is allowed."
+            )
+
+        if include:
+            return set(include), "include"
+        if exclude:
+            return set(exclude), "exclude"
+        return None, "all"
+
+    def _extract_runtime_available_skills(
+        self, global_skills: Any, agent_name: str,
+    ) -> List[Dict[str, Any]]:
         """Extract actually available resource skills from runtime skillkit."""
         resource_skillkit = None
 
@@ -623,7 +653,9 @@ Current time: $current_time
                 }
             )
 
-        # Filter out disabled skills
+        all_skill_names = {s["name"] for s in available_skills}
+
+        # Filter out globally disabled skills
         disabled = self._load_disabled_skills()
         if disabled:
             before_count = len(available_skills)
@@ -631,6 +663,24 @@ Current time: $current_time
             filtered_count = before_count - len(available_skills)
             if filtered_count:
                 logger.info("Filtered out %d disabled skill(s).", filtered_count)
+
+        # Per-agent skills filter (include or exclude, not both)
+        filter_names, mode = self._get_agent_skills_filter(agent_name)
+        if filter_names is not None:
+            unknown = filter_names - all_skill_names
+            if unknown:
+                raise ValueError(
+                    f"Agent '{agent_name}' skills.{mode} references non-existent "
+                    f"skill(s): {sorted(unknown)}. Available: {sorted(all_skill_names)}"
+                )
+            if mode == "include":
+                available_skills = [s for s in available_skills if s["name"] in filter_names]
+            else:  # exclude
+                available_skills = [s for s in available_skills if s["name"] not in filter_names]
+            logger.info(
+                "Agent '%s' skills.%s filter: %d skill(s) remaining.",
+                agent_name, mode, len(available_skills),
+            )
 
         return available_skills
 

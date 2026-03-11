@@ -21,6 +21,8 @@ def factory():
     """创建 AgentFactory 实例（不依赖配置文件）"""
     with patch.object(AgentFactory, "__init__", lambda self, **kw: None):
         f = AgentFactory.__new__(AgentFactory)
+        # Default: no per-agent skill filtering
+        f._get_agent_skills_filter = lambda agent_name: (None, "all")
         return f
 
 
@@ -77,7 +79,7 @@ class TestExtractRuntimeAvailableSkills:
         gs = _build_global_skills(["coding-master", "dev-browser", "paper-discovery"])
 
         with patch.object(factory, "_load_disabled_skills", return_value=set()):
-            result = factory._extract_runtime_available_skills(gs)
+            result = factory._extract_runtime_available_skills(gs, "test-agent")
 
         assert len(result) == 3
         names = {s["name"] for s in result}
@@ -88,7 +90,7 @@ class TestExtractRuntimeAvailableSkills:
         gs = SimpleNamespace()  # 无任何属性
 
         with patch.object(factory, "_load_disabled_skills", return_value=set()):
-            result = factory._extract_runtime_available_skills(gs)
+            result = factory._extract_runtime_available_skills(gs, "test-agent")
 
         assert result == []
 
@@ -99,7 +101,7 @@ class TestExtractRuntimeAvailableSkills:
         gs = SimpleNamespace(installedSkillset=installed)
 
         with patch.object(factory, "_load_disabled_skills", return_value=set()):
-            result = factory._extract_runtime_available_skills(gs)
+            result = factory._extract_runtime_available_skills(gs, "test-agent")
 
         assert result == []
 
@@ -111,7 +113,7 @@ class TestExtractRuntimeAvailableSkills:
         gs = SimpleNamespace(installedSkillset=installed)
 
         with patch.object(factory, "_load_disabled_skills", return_value=set()):
-            result = factory._extract_runtime_available_skills(gs)
+            result = factory._extract_runtime_available_skills(gs, "test-agent")
 
         assert result == []
 
@@ -120,7 +122,7 @@ class TestExtractRuntimeAvailableSkills:
         gs = _build_global_skills(["coding-master"])
 
         with patch.object(factory, "_load_disabled_skills", return_value=set()):
-            result = factory._extract_runtime_available_skills(gs)
+            result = factory._extract_runtime_available_skills(gs, "test-agent")
 
         assert len(result) == 1
         skill = result[0]
@@ -143,7 +145,7 @@ class TestExtractRuntimeAvailableSkills:
         )
 
         with patch.object(factory, "_load_disabled_skills", return_value=set()):
-            result = factory._extract_runtime_available_skills(gs)
+            result = factory._extract_runtime_available_skills(gs, "test-agent")
 
         assert result[0]["description"] == "A" * 150 + "..."
 
@@ -160,7 +162,7 @@ class TestExtractRuntimeAvailableSkills:
         skillkit.get_skill_meta.side_effect = flaky_meta
 
         with patch.object(factory, "_load_disabled_skills", return_value=set()):
-            result = factory._extract_runtime_available_skills(gs)
+            result = factory._extract_runtime_available_skills(gs, "test-agent")
 
         assert len(result) == 2
         # bad-skill 仍然在列表中，只是没有 meta 信息
@@ -173,7 +175,7 @@ class TestExtractRuntimeAvailableSkills:
         gs = _build_global_skills(["coding-master", "dev-browser", "deprecated-skill"])
 
         with patch.object(factory, "_load_disabled_skills", return_value={"deprecated-skill"}):
-            result = factory._extract_runtime_available_skills(gs)
+            result = factory._extract_runtime_available_skills(gs, "test-agent")
 
         names = {s["name"] for s in result}
         assert "deprecated-skill" not in names
@@ -184,7 +186,7 @@ class TestExtractRuntimeAvailableSkills:
         gs = _build_global_skills(["raw-skill"], with_meta=False)
 
         with patch.object(factory, "_load_disabled_skills", return_value=set()):
-            result = factory._extract_runtime_available_skills(gs)
+            result = factory._extract_runtime_available_skills(gs, "test-agent")
 
         assert len(result) == 1
         assert result[0]["name"] == "raw-skill"
@@ -204,7 +206,7 @@ class TestExtractRuntimeAvailableSkills:
         )
 
         with patch.object(factory, "_load_disabled_skills", return_value=set()):
-            result = factory._extract_runtime_available_skills(gs)
+            result = factory._extract_runtime_available_skills(gs, "test-agent")
 
         assert result[0]["path"] == "~/.alfred/skills/my-skill"
 
@@ -227,6 +229,59 @@ class TestOldApiDoesNotWork:
 
         # 但 skills 仍然能被正确提取
         with patch.object(factory, "_load_disabled_skills", return_value=set()):
-            result = factory._extract_runtime_available_skills(gs)
+            result = factory._extract_runtime_available_skills(gs, "test-agent")
 
         assert len(result) == 2
+
+
+class TestPerAgentSkillsFilter:
+    """Per-agent skills.include / skills.exclude filtering."""
+
+    def test_include_filters_to_allowlist(self, factory):
+        """skills.include only keeps listed skills"""
+        gs = _build_global_skills(["coding-master", "dev-browser", "paper-discovery"])
+        factory._get_agent_skills_filter = lambda name: ({"coding-master"}, "include")
+
+        with patch.object(factory, "_load_disabled_skills", return_value=set()):
+            result = factory._extract_runtime_available_skills(gs, "my-agent")
+
+        assert [s["name"] for s in result] == ["coding-master"]
+
+    def test_exclude_removes_listed_skills(self, factory):
+        """skills.exclude removes listed skills, keeps the rest"""
+        gs = _build_global_skills(["coding-master", "dev-browser", "paper-discovery"])
+        factory._get_agent_skills_filter = lambda name: ({"dev-browser"}, "exclude")
+
+        with patch.object(factory, "_load_disabled_skills", return_value=set()):
+            result = factory._extract_runtime_available_skills(gs, "my-agent")
+
+        names = {s["name"] for s in result}
+        assert names == {"coding-master", "paper-discovery"}
+
+    def test_unknown_skill_in_include_raises(self, factory):
+        """Referencing a non-existent skill in include raises ValueError"""
+        gs = _build_global_skills(["coding-master"])
+        factory._get_agent_skills_filter = lambda name: ({"coding-master", "no-such-skill"}, "include")
+
+        with patch.object(factory, "_load_disabled_skills", return_value=set()):
+            with pytest.raises(ValueError, match="no-such-skill"):
+                factory._extract_runtime_available_skills(gs, "my-agent")
+
+    def test_unknown_skill_in_exclude_raises(self, factory):
+        """Referencing a non-existent skill in exclude raises ValueError"""
+        gs = _build_global_skills(["coding-master"])
+        factory._get_agent_skills_filter = lambda name: ({"ghost-skill"}, "exclude")
+
+        with patch.object(factory, "_load_disabled_skills", return_value=set()):
+            with pytest.raises(ValueError, match="ghost-skill"):
+                factory._extract_runtime_available_skills(gs, "my-agent")
+
+    def test_no_filter_passes_all(self, factory):
+        """When no filter configured, all skills pass through"""
+        gs = _build_global_skills(["a", "b", "c"])
+        factory._get_agent_skills_filter = lambda name: (None, "all")
+
+        with patch.object(factory, "_load_disabled_skills", return_value=set()):
+            result = factory._extract_runtime_available_skills(gs, "my-agent")
+
+        assert len(result) == 3
