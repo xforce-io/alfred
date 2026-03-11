@@ -242,8 +242,8 @@ class ChannelCoreService:
                 if agent.state == AgentState.ERROR:
                     try:
                         await agent.initialize()
-                    except Exception:
-                        raise exc
+                    except Exception as e:
+                        raise exc from e
                 msg = f"检测到网络异常 ({str(exc)[:50]}...)，正在重试 ({attempt + 1}/{CHAT_POLICY.max_attempts})..."
                 await on_event(OutboundMessage(session_id, msg, msg_type="status"))
                 await on_event(OutboundMessage(session_id, "", msg_type="end"))

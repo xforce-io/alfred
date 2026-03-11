@@ -1548,8 +1548,8 @@ class _SkillLLMClient:
         """Single-turn LLM completion."""
         try:
             import litellm
-        except ImportError:
-            raise RuntimeError("litellm is required for skill LLM calls")
+        except ImportError as e:
+            raise RuntimeError("litellm is required for skill LLM calls") from e
 
         messages = []
         if system:
