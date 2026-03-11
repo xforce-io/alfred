@@ -636,6 +636,26 @@ class TestDoctor:
             claims = tools._atomic_json_read(repo / tools.CM_DIR / "claims.json")
             assert claims["features"]["1"]["phase"] == "pending"
 
+    def test_fix_missing_session_worktree_recreates_it(self, git_repo):
+        repo = _setup_locked(git_repo)
+        lock_path = repo / tools.CM_DIR / "lock.json"
+        lock = json.loads(lock_path.read_text())
+        session_wt = Path(lock["session_worktree"])
+        if session_wt.exists():
+            subprocess.run(["git", "worktree", "remove", str(session_wt), "--force"],
+                           cwd=repo, capture_output=True, check=True)
+        lock.pop("session_worktree", None)
+        lock_path.write_text(json.dumps(lock))
+
+        with _mock_repo(repo):
+            r = tools.cmd_doctor(make_args(repo=repo.name, fix=False))
+            assert any("session_worktree missing from lock" in i for i in r["data"]["issues"])
+
+            tools.cmd_doctor(make_args(repo=repo.name, fix=True))
+            repaired_lock = tools._atomic_json_read(lock_path)
+            repaired_wt = Path(repaired_lock["session_worktree"])
+            assert repaired_wt.exists()
+
     def test_detect_plan_claims_mismatch(self, git_repo):
         repo = _setup_locked(git_repo)
         plan_path = repo / tools.CM_DIR / "PLAN.md"

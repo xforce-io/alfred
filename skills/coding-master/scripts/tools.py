@@ -218,6 +218,58 @@ def _resolve_locked_repo(args) -> Path:
     return repo
 
 
+def _get_session_worktree(repo: Path, lock: dict | None = None) -> Path | None:
+    """Return session worktree path from lock.json, or None if not set."""
+    if lock is None:
+        lock = _atomic_json_read(repo / CM_DIR / "lock.json")
+    wt = lock.get("session_worktree", "")
+    if wt and Path(wt).exists():
+        return Path(wt)
+    return None
+
+
+def _session_worktree_path(repo: Path) -> Path:
+    """Return the canonical session worktree path for a repo."""
+    return repo.parent / f"{repo.name}-session"
+
+
+def _ensure_session_worktree(repo: Path, lock: dict | None = None) -> dict:
+    """Ensure the session worktree exists for the active write session."""
+    lock_path = repo / CM_DIR / "lock.json"
+    if lock is None:
+        lock = _atomic_json_read(lock_path)
+
+    if not lock or lock.get("read_only", False):
+        return {"ok": True, "data": {"session_worktree": ""}}
+
+    branch = lock.get("branch", "")
+    if not branch:
+        return {"ok": False, "error": "lock references no branch for session worktree recovery"}
+
+    recorded_wt = lock.get("session_worktree", "")
+    session_wt = Path(recorded_wt) if recorded_wt else _session_worktree_path(repo)
+
+    if recorded_wt and session_wt.exists():
+        return {"ok": True, "data": {"session_worktree": str(session_wt)}}
+
+    if session_wt.exists():
+        _remove_worktree(repo, str(session_wt))
+
+    branch_exists = _run_git(repo, ["rev-parse", "--verify", branch], check=False).returncode == 0
+    worktree_cmd = ["worktree", "add", str(session_wt), branch] if branch_exists else ["worktree", "add", str(session_wt), "-b", branch]
+
+    try:
+        _run_git(repo, worktree_cmd)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        err = getattr(exc, "stderr", "") or str(exc)
+        return {"ok": False, "error": f"session worktree recovery failed: {err}"}
+
+    _atomic_json_update(lock_path, lambda d: (
+        d.update({"session_worktree": str(session_wt)}), {"ok": True}
+    )[1])
+    return {"ok": True, "data": {"session_worktree": str(session_wt)}}
+
+
 def _ensure_gitignore(repo: Path):
     """Ensure .coding-master/ is in .gitignore."""
     gi = repo / ".gitignore"
@@ -731,30 +783,8 @@ def cmd_lock(args) -> dict:
 
     read_only = mode in READ_ONLY_MODES
 
-    # Read-only modes allow dirty working tree; write modes require clean state
-    if not read_only:
-        status = _run_git(repo, [
-            "status", "--porcelain", "--", ".",
-            ":(exclude).coding-master", ":(exclude).gitignore",
-        ], check=False)
-        dirty_output = status.stdout.strip()
-        if dirty_output:
-            if getattr(args, "stash", False):
-                _run_git(repo, ["stash", "push", "-u", "-m", "CM auto-stash before lock"])
-            else:
-                lines = dirty_output.splitlines()
-                tracked = [l for l in lines if not l.startswith("??")]
-                untracked = [l for l in lines if l.startswith("??")]
-                return {
-                    "ok": False,
-                    "error": "working tree not clean",
-                    "data": {
-                        "dirty_files": [l.split(None, 1)[-1] for l in lines],
-                        "tracked_modified": len(tracked),
-                        "untracked": len(untracked),
-                    },
-                    "recovery_command": f"$CM lock --repo {args.repo} --mode {mode} --stash",
-                }
+    # Write modes use a separate session worktree, so dirty main repo is fine.
+    # No stash or clean-tree check needed — the worktree starts clean.
 
     # Capture current branch for read-only modes (before lock, no git mutation)
     current_branch = _run_git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip() if read_only else None
@@ -809,18 +839,15 @@ def cmd_lock(args) -> dict:
                         f"Read-only overlay ({mode}), branch: {current_branch or '(current)'}")
         return {"ok": True, "data": {"branch": current_branch or "", "read_only": True, "overlay": True}}
 
-    # ── Joined existing session: checkout existing branch, no creation ──
+    # ── Joined existing session: validate or recover session worktree ──
     if action_taken["type"] == "joined":
         existing_data = result.get("data", {})
         existing_branch = existing_data.get("branch", "")
-        if not read_only and existing_branch:
-            current = _run_git(repo, ["rev-parse", "--abbrev-ref", "HEAD"], check=False).stdout.strip()
-            if current != existing_branch:
-                try:
-                    _run_git(repo, ["checkout", existing_branch])
-                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-                    err = getattr(exc, "stderr", "") or str(exc)
-                    return {"ok": False, "error": f"checkout existing branch failed: {err}"}
+        if not existing_data.get("read_only", False):
+            session_result = _ensure_session_worktree(repo, existing_data)
+            if not session_result.get("ok"):
+                return session_result
+            existing_data["session_worktree"] = session_result["data"]["session_worktree"]
         _append_journal(repo, agent, "lock", f"Joined session, branch: {existing_branch}")
         return {"ok": True, "data": existing_data}
 
@@ -832,18 +859,18 @@ def cmd_lock(args) -> dict:
         _append_journal(repo, agent, "lock", f"Read-only lock ({mode}), branch: {current_branch}")
         return {"ok": True, "data": {"branch": current_branch, "read_only": True}}
 
-    # Write modes: create dev branch
+    # Write modes: create session worktree with dev branch (main repo untouched)
     lock = _atomic_json_read(lock_path)
     branch = lock.get("branch", "")
-    try:
-        _run_git(repo, ["checkout", "-b", branch])
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+    session_result = _ensure_session_worktree(repo, lock)
+    if not session_result.get("ok"):
         _atomic_json_update(lock_path, lambda d: (d.clear(), {"ok": True})[1])
-        err = getattr(exc, "stderr", "") or str(exc)
-        return {"ok": False, "error": f"git checkout failed: {err}"}
+        return {"ok": False, "error": session_result["error"]}
+    session_wt = session_result["data"]["session_worktree"]
 
-    _append_journal(repo, agent, "lock", f"Workspace locked, branch: {branch}")
-    return {"ok": True, "data": {"branch": branch}}
+    _ensure_gitignore(repo)
+    _append_journal(repo, agent, "lock", f"Workspace locked, branch: {branch}, worktree: {session_wt}")
+    return {"ok": True, "data": {"branch": branch, "session_worktree": session_wt}}
 
 
 def cmd_unlock(args) -> dict:
@@ -869,6 +896,11 @@ def cmd_unlock(args) -> dict:
                     "error": f"write session in progress (phase={phase}). "
                              "Use cm submit to complete, or cm unlock --force to discard."}
 
+    # Cleanup session worktree (best effort): force unlock or completed session
+    session_wt = lock.get("session_worktree", "")
+    if session_wt and (force or lock.get("session_phase") == "done"):
+        _remove_worktree(repo, session_wt)
+
     def clear_lock(data):
         data.clear()
         return {"ok": True}
@@ -886,6 +918,7 @@ def cmd_status(args) -> dict:
     data = {
         "locked": True, "expired": _is_expired(lock),
         "branch": lock.get("branch"),
+        "session_worktree": lock.get("session_worktree", ""),
         "locked_by": lock.get("locked_by"),
         "session_phase": lock.get("session_phase"),
         "lease_expires_at": lock.get("lease_expires_at"),
@@ -1495,9 +1528,13 @@ def cmd_integrate(args) -> dict:
     lock = _atomic_json_read(repo / CM_DIR / "lock.json")
     branch = lock.get("branch", "dev/unknown")
 
-    # Checkout dev branch, record pre-merge SHA for rollback
-    _run_git(repo, ["checkout", branch])
-    pre_merge_sha = _run_git(repo, ["rev-parse", "HEAD"]).stdout.strip()
+    # All merge/test operations happen in the session worktree (main repo untouched)
+    session_wt = _get_session_worktree(repo, lock)
+    if not session_wt:
+        return {"ok": False, "error": "session_worktree not found. Run cm doctor --fix"}
+    wt = session_wt
+
+    pre_merge_sha = _run_git(wt, ["rev-parse", "HEAD"]).stdout.strip()
 
     # Build merge order and track results
     merge_order = _topo_sort(plan)
@@ -1509,15 +1546,15 @@ def cmd_integrate(args) -> dict:
             continue
         merge_rc = subprocess.run(
             ["git", "merge", fb, "--no-edit"],
-            cwd=repo, capture_output=True, text=True,
+            cwd=wt, capture_output=True, text=True,
         )
         if merge_rc.returncode != 0:
             merge_results.append({"feature": fid, "branch": fb, "status": "conflict",
                                   "error": merge_rc.stderr.strip()})
-            subprocess.run(["git", "merge", "--abort"], cwd=repo, capture_output=True)
+            subprocess.run(["git", "merge", "--abort"], cwd=wt, capture_output=True)
             subprocess.run(
                 ["git", "reset", "--hard", pre_merge_sha],
-                cwd=repo, capture_output=True,
+                cwd=wt, capture_output=True,
             )
             # Write integration report (failure)
             report = {
@@ -1535,17 +1572,17 @@ def cmd_integrate(args) -> dict:
             return {"ok": False, "error": f"merge failed ({fb}): {merge_rc.stderr.strip()}. "
                     "Run cm reopen for the conflicting feature, resolve, then retry"}
         else:
-            commit = _run_git(repo, ["rev-parse", "HEAD"], check=False).stdout.strip()
+            commit = _run_git(wt, ["rev-parse", "HEAD"], check=False).stdout.strip()
             merge_results.append({"feature": fid, "branch": fb, "status": "merged", "commit": commit})
 
-    # Run full tests on merged dev branch
-    test_result = _run_tests(repo)
+    # Run full tests on merged dev branch (in session worktree)
+    test_result = _run_tests(wt)
     output_summary = (test_result.get("output", "") or "")[:1000]
 
     if not test_result["ok"]:
         subprocess.run(
             ["git", "reset", "--hard", pre_merge_sha],
-            cwd=repo, capture_output=True,
+            cwd=wt, capture_output=True,
         )
         # Write integration report (test failure)
         report = {
@@ -1605,26 +1642,32 @@ def cmd_submit(args) -> dict:
 
     branch = lock.get("branch", "dev/unknown")
 
-    # Commit (idempotent)
-    _run_git(repo, ["add", "-A", "--", ":(exclude).coding-master"], check=False)
-    status_out = _run_git(repo, ["status", "--porcelain"], check=False).stdout.strip()
-    if status_out:
-        _run_git(repo, ["commit", "-m", args.title], check=False)
+    # All git operations in session worktree (main repo untouched)
+    session_wt = _get_session_worktree(repo, lock)
+    if not session_wt:
+        return {"ok": False, "error": "session_worktree not found. Run cm doctor --fix"}
+    wt = session_wt
 
-    # Push (idempotent)
-    _run_git(repo, ["push", "-u", "origin", branch], check=False)
+    # Commit (idempotent) — in session worktree
+    _run_git(wt, ["add", "-A", "--", ":(exclude).coding-master"], check=False)
+    status_out = _run_git(wt, ["status", "--porcelain"], check=False).stdout.strip()
+    if status_out:
+        _run_git(wt, ["commit", "-m", args.title], check=False)
+
+    # Push (idempotent) — from session worktree
+    _run_git(wt, ["push", "-u", "origin", branch], check=False)
 
     # PR (idempotent)
     existing_pr = subprocess.run(
         ["gh", "pr", "view", branch, "--json", "url"],
-        cwd=repo, capture_output=True, text=True,
+        cwd=wt, capture_output=True, text=True,
     )
     pr_url = None
     if existing_pr.returncode != 0:
         pr_body = _generate_pr_body(repo)
         pr_result = subprocess.run(
             ["gh", "pr", "create", "--title", args.title, "--body", pr_body],
-            cwd=repo, capture_output=True, text=True,
+            cwd=wt, capture_output=True, text=True,
         )
         if pr_result.returncode == 0:
             pr_url = pr_result.stdout.strip()
@@ -1634,17 +1677,20 @@ def cmd_submit(args) -> dict:
         except json.JSONDecodeError:
             pass
 
-    # Cleanup worktrees + merged feature branches (best effort)
+    # Cleanup feature worktrees + merged feature branches (best effort)
     plan = _parse_plan_md(repo / CM_DIR / "PLAN.md")
     claims = _atomic_json_read(repo / CM_DIR / "claims.json")
     for fid in plan:
         feat = claims.get("features", {}).get(fid, {})
-        wt = feat.get("worktree")
-        if wt:
-            _remove_worktree(repo, wt)
+        feat_wt = feat.get("worktree")
+        if feat_wt:
+            _remove_worktree(repo, feat_wt)
         feat_branch = feat.get("branch")
         if feat_branch:
             _run_git(repo, ["branch", "-d", feat_branch], check=False)
+
+    # Cleanup session worktree (best effort)
+    _remove_worktree(repo, str(session_wt))
 
     # Mark done + unlock
     agent = _resolve_agent(args)
@@ -1921,6 +1967,7 @@ def cmd_progress(args) -> dict:
     return {"ok": True, "data": {
         "mode": mode,
         "session_phase": session_phase,
+        "session_worktree": lock.get("session_worktree", ""),
         "session_steps": session_steps,
         "must_delegate": must_delegate,
         "delegation": delegation_info,
@@ -2247,6 +2294,15 @@ def cmd_doctor(args) -> dict:
                 if branch_check.returncode != 0:
                     issues.append(f"lock references branch '{branch}' which does not exist")
                     fixes.append("cm unlock --force")
+            # Check session_worktree health for write sessions
+            if not lock.get("read_only", False):
+                session_wt = lock.get("session_worktree", "")
+                if not session_wt:
+                    issues.append("session_worktree missing from lock")
+                    fixes.append("cm doctor --fix (will recreate session worktree)")
+                elif not Path(session_wt).exists():
+                    issues.append(f"session_worktree '{session_wt}' does not exist")
+                    fixes.append("cm doctor --fix (will recreate session worktree)")
 
     # 2. Claims worktree existence
     claims_path = repo / CM_DIR / "claims.json"
@@ -2259,14 +2315,22 @@ def cmd_doctor(args) -> dict:
                     issues.append(f"Feature {fid}: worktree '{wt}' does not exist")
                     fixes.append(f"cm doctor --fix (will reset Feature {fid} to pending)")
 
-    # 3. Orphaned worktrees
+    # 3. Orphaned worktrees (feature + session)
     expected_worktrees = set()
+    # Session worktree from lock.json
+    if lock_path.exists():
+        _lock = _atomic_json_read(lock_path)
+        if _lock.get("session_worktree"):
+            expected_worktrees.add(_lock["session_worktree"])
+    # Feature worktrees from claims.json
     if claims_path.exists():
         for feat in _atomic_json_read(claims_path).get("features", {}).values():
             if feat.get("worktree"):
                 expected_worktrees.add(feat["worktree"])
     for d in repo.parent.iterdir():
-        if d.name.startswith(f"{repo.name}-feature-") and str(d) not in expected_worktrees:
+        is_feature_wt = d.name.startswith(f"{repo.name}-feature-")
+        is_session_wt = d.name == f"{repo.name}-session"
+        if (is_feature_wt or is_session_wt) and str(d) not in expected_worktrees:
             issues.append(f"orphaned worktree: {d}")
             fixes.append(f"cm doctor --fix (will remove {d})")
 
@@ -2327,6 +2391,11 @@ def _doctor_auto_fix(repo: Path, issues: list[str]):
                     shutil.rmtree(wt_path, ignore_errors=True)
 
         elif "worktree" in issue and "does not exist" in issue:
+            if issue.startswith("session_worktree"):
+                session_result = _ensure_session_worktree(repo)
+                if not session_result.get("ok"):
+                    continue
+                continue
             # Reset feature to pending
             fid_match = re.search(r"Feature (\d+)", issue)
             if fid_match:
@@ -2338,6 +2407,11 @@ def _doctor_auto_fix(repo: Path, issues: list[str]):
                         feats[_fid] = {"phase": "pending"}
                     return {"ok": True}
                 _atomic_json_update(claims_path, reset_feature)
+
+        elif issue == "session_worktree missing from lock":
+            session_result = _ensure_session_worktree(repo)
+            if not session_result.get("ok"):
+                continue
 
         elif "expired" in issue:
             pass  # Don't auto-fix expired locks — user should decide
@@ -2401,6 +2475,7 @@ def cmd_start(args) -> dict:
                 raise RuntimeError(ready_result.get("error", "plan-ready failed"))
             return {"ok": True, "data": {
                 "branch": lock_result["data"]["branch"],
+                "session_worktree": lock_result["data"].get("session_worktree", ""),
                 "plan": ready_result.get("data", {}),
                 "rolled_back": False,
             }}
@@ -2408,6 +2483,7 @@ def cmd_start(args) -> dict:
             # No plan yet — return locked state, user will create plan
             return {"ok": True, "data": {
                 "branch": lock_result["data"]["branch"],
+                "session_worktree": lock_result["data"].get("session_worktree", ""),
                 "session_phase": "locked",
                 "rolled_back": False,
             }}
@@ -2466,7 +2542,7 @@ def main():
     p_lock.add_argument("--mode", default="deliver", choices=list(MODES.keys()),
                         help="Session mode: deliver, review, debug, analyze")
     p_lock.add_argument("--stash", action="store_true",
-                        help="Auto-stash dirty working tree (including untracked) before locking")
+                        help="(deprecated, no-op) Session worktree is always clean")
 
     # unlock
     unlock_parser = sub.add_parser("unlock", help="Release lock")

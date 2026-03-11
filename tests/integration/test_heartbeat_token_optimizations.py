@@ -491,8 +491,8 @@ class TestComputeFileHashes:
         hashes = runner._compute_file_hashes()
         assert "MEMORY.md" in hashes
         assert "HEARTBEAT.md" in hashes
-        assert len(hashes["MEMORY.md"]) == 32  # MD5 hex length
-        assert len(hashes["HEARTBEAT.md"]) == 32
+        assert len(hashes["MEMORY.md"]) == 64  # SHA-256 hex length
+        assert len(hashes["HEARTBEAT.md"]) == 64
 
     def test_missing_file_returns_empty_string(self, tmp_path: Path):
         runner = _make_runner(workspace_path=tmp_path)

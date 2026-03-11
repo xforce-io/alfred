@@ -1097,15 +1097,22 @@ def cmd_lock(args) -> dict:
     if not result.get("ok"):
         return result
 
+    # 在独立 worktree 中创建 dev branch，不污染主 repo 工作区
+    session_worktree = str(repo.parent / f"{repo.name}-session")
     try:
-        subprocess.run(["git", "checkout", "-b", reserved["branch"]], cwd=repo, check=True, capture_output=True)
-    except subprocess.CalledProcessError as exc:
+        _run_git(repo, ["worktree", "add", session_worktree, "-b", reserved["branch"]])
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         # 回滚 lock.json（原子写空）
         _atomic_json_update(lock_path, lambda data: (data.clear(), {"ok": True})[1])
-        return {"ok": False, "error": exc.stderr.decode() if exc.stderr else "git checkout failed"}
+        return {"ok": False, "error": f"session worktree creation failed: {exc}"}
+
+    # 记录 session_worktree 到 lock.json
+    _atomic_json_update(lock_path, lambda d: (
+        d.update({"session_worktree": session_worktree}), {"ok": True}
+    )[1])
 
     _ensure_gitignore(repo)
-    return {"ok": True, "data": {"branch": reserved["branch"]}}
+    return {"ok": True, "data": {"branch": reserved["branch"], "session_worktree": session_worktree}}
 
 # ── cm claim ──────────────────────────────────────────
 
@@ -2044,8 +2051,9 @@ def _parse_plan_md(path: Path) -> dict:
 1. 读 `~/.alfred/coding-master.json` 找到 alfred 的 repo path
 2. 检查 `.coding-master/lock.json` → 不存在，可以锁
 3. 原子写入 `lock.json`
-4. `git checkout -b dev/alfred-0308-1000`
-5. 确保 `.gitignore` 包含 `.coding-master/`
+4. `git worktree add ../alfred-session -b dev/alfred-0308-1000`（在独立目录创建 session worktree，主 repo 不动）
+5. 更新 `lock.json` 记录 `session_worktree` 路径
+6. 确保 `.gitignore` 包含 `.coding-master/`
 
 **各层状态**：
 
@@ -2059,6 +2067,7 @@ def _parse_plan_md(path: Path) -> dict:
 ```
 .coding-master/
 ├── lock.json           ← {"repo":"alfred","branch":"dev/alfred-0308-1000",
+│                           "session_worktree":"../alfred-session",
 │                           "locked_by":"dolphin-a","lease_expires_at":"..."}
 ```
 
@@ -2513,6 +2522,7 @@ lock.json、claims.json、feature locks 和 worktrees 已清理；`.coding-maste
 | worktree 基点正确？ | ✓ Feature 2/3 从 Feature 1 的 branch 创建，继承代码改动 |
 | integrate + submit 幂等？ | ✓ 每一步都检查是否已完成，崩溃后重跑安全 |
 | integrate merge 按拓扑序？ | ✓ `_topo_sort` 保证先 merge 基础 feature，冲突时自动 abort |
+| session worktree 隔离主 repo？ | ✓ `cm lock` 用 `git worktree add` 创建独立目录，主 repo 工作区不受影响 |
 | dev branch 无直接 commit？ | ✓ 开发全在 feature worktree 中，dev branch 只做基线和汇总 |
 | agent identity 可区分？ | ✓ 来源于 session id 或 hostname-pid fallback |
 | `_atomic_json_update` 失败不写入？ | ✓ updater 返回 `ok:false` 时恢复快照 |
@@ -2525,8 +2535,9 @@ lock.json、claims.json、feature locks 和 worktrees 已清理；`.coding-maste
 
 | 崩溃点 | 后果 | 恢复方式 |
 |--------|------|----------|
-| `cm lock`：lock.json 写入后，git checkout 前被 kill | lock.json 残留，workspace 被锁 | lease 过期后自动释放；或 `cm doctor --fix` 清理 |
-| `cm lock`：git checkout 失败 | 工具自动回滚 lock.json | 无需恢复 |
+| `cm lock`：lock.json 写入后，session worktree 创建前被 kill | lock.json 残留，workspace 被锁 | lease 过期后自动释放；或 `cm doctor --fix` 清理 |
+| `cm lock`：session worktree 创建失败 | 工具自动回滚 lock.json | 无需恢复 |
+| `cm lock`：session worktree 创建后，lock.json 更新 session_worktree 前被 kill | 残留 session worktree | `cm doctor --fix` 检测并清理残留 session worktree |
 | `cm claim`：worktree 创建后，claims.json 写入前崩溃 | 残留 worktree，但 feature 仍是 pending | `cm doctor --fix` 清理残留 worktree；重新 `cm claim` 即可 |
 | `cm claim`：claims.json 写入时被抢先 | 工具自动回滚 worktree | 无需恢复，agent 选其他 feature |
 | `cm test`：测试通过后，claims.json 更新前崩溃 | test_status 未更新（仍是 pending 或旧值） | 重新 `cm test` 即可（幂等，会重跑测试并写入状态） |
@@ -2567,9 +2578,11 @@ lock.json、claims.json、feature locks 和 worktrees 已清理；`.coding-maste
 | 检查项 | 自动修复 |
 |--------|----------|
 | lock.json 引用的 branch 不存在 | 清空 lock.json |
+| lock.json 的 session_worktree 不存在 | 清空 lock.json |
 | lock lease 已过期 | 提示 `cm renew` 或 `cm unlock` |
 | claims.json 中 analyzing/developing feature 的 worktree 不存在 | 重置为 pending |
-| 存在残留 worktree 但 claims.json 中无记录 | 删除残留 worktree |
+| 存在残留 session worktree 但 lock.json 中无记录 | 删除残留 session worktree |
+| 存在残留 feature worktree 但 claims.json 中无记录 | 删除残留 feature worktree |
 | 孤立的 dev/* 或 feat/* 分支（已 merge 或无 session） | 删除孤立分支 |
 | PLAN.md 中的 feature ID 与 claims.json 不一致 | 报告不一致，不自动修复 |
 | PLAN.md 解析失败（格式错误） | 报告解析错误位置 |
@@ -2587,7 +2600,8 @@ lock.json、claims.json、feature locks 和 worktrees 已清理；`.coding-maste
 | JOURNAL.md | `_append_journal`（flock + O_APPEND） |
 | PLAN.md | 单次写入，之后只读，无需保护 |
 | features/XX.md | 单 owner，无需保护 |
-| worktree | 每个 feature 独立目录，无冲突 |
+| session worktree | session 独立目录（`../repo-session`），主 repo 不动 |
+| feature worktree | 每个 feature 独立目录（`../repo-feature-N`），无冲突 |
 
 ---
 
@@ -3331,3 +3345,4 @@ def parallel_run(n, cmd_fn):
 21. **模式隔离** — read-only overlay session（review/analyze）不修改 lock.json，不影响正在进行的 write session；`cm unlock` 拒绝清除未完成的 write session（需 `--force` 或先 `cm submit`）
 22. **Evidence-driven 验证** — `evidence/N-verify.json` 记录结构化测试结果（pass/fail/skipped + 输出摘要），供接力 agent 和 integration 阶段引用
 23. **Delegation 硬关卡** — `delegation/N-delegation.json` 记录子任务委派，feature 完成前必须验证所有 delegation 已回收
+24. **Session Worktree 隔离** — `cm lock` 通过 `git worktree add` 在独立目录创建 session worktree，主 repo 工作区不受任何 session 操作影响。所有 session 级 git 操作（integrate merge、submit commit/push）在 session worktree 中执行。`cm submit` 完成后清理 session worktree。避免了 checkout 切分支导致用户未提交修改丢失的严重问题

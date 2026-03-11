@@ -398,13 +398,35 @@ class TestCmdLock:
             # Second lock joins the existing session, reuses same branch
             assert r2["data"]["branch"] == branch1
 
-    def test_lock_dirty_tree(self, git_repo):
+    def test_lock_join_recovers_missing_session_worktree_metadata(self, git_repo):
+        with mock.patch.object(tools, "_repo_path", return_value=git_repo):
+            args = self._make_args(git_repo.name)
+            r1 = tools.cmd_lock(args)
+            assert r1["ok"]
+
+            lock_path = git_repo / tools.CM_DIR / "lock.json"
+            lock = json.loads(lock_path.read_text())
+            session_wt = Path(lock["session_worktree"])
+            subprocess.run(["git", "worktree", "remove", str(session_wt), "--force"], cwd=git_repo, capture_output=True, check=True)
+            lock.pop("session_worktree", None)
+            lock_path.write_text(json.dumps(lock))
+
+            r2 = tools.cmd_lock(args)
+            assert r2["ok"]
+            recovered_wt = Path(r2["data"]["session_worktree"])
+            assert recovered_wt.exists()
+
+            repaired_lock = json.loads(lock_path.read_text())
+            assert repaired_lock["session_worktree"] == str(recovered_wt)
+
+    def test_lock_dirty_tree_allowed(self, git_repo):
+        """Dirty main repo is fine — session uses a separate worktree."""
         (git_repo / "dirty.txt").write_text("dirty")
         with mock.patch.object(tools, "_repo_path", return_value=git_repo):
             args = self._make_args(git_repo.name)
             result = tools.cmd_lock(args)
-            assert not result["ok"]
-            assert "not clean" in result["error"]
+            assert result["ok"]
+            assert result["data"].get("session_worktree")
 
     def test_unlock(self, git_repo):
         with mock.patch.object(tools, "_repo_path", return_value=git_repo):
