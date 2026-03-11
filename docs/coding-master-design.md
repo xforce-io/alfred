@@ -1,6 +1,6 @@
 # Coding Master: 公约驱动 + 分层架构
 
-> **版本**: v4.2（合并 v3 基础 + v4 证据层/委托/模式系统 + session 连续性修复）
+> **版本**: v4.3（合并 v3 基础 + v4 证据层/委托/模式系统 + session 连续性修复 + session worktree 隔离）
 > **创建时间**: 2026-03-08
 > **最后更新**: 2026-03-11
 > **状态**: Active
@@ -98,9 +98,11 @@ Agent 只接触计划层（MD）和工具层（调用），永远不直接碰数
 
 - **Session 级**（`lock.json`）：排他锁，保证同一时间只有一组 agent 在同一个 repo 上执行一个 PLAN。解决的是"谁在用这个 repo"。
 - **Feature 级**（`claims.json` 认领）：原子认领，保证一个 feature 只有一个 owner。解决的是"谁负责哪个 feature"。用 flock 保证认领的原子性，但不是持久文件锁。
-- **代码隔离**（worktree）：每个 feature 独立 worktree，物理上不会冲突。解决的是"代码改动互不影响"。
+- **代码隔离**（worktree）：**session 级和 feature 级都使用独立 worktree**，物理上不会冲突。解决的是"代码改动互不影响"且"不污染主 repo 工作区"。
 
 一个 repo 同时只能有一个 session（一个 lock = 一个 PLAN），但一个 session 内可以有多个 agent 并行工作在不同 feature 的 worktree 中。这是有意的简化——并行多 session 带来的 branch 管理和 merge 复杂度不值得。
+
+**Session Worktree 隔离**：`cm lock` 创建 dev branch 时不在主 repo 上 checkout，而是通过 `git worktree add` 在独立目录（`<repo-parent>/<repo-name>-session`）中创建 session worktree。主 repo 始终保持在用户原来的分支上，用户的未提交修改不受影响。Feature worktree 的父目录与 session worktree 同级（`<repo-parent>/<repo-name>-feature-N`）。`cm integrate` 和 `cm submit` 的所有 git 操作都在 session worktree 中执行。
 
 ---
 
@@ -212,6 +214,7 @@ cm lock        cm plan-ready          cm claim      cm integrate(pass)  cm submi
   "mode": "deliver",
   "session_phase": "working",
   "branch": "dev/alfred-0308-1000",
+  "session_worktree": "../alfred-session",
   "read_only": false,
   "locked_by": "dolphin",
   "locked_at": "2026-03-08T10:00:00Z",
@@ -237,18 +240,18 @@ cm lock        cm plan-ready          cm claim      cm integrate(pass)  cm submi
 
 `lock.json` 是跨 turn、跨 conversation 的唯一事实源。所有命令先读 lock.json 再决策，不依赖调用者身份或上下文连续性。
 
-- **跨 turn 复用**：`cm lock` 发现 `session_phase` 存在且不是 `"done"` 时，join 已有 session（续约 lease、checkout 已有 branch），不创建新分支。Agent ID 仅用于 journal 审计，不作为身份校验。
+- **跨 turn 复用**：`cm lock` 发现 `session_phase` 存在且不是 `"done"` 时，join 已有 session（续约 lease，返回已有 session_worktree 路径），不创建新分支。Agent ID 仅用于 journal 审计，不作为身份校验。
 - **Lease 自动续约**：所有写命令的前置检查 (`_check_lease`) 在发现过期时自动续约，不阻塞操作。这确保长时间或中断后恢复的 session 可以继续。
 - **Read-only overlay**：review/analyze mode 在 write session 上叠加时，不修改 lock.json。overlay 的 unlock 不会破坏底层 write session。
 - **Write session 保护**：`cm unlock` 在 write session 进行中（`session_phase != "done"`）时拒绝清空，必须走 `cm submit` 或 `cm unlock --force`。
 
-**Dev branch 约束**：dev branch 在整个 session 期间只作为基线和最终汇总点，不应有直接 commit。所有开发在 feature worktree 中进行。`cm submit` 时的 merge 操作是唯一合法的 dev branch 写入。如果 merge 冲突，agent 应回到对应 feature worktree 中解决。
+**Dev branch 约束**：dev branch 存在于 session worktree 中（`<repo-parent>/<repo-name>-session`），在整个 session 期间只作为基线和最终汇总点，不应有直接 commit。所有开发在 feature worktree 中进行。`cm integrate` 的 merge 和 `cm submit` 的 commit/push 操作是唯一合法的 dev branch 写入，均在 session worktree 中执行。主 repo 工作区不受任何 session 操作影响。
 
 **原子性要求**：
 
 - `cm lock` 必须使用 `flock + read-modify-write`，不能先 `exists()` 再写
-- branch 或 worktree 创建失败时，不得保留 lock.json
-- lock 建立失败时，需要回滚刚创建的 branch 或 worktree，避免留下脏状态
+- session worktree 创建失败时，不得保留 lock.json
+- lock 建立失败时，需要回滚刚创建的 session worktree，避免留下脏状态
 
 **Agent Identity**：
 
@@ -702,7 +705,8 @@ cm claim --feature 4  (depends on Feature 2, Feature 3)
 | **PLAN.md** | 只有 1 个 feature | 有多个 feature |
 | **claims.json** | 只有 Feature 1 | 多个 feature 的认领状态 |
 | **工作现场** | `features/01-*.md` | `features/XX.md`（每个 feature 一个） |
-| **worktree** | 1 个 | 每个 feature 1 个 |
+| **session worktree** | 1 个 | 1 个 |
+| **feature worktree** | 1 个 | 每个 feature 1 个 |
 
 ---
 
@@ -711,6 +715,14 @@ cm claim --feature 4  (depends on Feature 2, Feature 3)
 ### 4.1 多 Agent 协作模型
 
 ```
+              主 repo（不动，用户工作区不受影响）
+                         │
+                  cm lock --repo alfred
+                         │
+                         ▼
+              session worktree（../alfred-session）
+              dev branch: dev/alfred-0308-1000
+                         │
                     PLAN.md（规格，只读）
                          │
               ┌──────────┼──────────┐
@@ -720,10 +732,11 @@ cm claim --feature 4  (depends on Feature 2, Feature 3)
     cm claim 1    cm claim 2  cm claim 3
            │            │          │
            ▼            ▼          ▼
-      worktree A    worktree B  worktree C
-      branch A      branch B    branch C
-           │            │          │
-           ▼            ▼          ▼
+  feature worktree  feature wt  feature wt
+  ../alfred-feat-1  ../alfred-  ../alfred-
+      branch A      feat-2      feat-3
+           │        branch B    branch C
+           ▼            │          │
     features/       features/   features/
     01-xxx.md       02-xxx.md   03-xxx.md
     (独立写)        (独立写)    (独立写)
@@ -732,10 +745,13 @@ cm claim --feature 4  (depends on Feature 2, Feature 3)
            │            │          │
            └──────────┬─┴──────────┘
                       ▼
-               claims.json
-               (汇总状态)
+               claims.json（汇总状态）
                       │
-              全部 done → cm submit
+              全部 done → cm integrate（在 session worktree 中 merge）
+                      │
+              cm submit（在 session worktree 中 commit/push/PR）
+                      │
+              cleanup: 删除 session worktree + feature worktrees
 ```
 
 **关键约束**：
