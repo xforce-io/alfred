@@ -190,9 +190,23 @@ def _check_lease(repo: Path) -> dict:
     if not lock:
         return {"ok": False, "error": "no active lock"}
     if _is_expired(lock):
-        return {"ok": False, "error": f"lease expired at {lock.get('lease_expires_at')}. "
-                "Run cm renew or cm doctor --fix"}
+        # Auto-renew expired lease instead of blocking — enables cross-turn continuity
+        _auto_renew_lease(repo)
     return {"ok": True}
+
+
+def _auto_renew_lease(repo: Path) -> None:
+    """Auto-renew an expired lease, preserving all session state."""
+    lock_path = repo / CM_DIR / "lock.json"
+
+    def do_renew(data):
+        if not data:
+            return {"ok": True}
+        now = datetime.now(timezone.utc)
+        data["lease_expires_at"] = (now + timedelta(minutes=LEASE_MINUTES)).isoformat()
+        return {"ok": True}
+
+    _atomic_json_update(lock_path, do_renew)
 
 
 def _resolve_locked_repo(args) -> Path:
@@ -697,12 +711,18 @@ def _append_journal(repo: Path, agent: str, action: str, message: str = ""):
 
 
 def cmd_lock(args) -> dict:
-    """Lock workspace, create dev branch (or read-only lock for review/analyze)."""
+    """Lock workspace, create dev branch (or read-only lock for review/analyze).
+
+    Data-layer-first: lock.json is the single source of truth.
+    - If an active session exists (session_phase != "done"), join it
+      regardless of agent identity or lease expiry.
+    - Only create a new session when no lock exists or session is done.
+    """
     repo = _repo_path(args.repo)
     lock_path = repo / CM_DIR / "lock.json"
 
     agent = _resolve_agent(args)
-    reserved = {}
+    action_taken = {"type": None}  # track what happened inside atomic update
 
     raw_mode = getattr(args, "mode", None)
     mode = raw_mode if isinstance(raw_mode, str) else "deliver"
@@ -740,17 +760,32 @@ def cmd_lock(args) -> dict:
     current_branch = _run_git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip() if read_only else None
 
     def reserve_lock(data):
-        if data and not _is_expired(data):
-            # Idempotent: same agent re-locking is a no-op success
-            if data.get("locked_by") == agent:
-                return {"ok": True, "data": data, "hint": "already locked by you"}
-            return {"ok": False, "error": "already locked", "data": data}
-
         now = datetime.now(timezone.utc)
+
+        # ── Active session exists (has session_phase, not "done") → join or overlay ──
+        if data and data.get("session_phase") and data.get("session_phase") != "done":
+            existing_read_only = data.get("read_only", False)
+
+            if read_only and not existing_read_only:
+                # Read-only request on a write session: overlay without modifying lock.
+                # This prevents review/analyze unlock from destroying a deliver session.
+                action_taken["type"] = "overlay"
+                return {"ok": True, "data": dict(data)}
+
+            # Same mode family: join the session
+            data["lease_expires_at"] = (now + timedelta(minutes=LEASE_MINUTES)).isoformat()
+            agents = data.setdefault("session_agents", [])
+            if agent not in agents:
+                agents.append(agent)
+            action_taken["type"] = "joined"
+            return {"ok": True, "data": dict(data), "hint": "session resumed"}
+
+        # ── No session or session done → create new ──
         branch = current_branch if read_only else (
             getattr(args, "branch", None) or f"dev/{args.repo}-{now.strftime('%m%d-%H%M')}"
         )
-        reserved.update({
+        data.clear()
+        data.update({
             "repo": args.repo,
             "mode": mode,
             "session_phase": "locked",
@@ -761,18 +796,35 @@ def cmd_lock(args) -> dict:
             "lease_expires_at": (now + timedelta(minutes=LEASE_MINUTES)).isoformat(),
             "session_agents": [agent],
         })
-        data.clear()
-        data.update(reserved)
+        action_taken["type"] = "created"
         return {"ok": True}
 
     result = _atomic_json_update(lock_path, reserve_lock)
     if not result.get("ok"):
         return result
 
-    # Idempotent re-lock: skip branch creation and gitignore setup
-    if result.get("hint"):
-        return result
+    # ── Read-only overlay on write session: don't touch lock, just return ──
+    if action_taken["type"] == "overlay":
+        _append_journal(repo, agent, "lock",
+                        f"Read-only overlay ({mode}), branch: {current_branch or '(current)'}")
+        return {"ok": True, "data": {"branch": current_branch or "", "read_only": True, "overlay": True}}
 
+    # ── Joined existing session: checkout existing branch, no creation ──
+    if action_taken["type"] == "joined":
+        existing_data = result.get("data", {})
+        existing_branch = existing_data.get("branch", "")
+        if not read_only and existing_branch:
+            current = _run_git(repo, ["rev-parse", "--abbrev-ref", "HEAD"], check=False).stdout.strip()
+            if current != existing_branch:
+                try:
+                    _run_git(repo, ["checkout", existing_branch])
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                    err = getattr(exc, "stderr", "") or str(exc)
+                    return {"ok": False, "error": f"checkout existing branch failed: {err}"}
+        _append_journal(repo, agent, "lock", f"Joined session, branch: {existing_branch}")
+        return {"ok": True, "data": existing_data}
+
+    # ── New session created ──
     _ensure_gitignore(repo)
 
     # Read-only modes: no branch creation, no git state changes
@@ -781,21 +833,41 @@ def cmd_lock(args) -> dict:
         return {"ok": True, "data": {"branch": current_branch, "read_only": True}}
 
     # Write modes: create dev branch
+    lock = _atomic_json_read(lock_path)
+    branch = lock.get("branch", "")
     try:
-        _run_git(repo, ["checkout", "-b", reserved["branch"]])
+        _run_git(repo, ["checkout", "-b", branch])
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         _atomic_json_update(lock_path, lambda d: (d.clear(), {"ok": True})[1])
         err = getattr(exc, "stderr", "") or str(exc)
         return {"ok": False, "error": f"git checkout failed: {err}"}
 
-    _append_journal(repo, agent, "lock", f"Workspace locked, branch: {reserved['branch']}")
-    return {"ok": True, "data": {"branch": reserved["branch"]}}
+    _append_journal(repo, agent, "lock", f"Workspace locked, branch: {branch}")
+    return {"ok": True, "data": {"branch": branch}}
 
 
 def cmd_unlock(args) -> dict:
-    """Release workspace lock."""
+    """Release workspace lock.
+
+    Safety: a write session (deliver/debug) that is not yet done cannot be
+    unlocked by a plain `cm unlock`. Only cmd_submit (which sets session_phase
+    to "done" first) or `--force` can clear it. This prevents read-only
+    overlay sessions from accidentally destroying an in-progress write session.
+    """
     repo = _repo_path(args.repo)
     lock_path = repo / CM_DIR / "lock.json"
+
+    lock = _atomic_json_read(lock_path)
+    if not lock:
+        return {"ok": True}  # already unlocked
+
+    force = getattr(args, "force", False)
+    if not force and not lock.get("read_only", False):
+        phase = lock.get("session_phase", "")
+        if phase and phase != "done":
+            return {"ok": False,
+                    "error": f"write session in progress (phase={phase}). "
+                             "Use cm submit to complete, or cm unlock --force to discard."}
 
     def clear_lock(data):
         data.clear()
@@ -1562,13 +1634,17 @@ def cmd_submit(args) -> dict:
         except json.JSONDecodeError:
             pass
 
-    # Cleanup worktrees (best effort)
+    # Cleanup worktrees + merged feature branches (best effort)
     plan = _parse_plan_md(repo / CM_DIR / "PLAN.md")
     claims = _atomic_json_read(repo / CM_DIR / "claims.json")
     for fid in plan:
-        wt = claims.get("features", {}).get(fid, {}).get("worktree")
+        feat = claims.get("features", {}).get(fid, {})
+        wt = feat.get("worktree")
         if wt:
             _remove_worktree(repo, wt)
+        feat_branch = feat.get("branch")
+        if feat_branch:
+            _run_git(repo, ["branch", "-d", feat_branch], check=False)
 
     # Mark done + unlock
     agent = _resolve_agent(args)
@@ -2202,6 +2278,32 @@ def cmd_doctor(args) -> dict:
             if fid not in plan:
                 issues.append(f"claims.json references Feature {fid} not in PLAN.md")
 
+    # 5. Orphaned branches (dev/* and feat/* with no active session)
+    lock = _atomic_json_read(lock_path) if lock_path.exists() else {}
+    active_branch = lock.get("branch", "") if lock else ""
+    active_feat_branches = set()
+    if claims_path.exists():
+        for feat in _atomic_json_read(claims_path).get("features", {}).values():
+            if feat.get("branch"):
+                active_feat_branches.add(feat["branch"])
+
+    branch_output = _run_git(repo, ["branch", "--list", "dev/*", "feat/*"], check=False).stdout
+    for line in branch_output.splitlines():
+        branch_name = line.strip().lstrip("* ")
+        if not branch_name:
+            continue
+        if branch_name == active_branch or branch_name in active_feat_branches:
+            continue
+        # Check if merged into main
+        merged = _run_git(repo, ["branch", "--merged", "main", "--list", branch_name], check=False)
+        if merged.stdout.strip():
+            issues.append(f"orphaned branch (merged): {branch_name}")
+            fixes.append(f"cm doctor --fix (will delete {branch_name})")
+        elif not lock:
+            # No active session at all → all dev/feat branches are orphaned
+            issues.append(f"orphaned branch (no session): {branch_name}")
+            fixes.append(f"cm doctor --fix (will delete {branch_name})")
+
     # Auto-fix
     if getattr(args, "fix", False) and issues:
         _doctor_auto_fix(repo, issues)
@@ -2240,6 +2342,11 @@ def _doctor_auto_fix(repo: Path, issues: list[str]):
         elif "expired" in issue:
             pass  # Don't auto-fix expired locks — user should decide
 
+        elif "orphaned branch" in issue:
+            branch_name = issue.split(": ", 1)[1] if ": " in issue else ""
+            if branch_name:
+                _run_git(repo, ["branch", "-D", branch_name], check=False)
+
 
 def _generate_pr_body(repo: Path) -> str:
     """Generate PR body from JOURNAL.md milestones + PLAN.md features."""
@@ -2270,12 +2377,7 @@ def cmd_start(args) -> dict:
     lock_path = repo / CM_DIR / "lock.json"
     plan_path = repo / CM_DIR / "PLAN.md"
 
-    # Check no existing lock
-    existing = _atomic_json_read(lock_path)
-    if existing and not _is_expired(existing):
-        return {"ok": False, "error": "already locked", "data": existing}
-
-    # Step 1: Lock
+    # Step 1: Lock (cmd_lock handles join-or-create)
     lock_result = cmd_lock(args)
     if not lock_result.get("ok"):
         return lock_result
@@ -2311,13 +2413,15 @@ def cmd_start(args) -> dict:
             }}
 
     except Exception as exc:
-        # Best-effort rollback
+        # Best-effort rollback: force-unlock since we just created this session
         if plan_created and plan_path.exists():
             try:
                 plan_path.unlink()
             except OSError:
                 pass
-        cmd_unlock(args)
+        force_args = copy.copy(args)
+        force_args.force = True
+        cmd_unlock(force_args)
         return {"ok": False, "error": str(exc), "data": {"rolled_back": True}}
 
 
@@ -2365,7 +2469,9 @@ def main():
                         help="Auto-stash dirty working tree (including untracked) before locking")
 
     # unlock
-    _add_global_args(sub.add_parser("unlock", help="Release lock"))
+    unlock_parser = sub.add_parser("unlock", help="Release lock")
+    unlock_parser.add_argument("--force", action="store_true", help="Force unlock even if write session in progress")
+    _add_global_args(unlock_parser)
 
     # status
     _add_global_args(sub.add_parser("status", help="Show lock status"))

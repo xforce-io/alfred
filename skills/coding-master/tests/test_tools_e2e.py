@@ -397,12 +397,15 @@ class TestE2EMultiFeature:
 
 
 class TestIdempotency:
-    def test_lock_twice_returns_error(self, git_repo):
+    def test_lock_twice_joins_session(self, git_repo):
         repo = _setup_locked(git_repo)
+        lock = json.loads((repo / tools.CM_DIR / "lock.json").read_text())
+        original_branch = lock["branch"]
         with _mock_repo(repo):
             r = tools.cmd_lock(make_args(repo=repo.name, branch=None))
-            assert not r["ok"]
-            assert "already locked" in r["error"]
+            assert r["ok"]
+            # Joins existing session, reuses same branch
+            assert r["data"]["branch"] == original_branch
 
     def test_claim_twice_returns_error(self, git_repo):
         repo, _ = _setup_claimed(git_repo)

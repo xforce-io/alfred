@@ -195,8 +195,8 @@ class TestLeaseEdgeCases:
         assert result["ok"] is False
         assert "no active lock" in result["error"]
 
-    def test_check_lease_expired(self, tmp_path):
-        """Check lease when expired."""
+    def test_check_lease_expired_auto_renews(self, tmp_path):
+        """Expired lease is auto-renewed by _check_lease."""
         from datetime import datetime, timezone, timedelta
 
         expired_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
@@ -208,8 +208,11 @@ class TestLeaseEdgeCases:
         }))
 
         result = _check_lease(tmp_path)
-        assert result["ok"] is False
-        assert "expired" in result["error"]
+        # Auto-renewed: returns ok instead of error
+        assert result["ok"] is True
+        # Verify lease was renewed in the file
+        renewed = json.loads(lock_path.read_text())
+        assert renewed["lease_expires_at"] > expired_time
 
     def test_check_lease_valid(self, tmp_path):
         """Check lease when valid."""

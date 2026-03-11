@@ -1,8 +1,9 @@
-# Coding Master v3: 公约驱动 + 分层架构
+# Coding Master: 公约驱动 + 分层架构
 
-> **版本**: v3.6（review 修复：done HEAD 检查 + 原子操作 deepcopy + integrate returncode + 文档补全）
+> **版本**: v4.2（合并 v3 基础 + v4 证据层/委托/模式系统 + session 连续性修复）
 > **创建时间**: 2026-03-08
-> **状态**: Draft
+> **最后更新**: 2026-03-11
+> **状态**: Active
 
 ---
 
@@ -115,10 +116,18 @@ Agent 只接触计划层（MD）和工具层（调用），永远不直接碰数
 ├── JOURNAL.md                       # MD：append-only 开发日志（全局时间线）
 ├── claims.json                      # 结构化：feature 认领状态（工具原子读写）
 │
-└── features/                        # MD：每个 feature 的独立工作现场
-    ├── 01-scanner-interface.md      #     各 agent 只写自己认领的
-    ├── 02-new-scan-logic.md
-    └── ...
+├── features/                        # MD：每个 feature 的独立工作现场
+│   ├── 01-scanner-interface.md
+│   └── 02-new-scan-logic.md
+│
+├── evidence/                        # v4: 结构化验证证据
+│   ├── 1-verify.json               # per-feature lint+typecheck+test 结果
+│   ├── 2-verify.json
+│   └── integration-report.json     # session 级集成测试结果
+│
+└── delegation/                      # v4: 委托请求/结果
+    ├── 1-request.json
+    └── 1-result.json
 ```
 
 四层架构：
@@ -200,8 +209,10 @@ cm lock        cm plan-ready          cm claim      cm integrate(pass)  cm submi
 ```json
 {
   "repo": "alfred",
+  "mode": "deliver",
   "session_phase": "working",
   "branch": "dev/alfred-0308-1000",
+  "read_only": false,
   "locked_by": "dolphin",
   "locked_at": "2026-03-08T10:00:00Z",
   "lease_expires_at": "2026-03-08T12:00:00Z",
@@ -213,7 +224,25 @@ cm lock        cm plan-ready          cm claim      cm integrate(pass)  cm submi
 
 为什么是 JSON 不是 MD：锁需要原子性判断（是否过期、是否已占用），session phase 需要精确枚举，程序解析 JSON 零歧义。
 
-**Dev branch 约束**：dev branch 在整个 session 期间只作为基线和最终汇总点，不应有直接 commit。所有开发在 feature worktree 中进行。`cm submit` 时的 merge 操作是唯一合法的 dev branch 写入。如果 merge 冲突，agent 应回到对应 feature worktree 中解决（rebase 到 dev branch 或 merge dev branch 进来），而不是在 dev branch 上直接编辑。
+**Mode 系统**：
+
+| Mode | 读写 | 用途 | 完成条件 |
+|------|------|------|----------|
+| `deliver` | 读写 | Feature 开发（默认） | 所有 feature done + evidence pass |
+| `debug` | 读写 | 调查和修复 | diagnosis.md exists |
+| `review` | 只读 | 代码审查 | report.md exists |
+| `analyze` | 只读 | 代码分析 | report.md exists |
+
+**Session 连续性**（数据层即事实）：
+
+`lock.json` 是跨 turn、跨 conversation 的唯一事实源。所有命令先读 lock.json 再决策，不依赖调用者身份或上下文连续性。
+
+- **跨 turn 复用**：`cm lock` 发现 `session_phase` 存在且不是 `"done"` 时，join 已有 session（续约 lease、checkout 已有 branch），不创建新分支。Agent ID 仅用于 journal 审计，不作为身份校验。
+- **Lease 自动续约**：所有写命令的前置检查 (`_check_lease`) 在发现过期时自动续约，不阻塞操作。这确保长时间或中断后恢复的 session 可以继续。
+- **Read-only overlay**：review/analyze mode 在 write session 上叠加时，不修改 lock.json。overlay 的 unlock 不会破坏底层 write session。
+- **Write session 保护**：`cm unlock` 在 write session 进行中（`session_phase != "done"`）时拒绝清空，必须走 `cm submit` 或 `cm unlock --force`。
+
+**Dev branch 约束**：dev branch 在整个 session 期间只作为基线和最终汇总点，不应有直接 commit。所有开发在 feature worktree 中进行。`cm submit` 时的 merge 操作是唯一合法的 dev branch 写入。如果 merge 冲突，agent 应回到对应 feature worktree 中解决。
 
 **原子性要求**：
 
@@ -223,18 +252,15 @@ cm lock        cm plan-ready          cm claim      cm integrate(pass)  cm submi
 
 **Agent Identity**：
 
-- agent identity 来源于 everbot session id（如 `dolphin-a`），由调用方在 `--agent` 参数中传入
-- 工具层不生成 identity，只记录和校验
-- 同一 session（lock）内的所有 agent 共享 lease，任一 agent 可续租（`cm renew` 检查 agent 是否在 `session_agents` 列表中，而非是否是 lock 创建者）
-- `session_agents` 列表由 `cm lock` 初始化（包含创建者），`cm claim` 时自动将新 agent 加入
-- 如果未传 `--agent`，使用 hostname + pid 作为 fallback identity，避免多 agent 无法区分
+- agent identity 默认为 `hostname-PID`，可通过 `--agent` 参数传入
+- Identity 仅用于 journal 审计和 session_agents 列表，**不用于权限校验**
+- 同一 session 内的所有 agent 共享 lease，任一 agent 可续租
 
-**Lease 续租机制**：
+**Lease 机制**：
 
-- 默认 lease 120 分钟，长任务可能超时
-- `cm renew` 续租当前 lock，延长 lease_expires_at（同一 session 内任一 agent 可续）
-- `cm done` / `cm claim` 操作时自动检查 lease 是否过期，过期则拒绝操作并提示 `cm renew` 或 `cm doctor`
-- 防止 session lease 过期后外部 agent 抢锁、当前 agent 仍在写代码的竞态
+- 默认 lease 120 分钟
+- `cm renew` 显式续租；写命令的前置检查自动续约过期 lease
+- `cm lock` join 已有 session 时自动续约
 
 ### 3.3 PLAN.md — Feature 规格
 
@@ -925,9 +951,22 @@ version: "3.0.0"
 
 ```
 skills/coding-master/
-├── SKILL.md
-└── scripts/
-    └── tools.py           # < 600 行
+├── SKILL.md                     # 公约层：不可变的流程定义
+├── scripts/
+│   ├── tools.py                 # 核心工具（~2500 行，含 v4 证据/委托/模式）
+│   ├── dispatch.py              # 引擎调度（analyze/develop/test 工作流）
+│   ├── config_manager.py        # 配置管理
+│   ├── workspace.py             # 工作区管理
+│   ├── git_ops.py               # git 操作封装
+│   ├── test_runner.py           # 测试运行器
+│   └── engine/                  # LLM 引擎（claude/codex）
+│       ├── claude_runner.py
+│       └── codex_runner.py
+└── references/                  # SOP 参考文档
+    ├── sop-feature-dev.md
+    ├── sop-bugfix-workflow.md
+    ├── sop-deep-review.md
+    └── sop-quick-queries.md
 ```
 
 ### 6.2 工具实现概要
@@ -2515,6 +2554,7 @@ lock.json、claims.json、feature locks 和 worktrees 已清理；`.coding-maste
 | lock lease 已过期 | 提示 `cm renew` 或 `cm unlock` |
 | claims.json 中 analyzing/developing feature 的 worktree 不存在 | 重置为 pending |
 | 存在残留 worktree 但 claims.json 中无记录 | 删除残留 worktree |
+| 孤立的 dev/* 或 feat/* 分支（已 merge 或无 session） | 删除孤立分支 |
 | PLAN.md 中的 feature ID 与 claims.json 不一致 | 报告不一致，不自动修复 |
 | PLAN.md 解析失败（格式错误） | 报告解析错误位置 |
 
@@ -3270,3 +3310,8 @@ def parallel_run(n, cmd_fn):
 16. **失败不写入** — `_atomic_json_update` 在 updater 返回 `ok:false` 时恢复快照，防止意外的 data 修改泄露到文件。注意 `cm test` 的 updater 始终返回 `ok:true`（无论测试是否通过），因为测试失败结果本身需要持久化到 claims.json 供接力 agent 读取
 17. **Session/Feature 职责分离** — session 级排他锁防多 plan 冲突，feature 级 claim + worktree 隔离防代码冲突，不需要 feature 级文件锁
 18. **指引可操作化** — `cm progress` 输出分步操作列表（action_steps），每步都是可直接执行的指令，接力 agent 无需额外探索即可接手工作
+19. **数据层即事实** — lock.json/claims.json 是跨 turn、跨会话的唯一事实来源；所有命令先读数据层再决策，不依赖 git branch 列表或提示词传递上下文
+20. **Lease 自动续期** — `_check_lease` 发现过期时自动续期而非拒绝操作，避免长任务因 lease 超时而中断；竞态安全由 flock 保证
+21. **模式隔离** — read-only overlay session（review/analyze）不修改 lock.json，不影响正在进行的 write session；`cm unlock` 拒绝清除未完成的 write session（需 `--force` 或先 `cm submit`）
+22. **Evidence-driven 验证** — `evidence/N-verify.json` 记录结构化测试结果（pass/fail/skipped + 输出摘要），供接力 agent 和 integration 阶段引用
+23. **Delegation 硬关卡** — `delegation/N-delegation.json` 记录子任务委派，feature 完成前必须验证所有 delegation 已回收

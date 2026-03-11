@@ -385,7 +385,7 @@ class TestProgressNextAction:
 
 
 class TestPreconditionChecks:
-    def test_rejects_expired_lease(self, git_repo):
+    def test_auto_renews_expired_lease(self, git_repo):
         repo, data = _setup_developing(git_repo)
         # Expire the lease
         lock_path = repo / tools.CM_DIR / "lock.json"
@@ -396,8 +396,11 @@ class TestPreconditionChecks:
         with mock.patch.object(tools, "_repo_path", return_value=repo):
             _write_and_commit(data["worktree"])
             r = tools.cmd_test(make_args(repo=repo.name, feature=1))
-            assert not r["ok"]
-            assert "expired" in r["error"].lower()
+            # Expired lease is auto-renewed, command proceeds
+            assert r["ok"]
+            # Verify lease was renewed
+            renewed_lock = json.loads(lock_path.read_text())
+            assert renewed_lock["lease_expires_at"] > "2020-01-01T00:00:00+00:00"
 
     def test_rejects_done_session(self, git_repo):
         repo = _setup_locked(git_repo)

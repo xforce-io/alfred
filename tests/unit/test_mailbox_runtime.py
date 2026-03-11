@@ -79,9 +79,8 @@ def test_compose_message_with_mailbox_updates_dedupes_and_cleans_stale_events():
 
 def test_compose_message_truncates_long_detail():
     """Long detail text should be truncated to avoid drowning out the
-    user's actual message.  Production bug: 800+ char deferred result
-    detail overwhelmed a 1-char user reply '1'."""
-    long_detail = "x" * 1000
+    user's actual message.  Cap at 2000 chars to preserve structured reports."""
+    long_detail = "x" * 5000
     mailbox = [
         {
             "event_id": "evt_long",
@@ -97,7 +96,7 @@ def test_compose_message_truncates_long_detail():
     detail_lines = [l for l in message.split("\n") if l.strip().startswith("Detail:")]
     assert len(detail_lines) == 1
     detail_content = detail_lines[0].split("Detail:", 1)[1].strip()
-    assert len(detail_content) <= 210, (
-        f"Detail should be truncated to ~200 chars, got {len(detail_content)}"
+    assert len(detail_content) <= 2010, (
+        f"Detail should be truncated to ~2000 chars, got {len(detail_content)}"
     )
     assert detail_content.endswith("...")

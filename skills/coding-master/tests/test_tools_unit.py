@@ -373,6 +373,8 @@ class TestCmdLock:
         args.repo = repo_name
         args.agent = kwargs.get("agent", "test-agent")
         args.branch = kwargs.get("branch", None)
+        args.stash = kwargs.get("stash", False)
+        args.mode = kwargs.get("mode", None)
         return args
 
     def test_lock_success(self, git_repo):
@@ -385,14 +387,16 @@ class TestCmdLock:
             assert lock["session_phase"] == "locked"
             assert lock["locked_by"] == "test-agent"
 
-    def test_lock_twice(self, git_repo):
+    def test_lock_twice_joins_session(self, git_repo):
         with mock.patch.object(tools, "_repo_path", return_value=git_repo):
             args = self._make_args(git_repo.name)
             r1 = tools.cmd_lock(args)
             assert r1["ok"]
+            branch1 = r1["data"]["branch"]
             r2 = tools.cmd_lock(args)
-            assert not r2["ok"]
-            assert "already locked" in r2["error"]
+            assert r2["ok"]
+            # Second lock joins the existing session, reuses same branch
+            assert r2["data"]["branch"] == branch1
 
     def test_lock_dirty_tree(self, git_repo):
         (git_repo / "dirty.txt").write_text("dirty")
