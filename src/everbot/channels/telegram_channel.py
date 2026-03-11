@@ -172,7 +172,7 @@ class TelegramChannel:
             return
 
         source_type = data.get("source_type")
-        if source_type not in ("heartbeat_delivery", "deferred_result"):
+        if source_type not in ("heartbeat_delivery", "deferred_result", "inspector_push"):
             return
 
         agent_name = data.get("agent_name")
@@ -186,12 +186,17 @@ class TelegramChannel:
 
         if source_type == "deferred_result":
             msg_prefix = "[Deferred Result]"
+        elif source_type == "inspector_push":
+            msg_prefix = None
         else:
             msg_prefix = "[Heartbeat]"
 
-        text, entities = self._convert_markdown(
-            f"{msg_prefix} {agent_name}\n\n{detail}"
-        )
+        if msg_prefix:
+            raw_text = f"{msg_prefix} {agent_name}\n\n{detail}"
+        else:
+            raw_text = detail
+
+        text, entities = self._convert_markdown(raw_text)
 
         run_id = data.get("run_id") or ""
         target_chat = None

@@ -753,7 +753,13 @@ If not, reply with `HEARTBEAT_OK`.
                             scope=self.broadcast_scope,
                             detail=inspection.delivery_detail,
                         )
-                    result = inspection.output
+                    # If inspector already pushed a message to the user,
+                    # suppress the bare status string (e.g. "HEARTBEAT_ERROR")
+                    # from being delivered as a redundant notification.
+                    if inspection.push_message:
+                        result = "HEARTBEAT_OK"
+                    else:
+                        result = inspection.output
                 elif self._file_mgr.heartbeat_mode == "corrupted":
                     self._write_heartbeat_event("corrupted")
                     user_message = await self._inject_heartbeat_context(

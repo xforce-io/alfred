@@ -94,13 +94,13 @@ async def emit_push_message(
             "content": push_message,
             "summary": push_message[:SUMMARY_MAX_CHARS],
             "detail": detail or push_message,
-            "source_type": "heartbeat_delivery",
+            "source_type": "inspector_push",
             "run_id": run_id,
             "deliver": True,
         },
         agent_name=agent_name,
         **routing_kwargs,
-        source_type="heartbeat_delivery",
+        source_type="inspector_push",
         run_id=run_id,
     )
 
