@@ -21,7 +21,6 @@ class WorkspaceInstructions:
     user_md: Optional[str] = None
     memory_md: Optional[str] = None
     heartbeat_md: Optional[str] = None
-    coding_stats_md: Optional[str] = None
     coding_md: Optional[str] = None
 
 
@@ -41,7 +40,6 @@ class WorkspaceLoader:
         'user_md': 'USER.md',
         'memory_md': 'MEMORY.md',
         'heartbeat_md': 'HEARTBEAT.md',
-        'coding_stats_md': 'CODING_STATS.md',
         'coding_md': 'CODING.md',
     }
 
