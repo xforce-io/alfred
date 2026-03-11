@@ -12,6 +12,7 @@ import argparse
 import copy
 import fcntl
 import json
+import logging
 import os
 import re
 import socket
@@ -20,6 +21,8 @@ import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 # ── Add scripts dir to path so we can import siblings ──
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -424,13 +427,6 @@ def _check_feature_md_sections(path: Path | None) -> tuple[bool, bool]:
     if not path or not path.exists():
         return False, False
     text = path.read_text()
-    has_analysis = bool(re.search(
-        r"^## Analysis\s*\n(.+)", text, re.MULTILINE | re.DOTALL
-    ))
-    has_plan = bool(re.search(
-        r"^## Plan\s*\n(.+)", text, re.MULTILINE | re.DOTALL
-    ))
-    # More precise: check there's content between ## Analysis and next ##
     analysis_match = re.search(
         r"^## Analysis\s*\n(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL
     )
@@ -557,11 +553,13 @@ def _create_feature_worktree(
 
 
 def _remove_worktree(repo: Path, worktree_path: str) -> None:
-    """Remove a git worktree, ignoring errors."""
+    """Remove a git worktree, logging failures but not raising."""
     try:
-        _run_git(repo, ["worktree", "remove", worktree_path, "--force"], check=False)
-    except Exception:
-        pass
+        result = _run_git(repo, ["worktree", "remove", worktree_path, "--force"], check=False)
+        if result.returncode != 0:
+            logger.warning("worktree removal failed for %s: %s", worktree_path, result.stderr.strip())
+    except Exception as exc:
+        logger.warning("worktree removal error for %s: %s", worktree_path, exc)
 
 
 # ══════════════════════════════════════════════════════════
@@ -583,7 +581,7 @@ def _run_tests(cwd: Path) -> dict:
         test_cmd = "cargo test"
 
     if not test_cmd:
-        return {"ok": True, "output": "no test command detected (skipped)"}
+        return {"ok": True, "skipped": True, "output": "no test command detected (skipped)"}
 
     stdout, stderr, rc = _exec(str(cwd), test_cmd)
     combined = stdout + stderr
@@ -611,7 +609,7 @@ def _run_lint(cwd: Path) -> dict:
         lint_cmd = "cargo clippy"
 
     if not lint_cmd:
-        return {"passed": True, "command": None, "output": "no lint command detected (skipped)"}
+        return {"passed": True, "skipped": True, "command": None, "output": "no lint command detected (skipped)"}
 
     stdout, stderr, rc = _exec(str(cwd), lint_cmd)
     combined = stdout + stderr
@@ -625,7 +623,7 @@ def _run_typecheck(cwd: Path) -> dict:
 
     tc_cmd = _resolve_typecheck_command(cwd)
     if not tc_cmd:
-        return {"passed": True, "command": None, "output": "no typecheck command detected (skipped)"}
+        return {"passed": True, "skipped": True, "command": None, "output": "no typecheck command detected (skipped)"}
 
     stdout, stderr, rc = _exec(str(cwd), tc_cmd)
     combined = stdout + stderr
@@ -1160,6 +1158,8 @@ def cmd_claim(args) -> dict:
     result = _atomic_json_update(claims_path, do_claim)
     if not result.get("ok"):
         _remove_worktree(repo, worktree)
+        if feature_md.exists():
+            feature_md.unlink()
         return result
 
     # Update session_phase + session_agents
@@ -1277,23 +1277,33 @@ def cmd_test(args) -> dict:
 
     # Build evidence
     now = datetime.now(timezone.utc).isoformat()
-    overall = "passed" if (lint_result["passed"] and typecheck_result["passed"] and test_result["ok"]) else "failed"
+    all_skipped = (lint_result.get("skipped") and typecheck_result.get("skipped")
+                   and test_result.get("skipped"))
+    if all_skipped:
+        overall = "skipped"
+    elif lint_result["passed"] and typecheck_result["passed"] and test_result["ok"]:
+        overall = "passed"
+    else:
+        overall = "failed"
     evidence = {
         "feature_id": feature_id,
         "created_at": now,
         "commit": head,
         "lint": {
             "passed": lint_result["passed"],
+            "skipped": lint_result.get("skipped", False),
             "command": lint_result.get("command"),
             "output": (lint_result.get("output", "") or "")[:TEST_OUTPUT_MAX],
         },
         "typecheck": {
             "passed": typecheck_result["passed"],
+            "skipped": typecheck_result.get("skipped", False),
             "command": typecheck_result.get("command"),
             "output": (typecheck_result.get("output", "") or "")[:TEST_OUTPUT_MAX],
         },
         "test": {
             "passed": test_result["ok"],
+            "skipped": test_result.get("skipped", False),
             "command": None,  # auto-detected
             "output": (test_result.get("output", "") or "")[:TEST_OUTPUT_MAX],
         },
@@ -1379,6 +1389,9 @@ def cmd_done(args) -> dict:
             # v4 evidence-based verification
             if evidence.get("commit") != current_head:
                 return {"ok": False, "error": "Evidence is stale (code changed after test). Re-run cm test."}
+            if evidence.get("overall") == "skipped":
+                return {"ok": False, "error": "All verification steps were skipped (no lint/typecheck/test configured). "
+                        "Add at least one verification command or write tests before marking done."}
             if evidence.get("overall") != "passed":
                 failed = [k for k in ("lint", "typecheck", "test")
                           if not evidence.get(k, {}).get("passed", True)]
@@ -1649,13 +1662,19 @@ def cmd_submit(args) -> dict:
     wt = session_wt
 
     # Commit (idempotent) — in session worktree
-    _run_git(wt, ["add", "-A", "--", ":(exclude).coding-master"], check=False)
+    add_rc = _run_git(wt, ["add", "-A", "--", ":(exclude).coding-master"], check=False)
+    if add_rc.returncode != 0:
+        return {"ok": False, "error": f"git add failed: {add_rc.stderr.strip()}"}
     status_out = _run_git(wt, ["status", "--porcelain"], check=False).stdout.strip()
     if status_out:
-        _run_git(wt, ["commit", "-m", args.title], check=False)
+        commit_rc = _run_git(wt, ["commit", "-m", args.title], check=False)
+        if commit_rc.returncode != 0:
+            return {"ok": False, "error": f"git commit failed: {commit_rc.stderr.strip()}"}
 
     # Push (idempotent) — from session worktree
-    _run_git(wt, ["push", "-u", "origin", branch], check=False)
+    push_rc = _run_git(wt, ["push", "-u", "origin", branch], check=False)
+    if push_rc.returncode != 0:
+        return {"ok": False, "error": f"git push failed: {push_rc.stderr.strip()}"}
 
     # PR (idempotent)
     existing_pr = subprocess.run(

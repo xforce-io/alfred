@@ -82,14 +82,14 @@ class TestParsePytestOutputExtra:
     def test_with_errors(self):
         total, p, f = _parse_pytest_output("3 passed, 1 failed, 2 error")
         assert p == 3
-        assert f == 1
-        assert total == 6  # 3+1 + 2 errors
+        assert f == 3  # 1 failed + 2 errors
+        assert total == 6  # 3+3
 
     def test_only_errors(self):
         total, p, f = _parse_pytest_output("5 error")
         assert total == 5
         assert p == 0
-        assert f == 0
+        assert f == 5  # errors counted as failures
 
 
 # ── TestRunner._detect_commands ──────────────────────────

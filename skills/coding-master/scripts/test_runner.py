@@ -166,11 +166,11 @@ def _parse_pytest_output(text: str) -> tuple[int, int, int]:
         passed = int(m_passed.group(1))
     if m_failed:
         failed = int(m_failed.group(1))
-    total = passed + failed
-    # also check for errors
+    # also check for errors (collection errors, etc.) — count as failures
     m_error = re.search(r"(\d+)\s+error", text)
     if m_error:
-        total += int(m_error.group(1))
+        failed += int(m_error.group(1))
+    total = passed + failed
     return total, passed, failed
 
 

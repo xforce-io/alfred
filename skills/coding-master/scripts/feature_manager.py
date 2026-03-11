@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -50,9 +52,7 @@ class FeatureManager:
             if criteria:
                 self._ensure_feature_dir(i)
                 criteria_path = self.features_dir / str(i) / "criteria.json"
-                criteria_path.write_text(
-                    json.dumps(criteria, indent=2, ensure_ascii=False)
-                )
+                _atomic_write(criteria_path, json.dumps(criteria, indent=2, ensure_ascii=False))
         self._save(plan)
         return {"ok": True, "data": {
             "total": len(plan["features"]),
@@ -290,9 +290,7 @@ class FeatureManager:
             existing.extend(new_criteria)
             self._ensure_feature_dir(index)
             criteria_path = self.features_dir / str(index) / "criteria.json"
-            criteria_path.write_text(
-                json.dumps(existing, indent=2, ensure_ascii=False)
-            )
+            _atomic_write(criteria_path, json.dumps(existing, indent=2, ensure_ascii=False))
             # Update criteria_count in plan
             plan["features"][index]["criteria_count"] = len(existing)
             self._save(plan)
@@ -396,9 +394,7 @@ class FeatureManager:
         # Write verification results
         self._ensure_feature_dir(index)
         verification_path = self.features_dir / str(index) / "verification.json"
-        verification_path.write_text(
-            json.dumps(results, indent=2, ensure_ascii=False)
-        )
+        _atomic_write(verification_path, json.dumps(results, indent=2, ensure_ascii=False))
 
         # Update plan counters
         auto_results = [r for r in results if r["type"] != "manual"]
@@ -451,10 +447,22 @@ class FeatureManager:
 
     def _save(self, plan: dict) -> None:
         self.plan_path.parent.mkdir(exist_ok=True)
-        self.plan_path.write_text(
-            json.dumps(plan, indent=2, ensure_ascii=False)
-        )
+        _atomic_write(self.plan_path, json.dumps(plan, indent=2, ensure_ascii=False))
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """Write file atomically via temp file + rename (same directory)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.rename(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise

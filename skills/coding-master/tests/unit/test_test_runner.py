@@ -22,7 +22,7 @@ class TestParsePytestOutput:
         total, passed, failed = _parse_pytest_output("1 passed, 1 failed, 2 error in 3s")
         assert total == 4  # 1 + 1 + 2
         assert passed == 1
-        assert failed == 1
+        assert failed == 3  # 1 explicit failed + 2 errors counted as failures
 
     def test_failed_only(self):
         total, passed, failed = _parse_pytest_output("3 failed in 2.00s")
