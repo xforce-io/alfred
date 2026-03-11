@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import re
 from datetime import datetime
 from typing import List, Optional
 
@@ -119,12 +120,29 @@ def render_report_json(report: WorkflowReport) -> str:
     return json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
 
 
+# SECURITY FIX: Valid git commit hash pattern (SHA-1: 40 hex chars, or abbreviated)
+_GIT_COMMIT_PATTERN = re.compile(r'^[a-f0-9]{7,40}$')
+
+
+def _is_valid_commit_hash(commit_hash: str) -> bool:
+    """Validate that commit hash is a valid SHA-1 format to prevent injection."""
+    if not commit_hash:
+        return False
+    return bool(_GIT_COMMIT_PATTERN.match(commit_hash))
+
+
 def _detect_files_modified(
     start_commit: Optional[str], project_dir: str
 ) -> List[str]:
     """Detect files modified since start_commit using git."""
-    if not start_commit:
+    # SECURITY FIX: Validate commit hash before passing to git command
+    if not start_commit or not _is_valid_commit_hash(start_commit):
+        logger.warning(
+            "workflow.report.invalid_commit_hash",
+            extra={"commit": start_commit},
+        )
         return []
+    
     try:
         result = subprocess.run(
             ["git", "diff", "--name-only", start_commit, "HEAD"],
