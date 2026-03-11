@@ -419,8 +419,15 @@ class ChannelCoreService:
                 **event_meta,
             )
 
-            # Send final response
-            if not has_streamed and response:
+            # Send final response.
+            # When LLM streams deltas, the text is already sent via "delta" events
+            # and `response` just accumulates a copy — no need to re-send.
+            # But in tool-use mode, the final answer may arrive only in
+            # TURN_COMPLETE.answer without any prior LLM_DELTA, so we must
+            # check whether deltas were actually streamed (llm_started) rather
+            # than just whether any event was streamed (has_streamed includes
+            # tool call/output events).
+            if not llm_started and response:
                 response = self._strip_heartbeat_token_for_chat(response)
                 if response:
                     await on_event(OutboundMessage(session_id, response, msg_type="text"))
