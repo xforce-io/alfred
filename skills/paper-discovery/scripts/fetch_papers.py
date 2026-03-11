@@ -365,6 +365,8 @@ def main():
                         help="Output format: text, json, or report (default: text)")
     parser.add_argument("--sort", choices=["heat", "date", "upvotes"], default="heat",
                         help="Sort order (default: heat)")
+    parser.add_argument("--keywords", nargs="+", default=None,
+                        help="Filter papers whose title or abstract contains ANY of these keywords (case-insensitive)")
     parser.add_argument("--with-summary", action="store_true", default=False,
                         help="Generate one-line Chinese summary for each paper using LLM")
 
@@ -390,6 +392,20 @@ def main():
     if not papers:
         print("No papers found. Check your internet connection or try a different source.", file=sys.stderr)
         sys.exit(1)
+
+    # Keyword filtering
+    if args.keywords:
+        kw_lower = [k.lower() for k in args.keywords]
+        papers = [
+            p for p in papers
+            if any(
+                k in p.get("title", "").lower() or k in p.get("abstract", "").lower()
+                for k in kw_lower
+            )
+        ]
+        if not papers:
+            print(f"No papers matched keywords: {args.keywords}", file=sys.stderr)
+            sys.exit(1)
 
     # Calculate heat for all papers
     for paper in papers:

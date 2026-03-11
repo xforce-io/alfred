@@ -50,7 +50,7 @@ class NewsItem:
 
     def __post_init__(self):
         if not self._hash:
-            self._hash = hashlib.md5(self.title.encode()).hexdigest()[:12]
+            self._hash = hashlib.sha256(self.title.encode()).hexdigest()[:12]
 
 
 def _check_dependencies():
