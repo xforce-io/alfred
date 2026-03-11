@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Resolve symlinks to find the real script location
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SKILL_DIR="$(cd "$(dirname "$SOURCE")/.." && pwd)"
+
+# Use venv python if available, else python3, else python
+if [[ -x "${SKILL_DIR}/../../.venv/bin/python" ]]; then
+  PY="${SKILL_DIR}/../../.venv/bin/python"
+elif command -v python3 &>/dev/null; then
+  PY=python3
+else
+  PY=python
+fi
+
+exec "$PY" "${SKILL_DIR}/scripts/tools.py" "$@"
