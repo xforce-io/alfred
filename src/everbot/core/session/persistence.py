@@ -398,6 +398,8 @@ class SessionPersistence:
 
     def _get_lock_path(self, session_id: str) -> Path:
         """Return the flock path for a session."""
+        if not self.is_safe_session_id(session_id):
+            raise ValueError(f"Invalid session_id: {session_id!r}")
         return self.sessions_dir / f".{session_id}.lock"
 
     @contextmanager

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, asdict, field
@@ -145,7 +146,7 @@ class TestRunner:
 def _exec(cwd: str, cmd: str) -> tuple[str, str, int]:
     try:
         r = subprocess.run(
-            cmd, shell=True, cwd=cwd,
+            shlex.split(cmd), shell=False, cwd=cwd,
             capture_output=True, text=True, timeout=CMD_TIMEOUT,
         )
         return r.stdout, r.stderr, r.returncode

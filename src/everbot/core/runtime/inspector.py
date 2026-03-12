@@ -255,9 +255,10 @@ class Inspector:
         system_health = None
         try:
             from ..jobs.health_check import _check_process_resources, _check_session_storage
+            from ...infra.user_data import get_user_data_manager
             proc = _check_process_resources()
             storage = _check_session_storage(
-                type("_Ctx", (), {"sessions_dir": self.workspace_path / "sessions"})()
+                type("_Ctx", (), {"sessions_dir": get_user_data_manager().sessions_dir})()
             )
             parts = [f"进程: {proc.message}"]
             parts.append(f"存储: {storage.message}")

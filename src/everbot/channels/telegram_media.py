@@ -72,7 +72,9 @@ def sanitize_filename(raw: str) -> str:
 def safe_local_path(target_dir: Path, filename: str) -> Optional[Path]:
     """Resolve the final path and verify it stays inside *target_dir*."""
     candidate = (target_dir / filename).resolve()
-    if not str(candidate).startswith(str(target_dir.resolve())):
+    try:
+        candidate.relative_to(target_dir.resolve())
+    except ValueError:
         logger.warning("Path traversal attempt blocked: %s", filename)
         return None
     return candidate

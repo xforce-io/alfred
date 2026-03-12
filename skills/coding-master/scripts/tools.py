@@ -47,6 +47,7 @@ MODES = {
             "plan-ready", "claim", "dev", "test", "done", "reopen",
             "integrate", "submit", "progress", "journal", "doctor",
             "delegate-prepare", "delegate-complete",
+            "engine-run",
         ],
         "completion_gate": "all features done + evidence pass",
         "description": "Feature delivery: plan → claim → dev → test → done → submit",
@@ -57,6 +58,7 @@ MODES = {
             "lock", "unlock", "status", "renew", "start",
             "scope", "report", "progress", "journal", "doctor",
             "delegate-prepare", "delegate-complete",
+            "engine-run",
         ],
         "completion_gate": "report.md exists",
         "description": "Code review: structured analysis and feedback",
@@ -68,6 +70,7 @@ MODES = {
             "scope", "report", "progress", "journal", "doctor",
             "delegate-prepare", "delegate-complete",
             "dev", "test",  # debug may need code changes
+            "engine-run",
         ],
         "completion_gate": "diagnosis.md exists",
         "description": "Debug: investigate, diagnose, optionally fix",
@@ -78,6 +81,7 @@ MODES = {
             "lock", "unlock", "status", "renew", "start",
             "scope", "report", "progress", "journal", "doctor",
             "delegate-prepare", "delegate-complete",
+            "engine-run",
         ],
         "completion_gate": "report.md exists",
         "description": "Analysis: understand code, produce structured conclusions",
@@ -756,6 +760,36 @@ def _append_journal(repo: Path, agent: str, action: str, message: str = ""):
 
 
 # ══════════════════════════════════════════════════════════
+#  Next-action guidance (injected into cmd_* return values)
+# ══════════════════════════════════════════════════════════
+
+
+def _hint(command: str, reason: str) -> dict:
+    """Build a next_action hint dict."""
+    return {"command": command, "reason": reason}
+
+
+# Mode-specific flow maps: after completing step X, suggest step Y.
+# Key = (mode, trigger), Value = next_action hint.
+_FLOW_AFTER_LOCK = {
+    "deliver":  _hint("cm plan-ready", "Validate PLAN.md to unlock feature claiming"),
+    "review":   _hint("cm scope --diff HEAD~3..HEAD", "Define what to review"),
+    "analyze":  _hint("cm scope --files '...'", "Define what to analyze"),
+    "debug":    _hint("cm scope --diff HEAD~3..HEAD", "Define what to investigate"),
+}
+
+_FLOW_AFTER_SCOPE = _hint("cm engine-run", "Delegate analysis to engine subprocess")
+
+_FLOW_AFTER_ENGINE = {
+    "review":   _hint("cm report --content '...'", "Write review report based on engine findings"),
+    "analyze":  _hint("cm report --content '...'", "Write analysis report based on engine findings"),
+    "debug":    _hint("cm report --content '...'", "Write diagnosis based on engine findings"),
+}
+
+_FLOW_AFTER_REPORT = _hint("cm unlock", "Report written, release session")
+
+
+# ══════════════════════════════════════════════════════════
 #  Commands
 # ══════════════════════════════════════════════════════════
 
@@ -831,11 +865,14 @@ def cmd_lock(args) -> dict:
     if not result.get("ok"):
         return result
 
+    next_action = _FLOW_AFTER_LOCK.get(mode)
+
     # ── Read-only overlay on write session: don't touch lock, just return ──
     if action_taken["type"] == "overlay":
         _append_journal(repo, agent, "lock",
                         f"Read-only overlay ({mode}), branch: {current_branch or '(current)'}")
-        return {"ok": True, "data": {"branch": current_branch or "", "read_only": True, "overlay": True}}
+        return {"ok": True, "data": {"branch": current_branch or "", "read_only": True, "overlay": True,
+                                     "next_action": next_action}}
 
     # ── Joined existing session: validate or recover session worktree ──
     if action_taken["type"] == "joined":
@@ -847,6 +884,7 @@ def cmd_lock(args) -> dict:
                 return session_result
             existing_data["session_worktree"] = session_result["data"]["session_worktree"]
         _append_journal(repo, agent, "lock", f"Joined session, branch: {existing_branch}")
+        existing_data["next_action"] = next_action
         return {"ok": True, "data": existing_data}
 
     # ── New session created ──
@@ -855,7 +893,8 @@ def cmd_lock(args) -> dict:
     # Read-only modes: no branch creation, no git state changes
     if read_only:
         _append_journal(repo, agent, "lock", f"Read-only lock ({mode}), branch: {current_branch}")
-        return {"ok": True, "data": {"branch": current_branch, "read_only": True}}
+        return {"ok": True, "data": {"branch": current_branch, "read_only": True,
+                                     "next_action": next_action}}
 
     # Write modes: create session worktree with dev branch (main repo untouched)
     lock = _atomic_json_read(lock_path)
@@ -868,7 +907,8 @@ def cmd_lock(args) -> dict:
 
     _ensure_gitignore(repo)
     _append_journal(repo, agent, "lock", f"Workspace locked, branch: {branch}, worktree: {session_wt}")
-    return {"ok": True, "data": {"branch": branch, "session_worktree": session_wt}}
+    return {"ok": True, "data": {"branch": branch, "session_worktree": session_wt,
+                                 "next_action": next_action}}
 
 
 def cmd_unlock(args) -> dict:
@@ -1074,9 +1114,14 @@ def cmd_plan_ready(args) -> dict:
     if not result.get("ok"):
         return result
 
+    first_claimable = next((fid for fid in _topo_sort(plan)
+                            if not plan[fid].get("depends_on")), list(plan.keys())[0] if plan else "1")
     agent = _resolve_agent(args)
     _append_journal(repo, agent, "plan-ready", f"PLAN.md reviewed: {len(plan)} features")
-    return {"ok": True, "data": {"features": len(plan), "plan": list(plan.keys())}}
+    return {"ok": True, "data": {
+        "features": len(plan), "plan": list(plan.keys()),
+        "next_action": _hint(f"cm claim --feature {first_claimable}", "Claim the first feature to start implementing"),
+    }}
 
 
 def cmd_claim(args) -> dict:
@@ -1178,6 +1223,8 @@ def cmd_claim(args) -> dict:
         "feature_md": str(feature_md),
         "branch": branch,
         "worktree": worktree,
+        "next_action": _hint(f"cm dev --feature {feature_id}",
+                             f"Write Analysis + Plan in {feature_md.name}, then advance to developing"),
     }}
 
 
@@ -1228,7 +1275,12 @@ def cmd_dev(args) -> dict:
         }
         return {"ok": True}
 
-    return _atomic_json_update(claims_path, do_dev)
+    result = _atomic_json_update(claims_path, do_dev)
+    if result.get("ok"):
+        result.setdefault("data", {})["next_action"] = _hint(
+            f"cm test --feature {feature_id}",
+            "Write code and commit, then run tests")
+    return result
 
 
 def cmd_test(args) -> dict:
@@ -1343,6 +1395,12 @@ def cmd_test(args) -> dict:
         return result
 
     _write_evidence(repo, feature_id, evidence)
+    if overall == "passed":
+        result.setdefault("data", {})["next_action"] = _hint(
+            f"cm done --feature {feature_id}", "Tests passed, mark feature complete")
+    else:
+        result.setdefault("data", {})["next_action"] = _hint(
+            f"cm test --feature {feature_id}", "Fix failing tests, then re-run")
     return result
 
 
@@ -1429,6 +1487,15 @@ def cmd_done(args) -> dict:
     result = _atomic_json_update(claims_path, do_done)
     if result.get("ok"):
         _append_journal(repo, agent, f"done feature-{feature_id}")
+        data = result.get("data", {})
+        if data.get("all_done"):
+            data["next_action"] = _hint("cm integrate", "All features done, merge and run integration tests")
+        elif data.get("unblocked"):
+            next_fid = data["unblocked"][0]["id"]
+            data["next_action"] = _hint(f"cm claim --feature {next_fid}",
+                                        f"Feature {next_fid} is now unblocked")
+        else:
+            data["next_action"] = _hint("cm progress", "Check which features are available next")
     return result
 
 
@@ -1472,7 +1539,10 @@ def cmd_reopen(args) -> dict:
     )[1])
 
     worktree = _get_feature_worktree(claims_path, feature_id)
-    response = {"ok": True, "data": {"worktree": worktree, "feature": feature_id, "phase": "developing"}}
+    response = {"ok": True, "data": {
+        "worktree": worktree, "feature": feature_id, "phase": "developing",
+        "next_action": _hint(f"cm test --feature {feature_id}", "Fix the issue, then re-run tests"),
+    }}
 
     # Extract failure context from integration report if available
     report_path = repo / CM_DIR / EVIDENCE_DIR / "integration-report.json"
@@ -1633,7 +1703,10 @@ def cmd_integrate(args) -> dict:
 
     agent = _resolve_agent(args)
     _append_journal(repo, agent, "integrate", "All features merged, integration tests passed")
-    return {"ok": True, "data": {"test_output": output_summary}}
+    return {"ok": True, "data": {
+        "test_output": output_summary,
+        "next_action": _hint("cm submit --title '...'", "Integration passed, push and create PR"),
+    }}
 
 
 def _write_integration_report(repo: Path, report: dict):
@@ -1743,7 +1816,7 @@ def cmd_submit(args) -> dict:
 def cmd_scope(args) -> dict:
     """Define the scope of analysis/review/debug work. Writes scope.json."""
     repo = _resolve_locked_repo(args)
-    mode = _get_session_mode(repo)
+    mode = getattr(args, "mode_override", None) or _get_session_mode(repo)
     if mode == "deliver":
         return {"ok": False, "error": "scope is not used in deliver mode; use PLAN.md instead"}
 
@@ -1771,13 +1844,14 @@ def cmd_scope(args) -> dict:
     scope_path.write_text(json.dumps(scope, indent=2, ensure_ascii=False))
     agent = _resolve_agent(args)
     _append_journal(repo, agent, "scope", f"Scope defined: {scope.get('type')}")
-    return {"ok": True, "data": {"scope_path": str(scope_path), "scope": scope}}
+    return {"ok": True, "data": {"scope_path": str(scope_path), "scope": scope,
+                                 "next_action": _FLOW_AFTER_SCOPE}}
 
 
 def cmd_report(args) -> dict:
     """Write or finalize the session report/diagnosis. Writes report.md or diagnosis.md."""
     repo = _resolve_locked_repo(args)
-    mode = _get_session_mode(repo)
+    mode = getattr(args, "mode_override", None) or _get_session_mode(repo)
     if mode == "deliver":
         return {"ok": False, "error": "report is not used in deliver mode; use cm submit"}
 
@@ -1804,7 +1878,166 @@ def cmd_report(args) -> dict:
     report_path.write_text(content)
     agent = _resolve_agent(args)
     _append_journal(repo, agent, "report", f"Report written: {filename}")
-    return {"ok": True, "data": {"report_path": str(report_path), "filename": filename}}
+
+    # Auto-unlock for review/analyze/debug — report is the terminal artifact.
+    auto_unlocked = False
+    if mode in ("review", "analyze", "debug"):
+        try:
+            cmd_unlock(args)
+            auto_unlocked = True
+        except Exception:
+            pass
+
+    result = {
+        "ok": True,
+        "data": {
+            "report_path": str(report_path),
+            "filename": filename,
+            "report_content": content,
+            "auto_unlocked": auto_unlocked,
+            "instruction": (
+                "Report saved. Present the report_content to the user "
+                "as a well-formatted message. Do NOT output raw JSON."
+            ),
+        },
+    }
+    if not auto_unlocked:
+        result["data"]["next_action"] = _FLOW_AFTER_REPORT
+    return result
+
+
+def _build_scope_description(scope: dict) -> str:
+    """Convert scope.json data into a human-readable description for engine prompts."""
+    parts = []
+    scope_type = scope.get("type", "repo")
+    if scope_type == "diff":
+        parts.append(f"Diff range: {scope.get('diff_range', 'unknown')}")
+    elif scope_type == "files":
+        files = scope.get("files", [])
+        parts.append(f"Files: {', '.join(files[:20])}")
+        if len(files) > 20:
+            parts.append(f"  ... and {len(files) - 20} more files")
+    elif scope_type == "pr":
+        parts.append(f"PR: {scope.get('pr', 'unknown')}")
+    else:
+        parts.append("Scope: entire repository")
+
+    if scope.get("goal"):
+        parts.append(f"Goal: {scope['goal']}")
+
+    return "\n".join(parts)
+
+
+def _get_scope_context(repo: Path, scope: dict) -> str:
+    """Get diff text or file listing from scope, capped at 20KB for engine prompt."""
+    max_bytes = 20_000
+    scope_type = scope.get("type", "repo")
+
+    if scope_type == "diff":
+        diff_range = scope.get("diff_range", "HEAD~1..HEAD")
+        try:
+            result = _run_git(repo, ["diff", diff_range], check=False)
+            diff_text = result.stdout
+            if len(diff_text) > max_bytes:
+                diff_text = diff_text[:max_bytes] + "\n...(diff truncated)..."
+            return f"## Diff ({diff_range})\n```\n{diff_text}\n```"
+        except Exception:
+            return f"(failed to get diff for {diff_range})"
+
+    elif scope_type == "files":
+        files = scope.get("files", [])
+        return f"## Target Files\n{chr(10).join(files[:50])}"
+
+    elif scope_type == "pr":
+        pr = scope.get("pr", "")
+        try:
+            result = subprocess.run(
+                ["gh", "pr", "diff", str(pr)],
+                cwd=str(repo), capture_output=True, text=True, timeout=30,
+            )
+            diff_text = result.stdout
+            if len(diff_text) > max_bytes:
+                diff_text = diff_text[:max_bytes] + "\n...(diff truncated)..."
+            return f"## PR #{pr} Diff\n```\n{diff_text}\n```"
+        except Exception:
+            return f"(failed to get PR diff for {pr})"
+
+    return "(no specific scope context)"
+
+
+def cmd_engine_run(args) -> dict:
+    """Delegate code analysis to an engine subprocess (e.g. Claude Code CLI).
+
+    Reads scope.json for analysis range, builds a mode-specific prompt,
+    invokes the engine, and saves the result to engine_result.json.
+    """
+    from engine import get_engine, MODE_PROMPTS
+
+    repo = _resolve_locked_repo(args)
+    mode = _get_session_mode(repo)
+
+    # Read scope
+    scope_path = repo / CM_DIR / "scope.json"
+    if not scope_path.exists():
+        return {"ok": False, "error": "no scope defined. Run cm scope first."}
+
+    scope = _atomic_json_read(scope_path)
+    if not scope:
+        return {"ok": False, "error": "scope.json is empty. Run cm scope to define scope."}
+
+    # Build prompt
+    if mode not in MODE_PROMPTS:
+        return {"ok": False, "error": f"no engine prompt template for mode '{mode}'. "
+                f"Available: {', '.join(MODE_PROMPTS)}"}
+    mode_prompt = MODE_PROMPTS[mode]
+    scope_desc = _build_scope_description(scope)
+    scope_context = _get_scope_context(repo, scope)
+
+    goal = getattr(args, "goal", None) or scope.get("goal", "")
+    goal_section = f"\n## Goal\n{goal}\n" if goal else ""
+
+    prompt = f"{mode_prompt}## Scope\n{scope_desc}\n{goal_section}\n{scope_context}"
+
+    # Get engine
+    engine_name = getattr(args, "engine", None) or "claude-code"
+    timeout = getattr(args, "timeout", None) or 600
+    max_turns = getattr(args, "max_turns", None) or 30
+
+    try:
+        engine = get_engine(engine_name)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    if not engine.is_available():
+        return {"ok": False, "error": f"Engine '{engine_name}' is not available. "
+                f"Ensure the CLI is installed and in PATH."}
+
+    # Run engine
+    agent = _resolve_agent(args)
+    _append_journal(repo, agent, "engine-run",
+                    f"Starting {engine_name} engine, mode={mode}, scope={scope.get('type')}")
+
+    result = engine.run(
+        prompt=prompt,
+        repo_path=repo,
+        mode=mode,
+        timeout=timeout,
+        max_turns=max_turns,
+    )
+
+    # Save result
+    result_path = repo / CM_DIR / "engine_result.json"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+
+    _append_journal(repo, agent, "engine-run",
+                    f"Engine finished: ok={result.ok}, "
+                    f"findings={len(result.findings)}, turns={result.turns_used}")
+
+    data = result.to_dict()
+    if result.ok:
+        data["next_action"] = _FLOW_AFTER_ENGINE.get(mode, _hint("cm report --content '...'", "Write report based on findings"))
+    return {"ok": result.ok, "data": data}
 
 
 def cmd_delegate_prepare(args) -> dict:
@@ -2596,6 +2829,15 @@ def main():
     p_report.add_argument("--content", default=None, help="Report content (inline)")
     p_report.add_argument("--file", default=None, help="Path to report file to copy")
 
+    # engine-run
+    p_engine = sub.add_parser("engine-run", help="Delegate analysis to engine subprocess")
+    _add_global_args(p_engine)
+    p_engine.add_argument("--goal", default=None, help="Analysis goal (overrides scope goal)")
+    p_engine.add_argument("--engine", default="claude-code", help="Engine to use (default: claude-code)")
+    p_engine.add_argument("--timeout", type=int, default=600, help="Timeout in seconds (default: 600)")
+    p_engine.add_argument("--max-turns", type=int, default=30, dest="max_turns",
+                          help="Max engine turns (default: 30)")
+
     # delegate-prepare
     p_delegate_prepare = sub.add_parser("delegate-prepare", help="Prepare delegation request for a feature")
     _add_global_args(p_delegate_prepare)
@@ -2671,6 +2913,7 @@ def main():
         "claim": cmd_claim,
         "scope": cmd_scope,
         "report": cmd_report,
+        "engine-run": cmd_engine_run,
         "delegate-prepare": cmd_delegate_prepare,
         "delegate-complete": cmd_delegate_complete,
         "dev": cmd_dev,

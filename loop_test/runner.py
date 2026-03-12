@@ -217,8 +217,9 @@ async def run_case(cfg: Config, case: TestCase, rlog: RunLogger) -> CaseResult:
             # created in prior iteration) so the test is idempotent.
             if case.cleanup_cmd:
                 try:
+                    import shlex as _shlex
                     import subprocess as _sp
-                    _sp.run(case.cleanup_cmd, shell=True, timeout=10, capture_output=True)
+                    _sp.run(_shlex.split(case.cleanup_cmd), shell=False, timeout=10, capture_output=True)
                     rlog.log(case.id, "cleanup", status="ok", cmd=case.cleanup_cmd)
                 except Exception as exc:
                     rlog.log(case.id, "cleanup", status="error", error=str(exc))

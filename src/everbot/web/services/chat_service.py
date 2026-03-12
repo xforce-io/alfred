@@ -111,7 +111,9 @@ class ChatService:
             for sid, ws in targets:
                 try:
                     await ws.send_json(data)
-                except Exception:
+                except Exception as e:
+                    if not isinstance(e, (ConnectionResetError, BrokenPipeError, OSError)):
+                        logger.warning("WebSocket send error (agent scope): %s", e)
                     self._active_connections.pop(sid, None)
                     self._connections_by_agent.get(agent_name, set()).discard((sid, ws))
             self._last_agent_broadcast[agent_name] = now
@@ -128,7 +130,9 @@ class ChatService:
                 return
             try:
                 await websocket.send_json(data)
-            except Exception:
+            except Exception as e:
+                if not isinstance(e, (ConnectionResetError, BrokenPipeError, OSError)):
+                    logger.warning("WebSocket send error (session scope): %s", e)
                 self._active_connections.pop(target_session_id, None)
 
     def _resolve_session_id_for_agent(self, agent_name: str, requested_session_id: Optional[str]) -> str:
@@ -409,8 +413,8 @@ class ChatService:
                 current_task.cancel()
             try:
                 await websocket.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("WebSocket close error (ignored): %s", e)
 
     def _ensure_core(self) -> ChannelCoreService:
         """Lazily create ChannelCoreService for test paths using __new__."""

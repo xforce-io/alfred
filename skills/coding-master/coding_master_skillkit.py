@@ -90,69 +90,6 @@ _GIT_ALLOWED = frozenset({
     "show", "tag", "pull", "fetch", "cherry-pick",
 })
 
-# Shell commands that _cm_shell allows (whitelist approach)
-# Format: (command_prefix, is_safe_without_args)
-# Only these commands are allowed to be executed
-_SHELL_ALLOWED_COMMANDS = frozenset({
-    # Build tools
-    "make", "cmake", "ninja", "gradle", "maven", "mvn",
-    # JavaScript/TypeScript
-    "npm", "yarn", "pnpm", "bun",
-    # Python testing
-    "pytest", "py.test", "python -m pytest",
-    "tox", "nox",
-    # Rust
-    "cargo",
-    # Go
-    "go", "gofmt",
-    # Java
-    "javac", "java",
-    # C/C++
-    "gcc", "g++", "clang", "clang++",
-    # Package managers
-    "pip", "pip3", "poetry", "uv",
-    # Docker
-    "docker", "docker-compose",
-})
-
-# Dangerous characters/patterns that indicate command injection
-_SHELL_DANGEROUS_PATTERNS = frozenset({
-    ";", "&&", "||", "|", "`", "$", "(", ")", "{", "}",
-    ">", "<", "&", "#", "\", "'"", "
-",
-})
-
-def _validate_shell_command(command: str) -> tuple[bool, str]:
-    """Validate shell command against whitelist and injection patterns.
-    
-    Returns:
-        (is_valid, error_message)
-    """
-    cmd_stripped = command.strip()
-    
-    # Check for dangerous patterns first
-    for pattern in _SHELL_DANGEROUS_PATTERNS:
-        if pattern in cmd_stripped:
-            return False, f"Dangerous character/pattern '{pattern}' not allowed in command"
-    
-    # Get the base command (first word)
-    cmd_lower = cmd_stripped.lower()
-    parts = cmd_lower.split()
-    if not parts:
-        return False, "Empty command"
-    
-    base_cmd = parts[0]
-    
-    # Check if it's in the allowed list
-    for allowed in _SHELL_ALLOWED_COMMANDS:
-        if cmd_lower.startswith(allowed.lower()):
-            return True, ""
-    
-    # Also allow if the base command is in allowed list
-    if base_cmd in _SHELL_ALLOWED_COMMANDS:
-        return True, ""
-    
-    return False, f"Command '{base_cmd}' is not in the allowed list. Allowed commands: {', '.join(sorted(_SHELL_ALLOWED_COMMANDS))}"
 
 
 class CodingMasterSkillkit(Skillkit):
@@ -165,6 +102,7 @@ class CodingMasterSkillkit(Skillkit):
     def __init__(self, agent_id: str = "") -> None:
         super().__init__()
         self._agent_id = agent_id
+        self._overlay_mode: str | None = None  # set when read-only overlay on deliver session
 
     def getName(self) -> str:
         return "coding_master"
@@ -224,7 +162,14 @@ class CodingMasterSkillkit(Skillkit):
             branch=branch or None,
             agent=self._agent_id,
         )
-        return _result_to_str(tools.cmd_lock(args))
+        result = tools.cmd_lock(args)
+        # Track overlay mode: when a read-only lock overlays a deliver session,
+        # lock.json still says "deliver" but this agent operates in review mode.
+        if result.get("ok") and result.get("data", {}).get("overlay"):
+            self._overlay_mode = mode
+        else:
+            self._overlay_mode = None
+        return _result_to_str(result)
 
     def _cm_unlock(self, repo: str = "", force: bool = False, **kwargs) -> str:
         """释放工作区锁。写会话未完成时需要 force=true。
@@ -381,6 +326,7 @@ class CodingMasterSkillkit(Skillkit):
             pr=pr or None,
             goal=goal or None,
             agent=self._agent_id,
+            mode_override=self._overlay_mode,
         )
         return _result_to_str(tools.cmd_scope(args))
 
@@ -402,6 +348,7 @@ class CodingMasterSkillkit(Skillkit):
             content=content or None,
             file=file or None,
             agent=self._agent_id,
+            mode_override=self._overlay_mode,
         )
         return _result_to_str(tools.cmd_report(args))
 
@@ -539,68 +486,6 @@ class CodingMasterSkillkit(Skillkit):
         except Exception as exc:
             return _result_to_str({"ok": False, "error": str(exc)})
 
-    def _cm_shell(self, command: str, cwd: str = "", **kwargs) -> str:
-        """在工作区内执行构建/测试命令。禁止用于代码搜索或文件读取。
-
-        Intended for: pytest, npm test, make build, cargo test, pip install, etc.
-        Forbidden: grep, cat, find, curl, wget, rm, python, etc.
-
-        Args:
-            command (str): 要执行的命令
-            cwd (str): 工作目录（默认使用当前会话的 worktree）
-
-        Returns:
-            str: JSON — 包含 stdout, stderr, returncode
-        """
-        # Validate command against whitelist
-        is_valid, error_msg = _validate_shell_command(command)
-        if not is_valid:
-            return _result_to_str({
-                "ok": False,
-                "error": f"Command validation failed: {error_msg}",
-            })
-
-        work_dir = cwd or self._resolve_session_cwd()
-        if not work_dir:
-            return _result_to_str({
-                "ok": False,
-                "error": "No active session. Lock a repo first, or specify cwd.",
-            })
-
-        # Resolve work_dir to absolute path and validate it's within allowed directory
-        work_dir_path = Path(work_dir).resolve()
-        
-        try:
-            # Use shell=False with properly parsed arguments to prevent injection
-            # shlex.split safely parses the command string
-            cmd_args = shlex.split(command)
-            result = subprocess.run(
-                cmd_args,
-                shell=False,
-                cwd=str(work_dir_path),
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
-            stdout = result.stdout
-            stderr = result.stderr
-            if len(stdout) > 8000:
-                stdout = stdout[:4000] + "\n...(truncated)...\n" + stdout[-4000:]
-            if len(stderr) > 4000:
-                stderr = stderr[:2000] + "\n...(truncated)...\n" + stderr[-2000:]
-
-            return _result_to_str({
-                "ok": result.returncode == 0,
-                "data": {
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "returncode": result.returncode,
-                },
-            })
-        except subprocess.TimeoutExpired:
-            return _result_to_str({"ok": False, "error": "command timed out (300s limit)"})
-        except Exception as exc:
-            return _result_to_str({"ok": False, "error": str(exc)})
 
     # ──────────────────────────────────────────────────────────
     #  Internal helpers
@@ -660,5 +545,4 @@ class CodingMasterSkillkit(Skillkit):
             SkillFunction(self._cm_doctor),
             # Escape hatches
             SkillFunction(self._cm_git),
-            SkillFunction(self._cm_shell),
         ]

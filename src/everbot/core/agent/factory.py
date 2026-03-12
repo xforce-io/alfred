@@ -87,13 +87,14 @@ class AgentFactory:
         return self._global_config
 
     def _create_agent_config(
-        self, workspace_path: Path
+        self, workspace_path: Path, agent_name: str = ""
     ) -> GlobalConfig:
         """
         为特定 agent 创建配置，添加专属 skills 目录
 
         Args:
             workspace_path: Agent 工作区路径
+            agent_name: Agent 名称，用于读取 per-agent skills 过滤配置
 
         Returns:
             新配置实例，包含 agent 专属的 skills 目录
@@ -152,6 +153,17 @@ class AgentFactory:
         variables['WORKSPACE_ROOT'] = str(workspace_path)
         agent_config.resource_skills['variables'] = variables
 
+        # 透传 per-agent skills include/exclude 到 resource_skills，
+        # 让 dolphin ResourceSkillkit 在 initialize() 时自行过滤
+        if agent_name:
+            filter_names, mode = self._get_agent_skills_filter(agent_name)
+            if filter_names is not None:
+                agent_config.resource_skills[mode] = list(filter_names)
+                logger.info(
+                    "Passed skills.%s=%s to resource_skills config for '%s'",
+                    mode, sorted(filter_names), agent_name,
+                )
+
         return agent_config
 
     async def create_agent(
@@ -176,7 +188,7 @@ class AgentFactory:
         workspace_path = Path(workspace_path)
 
         # 1. 为此 agent 创建专属配置（包含专属 skills 目录）
-        agent_config = self._create_agent_config(workspace_path)
+        agent_config = self._create_agent_config(workspace_path, agent_name)
         actual_model = model_name or self.default_model or agent_config.default_llm
 
         # 2. 加载工作区指令
@@ -230,7 +242,17 @@ class AgentFactory:
             verbose=False,
         )
 
-        # 7. 初始化
+        # 7. 加载 per-agent 自定义 skillkits（必须在 initialize 之前，
+        #    否则 context.all_skills 不会包含这些工具）
+        self._load_custom_skillkits(agent, agent_name)
+
+        # 7.5 刷新 allSkills — _loadCustomSkillkitsFromPath 只写入
+        #     installedSkillset，不会自动同步到 allSkills
+        gs = getattr(agent, "global_skills", None)
+        if gs is not None and hasattr(gs, "_syncAllSkills"):
+            gs._syncAllSkills()
+
+        # 8. 初始化
         await agent.initialize()
         logger.info("Agent 已初始化: %s", agent_name)
 
@@ -263,7 +285,35 @@ class AgentFactory:
         context.set_variable(KEY_HISTORY_COMPACT_ON_PERSIST, True)
         context.set_variable(KEY_HISTORY_COMPACT_RECENT_TURNS, 0)
 
+        # Pre-seed last_skills from DPH tools= so that continue_exploration
+        # (which bypasses DPH execution) inherits the tools filter.
+        dph_skills = self._parse_dph_tools(agent_dph_path)
+        if dph_skills and hasattr(context, "set_last_skills"):
+            context.set_last_skills(dph_skills)
+            logger.info("Pre-seeded last_skills from DPH: %s", dph_skills)
+
         return agent
+
+    @staticmethod
+    def _parse_dph_tools(dph_path: Path) -> list[str] | None:
+        """Extract the tools=[...] list from a DPH file without executing it.
+
+        Returns a list like ``['coding_master', '_date']`` or ``None``
+        if no ``tools=`` parameter is found.
+        """
+        try:
+            raw = dph_path.read_text(encoding="utf-8")
+        except Exception:
+            return None
+        # Match tools=[...] in the first /explore/ line
+        m = re.search(r'tools=\[([^\]]*)\]', raw)
+        if not m:
+            return None
+        inner = m.group(1).strip()
+        if not inner:
+            return []
+        # Parse comma-separated, strip quotes and whitespace
+        return [t.strip().strip("'\"") for t in inner.split(",") if t.strip()]
 
     def _ensure_compatible_agent_dph(
         self,
@@ -444,6 +494,83 @@ Current time: $current_time
 
         return "\n\n---\n\n".join([p for p in parts if p])
 
+    # ------------------------------------------------------------------
+    # Per-agent custom skillkit loading
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_skill_name(name: str) -> str:
+        """Normalize a skill name for comparison (hyphens ↔ underscores)."""
+        return name.replace("-", "_").lower()
+
+    def _load_custom_skillkits(self, agent: Any, agent_name: str) -> None:
+        """Load custom skillkits from per-agent skillkit_dirs config.
+
+        Reads ``everbot.agents.<name>.skillkit_dirs`` from config.yaml
+        and delegates to Dolphin's ``GlobalSkills._loadCustomSkillkitsFromPath()``
+        for scanning and registration.
+
+        Respects per-agent ``skills.include`` / ``skills.exclude``: if a filter
+        is active the skillkit directory basename (normalised) must pass the
+        filter, otherwise the entire skillkit is skipped.
+        """
+        # Read Alfred app config (not Dolphin framework config) — agent
+        # definitions live in ~/.alfred/config.yaml, not in dolphin.yaml.
+        config = get_config()
+        agent_section = config.get("everbot", {}).get("agents", {}).get(agent_name, {})
+        skillkit_dirs = agent_section.get("skillkit_dirs", [])
+        if not skillkit_dirs:
+            return
+
+        gs = getattr(agent, "global_skills", None)
+        if gs is None:
+            return
+
+        # Read the per-agent skills filter once for all dirs
+        filter_names, filter_mode = self._get_agent_skills_filter(agent_name)
+        normalized_filter: set[str] | None = None
+        if filter_names is not None:
+            normalized_filter = {self._normalize_skill_name(n) for n in filter_names}
+
+        project_root = Path(__file__).resolve().parents[4]
+
+        for dir_entry in skillkit_dirs:
+            skillkit_dir = Path(dir_entry).expanduser()
+            if not skillkit_dir.is_absolute():
+                skillkit_dir = (project_root / skillkit_dir).resolve()
+
+            # Derive skill identity from directory basename for filter check.
+            # e.g. "skills/coding-master" → "coding_master"
+            dir_skill_name = self._normalize_skill_name(skillkit_dir.name)
+
+            if normalized_filter is not None:
+                if filter_mode == "include" and dir_skill_name not in normalized_filter:
+                    logger.info(
+                        "Skipped custom skillkit %s for agent '%s' "
+                        "(not in skills.include)",
+                        skillkit_dir, agent_name,
+                    )
+                    continue
+                if filter_mode == "exclude" and dir_skill_name in normalized_filter:
+                    logger.info(
+                        "Skipped custom skillkit %s for agent '%s' "
+                        "(in skills.exclude)",
+                        skillkit_dir, agent_name,
+                    )
+                    continue
+
+            try:
+                gs._loadCustomSkillkitsFromPath(str(skillkit_dir))
+                logger.info(
+                    "Loaded custom skillkits from %s for agent '%s'",
+                    skillkit_dir, agent_name,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to load skillkits from %s", skillkit_dir,
+                    exc_info=True,
+                )
+
     def _get_skills_directories(self, agent_config: GlobalConfig) -> List[Path]:
         """获取技能目录列表"""
         directories = []
@@ -581,6 +708,8 @@ Current time: $current_time
             Raises ValueError if both include and exclude are set,
             or if any listed skill does not exist at runtime.
         """
+        # Read Alfred app config — agent skill filters live in
+        # ~/.alfred/config.yaml, not in dolphin.yaml.
         config = get_config()
         agent_section = config.get("everbot", {}).get("agents", {}).get(agent_name, {})
         skills_config = agent_section.get("skills", {})
@@ -664,7 +793,9 @@ Current time: $current_time
             if filtered_count:
                 logger.info("Filtered out %d disabled skill(s).", filtered_count)
 
-        # Per-agent skills filter (include or exclude, not both)
+        # Per-agent skills filter (include or exclude, not both).
+        # Dolphin ResourceSkillkit also receives these via _create_agent_config(),
+        # but we filter here too for prompt-injection correctness.
         filter_names, mode = self._get_agent_skills_filter(agent_name)
         if filter_names is not None:
             unknown = filter_names - all_skill_names

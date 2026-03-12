@@ -523,6 +523,30 @@ class TestIsSafeSessionId:
         assert SessionPersistence.is_safe_session_id("bad;chars") is False
 
 
+class TestGetLockPathValidation:
+    """_get_lock_path must reject unsafe session IDs (defense-in-depth)."""
+
+    def test_valid_session_id(self, tmp_path):
+        p = SessionPersistence(tmp_path)
+        result = p._get_lock_path("web_session_agent")
+        assert result == tmp_path / ".web_session_agent.lock"
+
+    def test_rejects_path_traversal(self, tmp_path):
+        p = SessionPersistence(tmp_path)
+        with pytest.raises(ValueError, match="Invalid session_id"):
+            p._get_lock_path("../../etc/passwd")
+
+    def test_rejects_slash(self, tmp_path):
+        p = SessionPersistence(tmp_path)
+        with pytest.raises(ValueError, match="Invalid session_id"):
+            p._get_lock_path("bad/id")
+
+    def test_rejects_empty(self, tmp_path):
+        p = SessionPersistence(tmp_path)
+        with pytest.raises(ValueError, match="Invalid session_id"):
+            p._get_lock_path("")
+
+
 # ===========================================================================
 # 9. SessionManager.save_session with lock_already_held=True
 # ===========================================================================

@@ -416,8 +416,9 @@ async def api_stream_heartbeat_log() -> StreamingResponse:
 
     async def _events():
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        f = open(log_path, "a+", encoding="utf-8")
+        f = None
         try:
+            f = open(log_path, "a+", encoding="utf-8")
             f.seek(0, 2)
             while True:
                 line = f.readline()
@@ -425,11 +426,14 @@ async def api_stream_heartbeat_log() -> StreamingResponse:
                     await asyncio.sleep(0.5)
                     continue
                 yield f"data: {line.rstrip()}\n\n"
+        except asyncio.CancelledError:
+            raise
         finally:
-            try:
-                f.close()
-            except Exception:
-                pass
+            if f is not None:
+                try:
+                    f.close()
+                except Exception:
+                    pass
 
     return StreamingResponse(_events(), media_type="text/event-stream")
 
@@ -442,8 +446,9 @@ async def api_stream_heartbeat_events() -> StreamingResponse:
 
     async def _events():
         events_path.parent.mkdir(parents=True, exist_ok=True)
-        f = open(events_path, "a+", encoding="utf-8")
+        f = None
         try:
+            f = open(events_path, "a+", encoding="utf-8")
             f.seek(0, 2)
             while True:
                 line = f.readline()
@@ -451,11 +456,14 @@ async def api_stream_heartbeat_events() -> StreamingResponse:
                     await asyncio.sleep(0.5)
                     continue
                 yield f"data: {line.rstrip()}\n\n"
+        except asyncio.CancelledError:
+            raise
         finally:
-            try:
-                f.close()
-            except Exception:
-                pass
+            if f is not None:
+                try:
+                    f.close()
+                except Exception:
+                    pass
 
     return StreamingResponse(_events(), media_type="text/event-stream")
 

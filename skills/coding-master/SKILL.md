@@ -10,7 +10,7 @@ tags: [coding, development, review, debug, analysis, pr, automation, parallel]
 > **MANDATORY**: All code work MUST go through `cm` commands below.
 > Do NOT use raw bash/grep/read to substitute `cm` workflows.
 > **Session continuity**: If prior `cm` results are visible in conversation history, you are already initialized — skip `cm lock` / `cm repos` / `cm scope` and continue from where you left off. Only run `cm lock` on the very first message of a session.
-> **EXECUTE, DON'T DISPLAY**: Always run `cm` commands via the `_bash` tool call.
+> **EXECUTE, DON'T DISPLAY**: Always run `cm` commands via the corresponding `_cm_*` tool calls (e.g. `_cm_lock`, `_cm_scope`, `_cm_engine_run`).
 > NEVER output commands as text/code blocks — the user cannot run them.
 
 CLI: `cm <command> [options]`
@@ -30,11 +30,14 @@ cm repos                              # list configured repos and workspaces
 ```
 cm lock --repo <name> --mode review    # or debug / analyze
 cm scope --diff HEAD~3..HEAD           # define what to look at
-# ... read code, analyze ...
-cm report --content '...'              # write findings
-cm progress                            # check what's missing
+cm engine-run                          # delegate analysis to engine subprocess
+cm report --content '...'              # write findings based on engine results
 cm unlock                              # done
 ```
+
+> **You are a dispatcher, not an executor.** Define scope, delegate to engine, consume results, write report.
+> `cm engine-run` invokes a subprocess that reads all files and returns structured findings.
+> Do NOT read/grep/find code yourself — that is the engine's job.
 
 ### deliver (feature development)
 
@@ -73,6 +76,7 @@ cm submit --title "..."                # push + PR + cleanup
 | `cm unlock --repo <name>` | all | Release lock |
 | `cm scope [--diff R] [--files F] [--pr N] [--goal G]` | review/debug/analyze | Define analysis scope |
 | `cm report [--content C] [--file F]` | review/debug/analyze | Write report or diagnosis |
+| `cm engine-run [--goal G] [--engine E] [--timeout T] [--max-turns N]` | all | Delegate analysis to engine subprocess |
 | `cm plan-ready` | deliver | Validate PLAN.md → session: locked → reviewed |
 | `cm claim --feature <n>` | deliver | Claim feature, create branch/worktree/feature-MD |
 | `cm delegate-prepare --feature <n>` | deliver | Write delegation request and mark delegation running |
@@ -99,3 +103,4 @@ cm submit --title "..."                # push + PR + cleanup
 6. **Release lock when done**
 7. **Trust local progress first** — when unsure, run `cm progress` and follow `next_action`
 8. **Respect delegation hard gates** — when `must_delegate=true`, wait for delegation completion
+9. **Dispatcher, not executor** — use `cm engine-run` for all code analysis. Do not read/grep/find code yourself
