@@ -546,7 +546,7 @@ class SessionManager:
                 session_data.mailbox = []
             session_data.variables = exported_variables
             if not session_data.created_at:
-                session_data.created_at = created_at_hint or datetime.now().isoformat()
+                session_data.created_at = created_at_hint or datetime.now(timezone.utc).isoformat()
             session_data.timeline = timeline or []
             session_data.context_trace = context_trace or {}
 
@@ -625,7 +625,7 @@ class SessionManager:
             if target is None:
                 target = legacy
                 target.session_id = target_session_id
-                target.updated_at = datetime.now().isoformat()
+                target.updated_at = datetime.now(timezone.utc).isoformat()
                 if not isinstance(target.variables, dict):
                     target.variables = {}
                 target.variables.setdefault("_migrated_from", [])
@@ -644,7 +644,7 @@ class SessionManager:
                     target.variables = {}
                 target.variables.setdefault("_migrated_from", [])
                 target.variables["_migrated_from"].append(legacy_id)
-                target.updated_at = datetime.now().isoformat()
+                target.updated_at = datetime.now(timezone.utc).isoformat()
 
             legacy_path = self.persistence._get_session_path(legacy_id)
             if legacy_path.exists():
@@ -678,7 +678,7 @@ class SessionManager:
         session_data.events = []
         session_data.timeline = []
         session_data.context_trace = {}
-        session_data.updated_at = datetime.now().isoformat()
+        session_data.updated_at = datetime.now(timezone.utc).isoformat()
         await self.persistence.save_data(session_data)
         # Also clear in-memory caches so next load is fresh
         self._agents.pop(session_id, None)

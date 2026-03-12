@@ -31,16 +31,16 @@ class ChatService:
     MAX_TOOL_ARGS_PREVIEW_CHARS = CHAT_POLICY.max_tool_args_preview_chars
     MAX_TOOL_OUTPUT_PREVIEW_CHARS = CHAT_POLICY.max_tool_output_preview_chars
 
-    # Active WebSocket connections: session_id -> WebSocket
-    _active_connections: Dict[str, WebSocket] = {}
-    # Agent-scoped connections: agent_name -> set of (session_id, WebSocket)
-    _connections_by_agent: Dict[str, set] = {}
-    # Last activity time: session_id -> timestamp (time.time())
-    _last_activity: Dict[str, float] = {}
-    # Per-agent last broadcast: agent_name -> timestamp (for agent-scope idle gate)
-    _last_agent_broadcast: Dict[str, float] = {}
-
     def __init__(self):
+        # Active WebSocket connections: session_id -> WebSocket
+        self._active_connections: Dict[str, WebSocket] = {}
+        # Agent-scoped connections: agent_name -> set of (session_id, WebSocket)
+        self._connections_by_agent: Dict[str, set] = {}
+        # Last activity time: session_id -> timestamp (time.time())
+        self._last_activity: Dict[str, float] = {}
+        # Per-agent last broadcast: agent_name -> timestamp (for agent-scope idle gate)
+        self._last_agent_broadcast: Dict[str, float] = {}
+
         self.agent_service = AgentService()
         self.user_data = get_user_data_manager()
         self.session_manager = SessionManager(self.user_data.sessions_dir)
@@ -62,10 +62,12 @@ class ChatService:
     def _unregister_connection(self, session_id: str, agent_name: str):
         """Remove a WebSocket from both session and agent indices."""
         ws = self._active_connections.pop(session_id, None)
+        self._last_activity.pop(session_id, None)
         if agent_name in self._connections_by_agent:
             self._connections_by_agent[agent_name].discard((session_id, ws))
             if not self._connections_by_agent[agent_name]:
                 del self._connections_by_agent[agent_name]
+                self._last_agent_broadcast.pop(agent_name, None)
 
     def _mark_activity(self, session_id: str, agent_name: Optional[str] = None):
         """Mark current time as the latest activity for a session."""
@@ -306,8 +308,12 @@ class ChatService:
                         if ack_ids:
                             await self._core._ack_mailbox_events(session_id, ack_ids)
                             logger.debug("Mailbox poll drained %d events", len(drain_events))
+                    except (ConnectionResetError, BrokenPipeError, OSError):
+                        break  # WebSocket closed — stop polling
+                    except asyncio.CancelledError:
+                        raise
                     except Exception:
-                        pass  # WebSocket closed or session read failed
+                        logger.debug("Mailbox poll error", exc_info=True)
 
             mailbox_poll_task = asyncio.create_task(_poll_mailbox_loop())
 

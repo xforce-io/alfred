@@ -28,6 +28,13 @@ from .heartbeat_utils import (
     try_deterministic_task,
 )
 
+# Whitelist of allowed skill module names for dynamic import
+ALLOWED_SKILLS: frozenset[str] = frozenset({
+    "health_check",
+    "memory_review",
+    "task_discover",
+})
+
 logger = logging.getLogger(__name__)
 
 # Error markers indicating non-retryable (permanent) failures.
@@ -546,7 +553,10 @@ class CronExecutor:
 
         try:
             context = self._build_skill_context(scan_result)
-            skill_module = importlib.import_module(f"everbot.core.jobs.{skill_name.replace('-', '_')}")
+            module_name = skill_name.replace("-", "_")
+            if module_name not in ALLOWED_SKILLS:
+                raise ValueError(f"Skill {skill_name!r} is not in the allowed skills whitelist")
+            skill_module = importlib.import_module(f"everbot.core.jobs.{module_name}")
             result = await skill_module.run(context)
 
             duration_ms = int(_time.time() * 1000) - start_ms

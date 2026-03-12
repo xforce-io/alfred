@@ -6,8 +6,9 @@ import json
 import os
 import re
 import time
-from contextlib import contextmanager
-from datetime import datetime
+import asyncio
+from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Callable
 import logging
@@ -284,7 +285,7 @@ class SessionPersistence:
             created_at = (
                 context.get_var_value("session_created_at")
                 or (previous.created_at if previous and previous.created_at else None)
-                or datetime.now().isoformat()
+                or datetime.now(timezone.utc).isoformat()
             )
 
             data = SessionData(
@@ -296,7 +297,7 @@ class SessionPersistence:
                 mailbox=(previous.mailbox if previous and isinstance(previous.mailbox, list) else []),
                 variables=exported_variables,
                 created_at=created_at,
-                updated_at=datetime.now().isoformat(),
+                updated_at=datetime.now(timezone.utc).isoformat(),
                 state=(previous.state if previous and isinstance(previous.state, str) else "active"),
                 archived_at=(previous.archived_at if previous else None),
                 timeline=timeline or [],
@@ -404,12 +405,15 @@ class SessionPersistence:
 
     @contextmanager
     def file_lock(self, session_id: str, *, timeout: float = 10.0, blocking: bool = True):
-        """Cross-process file lock using fcntl.flock.
+        """Cross-process file lock using fcntl.flock (sync version).
 
         Usage:
             with persistence.file_lock("session_123") as acquired:
                 if acquired:
                     ...  # exclusive access
+
+        WARNING: The blocking path uses ``time.sleep`` which blocks the event
+        loop.  Prefer ``async_file_lock`` when called from async code.
         """
         lock_path = self._get_lock_path(session_id)
         fd = None
@@ -445,6 +449,45 @@ class SessionPersistence:
                         pass
                 os.close(fd)
 
+    @asynccontextmanager
+    async def async_file_lock(self, session_id: str, *, timeout: float = 10.0, blocking: bool = True):
+        """Cross-process file lock using fcntl.flock (async version).
+
+        Uses ``asyncio.sleep`` instead of ``time.sleep`` so that the event
+        loop is not blocked while waiting for the lock.
+        """
+        lock_path = self._get_lock_path(session_id)
+        fd = None
+        acquired = False
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+            if blocking:
+                deadline = time.monotonic() + timeout
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        acquired = True
+                        break
+                    except (OSError, BlockingIOError):
+                        if time.monotonic() >= deadline:
+                            break
+                        await asyncio.sleep(0.05)
+            else:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                except (OSError, BlockingIOError):
+                    pass
+            yield acquired
+        finally:
+            if fd is not None:
+                if acquired:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    except Exception:
+                        pass
+                os.close(fd)
+
     async def update_atomic(
         self,
         session_id: str,
@@ -474,7 +517,7 @@ class SessionPersistence:
         if lock_already_held:
             return await self._update_atomic_inner(session_id, mutator)
 
-        with self.file_lock(session_id, timeout=timeout, blocking=blocking) as acquired:
+        async with self.async_file_lock(session_id, timeout=timeout, blocking=blocking) as acquired:
             if not acquired:
                 return None
             return await self._update_atomic_inner(session_id, mutator)
@@ -495,8 +538,8 @@ class SessionPersistence:
                 history_messages=[],
                 mailbox=[],
                 variables={},
-                created_at=datetime.now().isoformat(),
-                updated_at=datetime.now().isoformat(),
+                created_at=datetime.now(timezone.utc).isoformat(),
+                updated_at=datetime.now(timezone.utc).isoformat(),
                 state="active",
                 archived_at=None,
                 revision=0,
@@ -505,7 +548,7 @@ class SessionPersistence:
         mutator(current)
         # Bump revision and timestamp
         current.revision = (current.revision or 0) + 1
-        current.updated_at = datetime.now().isoformat()
+        current.updated_at = datetime.now(timezone.utc).isoformat()
         # Atomic write
         session_path = self._get_session_path(session_id)
         serialized = self._serialize_session(current.to_dict())

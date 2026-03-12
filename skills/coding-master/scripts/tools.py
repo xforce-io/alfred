@@ -32,6 +32,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 from config_manager import ConfigManager
 
 CM_DIR = ".coding-master"
+SESSION_FILE = "session.json"       # persistent session history (survives unlock)
 EVIDENCE_DIR = "evidence"
 DELEGATION_DIR = "delegation"
 LEASE_MINUTES = 120
@@ -240,6 +241,55 @@ def _session_worktree_path(repo: Path) -> Path:
     return repo.parent / f"{repo.name}-session"
 
 
+def _read_session(repo: Path) -> dict:
+    """Read persistent session history from .coding-master/session.json."""
+    return _atomic_json_read(repo / CM_DIR / SESSION_FILE)
+
+
+def _save_session(repo: Path, branch: str, mode: str, phase: str):
+    """Persist session state that must survive across lock/unlock cycles.
+
+    This is the single source of truth for "what branch was this repo
+    working on" — read by cmd_lock when deciding whether to create a
+    new branch or continue on an existing one.
+    """
+    session_path = repo / CM_DIR / SESSION_FILE
+
+    def update(data):
+        data.update({
+            "branch": branch,
+            "mode": mode,
+            "phase": phase,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        return {"ok": True}
+
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_json_update(session_path, update)
+
+
+def _reuse_session_branch(repo: Path) -> str | None:
+    """Return the branch from session.json if it still points at HEAD.
+
+    This is the key mechanism that prevents branch proliferation: instead
+    of creating dev/alfred-0312-1231, dev/alfred-0312-1232, ... on every
+    lock cycle, we continue working on the same branch as long as it
+    hasn't diverged.
+    """
+    session = _read_session(repo)
+    branch = session.get("branch", "")
+    if not branch:
+        return None
+    try:
+        head_sha = _run_git(repo, ["rev-parse", "HEAD"]).stdout.strip()
+        branch_sha = _run_git(repo, ["rev-parse", branch], check=False).stdout.strip()
+        if head_sha and head_sha == branch_sha:
+            return branch
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
 def _ensure_session_worktree(repo: Path, lock: dict | None = None) -> dict:
     """Ensure the session worktree exists for the active write session."""
     lock_path = repo / CM_DIR / "lock.json"
@@ -302,6 +352,8 @@ def _run_git(repo: Path, cmd: list[str], check: bool = True) -> subprocess.Compl
         ["git"] + cmd, cwd=str(repo), capture_output=True, text=True,
         check=check, timeout=120,
     )
+
+
 
 
 def _write_file(path: Path, content: str):
@@ -818,8 +870,9 @@ def cmd_lock(args) -> dict:
     # Write modes use a separate session worktree, so dirty main repo is fine.
     # No stash or clean-tree check needed — the worktree starts clean.
 
-    # Capture current branch for read-only modes (before lock, no git mutation)
+    # Pre-compute branch info outside atomic section (avoid subprocess under flock).
     current_branch = _run_git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip() if read_only else None
+    reuse_branch = None if read_only else _reuse_session_branch(repo)
 
     def reserve_lock(data):
         now = datetime.now(timezone.utc)
@@ -844,7 +897,9 @@ def cmd_lock(args) -> dict:
 
         # ── No session or session done → create new ──
         branch = current_branch if read_only else (
-            getattr(args, "branch", None) or f"dev/{args.repo}-{now.strftime('%m%d-%H%M')}"
+            getattr(args, "branch", None)
+            or reuse_branch
+            or f"dev/{args.repo}-{now.strftime('%m%d-%H%M')}"
         )
         data.clear()
         data.update({
@@ -906,6 +961,7 @@ def cmd_lock(args) -> dict:
     session_wt = session_result["data"]["session_worktree"]
 
     _ensure_gitignore(repo)
+    _save_session(repo, branch, mode, "locked")
     _append_journal(repo, agent, "lock", f"Workspace locked, branch: {branch}, worktree: {session_wt}")
     return {"ok": True, "data": {"branch": branch, "session_worktree": session_wt,
                                  "next_action": next_action}}
@@ -1794,6 +1850,7 @@ def cmd_submit(args) -> dict:
 
     # Mark done + unlock
     agent = _resolve_agent(args)
+    _save_session(repo, branch, "deliver", "done")
     _append_journal(repo, agent, "submit", f"PR: {pr_url or branch}")
     try:
         _atomic_json_update(repo / CM_DIR / "lock.json", lambda d: (

@@ -25,7 +25,7 @@ from .heartbeat_utils import (
     task_snapshot,
     try_deterministic_task,
 )
-from .cron import CronExecutor
+from .cron import ALLOWED_SKILLS, CronExecutor
 from .cron_delivery import CronDelivery
 from .inspector import Inspector
 from .ports import HeartbeatSessionPort
@@ -753,10 +753,15 @@ If not, reply with `HEARTBEAT_OK`.
                             scope=self.broadcast_scope,
                             detail=inspection.delivery_detail,
                         )
-                    # If inspector already pushed a message to the user,
-                    # suppress the bare status string (e.g. "HEARTBEAT_ERROR")
-                    # from being delivered as a redundant notification.
+                    # Suppress bare status strings from being delivered as
+                    # notifications.  If the inspector has a push_message it
+                    # was already emitted above; if it doesn't, a bare
+                    # "HEARTBEAT_ERROR" carries no actionable information for
+                    # the user.  Only forward non-trivial LLM output (e.g.
+                    # detailed diagnostics longer than a bare status token).
                     if inspection.push_message:
+                        result = "HEARTBEAT_OK"
+                    elif inspection.output in ("HEARTBEAT_ERROR", "HEARTBEAT_OK"):
                         result = "HEARTBEAT_OK"
                     else:
                         result = inspection.output
@@ -1088,7 +1093,10 @@ If not, reply with `HEARTBEAT_OK`.
             context = self._build_skill_context(scan_result)
 
             # Import and run skill
-            skill_module = importlib.import_module(f"everbot.core.jobs.{skill_name.replace('-', '_')}")
+            module_name = skill_name.replace("-", "_")
+            if module_name not in ALLOWED_SKILLS:
+                raise ValueError(f"Skill {skill_name!r} is not in the allowed skills whitelist")
+            skill_module = importlib.import_module(f"everbot.core.jobs.{module_name}")
             result = await skill_module.run(context)
 
             duration_ms = int(_time.time() * 1000) - start_ms

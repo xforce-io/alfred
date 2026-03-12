@@ -96,13 +96,15 @@ Agent 只接触计划层（MD）和工具层（调用），永远不直接碰数
 
 **决策**：三个机制各解决一类问题，不需要 feature 级文件锁。
 
-- **Session 级**（`lock.json`）：排他锁，保证同一时间只有一组 agent 在同一个 repo 上执行一个 PLAN。解决的是"谁在用这个 repo"。
+- **Session 级**（`lock.json` + `session.json`）：排他锁，保证同一时间只有一组 agent 在同一个 repo 上执行一个 PLAN。解决的是"谁在用这个 repo"。`lock.json` 仅存活跃 session 状态（unlock 时清空），`session.json` 持久化 session 历史（branch、mode、phase），使下一次 `cm lock` 能复用上次的 dev branch 而不是每次新建。
 - **Feature 级**（`claims.json` 认领）：原子认领，保证一个 feature 只有一个 owner。解决的是"谁负责哪个 feature"。用 flock 保证认领的原子性，但不是持久文件锁。
 - **代码隔离**（worktree）：**session 级和 feature 级都使用独立 worktree**，物理上不会冲突。解决的是"代码改动互不影响"且"不污染主 repo 工作区"。
 
 一个 repo 同时只能有一个 session（一个 lock = 一个 PLAN），但一个 session 内可以有多个 agent 并行工作在不同 feature 的 worktree 中。这是有意的简化——并行多 session 带来的 branch 管理和 merge 复杂度不值得。
 
 **Session Worktree 隔离**：`cm lock` 创建 dev branch 时不在主 repo 上 checkout，而是通过 `git worktree add` 在独立目录（`<repo-parent>/<repo-name>-session`）中创建 session worktree。主 repo 始终保持在用户原来的分支上，用户的未提交修改不受影响。Feature worktree 的父目录与 session worktree 同级（`<repo-parent>/<repo-name>-feature-N`）。`cm integrate` 和 `cm submit` 的所有 git 操作都在 session worktree 中执行。
+
+**Branch 复用**：`session.json` 持久化上一次 session 的 branch 名。`cm lock` 创建新 session 时，先读 `session.json` 中的 branch，检查该分支是否仍指向 HEAD（即没有产生过 commit）。如果是，则复用该分支；否则新建 `dev/<repo>-MMDD-HHMM`。这避免了 session 反复创建/销毁时产生大量空分支。优先级：用户 `--branch` 参数 > session.json 中可复用的分支 > 新时间戳分支。
 
 ---
 
@@ -112,7 +114,8 @@ Agent 只接触计划层（MD）和工具层（调用），永远不直接碰数
 
 ```
 <repo>/.coding-master/               # 被 .gitignore 忽略，仅本地协作状态
-├── lock.json                        # 结构化：workspace 锁（工具原子读写）
+├── lock.json                        # 结构化：workspace 锁（工具原子读写，unlock 时清空）
+├── session.json                     # 结构化：持久化 session 历史（跨 lock/unlock 生存）
 │
 ├── PLAN.md                          # MD：feature 规格（写一次，agent 读）
 ├── JOURNAL.md                       # MD：append-only 开发日志（全局时间线）

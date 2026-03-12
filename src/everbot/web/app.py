@@ -12,9 +12,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, WebSocket, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,13 +28,37 @@ from .services import AgentService, ChatService
 from ..core.session.session import SessionData
 from ..infra.user_data import get_user_data_manager
 from ..infra.config import get_config, load_config, save_config
+def _get_cors_origins() -> List[str]:
+    """Build the list of allowed CORS origins.
+
+    Defaults to common localhost variants.  Extra origins can be added via
+    the ``EVERBOT_CORS_ORIGINS`` environment variable (comma-separated).
+    """
+    origins: List[str] = [
+        "http://localhost",
+        "http://localhost:8080",
+        "http://localhost:3000",
+        "http://127.0.0.1",
+        "http://127.0.0.1:8080",
+        "http://127.0.0.1:3000",
+    ]
+    extra = os.environ.get("EVERBOT_CORS_ORIGINS", "").strip()
+    if extra:
+        for origin in extra.split(","):
+            origin = origin.strip()
+            if origin and origin not in origins:
+                origins.append(origin)
+    return origins
+
+
 # FastAPI app
 app = FastAPI(title="EverBot")
 
-# CORS middleware — permissive by default for local use; tighten via config if needed.
+# CORS middleware — restricted to local origins by default.
+# Set EVERBOT_CORS_ORIGINS (comma-separated) to allow additional origins.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_get_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -53,6 +78,33 @@ logger = logging.getLogger(__name__)
 
 # Task tracking (for async heartbeat operations)
 _tasks: Dict[str, str] = {}
+_task_refs: set = set()  # prevent GC of fire-and-forget asyncio tasks
+_MAX_COMPLETED_TASKS = 50
+_MAX_ERROR_LENGTH = 200
+
+
+def _cleanup_completed_tasks() -> None:
+    """Remove completed/errored tasks when the dict grows too large.
+
+    Evicts terminal tasks (done / error:*) first.  If the dict is still
+    over the limit after that – which happens when many fire-and-forget
+    coroutines are stuck in "running"/"scheduled" – evict the oldest
+    non-terminal entries as well so the dict stays bounded.
+    """
+    if len(_tasks) <= _MAX_COMPLETED_TASKS:
+        return
+    # Phase 1: remove all terminal entries
+    to_remove = [
+        tid for tid, status in _tasks.items()
+        if status == "done" or status.startswith("error:")
+    ]
+    for tid in to_remove:
+        del _tasks[tid]
+    # Phase 2: if still over limit, evict oldest entries (insertion order)
+    if len(_tasks) > _MAX_COMPLETED_TASKS:
+        excess = len(_tasks) - _MAX_COMPLETED_TASKS
+        for tid in list(_tasks)[:excess]:
+            del _tasks[tid]
 
 
 def _has_trajectory_messages(payload: Dict[str, Any]) -> bool:
@@ -90,18 +142,22 @@ async def api_status() -> Dict[str, Any]:
 @app.post("/api/agents/{agent_name}/heartbeat", dependencies=[Depends(verify_api_key)])
 async def api_trigger_heartbeat(agent_name: str, force: bool = False) -> JSONResponse:
     """Trigger heartbeat for an agent"""
+    _cleanup_completed_tasks()
     task_id = f"{agent_name}:{asyncio.get_event_loop().time()}"
     _tasks[task_id] = "scheduled"
 
     async def _run() -> None:
+        _tasks[task_id] = "running"
         try:
-            _tasks[task_id] = "running"
             await agent_service.trigger_heartbeat(agent_name, force=force)
             _tasks[task_id] = "done"
         except Exception as e:
-            _tasks[task_id] = f"error: {e}"
+            msg = str(e)[:_MAX_ERROR_LENGTH]
+            _tasks[task_id] = f"error: {msg}"
 
-    asyncio.create_task(_run())
+    task = asyncio.create_task(_run())
+    _task_refs.add(task)
+    task.add_done_callback(_task_refs.discard)
     return JSONResponse({"scheduled": True, "task_id": task_id})
 
 
