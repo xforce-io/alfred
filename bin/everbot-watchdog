@@ -41,10 +41,12 @@ send_telegram() {
     log "WARN: Cannot send alert — BOT_TOKEN or ALERT_CHAT_ID not set"
     return 1
   fi
+  # Use --data-urlencode to safely encode message content and prevent
+  # form-data injection from special characters (e.g. & in message text).
   curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-    -d chat_id="${ALERT_CHAT_ID}" \
-    -d text="${message}" \
-    -d parse_mode="Markdown" \
+    --data-urlencode "chat_id=${ALERT_CHAT_ID}" \
+    --data-urlencode "text=${message}" \
+    --data-urlencode "parse_mode=Markdown" \
     --max-time 10 > /dev/null 2>&1 || true
 }
 
@@ -99,6 +101,13 @@ pid="$(tr -d ' \n\r\t' < "${PID_FILE}" || true)"
 
 if [[ -z "${pid}" ]]; then
   log "FAIL: PID file empty"
+  exit 1
+fi
+
+# Validate PID is a positive integer to prevent command injection via
+# corrupted PID file content being passed to kill.
+if ! [[ "${pid}" =~ ^[0-9]+$ ]]; then
+  log "FAIL: PID file contains invalid value: ${pid}"
   exit 1
 fi
 

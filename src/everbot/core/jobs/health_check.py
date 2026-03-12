@@ -72,10 +72,14 @@ class HealthState:
 
     def save(self, workspace: Path) -> None:
         path = workspace / _STATE_FILENAME
-        path.write_text(
+        # Atomic write: write to temp file then rename, so a crash during
+        # write doesn't corrupt the state file.
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(
             json.dumps(self.to_dict(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        tmp_path.replace(path)
 
 
 async def run(context: SkillContext) -> str:

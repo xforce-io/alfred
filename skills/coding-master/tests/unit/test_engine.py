@@ -97,7 +97,8 @@ class TestClaudeCodeEngine:
 
     @patch("subprocess.run")
     @patch("shutil.which", return_value="/usr/local/bin/claude")
-    def test_run_success(self, mock_which, mock_run):
+    @patch("pathlib.Path.is_dir", return_value=True)
+    def test_run_success(self, mock_isdir, mock_which, mock_run):
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout=json.dumps({
@@ -119,7 +120,8 @@ class TestClaudeCodeEngine:
 
     @patch("subprocess.run")
     @patch("shutil.which", return_value="/usr/local/bin/claude")
-    def test_run_timeout(self, mock_which, mock_run):
+    @patch("pathlib.Path.is_dir", return_value=True)
+    def test_run_timeout(self, mock_isdir, mock_which, mock_run):
         import subprocess as sp
         mock_run.side_effect = sp.TimeoutExpired(cmd="claude", timeout=600)
         e = ClaudeCodeEngine()
@@ -129,7 +131,8 @@ class TestClaudeCodeEngine:
 
     @patch("subprocess.run")
     @patch("shutil.which", return_value="/usr/local/bin/claude")
-    def test_run_nonzero_exit(self, mock_which, mock_run):
+    @patch("pathlib.Path.is_dir", return_value=True)
+    def test_run_nonzero_exit(self, mock_isdir, mock_which, mock_run):
         mock_run.return_value = MagicMock(
             returncode=1,
             stdout="",
@@ -142,7 +145,8 @@ class TestClaudeCodeEngine:
 
     @patch("subprocess.run")
     @patch("shutil.which", return_value="/usr/local/bin/claude")
-    def test_run_plain_text_output(self, mock_which, mock_run):
+    @patch("pathlib.Path.is_dir", return_value=True)
+    def test_run_plain_text_output(self, mock_isdir, mock_which, mock_run):
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="This is plain text, not JSON",
@@ -155,7 +159,8 @@ class TestClaudeCodeEngine:
 
     @patch("subprocess.run")
     @patch("shutil.which", return_value="/usr/local/bin/claude")
-    def test_run_uses_correct_tools(self, mock_which, mock_run):
+    @patch("pathlib.Path.is_dir", return_value=True)
+    def test_run_uses_correct_tools(self, mock_isdir, mock_which, mock_run):
         mock_run.return_value = MagicMock(
             returncode=0, stdout='{"result": "ok"}', stderr=""
         )
@@ -166,9 +171,17 @@ class TestClaudeCodeEngine:
         tools_idx = call_args.index("--allowedTools")
         assert call_args[tools_idx + 1] == "Read,Glob,Grep"
 
+    @patch("shutil.which", return_value="/usr/local/bin/claude")
+    def test_run_invalid_repo_path(self, mock_which):
+        e = ClaudeCodeEngine()
+        result = e.run("review", "/nonexistent/path", mode="review")
+        assert result.ok is False
+        assert "not a valid directory" in result.error
+
     @patch("subprocess.run")
     @patch("shutil.which", return_value="/usr/local/bin/claude")
-    def test_run_debug_mode_tools(self, mock_which, mock_run):
+    @patch("pathlib.Path.is_dir", return_value=True)
+    def test_run_debug_mode_tools(self, mock_isdir, mock_which, mock_run):
         mock_run.return_value = MagicMock(
             returncode=0, stdout='{"result": "ok"}', stderr=""
         )

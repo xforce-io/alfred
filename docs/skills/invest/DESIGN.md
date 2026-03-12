@@ -496,7 +496,24 @@ Phase 5: 推理与输出
 2. 直接回复用户                       # 不需要因果推理
 ```
 
-### 4.3 假设推演流程
+### 4.3 增量更新流程
+
+图已存在时（隔天/隔周复查），agent 不需要从零开始：
+
+```
+1. inv scan                              # 刷新所有信号
+2. inv status                            # 检查图完整度 + 上次推理时间
+3. inv infer --top 5                     # 用新信号重新推理
+4. （agent 对比）                          # [LLM] 对比本次 vs 上次 inference.json 的 asset_summary
+                                          #   - 概率变化 > 0.15 的资产 → 重点审查对应链条
+                                          #   - 新出现的 rhino 信号 → 考虑是否需要新链条
+5. inv journal --content "..."           # 记录变化和判断
+6. inv report --format text              # 输出
+```
+
+与完整流程的区别：跳过 Phase 2-4（主题识别、链条展开、边注册），除非新信号揭示了现有图未覆盖的主题。
+
+### 4.4 假设推演流程
 
 ```
 1. inv scan                          # 先采集当前状态
@@ -660,7 +677,7 @@ Phase 5: 推理与输出
 | `fed_policy_shift` | 美联储政策方向 | {dovish, neutral, hawkish} | rhino + FRED |
 | `china_stimulus` | 中国政策刺激 | {tightening, neutral, easing, strong_stimulus} | rhino + Tushare |
 
-#### 市场信号节点（来自 scan:china + scan:breakout）
+#### 市场信号节点（来自 scan:china + scan:breakout + scan:value）
 
 | 节点 ID | 含义 | 取值 | 数据来源 |
 |---------|------|------|---------|
@@ -668,6 +685,8 @@ Phase 5: 推理与输出
 | `market_turnover` | 两市成交额 | {cold, normal, active, overheated} | Tushare |
 | `margin_trading` | 融资融券 | {deleveraging, stable, leveraging} | Tushare |
 | `southbound_flow` | 南向资金 | {outflow, neutral, inflow} | Tushare |
+| `valuation_regime` | 估值水位 | {cheap, fair, rich} | yfinance（PE/PB 分位） |
+| `breakout_signal` | 箱体突破 | {breakdown, range, breakout} | yfinance / Tushare |
 
 #### 资产价格节点（推理目标）
 
@@ -705,7 +724,7 @@ P(chain) = P(n1_state) × P(n2_state | n1_state) × P(n3_state | n2_state) × ..
 
 排序依据：`chain_score = joint_probability × impact_weight`
 
-impact_weight 由资产影响方向的强度决定（↑↑/↓↓ = 2, ↑/↓ = 1, ± = 0）。
+impact_weight 由资产影响方向的强度决定（↑↑/↓↓ = 2, ↑/↓ = 1, ± = 0.5）。± 取 0.5 而非 0，确保方向不确定的链条仍参与排序。
 
 ### 6.4 状态优先级与校验
 

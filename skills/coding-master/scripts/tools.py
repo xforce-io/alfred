@@ -299,7 +299,7 @@ def _slugify(text: str) -> str:
 def _run_git(repo: Path, cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
     """Run a git command, return CompletedProcess."""
     return subprocess.run(
-        ["git"] + cmd, cwd=repo, capture_output=True, text=True,
+        ["git"] + cmd, cwd=str(repo), capture_output=True, text=True,
         check=check, timeout=120,
     )
 
@@ -1308,6 +1308,11 @@ def cmd_test(args) -> dict:
     if feat.get("phase") != "developing":
         return {"ok": False, "error": f"Feature {feature_id} is {feat.get('phase')}, expected developing"}
 
+    # Verify worktree exists
+    if not wt_path.exists():
+        return {"ok": False, "error": f"Worktree {wt_path} does not exist. "
+                f"Run cm claim --feature {feature_id} to recreate it."}
+
     # Verify no uncommitted changes to tracked files (untracked files are OK)
     git_status = _run_git(wt_path, ["status", "--porcelain", "-uno"], check=False)
     if git_status.stdout.strip():
@@ -1423,6 +1428,9 @@ def cmd_done(args) -> dict:
     # Read actual git HEAD (outside flock to avoid blocking)
     worktree = _get_feature_worktree(claims_path, feature_id)
     wt_path = Path(worktree) if worktree else repo
+    if not wt_path.exists():
+        return {"ok": False, "error": f"Worktree {wt_path} does not exist. "
+                f"Run cm claim --feature {feature_id} to recreate it."}
     current_head = _run_git(wt_path, ["rev-parse", "HEAD"], check=False).stdout.strip()
 
     # Check evidence file (v4 path) or fallback to legacy claims check

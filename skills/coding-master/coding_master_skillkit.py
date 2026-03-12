@@ -484,6 +484,7 @@ class CodingMasterSkillkit(Skillkit):
         except subprocess.TimeoutExpired:
             return _result_to_str({"ok": False, "error": "git command timed out (60s limit)"})
         except Exception as exc:
+            logger.debug("_cm_git failed: %s", exc, exc_info=True)
             return _result_to_str({"ok": False, "error": str(exc)})
 
 

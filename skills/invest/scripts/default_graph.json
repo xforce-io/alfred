@@ -1,0 +1,302 @@
+{
+  "version": 1,
+  "nodes": {
+    "fed_liquidity": {
+      "id": "fed_liquidity",
+      "label": "Fed Liquidity",
+      "type": "macro",
+      "origin": "predefined",
+      "states": ["abundant", "normal", "tight", "crisis"]
+    },
+    "sofr_level": {
+      "id": "sofr_level",
+      "label": "SOFR Level",
+      "type": "rate",
+      "origin": "predefined",
+      "states": ["low", "normal", "elevated", "dangerous"]
+    },
+    "move_index": {
+      "id": "move_index",
+      "label": "MOVE Index",
+      "type": "macro",
+      "origin": "predefined",
+      "states": ["calm", "elevated", "volatile"]
+    },
+    "yen_carry": {
+      "id": "yen_carry",
+      "label": "Yen Carry",
+      "type": "macro",
+      "origin": "predefined",
+      "states": ["stable", "stressed", "unwinding"]
+    },
+    "geo_risk": {
+      "id": "geo_risk",
+      "label": "Geopolitical Risk",
+      "type": "event",
+      "origin": "predefined",
+      "states": ["low", "medium", "high", "extreme"]
+    },
+    "trade_risk": {
+      "id": "trade_risk",
+      "label": "Trade Risk",
+      "type": "event",
+      "origin": "predefined",
+      "states": ["low", "medium", "high"]
+    },
+    "fed_policy_shift": {
+      "id": "fed_policy_shift",
+      "label": "Fed Policy Shift",
+      "type": "macro",
+      "origin": "predefined",
+      "states": ["dovish", "neutral", "hawkish"]
+    },
+    "china_stimulus": {
+      "id": "china_stimulus",
+      "label": "China Stimulus",
+      "type": "macro",
+      "origin": "predefined",
+      "states": ["tightening", "neutral", "easing", "strong_stimulus"]
+    },
+    "northbound_flow": {
+      "id": "northbound_flow",
+      "label": "Northbound Flow",
+      "type": "flow",
+      "origin": "predefined",
+      "states": ["heavy_outflow", "outflow", "neutral", "inflow", "heavy_inflow"]
+    },
+    "market_turnover": {
+      "id": "market_turnover",
+      "label": "Market Turnover",
+      "type": "flow",
+      "origin": "predefined",
+      "states": ["cold", "normal", "active", "overheated"]
+    },
+    "margin_trading": {
+      "id": "margin_trading",
+      "label": "Margin Trading",
+      "type": "flow",
+      "origin": "predefined",
+      "states": ["deleveraging", "stable", "leveraging"]
+    },
+    "southbound_flow": {
+      "id": "southbound_flow",
+      "label": "Southbound Flow",
+      "type": "flow",
+      "origin": "predefined",
+      "states": ["outflow", "neutral", "inflow"]
+    },
+    "valuation_regime": {
+      "id": "valuation_regime",
+      "label": "Valuation Regime",
+      "type": "valuation",
+      "origin": "predefined",
+      "states": ["cheap", "fair", "rich"]
+    },
+    "breakout_signal": {
+      "id": "breakout_signal",
+      "label": "Breakout Signal",
+      "type": "signal",
+      "origin": "predefined",
+      "states": ["breakdown", "range", "breakout"]
+    },
+    "us_equity": {
+      "id": "us_equity",
+      "label": "US Equity",
+      "type": "asset",
+      "origin": "predefined",
+      "states": ["bearish", "neutral", "bullish"],
+      "impact_weight": 1.0
+    },
+    "a_share": {
+      "id": "a_share",
+      "label": "A-Share",
+      "type": "asset",
+      "origin": "predefined",
+      "states": ["bearish", "neutral", "bullish"],
+      "impact_weight": 1.0
+    },
+    "hk_equity": {
+      "id": "hk_equity",
+      "label": "HK Equity",
+      "type": "asset",
+      "origin": "predefined",
+      "states": ["bearish", "neutral", "bullish"],
+      "impact_weight": 0.9
+    },
+    "gold": {
+      "id": "gold",
+      "label": "Gold",
+      "type": "asset",
+      "origin": "predefined",
+      "states": ["bearish", "neutral", "bullish"],
+      "impact_weight": 0.9
+    },
+    "crude_oil": {
+      "id": "crude_oil",
+      "label": "Crude Oil",
+      "type": "asset",
+      "origin": "predefined",
+      "states": ["bearish", "neutral", "bullish"],
+      "impact_weight": 0.8
+    },
+    "us_bond": {
+      "id": "us_bond",
+      "label": "US Bond",
+      "type": "asset",
+      "origin": "predefined",
+      "states": ["bearish", "neutral", "bullish"],
+      "impact_weight": 0.8
+    },
+    "usd": {
+      "id": "usd",
+      "label": "USD",
+      "type": "asset",
+      "origin": "predefined",
+      "states": ["bearish", "neutral", "bullish"],
+      "impact_weight": 0.7
+    },
+    "btc": {
+      "id": "btc",
+      "label": "BTC",
+      "type": "asset",
+      "origin": "predefined",
+      "states": ["bearish", "neutral", "bullish"],
+      "impact_weight": 0.7
+    },
+    "copper": {
+      "id": "copper",
+      "label": "Copper",
+      "type": "asset",
+      "origin": "predefined",
+      "states": ["bearish", "neutral", "bullish"],
+      "impact_weight": 0.7
+    }
+  },
+  "edges": {
+    "fed_liquidity->sofr_level": {
+      "from": "fed_liquidity",
+      "to": "sofr_level",
+      "probabilities": {
+        "abundant->low": 0.70,
+        "normal->normal": 0.70,
+        "tight->elevated": 0.85,
+        "crisis->dangerous": 0.90
+      },
+      "method": "default_prior",
+      "reason": "Default macro transmission prior"
+    },
+    "sofr_level->northbound_flow": {
+      "from": "sofr_level",
+      "to": "northbound_flow",
+      "probabilities": {
+        "low->inflow": 0.60,
+        "normal->neutral": 0.60,
+        "elevated->outflow": 0.70,
+        "dangerous->outflow": 0.85
+      },
+      "method": "default_prior",
+      "reason": "Default cross-border flow prior"
+    },
+    "northbound_flow->a_share": {
+      "from": "northbound_flow",
+      "to": "a_share",
+      "probabilities": {
+        "inflow->bullish": 0.65,
+        "neutral->neutral": 0.60,
+        "outflow->bearish": 0.65
+      },
+      "method": "default_prior",
+      "reason": "Default flow-to-equity prior"
+    },
+    "geo_risk->gold": {
+      "from": "geo_risk",
+      "to": "gold",
+      "probabilities": {
+        "low->neutral": 0.55,
+        "medium->bullish": 0.55,
+        "high->bullish": 0.75,
+        "extreme->bullish": 0.85
+      },
+      "method": "default_prior",
+      "reason": "Default risk-off prior"
+    },
+    "geo_risk->a_share": {
+      "from": "geo_risk",
+      "to": "a_share",
+      "probabilities": {
+        "low->neutral": 0.55,
+        "medium->bearish": 0.45,
+        "high->bearish": 0.70,
+        "extreme->bearish": 0.80
+      },
+      "method": "default_prior",
+      "reason": "Default geopolitical equity prior"
+    },
+    "valuation_regime->a_share": {
+      "from": "valuation_regime",
+      "to": "a_share",
+      "probabilities": {
+        "cheap->bullish": 0.55,
+        "fair->neutral": 0.60,
+        "rich->bearish": 0.60
+      },
+      "method": "default_prior",
+      "reason": "Default valuation prior"
+    },
+    "fed_liquidity->usd": {
+      "from": "fed_liquidity",
+      "to": "usd",
+      "probabilities": {
+        "abundant->bearish": 0.55,
+        "normal->neutral": 0.60,
+        "tight->bullish": 0.65,
+        "crisis->bullish": 0.75
+      },
+      "method": "default_prior",
+      "reason": "Default dollar liquidity prior"
+    },
+    "trade_risk->gold": {
+      "from": "trade_risk",
+      "to": "gold",
+      "probabilities": {
+        "low->neutral": 0.60,
+        "medium->bullish": 0.55,
+        "high->bullish": 0.70
+      },
+      "method": "default_prior",
+      "reason": "Default trade-risk prior"
+    }
+  },
+  "chains": [
+    {
+      "id": 1,
+      "path": ["fed_liquidity", "sofr_level", "northbound_flow", "a_share"],
+      "label": "Fed tightening to A-share",
+      "reasoning": "Liquidity contraction can push short rates up, pressure cross-border flows, and weigh on A-share risk appetite."
+    },
+    {
+      "id": 2,
+      "path": ["geo_risk", "gold"],
+      "label": "Geopolitical risk to gold",
+      "reasoning": "Higher geopolitical stress can raise demand for safe-haven assets."
+    },
+    {
+      "id": 3,
+      "path": ["geo_risk", "a_share"],
+      "label": "Geopolitical risk to A-share",
+      "reasoning": "Escalating risk events can compress risk appetite and hurt equities."
+    },
+    {
+      "id": 4,
+      "path": ["valuation_regime", "a_share"],
+      "label": "Valuation mean reversion",
+      "reasoning": "Valuation can provide a medium-term offset or support for equities."
+    },
+    {
+      "id": 5,
+      "path": ["fed_liquidity", "usd"],
+      "label": "Fed liquidity to USD",
+      "reasoning": "Tighter liquidity can support the dollar."
+    }
+  ]
+}

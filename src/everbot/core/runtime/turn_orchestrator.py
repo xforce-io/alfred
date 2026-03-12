@@ -935,8 +935,16 @@ async def _drain_after_timeout(
         except Exception:
             pass
 
-    parts = [p for p in [final_response, "\n".join(collected_outputs)] if p.strip()]
-    result = "\n\n".join(parts)
+    # Prefer the LLM's final text response — it's already formatted for the user.
+    # Tool outputs are raw JSON and should only be included as fallback when
+    # the LLM produced no text (e.g. timeout during tool execution, before LLM reply).
+    if final_response.strip():
+        result = final_response.strip()
+    elif collected_outputs:
+        # Fallback: summarize tool outputs instead of dumping raw JSON
+        result = "\n\n".join(collected_outputs)
+    else:
+        result = ""
     # Strip any leaked [PIN] markers (dolphin framework internal token)
     result = result.replace("[PIN]", "").strip()
     if not result.strip():

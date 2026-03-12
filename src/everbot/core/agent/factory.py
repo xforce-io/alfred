@@ -10,6 +10,7 @@ from datetime import datetime
 import json
 import logging
 import re
+import threading
 
 from dolphin.sdk import DolphinAgent, GlobalSkills
 from dolphin.core.config.global_config import GlobalConfig
@@ -818,6 +819,7 @@ Current time: $current_time
 
 # 创建全局单例
 _default_factory: Optional[AgentFactory] = None
+_factory_lock = threading.Lock()
 
 
 def get_agent_factory(
@@ -836,10 +838,12 @@ def get_agent_factory(
     """
     global _default_factory
     if _default_factory is None:
-        _default_factory = AgentFactory(
-            global_config_path=global_config_path,
-            default_model=default_model,
-        )
+        with _factory_lock:
+            if _default_factory is None:
+                _default_factory = AgentFactory(
+                    global_config_path=global_config_path,
+                    default_model=default_model,
+                )
     return _default_factory
 
 

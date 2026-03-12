@@ -4,12 +4,14 @@ Agent Factory 测试
 
 import pytest
 import asyncio
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 import tempfile
 
 from src.everbot.infra.user_data import UserDataManager
-from src.everbot.core.agent.factory import AgentFactory
+from src.everbot.core.agent.factory import AgentFactory, get_agent_factory
+import src.everbot.core.agent.factory as factory_module
 
 
 @pytest.mark.asyncio
@@ -410,6 +412,50 @@ class TestSyncAllSkillsAfterCustomLoad:
                     f"Skills in installedSkillset but not in allSkills: {missing}. "
                     f"_syncAllSkills was not called after custom skillkit loading."
                 )
+
+
+# ===========================================================================
+# get_agent_factory thread-safety
+# ===========================================================================
+
+
+class TestGetAgentFactoryThreadSafety:
+    """Verify the singleton is created exactly once under concurrent access."""
+
+    def setup_method(self):
+        # Reset singleton state before each test
+        factory_module._default_factory = None
+
+    def teardown_method(self):
+        factory_module._default_factory = None
+
+    def test_concurrent_access_creates_single_instance(self):
+        """Multiple threads calling get_agent_factory simultaneously
+        should all receive the same instance."""
+        results = []
+        barrier = threading.Barrier(10)
+
+        def worker():
+            barrier.wait()
+            instance = get_agent_factory(global_config_path="", default_model="test")
+            results.append(instance)
+
+        threads = [threading.Thread(target=worker) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(results) == 10
+        assert all(r is results[0] for r in results), (
+            "get_agent_factory returned different instances from concurrent calls"
+        )
+
+    def test_singleton_reused_on_subsequent_calls(self):
+        """Subsequent calls return the same instance without locking overhead."""
+        first = get_agent_factory(global_config_path="", default_model="m1")
+        second = get_agent_factory()
+        assert first is second
 
 
 if __name__ == "__main__":

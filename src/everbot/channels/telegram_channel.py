@@ -562,12 +562,29 @@ class TelegramChannel:
 
         converted_text, converted_entities = self._convert_markdown(full_reply)
         sent_any = False
-        for part in self._split_message(converted_text):
-            # entities only valid for the full unsplit text
-            ent = converted_entities if part == converted_text else None
-            success = await self._send_message(chat_id, part, ent)
-            if success:
-                sent_any = True
+        parts = self._split_message(converted_text)
+        if len(parts) <= 1:
+            # Single message: use entities directly
+            for part in parts:
+                success = await self._send_message(chat_id, part, converted_entities)
+                if success:
+                    sent_any = True
+        else:
+            # Multi-part: slice entities for each chunk
+            search_from = 0
+            for part in parts:
+                part_start = converted_text.find(part, search_from)
+                if part_start < 0:
+                    part_start = search_from
+                part_entities = self._slice_entities(
+                    converted_entities, part_start, len(part),
+                )
+                success = await self._send_message(
+                    chat_id, part, part_entities or None,
+                )
+                if success:
+                    sent_any = True
+                search_from = part_start + len(part)
 
         # Last-resort fallback: plain text if all markdown sends failed
         if not sent_any:
@@ -591,8 +608,8 @@ class TelegramChannel:
             try:
                 plain, entities = tg_md_convert(text)
                 return plain, [e.to_dict() for e in entities]
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("telegramify_markdown conversion failed: %s", exc)
         # Fallback: strip heading markers, no entities
         lines = text.split('\n')
         result = []
@@ -604,6 +621,34 @@ class TelegramChannel:
             else:
                 result.append(line)
         return '\n'.join(result), None
+
+    @staticmethod
+    def _slice_entities(
+        entities: Optional[list], part_offset: int, part_length: int,
+    ) -> list:
+        """Extract and re-offset entities that fall within a text slice."""
+        if not entities:
+            return []
+        part_end = part_offset + part_length
+        result = []
+        for ent in entities:
+            e_offset = ent.get("offset", 0)
+            e_length = ent.get("length", 0)
+            e_end = e_offset + e_length
+            # Skip entities entirely outside this part
+            if e_end <= part_offset or e_offset >= part_end:
+                continue
+            # Clamp to part boundaries
+            new_offset = max(e_offset, part_offset) - part_offset
+            new_end = min(e_end, part_end) - part_offset
+            new_length = new_end - new_offset
+            if new_length <= 0:
+                continue
+            sliced = dict(ent)
+            sliced["offset"] = new_offset
+            sliced["length"] = new_length
+            result.append(sliced)
+        return result
 
     # ------------------------------------------------------------------
     # Telegram Skillkit registration

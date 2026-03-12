@@ -179,13 +179,15 @@ class Inspector:
         return {}
 
     def _persist_state(self, state: Dict[str, Any]) -> None:
-        """Persist inspector state."""
+        """Persist inspector state atomically (tmp + rename)."""
         try:
             self._state_path.parent.mkdir(parents=True, exist_ok=True)
-            self._state_path.write_text(
+            tmp_path = self._state_path.with_suffix(".tmp")
+            tmp_path.write_text(
                 json.dumps(state, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            tmp_path.replace(self._state_path)
         except Exception as exc:
             logger.debug("Failed to persist inspector state: %s", exc)
 
@@ -328,14 +330,24 @@ class Inspector:
         return stats
 
     def _gather_recent_events(self, hours: int = 24) -> List[Dict[str, Any]]:
-        """Gather recent system events."""
+        """Gather recent system events.
+
+        Only reads the tail of the JSONL file (last 64KB) to avoid loading
+        potentially very large event logs into memory.
+        """
         events = []
+        _TAIL_BYTES = 64 * 1024  # read at most last 64KB
         try:
             user_data = get_user_data_manager()
             events_file = user_data.heartbeat_events_file
             if events_file.exists():
+                file_size = events_file.stat().st_size
                 cutoff = datetime.now() - timedelta(hours=hours)
                 with open(events_file, "r", encoding="utf-8") as f:
+                    # Seek to tail for large files to avoid reading everything
+                    if file_size > _TAIL_BYTES:
+                        f.seek(file_size - _TAIL_BYTES)
+                        f.readline()  # discard partial first line
                     for line in f:
                         try:
                             event = json.loads(line.strip())

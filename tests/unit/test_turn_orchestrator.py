@@ -1221,8 +1221,12 @@ class _FakeAsyncIter:
 
 
 @pytest.mark.asyncio
-async def test_drain_combines_llm_and_tool_outputs():
-    """When both LLM text and tool output are present, drain merges them."""
+async def test_drain_prefers_llm_over_tool_outputs():
+    """When both LLM text and tool output are present, drain uses LLM text only.
+
+    Tool outputs are raw JSON and should not be forwarded to the user
+    when the LLM has already produced a human-readable response.
+    """
     items = [
         {"_progress": [{"stage": "llm", "delta": "Analysis: looks good."}]},
         {"_progress": [{"stage": "skill", "status": "completed", "output": "Tool result: pass"}]},
@@ -1235,7 +1239,8 @@ async def test_drain_combines_llm_and_tool_outputs():
     )
     assert len(results) == 1
     assert "Analysis: looks good." in results[0]
-    assert "Tool result: pass" in results[0]
+    # Tool output should NOT be included when LLM text is available
+    assert "Tool result: pass" not in results[0]
 
 
 @pytest.mark.asyncio

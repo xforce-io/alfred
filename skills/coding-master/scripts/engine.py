@@ -140,6 +140,12 @@ class ClaudeCodeEngine(CodingEngine):
             )
 
         repo_path = Path(repo_path).resolve()
+        if not repo_path.is_dir():
+            return EngineResult(
+                ok=False,
+                error=f"repo_path is not a valid directory: {repo_path}",
+                engine=self.name(),
+            )
         allowed_tools = MODE_TOOLS.get(mode, MODE_TOOLS["review"])
 
         cmd = [
