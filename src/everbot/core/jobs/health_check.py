@@ -305,8 +305,8 @@ def _check_process_resources() -> CheckResult:
         except Exception:
             pass
 
-        # Warn if RSS > 512MB
-        if rss_mb > 512:
+        # Warn if RSS > 3GB
+        if rss_mb > 3072:
             return CheckResult(
                 name="process",
                 ok=False,
