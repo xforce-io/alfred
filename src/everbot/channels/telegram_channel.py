@@ -516,6 +516,13 @@ class TelegramChannel:
             if streaming_message_id is None and len(accumulated_text) < min_streaming_chars:
                 return
 
+            # Skip streaming for very long messages (batch send with splitting instead)
+            # Telegram editMessageText has 4096 char limit and cannot split into multiple messages
+            if len(accumulated_text) > TELEGRAM_MSG_LIMIT:
+                logger.debug("Message too long for streaming (%d chars), switching to batch mode", len(accumulated_text))
+                streaming_failed = True
+                return
+
             current_time = asyncio.get_event_loop().time()
             if current_time - last_update_time < min_update_interval:
                 return
