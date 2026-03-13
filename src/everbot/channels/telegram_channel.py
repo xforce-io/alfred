@@ -491,16 +491,75 @@ class TelegramChannel:
         # Start typing indicator
         typing_task = asyncio.create_task(self._typing_loop(chat_id))
 
-        # Collect all deltas into a batch reply
+        # Streaming state
+        streaming_message_id: Optional[int] = None
+        accumulated_text = ""
+        last_update_time = 0.0
+        min_update_interval = 0.15  # 150ms throttle for smoother streaming
+        min_streaming_chars = 15    # Min chars before starting streaming
+        streaming_cursor = "▌"      # Typing cursor indicator
+        streaming_failed = False
+
+        # Collect tool calls and errors for final summary
         chunks: List[str] = []
         text_messages: List[str] = []
         tool_call_count = 0
         tool_call_failures: List[str] = []
 
+        async def flush_streaming() -> None:
+            """Flush accumulated text to Telegram if streaming is active."""
+            nonlocal streaming_message_id, last_update_time, streaming_failed
+            if streaming_failed or not accumulated_text:
+                return
+
+            # Skip streaming for very short messages (batch send instead)
+            if streaming_message_id is None and len(accumulated_text) < min_streaming_chars:
+                return
+
+            # Skip streaming for very long messages (batch send with splitting instead)
+            # Telegram editMessageText has 4096 char limit and cannot split into multiple messages
+            if len(accumulated_text) > TELEGRAM_MSG_LIMIT:
+                logger.debug("Message too long for streaming (%d chars), switching to batch mode", len(accumulated_text))
+                streaming_failed = True
+                return
+
+            current_time = asyncio.get_event_loop().time()
+            if current_time - last_update_time < min_update_interval:
+                return
+
+            display_text = accumulated_text + streaming_cursor
+
+            if streaming_message_id is None:
+                # First message - send new
+                try:
+                    resp = await self._client.post(
+                        f"{self._base_url}/sendMessage",
+                        json={"chat_id": chat_id, "text": display_text},
+                    )
+                    data = resp.json()
+                    if data.get("ok"):
+                        streaming_message_id = data["result"]["message_id"]
+                        last_update_time = current_time
+                    else:
+                        logger.warning("Failed to start streaming: %s", data.get("description"))
+                        streaming_failed = True
+                except Exception as exc:
+                    logger.warning("Exception starting streaming: %s", exc)
+                    streaming_failed = True
+            else:
+                # Update existing message
+                success = await self._edit_message(
+                    chat_id, streaming_message_id, display_text
+                )
+                if success:
+                    last_update_time = current_time
+
         async def on_event(out: OutboundMessage) -> None:
-            nonlocal tool_call_count
+            nonlocal tool_call_count, accumulated_text
             if out.msg_type == "delta":
                 chunks.append(out.content)
+                accumulated_text += out.content
+                await flush_streaming()
             elif out.msg_type == "skill":
                 meta = out.metadata or {}
                 status = (meta.get("status") or "").lower()
@@ -539,7 +598,7 @@ class TelegramChannel:
             except asyncio.CancelledError:
                 pass
 
-        # Send reply
+        # Build final reply
         full_reply = "".join(chunks).strip()
         if text_messages:
             extra = "\n".join(text_messages).strip()
@@ -560,19 +619,22 @@ class TelegramChannel:
                 summary_parts.append(f"🔧 {tool_call_count} commands executed")
             full_reply = f"{full_reply}\n\n{chr(10).join(summary_parts)}"
 
+        # If streaming worked, update with final text (remove ellipsis)
+        if streaming_message_id and not streaming_failed:
+            # Final update without ellipsis
+            await self._edit_message(chat_id, streaming_message_id, full_reply[:TELEGRAM_MSG_LIMIT])
+            return
+
+        # Fallback: batch send (original behavior)
         converted_text, converted_entities = self._convert_markdown(full_reply)
         sent_any = False
         parts = self._split_message(converted_text)
         if len(parts) <= 1:
-            # Single message: use entities directly
             for part in parts:
                 success = await self._send_message(chat_id, part, converted_entities)
                 if success:
                     sent_any = True
         else:
-            # Multi-part: slice entities for each chunk.
-            # Entity offsets are in UTF-16 code units, so convert
-            # Python string positions to UTF-16 before slicing.
             search_from = 0
             for part in parts:
                 part_start = converted_text.find(part, search_from)
@@ -590,7 +652,6 @@ class TelegramChannel:
                     sent_any = True
                 search_from = part_start + len(part)
 
-        # Last-resort fallback: plain text if all markdown sends failed
         if not sent_any:
             fallback = full_reply[:200]
             await self._send_plain_message(
@@ -848,6 +909,30 @@ class TelegramChannel:
                 )
             if attempt < max_retries - 1:
                 await asyncio.sleep(2 ** attempt)
+        return False
+
+    async def _edit_message(self, chat_id: str, message_id: int, text: str) -> bool:
+        """Edit an existing message. Returns True if successful."""
+        if not text:
+            return True
+        if len(text) > TELEGRAM_MSG_LIMIT:
+            text = text[: TELEGRAM_MSG_LIMIT - 20] + "\n\n... (truncated)"
+        if self._client is None:
+            return False
+
+        try:
+            resp = await self._client.post(
+                f"{self._base_url}/editMessageText",
+                json={"chat_id": chat_id, "message_id": message_id, "text": text},
+            )
+            data = resp.json()
+            if data.get("ok"):
+                return True
+            # Log but don't retry - edit conflicts are expected in streaming
+            logger.debug("editMessageText failed: %s", data.get("description", "unknown"))
+        except Exception as exc:
+            logger.debug("editMessageText exception: [%s] %r", type(exc).__name__, exc)
+        return False
 
         logger.error("Failed to send plain message to %s after %d retries", chat_id, max_retries)
         return False
