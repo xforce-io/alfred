@@ -286,7 +286,9 @@ def test_extract_tool_intent_signature():
     # _grep tool with JSON args
     assert _extract_tool_intent_signature("_grep", '{"pattern": "吸引子|attractor", "path": "."}') == "search_grep:吸引子|attractor"
     assert _extract_tool_intent_signature("_grep", '{"pattern": "TODO"}') == "search_grep:TODO"
-    assert _extract_tool_intent_signature("_grep", 'not json') is None
+    # Non-JSON _grep args: falls through to generic fallback (still dedup-able)
+    sig = _extract_tool_intent_signature("_grep", 'not json')
+    assert sig is not None and sig.startswith("tool_exec:_grep:")
     # _bash with grep/rg commands
     assert _extract_tool_intent_signature("_bash", 'grep -r "attractor" .') == "search_bash:attractor"
     assert _extract_tool_intent_signature("_bash", "rg -i 'TODO' src/") == "search_bash:TODO"

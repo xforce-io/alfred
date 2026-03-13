@@ -19,6 +19,10 @@ import shutil
 import socket
 import subprocess
 import sys
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    tomllib = None  # type: ignore[assignment]
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Callable
@@ -35,6 +39,7 @@ from config_manager import ConfigManager
 CM_DIR = ".coding-master"
 SESSION_FILE = "session.json"       # persistent session history (survives unlock)
 EVIDENCE_DIR = "evidence"
+LAST_SESSION_FILE = "last_session.json"  # snapshot of completed session (survives unlock)
 DELEGATION_DIR = "delegation"
 LEASE_MINUTES = 120
 READ_ONLY_MODES = {"review", "analyze"}  # These modes must not modify git state
@@ -274,6 +279,45 @@ def _save_session(repo: Path, branch: str, mode: str, phase: str):
 
     session_path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_json_update(session_path, update)
+
+
+def _save_last_session(repo: Path, lock: dict, **extra):
+    """Snapshot the completing session so cm progress can report it after unlock."""
+    mode = lock.get("mode", "unknown")
+    summary: dict = {
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "mode": mode,
+        "branch": lock.get("branch", ""),
+    }
+
+    if mode == "deliver":
+        claims = _atomic_json_read(repo / CM_DIR / "claims.json")
+        plan = _parse_plan_md(repo / CM_DIR / "PLAN.md")
+        features = []
+        for fid, spec in plan.items():
+            claim = claims.get("features", {}).get(fid, {})
+            dev = claim.get("developing", {})
+            evidence = _read_evidence(repo, fid)
+            features.append({
+                "id": fid,
+                "title": spec.get("title", ""),
+                "phase": claim.get("phase", "pending"),
+                "test_status": evidence.get("overall") if evidence else dev.get("test_status", "pending"),
+            })
+        summary["features"] = features
+    else:
+        # review / debug / analyze — include scope
+        scope_path = repo / CM_DIR / "scope.json"
+        if scope_path.exists():
+            try:
+                summary["scope"] = json.loads(scope_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    summary.update(extra)
+    last_path = repo / CM_DIR / LAST_SESSION_FILE
+    last_path.parent.mkdir(parents=True, exist_ok=True)
+    last_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
 def _reuse_session_branch(repo: Path) -> str | None:
@@ -659,22 +703,43 @@ def _remove_worktree(repo: Path, worktree_path: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════
+#  Project config (.coding-master.toml)
+# ══════════════════════════════════════════════════════════
+
+
+def _load_project_config(cwd: Path) -> dict:
+    """Load .coding-master.toml from project root. Returns {} if missing."""
+    cfg_path = cwd / ".coding-master.toml"
+    if not cfg_path.is_file():
+        return {}
+    if tomllib is None:
+        logger.warning(".coding-master.toml found but tomllib unavailable (Python < 3.11)")
+        return {}
+    try:
+        return tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Failed to parse %s: %s", cfg_path, exc)
+        return {}
+
+
+# ══════════════════════════════════════════════════════════
 #  Test execution
 # ══════════════════════════════════════════════════════════
 
 
-def _run_tests(cwd: Path) -> dict:
+def _run_tests(cwd: Path, cmd_override: str | None = None) -> dict:
     """Run tests in the given directory. Returns {ok, output}."""
     from test_runner import TestRunner, _exec, _parse_pytest_output, _resolve_pytest_command
 
-    # Auto-detect test command
-    test_cmd = None
-    if (cwd / "pyproject.toml").exists():
-        test_cmd = _resolve_pytest_command(cwd)
-    elif (cwd / "package.json").exists():
-        test_cmd = "npm test"
-    elif (cwd / "Cargo.toml").exists():
-        test_cmd = "cargo test"
+    test_cmd = cmd_override
+    if not test_cmd:
+        # Auto-detect test command
+        if (cwd / "pyproject.toml").exists():
+            test_cmd = _resolve_pytest_command(cwd)
+        elif (cwd / "package.json").exists():
+            test_cmd = "npm test"
+        elif (cwd / "Cargo.toml").exists():
+            test_cmd = "cargo test"
 
     if not test_cmd:
         return {"ok": True, "skipped": True, "output": "no test command detected (skipped)"}
@@ -691,18 +756,19 @@ def _run_tests(cwd: Path) -> dict:
     }
 
 
-def _run_lint(cwd: Path) -> dict:
+def _run_lint(cwd: Path, cmd_override: str | None = None) -> dict:
     """Run lint in the given directory. Returns {passed, command, output}."""
     from test_runner import _exec, _has_tool
 
-    lint_cmd = None
-    if (cwd / "pyproject.toml").exists():
-        if _has_tool(cwd / "pyproject.toml", "ruff"):
-            lint_cmd = "ruff check ."
-    elif (cwd / "package.json").exists():
-        lint_cmd = "npm run lint"
-    elif (cwd / "Cargo.toml").exists():
-        lint_cmd = "cargo clippy"
+    lint_cmd = cmd_override
+    if not lint_cmd:
+        if (cwd / "pyproject.toml").exists():
+            if _has_tool(cwd / "pyproject.toml", "ruff"):
+                lint_cmd = "ruff check ."
+        elif (cwd / "package.json").exists():
+            lint_cmd = "npm run lint"
+        elif (cwd / "Cargo.toml").exists():
+            lint_cmd = "cargo clippy"
 
     if not lint_cmd:
         return {"passed": True, "skipped": True, "command": None, "output": "no lint command detected (skipped)"}
@@ -713,11 +779,11 @@ def _run_lint(cwd: Path) -> dict:
     return {"passed": rc == 0, "command": lint_cmd, "output": output}
 
 
-def _run_typecheck(cwd: Path) -> dict:
+def _run_typecheck(cwd: Path, cmd_override: str | None = None) -> dict:
     """Run typecheck in the given directory. Returns {passed, command, output}."""
     from test_runner import _exec, _has_tool, _resolve_pytest_command
 
-    tc_cmd = _resolve_typecheck_command(cwd)
+    tc_cmd = cmd_override or _resolve_typecheck_command(cwd)
     if not tc_cmd:
         return {"passed": True, "skipped": True, "command": None, "output": "no typecheck command detected (skipped)"}
 
@@ -1096,6 +1162,13 @@ def cmd_unlock(args) -> dict:
             return {"ok": False,
                     "error": f"write session in progress (phase={phase}). "
                              "Use cm submit to complete, or cm unlock --force to discard."}
+
+    # Snapshot session before cleanup (best effort)
+    if not lock.get("read_only", False):
+        try:
+            _save_last_session(repo, lock)
+        except Exception:
+            pass
 
     # Cleanup session worktree (best effort): force unlock or completed session
     session_wt = lock.get("session_worktree", "")
@@ -1981,6 +2054,18 @@ def cmd_submit(args) -> dict:
     agent = _resolve_agent(args)
     _save_session(repo, branch, "deliver", "done")
     _append_journal(repo, agent, "submit", f"PR: {pr_url or branch}")
+
+    # Snapshot last session with submit-specific extras (before unlock clears lock)
+    submit_extras: dict = {}
+    if pr_url:
+        submit_extras["pr_url"] = pr_url
+    if change_summary:
+        submit_extras["change_summary"] = change_summary
+    try:
+        _save_last_session(repo, lock, **submit_extras)
+    except Exception:
+        pass
+
     try:
         _atomic_json_update(repo / CM_DIR / "lock.json", lambda d: (
             d.update({"session_phase": "done"}), {"ok": True},
@@ -2373,8 +2458,23 @@ def cmd_delegate_complete(args) -> dict:
 
 def cmd_progress(args) -> dict:
     """Read-only: show session + feature status + action guidance."""
-    repo = _resolve_locked_repo(args)
+    repo = _repo_path(args.repo)
     lock = _atomic_json_read(repo / CM_DIR / "lock.json")
+
+    # No active session — return last session snapshot if available
+    if not lock:
+        last_path = repo / CM_DIR / LAST_SESSION_FILE
+        if last_path.exists():
+            try:
+                last = json.loads(last_path.read_text())
+                return {"ok": True, "data": {
+                    "active_session": False,
+                    "last_session": last,
+                }}
+            except (json.JSONDecodeError, OSError):
+                pass
+        return {"ok": True, "data": {"active_session": False}}
+
     mode = lock.get("mode", "deliver")
     session_phase = lock.get("session_phase", "unknown")
 
@@ -2730,6 +2830,48 @@ def cmd_journal(args) -> dict:
     agent = _resolve_agent(args)
     _append_journal(repo, agent, "note", args.message)
     return {"ok": True}
+
+
+def cmd_regression(args) -> dict:
+    """Run full regression (lint + typecheck + tests) on session worktree.
+
+    Unlike ``cm test --feature N`` which operates on a feature worktree and
+    writes evidence/claims, this runs on the session worktree (or repo root)
+    and only returns results — no state mutation.
+
+    Command overrides are read from ``.coding-master.toml`` in the project
+    root (keys: ``[test] command``, ``[lint] command``, ``[typecheck] command``).
+    """
+    repo = _resolve_locked_repo(args)
+    lock = _atomic_json_read(repo / CM_DIR / "lock.json")
+    wt = _get_session_worktree(repo, lock) or repo
+
+    # Load per-project config overrides
+    cfg = _load_project_config(wt)
+    test_cmd = cfg.get("test", {}).get("command")
+    lint_cmd = cfg.get("lint", {}).get("command")
+    tc_cmd = cfg.get("typecheck", {}).get("command")
+
+    lint_result = _run_lint(wt, cmd_override=lint_cmd)
+    typecheck_result = _run_typecheck(wt, cmd_override=tc_cmd)
+    test_result = _run_tests(wt, cmd_override=test_cmd)
+
+    all_skipped = (lint_result.get("skipped") and typecheck_result.get("skipped")
+                   and test_result.get("skipped"))
+    if all_skipped:
+        overall = "skipped"
+    elif lint_result["passed"] and typecheck_result["passed"] and test_result["ok"]:
+        overall = "passed"
+    else:
+        overall = "failed"
+
+    return {"ok": overall != "failed", "data": {
+        "overall": overall,
+        "worktree": str(wt),
+        "lint": {"passed": lint_result["passed"], "output": (lint_result.get("output") or "")[:TEST_OUTPUT_MAX]},
+        "typecheck": {"passed": typecheck_result["passed"], "output": (typecheck_result.get("output") or "")[:TEST_OUTPUT_MAX]},
+        "test": {"passed": test_result.get("ok"), "output": (test_result.get("output") or "")[:TEST_OUTPUT_MAX]},
+    }}
 
 
 def cmd_repos(_args) -> dict:
@@ -3359,6 +3501,9 @@ def main():
     _add_global_args(p_journal)
     p_journal.add_argument("--message", "-m", required=True)
 
+    # regression
+    _add_global_args(sub.add_parser("regression", help="Full regression (lint + typecheck + tests)"))
+
     # change-summary
     p_cs = sub.add_parser("change-summary", help="Generate change summary with diff")
     _add_global_args(p_cs)
@@ -3437,6 +3582,7 @@ def main():
         "submit": cmd_submit,
         "progress": cmd_progress,
         "journal": cmd_journal,
+        "regression": cmd_regression,
         "change-summary": cmd_change_summary,
         "doctor": cmd_doctor,
         "read": cmd_read,

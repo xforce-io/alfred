@@ -1,6 +1,5 @@
 """Unit tests for skill import whitelist validation in CronExecutor and HeartbeatRunner."""
 
-import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -47,7 +46,8 @@ class TestAllowedSkillsWhitelist:
 class TestCronSkillWhitelist:
     """CronExecutor._invoke_skill rejects skills not in the whitelist."""
 
-    def test_allowed_skill_is_imported(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_allowed_skill_is_imported(self, tmp_path):
         executor = _make_executor(tmp_path)
         task = MagicMock()
         task.skill = "health_check"
@@ -57,13 +57,12 @@ class TestCronSkillWhitelist:
 
         with patch.object(executor, "_build_skill_context", return_value=MagicMock()), \
              patch("importlib.import_module", return_value=mock_module) as mock_import:
-            result = asyncio.get_event_loop().run_until_complete(
-                executor._invoke_skill(task, None, "run-1")
-            )
+            result = await executor._invoke_skill(task, None, "run-1")
             mock_import.assert_called_once_with("everbot.core.jobs.health_check")
             assert result == "ok"
 
-    def test_hyphenated_skill_normalised(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_hyphenated_skill_normalised(self, tmp_path):
         executor = _make_executor(tmp_path)
         task = MagicMock()
         task.skill = "health-check"
@@ -73,36 +72,33 @@ class TestCronSkillWhitelist:
 
         with patch.object(executor, "_build_skill_context", return_value=MagicMock()), \
              patch("importlib.import_module", return_value=mock_module) as mock_import:
-            asyncio.get_event_loop().run_until_complete(
-                executor._invoke_skill(task, None, "run-1")
-            )
+            await executor._invoke_skill(task, None, "run-1")
             mock_import.assert_called_once_with("everbot.core.jobs.health_check")
 
-    def test_disallowed_skill_raises_valueerror(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_disallowed_skill_raises_valueerror(self, tmp_path):
         executor = _make_executor(tmp_path)
         task = MagicMock()
         task.skill = "os.system"
 
         with pytest.raises(ValueError, match="not in the allowed skills whitelist"):
-            asyncio.get_event_loop().run_until_complete(
-                executor._invoke_skill(task, None, "run-1")
-            )
+            await executor._invoke_skill(task, None, "run-1")
 
-    def test_path_traversal_skill_rejected(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_path_traversal_skill_rejected(self, tmp_path):
         executor = _make_executor(tmp_path)
         task = MagicMock()
         task.skill = "..evil_module"
 
         with pytest.raises(ValueError, match="not in the allowed skills whitelist"):
-            asyncio.get_event_loop().run_until_complete(
-                executor._invoke_skill(task, None, "run-1")
-            )
+            await executor._invoke_skill(task, None, "run-1")
 
 
 class TestHeartbeatSkillWhitelist:
     """HeartbeatRunner._invoke_skill_task rejects skills not in the whitelist."""
 
-    def test_disallowed_skill_raises_valueerror(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_disallowed_skill_raises_valueerror(self, tmp_path):
         """Heartbeat imports ALLOWED_SKILLS from cron and applies the same check."""
         from src.everbot.core.runtime.heartbeat import HeartbeatRunner
 
@@ -114,6 +110,4 @@ class TestHeartbeatSkillWhitelist:
         task.skill = "malicious_module"
 
         with pytest.raises(ValueError, match="not in the allowed skills whitelist"):
-            asyncio.get_event_loop().run_until_complete(
-                HeartbeatRunner._invoke_skill_task(runner, task, None, "run-1")
-            )
+            await HeartbeatRunner._invoke_skill_task(runner, task, None, "run-1")

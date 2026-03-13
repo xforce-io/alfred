@@ -154,7 +154,12 @@ def _extract_tool_intent_signature(tool_name: str, args) -> Optional[str]:
         normalized = re.sub(r'\s+', ' ', args.strip())
         code_hash = hashlib.sha256(normalized.encode()).hexdigest()[:12]
         return f"python_exec:{code_hash}"
-    return None
+    # Generic fallback for all other tools (skill tools like _cm_journal,
+    # _cm_read, etc.).  Without this, custom tools return None and bypass
+    # the REPEATED_TOOL_INTENT guard entirely — allowing infinite loops.
+    normalized = re.sub(r'\s+', ' ', args.strip())
+    args_hash = hashlib.sha256(normalized.encode()).hexdigest()[:12]
+    return f"tool_exec:{tool_name}:{args_hash}"
 
 
 _READ_ONLY_BASH_PATTERNS = re.compile(
