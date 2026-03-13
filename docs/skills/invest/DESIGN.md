@@ -217,7 +217,7 @@ $INV edge --from tariff_escalation --to a_share \
 $INV edge --from fed_liquidity --to sofr_level --estimate --lookback 5y
 ```
 
-**做什么**：读写 `graph.json` 中的边。条件概率可以由 agent 直接给出（先验），也可以让工具从历史数据估算。
+**做什么**：读写 `graph.json` 中的边。条件概率可以由 agent 直接给出（先验），也可以让工具从历史数据估算。当前实现会校验状态枚举和值域，拒绝非法状态名和 `[0,1]` 之外的概率。
 
 **返回**：
 
@@ -257,7 +257,7 @@ $INV chain --list
 $INV chain --remove --id 3
 ```
 
-**做什么**：将 agent 推理出的因果链条作为一个整体注册到 `graph.json`。链条是边的有序组合，但额外携带 agent 的推理说明。
+**做什么**：将 agent 推理出的因果链条作为一个整体注册到 `graph.json`。链条是边的有序组合，但额外携带 agent 的推理说明。当前实现要求路径中的每一跳边都已存在，并拒绝重复节点/环路。
 
 **重要约束**：
 
@@ -291,17 +291,17 @@ $INV infer
 # 仅推理指定目标
 $INV infer --target a_share,gold
 
-# 输出 Top N 活跃链条
-$INV infer --top 5
+# 输出 Top N 活跃链条，并允许更长的自动路径发现
+$INV infer --top 5 --max-hops 6
 ```
 
-**做什么**：读取 `graph.json` 中所有有效节点状态，沿已注册的链条和边进行正向推理，计算目标节点的概率分布。按链条概率 × 影响幅度排序，并将结果写入 `inference.json` 供 `inv report` 复用。
+**做什么**：读取 `graph.json` 中所有有效节点状态，沿已注册链条以及图中可达的简单路径进行正向推理，计算目标节点的概率分布。`--max-hops` 用于限制自动发现路径的最大跳数，支持更长的传导链。结果按链条概率 × 影响幅度排序，并写入 `inference.json` 供 `inv report` 复用。
 
 **证据合并规则**：
 
 1. 单条链内部：沿路径做条件概率连乘
 2. 多条链汇聚到同一目标状态时：先按“首个分叉节点”分组
-3. 同组链条视为相关证据，只保留 `chain_score` 最高的一条，避免共享前缀导致重复计数
+3. 同组链条视为相关证据，只保留 `chain_score` 最高的一条，避免共享前缀导致重复计数；当前实现按“根节点 + 首个分叉边”近似分组
 4. 不同组链条视为近似独立证据，按 noisy-or 合并：`P = 1 - Π(1 - P_i)`
 5. 最终对目标节点全部候选状态做归一化，得到 `asset_summary`
 

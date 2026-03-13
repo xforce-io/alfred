@@ -173,6 +173,136 @@ def _parse_probabilities(raw: str) -> Dict[str, float]:
     return out
 
 
+def _validate_probabilities(
+    graph: Dict[str, Any],
+    from_id: str,
+    to_id: str,
+    probabilities: Dict[str, float],
+) -> Dict[str, float]:
+    if not probabilities:
+        raise ValueError("--prob must not be empty")
+
+    src_states = set(graph["nodes"][from_id]["states"])
+    dst_states = set(graph["nodes"][to_id]["states"])
+    validated: Dict[str, float] = {}
+
+    for transition, raw_value in probabilities.items():
+        if "->" not in transition:
+            raise ValueError(f"Invalid transition '{transition}', expected '<src_state>-><dst_state>'")
+
+        src_state, dst_state = (part.strip() for part in transition.split("->", 1))
+        if src_state not in src_states:
+            raise ValueError(
+                f"Invalid source state '{src_state}' for node '{from_id}', allowed: {sorted(src_states)}"
+            )
+        if dst_state not in dst_states:
+            raise ValueError(
+                f"Invalid target state '{dst_state}' for node '{to_id}', allowed: {sorted(dst_states)}"
+            )
+        if not 0.0 <= raw_value <= 1.0:
+            raise ValueError(f"Probability for '{transition}' must be within [0, 1]")
+
+        validated[f"{src_state}->{dst_state}"] = round(float(raw_value), 4)
+
+    return validated
+
+
+def _validate_chain_path(graph: Dict[str, Any], path: List[str]) -> None:
+    if len(path) < 2:
+        raise ValueError("Path must contain at least two nodes")
+
+    seen: set[str] = set()
+    repeated: set[str] = set()
+    for node_id in path:
+        if node_id in seen:
+            repeated.add(node_id)
+        seen.add(node_id)
+    if repeated:
+        raise ValueError(f"Path contains a cycle or repeated node: {sorted(repeated)}")
+
+    for node_id in path:
+        if node_id not in graph["nodes"]:
+            raise ValueError(f"Unknown node in path: {node_id}")
+
+    for src, dst in zip(path, path[1:]):
+        if _find_edge(graph, src, dst) is None:
+            raise ValueError(f"Missing edge {src}->{dst}")
+
+
+def _chain_branch_key(path: List[str]) -> str:
+    if len(path) >= 2:
+        return f"{path[0]}->{path[1]}"
+    return path[0]
+
+
+def _graph_adjacency(graph: Dict[str, Any]) -> Dict[str, List[str]]:
+    adjacency: Dict[str, List[str]] = {}
+    for edge in graph["edges"].values():
+        adjacency.setdefault(edge["from"], []).append(edge["to"])
+    for values in adjacency.values():
+        values.sort()
+    return adjacency
+
+
+def _discover_chains(
+    graph: Dict[str, Any],
+    *,
+    max_hops: int,
+    targets: Optional[List[str]] = None,
+    limit: int = 200,
+) -> List[Dict[str, Any]]:
+    if max_hops < 1:
+        return []
+
+    target_set = set(targets or [])
+    adjacency = _graph_adjacency(graph)
+    existing_paths = {tuple(chain["path"]) for chain in graph["chains"]}
+    discovered: List[Dict[str, Any]] = []
+
+    def should_keep(node_id: str) -> bool:
+        if targets and node_id not in target_set:
+            return False
+        node = graph["nodes"].get(node_id, {})
+        return node.get("type") == "asset"
+
+    def dfs(path: List[str]) -> None:
+        if len(discovered) >= limit:
+            return
+
+        current = path[-1]
+        hops = len(path) - 1
+        if hops >= 1 and should_keep(current) and tuple(path) not in existing_paths:
+            discovered.append(
+                {
+                    "id": f"auto:{len(discovered) + 1}",
+                    "path": list(path),
+                    "label": "Auto-discovered: " + " -> ".join(path),
+                    "reasoning": "Auto-discovered from graph connectivity",
+                    "updated_at": _utc_now(),
+                    "auto_discovered": True,
+                }
+            )
+            return
+
+        if hops >= max_hops:
+            return
+
+        for nxt in adjacency.get(current, []):
+            if nxt in path:
+                continue
+            dfs(path + [nxt])
+
+    for node_id, node in graph["nodes"].items():
+        state, _, _ = _node_effective(node)
+        if state is None:
+            continue
+        dfs([node_id])
+        if len(discovered) >= limit:
+            break
+
+    return discovered
+
+
 def _load_macro_result(lookback_days: int) -> Dict[str, Any]:
     path = _repo_root() / "skills" / "investment-signal" / "scripts" / "macro_liquidity.py"
     module = _load_module("invest_macro_liquidity", path)
@@ -476,7 +606,12 @@ def cmd_edge(args: argparse.Namespace) -> None:
     edge = graph["edges"].get(key)
 
     if args.prob:
-        probabilities = _parse_probabilities(args.prob)
+        try:
+            raw_probabilities = _parse_probabilities(args.prob)
+            probabilities = _validate_probabilities(graph, args.from_id, args.to, raw_probabilities)
+        except ValueError as exc:
+            _json_error(str(exc))
+            return
         if edge is not None:
             edge["probabilities"].update(probabilities)
             edge["method"] = "agent_prior"
@@ -573,13 +708,11 @@ def cmd_chain(args: argparse.Namespace) -> None:
         return
 
     path = [part.strip() for part in args.path.split("->") if part.strip()]
-    if len(path) < 2:
-        _json_error("Path must contain at least two nodes")
+    try:
+        _validate_chain_path(graph, path)
+    except ValueError as exc:
+        _json_error(str(exc))
         return
-    for node_id in path:
-        if node_id not in graph["nodes"]:
-            _json_error(f"Unknown node in path: {node_id}")
-            return
 
     if args.preview:
         try:
@@ -603,24 +736,52 @@ def cmd_chain(args: argparse.Namespace) -> None:
     _json_ok(chain)
 
 
-def _infer(graph: Dict[str, Any], top_n: int, targets: Optional[List[str]] = None) -> Dict[str, Any]:
+def _infer(
+    graph: Dict[str, Any],
+    top_n: int,
+    targets: Optional[List[str]] = None,
+    *,
+    max_hops: int = 6,
+) -> Dict[str, Any]:
     observed_nodes = sum(1 for n in graph["nodes"].values() if _node_effective(n)[0] is not None)
 
+    chain_candidates = list(graph["chains"])
+    seen_paths = {tuple(chain["path"]) for chain in chain_candidates}
+    for chain in _discover_chains(graph, max_hops=max_hops, targets=targets):
+        if tuple(chain["path"]) in seen_paths:
+            continue
+        chain_candidates.append(chain)
+        seen_paths.add(tuple(chain["path"]))
+
     raw_chains: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
-    for chain in graph["chains"]:
+    skipped_chains: List[Dict[str, Any]] = []
+    for chain in chain_candidates:
         try:
             preview = _preview_chain(graph, chain["path"])
-        except Exception:
+        except Exception as exc:
+            skipped_chains.append(
+                {
+                    "id": chain["id"],
+                    "label": chain["label"],
+                    "path": chain["path"],
+                    "error": str(exc),
+                    "auto_discovered": bool(chain.get("auto_discovered")),
+                }
+            )
             continue
         target_node = preview["terminal_node"]
         if targets and target_node not in targets:
             continue
         raw_chains.append((chain, preview))
 
-    # Dedup: group by (target, state, root), keep highest probability per group
+    # Dedup chains that share the same root and first branch into the same target state.
     groups: Dict[Tuple[str, str, str], List[Tuple[Dict[str, Any], Dict[str, Any]]]] = {}
     for chain, preview in raw_chains:
-        key = (preview["terminal_node"], preview["terminal_state"], preview["root_node"])
+        key = (
+            preview["terminal_node"],
+            preview["terminal_state"],
+            _chain_branch_key(chain["path"]),
+        )
         groups.setdefault(key, []).append((chain, preview))
 
     deduped: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
@@ -646,6 +807,8 @@ def _infer(graph: Dict[str, Any], top_n: int, targets: Optional[List[str]] = Non
                 "target": target_node,
                 "target_state": target_state,
                 "root_node": preview["root_node"],
+                "path_length": len(chain["path"]),
+                "auto_discovered": bool(chain.get("auto_discovered")),
             }
         )
 
@@ -679,13 +842,14 @@ def _infer(graph: Dict[str, Any], top_n: int, targets: Optional[List[str]] = Non
         "observed_nodes": observed_nodes,
         "top_chains": top_chains,
         "asset_summary": asset_summary,
+        "skipped_chains": skipped_chains,
     }
 
 
 def cmd_infer(args: argparse.Namespace) -> None:
     graph = _load_graph()
     targets = [part.strip() for part in args.target.split(",")] if args.target else None
-    result = _infer(graph, args.top, targets)
+    result = _infer(graph, args.top, targets, max_hops=args.max_hops)
     snapshot = {
         "graph_updated_at": graph["updated_at"],
         **result,
@@ -763,6 +927,7 @@ def cmd_status(_: argparse.Namespace) -> None:
     observed = 0
     analyst = 0
     missing = []
+    chain_issues = []
     for node in graph["nodes"].values():
         if node.get("observed_state"):
             observed += 1
@@ -771,6 +936,13 @@ def cmd_status(_: argparse.Namespace) -> None:
         state, _, _ = _node_effective(node)
         if state is None:
             missing.append(node["id"])
+
+    for chain in graph["chains"]:
+        try:
+            _validate_chain_path(graph, chain["path"])
+        except ValueError as exc:
+            chain_issues.append({"id": chain["id"], "label": chain["label"], "error": str(exc)})
+
     _json_ok(
         {
             "graph_updated_at": graph["updated_at"],
@@ -780,6 +952,7 @@ def cmd_status(_: argparse.Namespace) -> None:
             "observed_nodes": observed,
             "analyst_nodes": analyst,
             "missing_nodes": missing,
+            "invalid_chains": chain_issues,
             "has_inference": bool(inference),
         }
     )
@@ -841,6 +1014,7 @@ def build_parser() -> argparse.ArgumentParser:
     infer = sub.add_parser("infer", help="Run forward inference")
     infer.add_argument("--top", type=int, default=5)
     infer.add_argument("--target")
+    infer.add_argument("--max-hops", type=int, default=6)
     infer.set_defaults(func=cmd_infer)
 
     report = sub.add_parser("report", help="Format report")

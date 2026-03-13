@@ -231,8 +231,8 @@ def test_infer_generates_asset_summary_from_default_chain():
     assert result["asset_summary"]["a_share"]["bearish"] > 0
 
 
-def test_infer_dedup_same_root_same_target():
-    """Two chains from same root to same target+state should be deduped."""
+def test_infer_same_root_different_first_hop_both_survive():
+    """Chains from same root can both contribute when they diverge at the first hop."""
     tools = _load_tools_module()
     graph = tools._default_graph()
 
@@ -260,15 +260,12 @@ def test_infer_dedup_same_root_same_target():
 
     result = tools._infer(graph, top_n=10)
 
-    # Among chains targeting a_share+bearish from fed_liquidity, only one should survive dedup
+    # These two chains diverge at the first hop, so both should remain after dedup.
     fed_a_share_bearish = [
         c for c in result["top_chains"]
         if c["target"] == "a_share" and c["target_state"] == "bearish" and c["root_node"] == "fed_liquidity"
     ]
-    # After dedup, only the highest-probability one should be in top_chains
-    # But top_chains is post-dedup, so we check the asset_summary isn't inflated
-    # The key check: only one chain per (target, state, root) group
-    assert len(fed_a_share_bearish) <= 1
+    assert len(fed_a_share_bearish) >= 2
 
 
 def test_infer_different_roots_both_contribute():
@@ -357,3 +354,129 @@ def test_cmd_edge_merges_probabilities(tmp_path, monkeypatch, capsys):
     assert "abundant->low" in edge["probabilities"]
     assert "normal->normal" in edge["probabilities"]
     assert "crisis->dangerous" in edge["probabilities"]
+
+
+def test_cmd_edge_rejects_invalid_state_transition(tmp_path, monkeypatch, capsys):
+    tools = _load_tools_module()
+    monkeypatch.setattr(tools, "_workspace_root", lambda: tmp_path)
+    tools._ensure_store()
+
+    import argparse
+
+    args = argparse.Namespace(
+        from_id="fed_liquidity", to="sofr_level",
+        prob='{"tight->bullish": 0.95}', reason="bad transition",
+    )
+    tools.cmd_edge(args)
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is False
+    assert "Invalid target state" in output["error"]
+
+
+def test_cmd_edge_rejects_out_of_range_probability(tmp_path, monkeypatch, capsys):
+    tools = _load_tools_module()
+    monkeypatch.setattr(tools, "_workspace_root", lambda: tmp_path)
+    tools._ensure_store()
+
+    import argparse
+
+    args = argparse.Namespace(
+        from_id="fed_liquidity", to="sofr_level",
+        prob='{"tight->elevated": 1.2}', reason="bad probability",
+    )
+    tools.cmd_edge(args)
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is False
+    assert "must be within [0, 1]" in output["error"]
+
+
+def test_cmd_chain_rejects_missing_edge(tmp_path, monkeypatch, capsys):
+    tools = _load_tools_module()
+    monkeypatch.setattr(tools, "_workspace_root", lambda: tmp_path)
+    tools._ensure_store()
+
+    import argparse
+
+    args = argparse.Namespace(
+        path="fed_liquidity -> gold", label="Invalid", reasoning="missing edge",
+        preview=False, list=False, remove=None,
+    )
+    tools.cmd_chain(args)
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is False
+    assert "Missing edge fed_liquidity->gold" in output["error"]
+
+    graph = json.loads((tmp_path / ".invest" / "graph.json").read_text())
+    assert all(chain["label"] != "Invalid" for chain in graph["chains"])
+
+
+def test_infer_returns_skipped_invalid_chain():
+    tools = _load_tools_module()
+    graph = tools._default_graph()
+    graph["nodes"]["fed_liquidity"]["observed_state"] = "tight"
+    graph["nodes"]["fed_liquidity"]["observed_confidence"] = 0.9
+    graph["chains"].append({
+        "id": 999,
+        "path": ["fed_liquidity", "gold"],
+        "label": "Broken chain",
+        "reasoning": "missing edge",
+        "updated_at": "2026-01-01T00:00:00Z",
+    })
+
+    result = tools._infer(graph, top_n=10)
+
+    assert any(chain["id"] == 999 for chain in result["skipped_chains"])
+
+
+def test_infer_supports_long_registered_chain():
+    tools = _load_tools_module()
+    graph = tools._default_graph()
+    graph["nodes"]["fed_liquidity"]["observed_state"] = "tight"
+    graph["nodes"]["fed_liquidity"]["observed_confidence"] = 0.9
+
+    result = tools._infer(graph, top_n=10)
+
+    assert any(chain["path_length"] >= 5 for chain in result["top_chains"])
+
+
+def test_infer_same_root_different_first_hop_both_contribute():
+    tools = _load_tools_module()
+    graph = tools._default_graph()
+
+    graph["nodes"]["fed_liquidity"]["observed_state"] = "tight"
+    graph["nodes"]["fed_liquidity"]["observed_confidence"] = 0.9
+
+    graph["edges"]["fed_liquidity->move_index"] = {
+        "from": "fed_liquidity",
+        "to": "move_index",
+        "probabilities": {"tight->elevated": 0.7},
+        "method": "test",
+        "reason": "test",
+        "updated_at": "2026-01-01T00:00:00Z",
+    }
+    graph["edges"]["move_index->a_share"] = {
+        "from": "move_index",
+        "to": "a_share",
+        "probabilities": {"elevated->bearish": 0.6},
+        "method": "test",
+        "reason": "test",
+        "updated_at": "2026-01-01T00:00:00Z",
+    }
+    graph["chains"].append({
+        "id": 88,
+        "path": ["fed_liquidity", "move_index", "a_share"],
+        "label": "Fed via MOVE to A-share",
+        "reasoning": "test",
+        "updated_at": "2026-01-01T00:00:00Z",
+    })
+
+    result = tools._infer(graph, top_n=10)
+
+    fed_a_share_bearish = [
+        c for c in result["top_chains"]
+        if c["target"] == "a_share" and c["target_state"] == "bearish" and c["root_node"] == "fed_liquidity"
+    ]
+    assert len(fed_a_share_bearish) >= 2

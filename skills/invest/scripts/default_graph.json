@@ -208,6 +208,53 @@
       "method": "default_prior",
       "reason": "Default flow-to-equity prior"
     },
+    "northbound_flow->market_turnover": {
+      "from": "northbound_flow",
+      "to": "market_turnover",
+      "probabilities": {
+        "heavy_outflow->cold": 0.80,
+        "outflow->cold": 0.65,
+        "neutral->normal": 0.60,
+        "inflow->active": 0.65,
+        "heavy_inflow->overheated": 0.75
+      },
+      "method": "default_prior",
+      "reason": "Default flow-to-turnover prior"
+    },
+    "market_turnover->margin_trading": {
+      "from": "market_turnover",
+      "to": "margin_trading",
+      "probabilities": {
+        "cold->deleveraging": 0.75,
+        "normal->stable": 0.65,
+        "active->leveraging": 0.70,
+        "overheated->leveraging": 0.85
+      },
+      "method": "default_prior",
+      "reason": "Default turnover-to-leverage prior"
+    },
+    "margin_trading->breakout_signal": {
+      "from": "margin_trading",
+      "to": "breakout_signal",
+      "probabilities": {
+        "deleveraging->breakdown": 0.75,
+        "stable->range": 0.65,
+        "leveraging->breakout": 0.70
+      },
+      "method": "default_prior",
+      "reason": "Default leverage-to-price-action prior"
+    },
+    "breakout_signal->a_share": {
+      "from": "breakout_signal",
+      "to": "a_share",
+      "probabilities": {
+        "breakdown->bearish": 0.75,
+        "range->neutral": 0.60,
+        "breakout->bullish": 0.70
+      },
+      "method": "default_prior",
+      "reason": "Default technical-to-equity prior"
+    },
     "geo_risk->gold": {
       "from": "geo_risk",
       "to": "gold",
@@ -255,6 +302,42 @@
       "method": "default_prior",
       "reason": "Default dollar liquidity prior"
     },
+    "northbound_flow->southbound_flow": {
+      "from": "northbound_flow",
+      "to": "southbound_flow",
+      "probabilities": {
+        "heavy_outflow->outflow": 0.70,
+        "outflow->outflow": 0.60,
+        "neutral->neutral": 0.60,
+        "inflow->inflow": 0.60,
+        "heavy_inflow->inflow": 0.70
+      },
+      "method": "default_prior",
+      "reason": "Default cross-market flow prior"
+    },
+    "southbound_flow->hk_equity": {
+      "from": "southbound_flow",
+      "to": "hk_equity",
+      "probabilities": {
+        "outflow->bearish": 0.65,
+        "neutral->neutral": 0.60,
+        "inflow->bullish": 0.65
+      },
+      "method": "default_prior",
+      "reason": "Default southbound flow prior"
+    },
+    "china_stimulus->southbound_flow": {
+      "from": "china_stimulus",
+      "to": "southbound_flow",
+      "probabilities": {
+        "tightening->outflow": 0.65,
+        "neutral->neutral": 0.60,
+        "easing->inflow": 0.65,
+        "strong_stimulus->inflow": 0.75
+      },
+      "method": "default_prior",
+      "reason": "Default stimulus-to-HK-flow prior"
+    },
     "trade_risk->gold": {
       "from": "trade_risk",
       "to": "gold",
@@ -297,6 +380,24 @@
       "path": ["fed_liquidity", "usd"],
       "label": "Fed liquidity to USD",
       "reasoning": "Tighter liquidity can support the dollar."
+    },
+    {
+      "id": 6,
+      "path": ["fed_liquidity", "sofr_level", "northbound_flow", "market_turnover", "margin_trading", "breakout_signal", "a_share"],
+      "label": "Liquidity transmission to A-share trend",
+      "reasoning": "Liquidity tightening can move funding costs, slow cross-border flows, cool turnover, force deleveraging, and end in weaker technical structure for A-shares."
+    },
+    {
+      "id": 7,
+      "path": ["fed_liquidity", "sofr_level", "northbound_flow", "southbound_flow", "hk_equity"],
+      "label": "Fed tightening to HK equity",
+      "reasoning": "Higher US funding stress can weaken regional flows and weigh on Hong Kong equities."
+    },
+    {
+      "id": 8,
+      "path": ["china_stimulus", "southbound_flow", "hk_equity"],
+      "label": "China stimulus to HK equity",
+      "reasoning": "More domestic support can improve flow expectations into Hong Kong equities."
     }
   ]
 }

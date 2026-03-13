@@ -14,7 +14,7 @@ Use this skill when the user wants an investment environment readout, not just a
 3. Use `inv node --check` before adding new nodes. Reuse existing nodes when semantics overlap.
 4. Use `inv node` to override or add analyst judgment when scan output is incomplete or stale.
 5. Use `inv edge` and `inv chain` only when you need to extend the default causal graph.
-6. Run `inv infer --top 5` before presenting probabilities.
+6. Run `inv infer --top 5 --max-hops 6` before presenting probabilities, especially when you need long transmission chains.
 7. Use `inv report` to format the final answer.
 
 ## Command Entry
@@ -35,7 +35,7 @@ $INV node --id geo_risk --state high --confidence 0.75 --reason "Escalation conf
 $INV edge --from fed_liquidity --to sofr_level --prob '{"tight->elevated": 0.85}'
 $INV chain --path "fed_liquidity -> sofr_level -> northbound_flow -> a_share" --label "Fed tightening to A-share"
 
-$INV infer --top 5
+$INV infer --top 5 --max-hops 6
 $INV report
 $INV status
 ```
@@ -44,5 +44,8 @@ $INV status
 
 - `scan` writes observable states only. Analyst states from `node` take precedence.
 - The default graph already includes a minimal set of macro, China flow, geopolitics, valuation, and asset nodes.
+- `edge --prob` validates state names and probability range before persisting.
+- `chain` validates that every hop exists and rejects cyclic or disconnected paths.
+- `infer` can auto-discover simple paths up to `--max-hops` and returns `skipped_chains` for invalid paths instead of silently dropping them.
 - `infer` is heuristic forward reasoning. It is intended to be explainable, not a strict Bayesian network.
 - Output must clearly state uncertainty and should not be framed as investment advice.
