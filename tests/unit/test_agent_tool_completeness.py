@@ -10,8 +10,7 @@
 """
 
 import pytest
-from unittest.mock import Mock, MagicMock, patch
-from dolphin.core.skill.skillkit import Skillkit
+from unittest.mock import Mock
 
 
 # 定义必须包含的核心工具
@@ -175,7 +174,6 @@ class TestAgentToolCompletenessIntegration:
 
     def test_real_agent_dph_exists(self):
         """验证真实 agent.dph 文件存在且包含必需工具"""
-        from pathlib import Path
         from src.everbot.infra.user_data import UserDataManager
 
         user_data = UserDataManager()
@@ -194,7 +192,6 @@ class TestAgentToolCompletenessIntegration:
     def test_real_agent_factory_creates_agent(self):
         """验证 AgentFactory 能成功创建 agent"""
         import asyncio
-        from pathlib import Path
         from src.everbot.infra.user_data import UserDataManager
         from src.everbot.core.agent.factory import AgentFactory
 

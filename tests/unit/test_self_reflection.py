@@ -1,11 +1,9 @@
 """Tests for self-reflection: scanners, state, skill context, and memory review."""
 
 import json
-import os
 import pytest
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 # Relative timestamps for tests — avoids hardcoded dates that become stale.
 _NOW = datetime.now(timezone.utc)

@@ -463,7 +463,6 @@ class CronExecutor:
         """Execute one isolated task with a dedicated job session."""
         job_session_id = build_job_session_id(task)
         task_title = str(task.title or "")
-        task_desc = str(task.description or "")
         prompt = build_isolated_task_prompt(task)
 
         agent = await self._create_job_agent(job_session_id)

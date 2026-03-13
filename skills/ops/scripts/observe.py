@@ -139,12 +139,6 @@ def cmd_tasks(alfred_home: Path, agent: str) -> Dict[str, Any]:
 
     tasks = _parse_heartbeat_tasks(content)
 
-    # Also try task_states from status snapshot
-    snapshot = _read_status_snapshot(alfred_home)
-    task_states = {}
-    if snapshot:
-        task_states = (snapshot.get("task_states", {}) or {}).get(agent, {})
-
     # Extract summary fields
     task_summaries = []
     for t in tasks:
@@ -213,21 +207,21 @@ def cmd_logs(
     # Filter by level
     if level:
         level_upper = level.upper()
-        lines = [l for l in lines if level_upper in l]
+        lines = [line for line in lines if level_upper in line]
 
     # Filter by agent
     if agent:
-        lines = [l for l in lines if agent in l]
+        lines = [line for line in lines if agent in line]
 
     # Trim to requested count after filtering
     lines = lines[-tail:]
 
     # Strip trailing newlines
-    lines = [l.rstrip("\n") for l in lines]
+    lines = [line.rstrip("\n") for line in lines]
 
     # Count error/warning
-    error_count = sum(1 for l in lines if "ERROR" in l)
-    warning_count = sum(1 for l in lines if "WARNING" in l)
+    error_count = sum(1 for line in lines if "ERROR" in line)
+    warning_count = sum(1 for line in lines if "WARNING" in line)
 
     return {
         "ok": True, "command": "logs",

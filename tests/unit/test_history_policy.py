@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.everbot.core.session.history_utils import (
     MAX_HEARTBEAT_MESSAGES,
-    COMPACT_TOKEN_BUDGET,
     COMPACT_WINDOW_TOKENS,
     _HEARTBEAT_CONTEXT_MARKER,
     _is_heartbeat,
@@ -17,9 +16,7 @@ from src.everbot.core.session.history_utils import (
 )
 from src.everbot.core.session.compressor import (
     SessionCompressor,
-    COMPRESS_THRESHOLD,
     WINDOW_SIZE,
-    SUMMARY_TAG,
 )
 from src.everbot.core.session.persistence import SessionPersistence
 
@@ -142,7 +139,7 @@ class TestEstimateTokens:
                 "function": {"name": "bash", "arguments": '{"cmd":"ls -la"}'},
             }],
         }
-        tokens_plain = _estimate_tokens([msg_plain])
+        _estimate_tokens([msg_plain])
         tokens_tool = _estimate_tokens([msg_tool])
         # tool msg has function name + arguments + id counted
         assert tokens_tool > 0
@@ -649,7 +646,7 @@ class TestRestoreWithHeartbeatContext:
     @pytest.mark.asyncio
     async def test_heartbeat_context_ignored_history_unchanged(self):
         """Passing heartbeat_context should not alter restored history."""
-        persistence = SessionPersistence(tmp_path := __import__("tempfile").mkdtemp())
+        persistence = SessionPersistence(__import__("tempfile").mkdtemp())
         agent = MagicMock()
         agent.snapshot.import_portable_session = MagicMock(return_value={})
 
@@ -687,7 +684,7 @@ class TestRestoreWithHeartbeatContext:
     @pytest.mark.asyncio
     async def test_no_heartbeat_context(self):
         """Without heartbeat_context, restore behaves as before."""
-        persistence = SessionPersistence(tmp_path := __import__("tempfile").mkdtemp())
+        persistence = SessionPersistence(__import__("tempfile").mkdtemp())
         agent = MagicMock()
         agent.snapshot.import_portable_session = MagicMock(return_value={})
 

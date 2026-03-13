@@ -10,7 +10,7 @@ import pytest
 from src.everbot.core.runtime.cron import CronExecutor, CronTickResult, TaskResult
 from src.everbot.core.runtime.cron_delivery import CronDelivery
 from src.everbot.core.tasks.routine_manager import RoutineManager
-from src.everbot.core.tasks.task_manager import Task, TaskList, TaskState
+from src.everbot.core.tasks.task_manager import TaskState
 
 
 def _make_executor(tmp_path: Path, **overrides) -> CronExecutor:
@@ -75,7 +75,6 @@ class TestDeterministicExecution:
         mgr = _seed_task(tmp_path, title="time_reminder_test", description="报时")
         executor = _make_executor(tmp_path, routine_manager=mgr)
 
-        now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
         task_list = mgr.load_task_list()
         run_agent = AsyncMock()
         inject_context = AsyncMock()

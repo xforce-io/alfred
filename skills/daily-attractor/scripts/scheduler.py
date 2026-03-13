@@ -7,7 +7,6 @@
 import os
 import sys
 import subprocess
-import asyncio
 from datetime import datetime
 from pathlib import Path
 
@@ -60,10 +59,10 @@ def run_scheduler():
     """运行调度器"""
     push_time = os.getenv('DAILY_ATTRACTOR_TIME', '15:00')
     
-    print(f"🚀 吸引子监控启动...")
+    print("🚀 吸引子监控启动...")
     print(f"⏰ 已设置每天 {push_time} 推送")
-    print(f"📱 Telegram推送已配置")
-    print(f"💡 按Ctrl+C停止\n")
+    print("📱 Telegram推送已配置")
+    print("💡 按Ctrl+C停止\n")
     
     # 设置定时任务
     schedule.every().day.at(push_time).do(push_daily_case)

@@ -23,10 +23,8 @@ Current bugs (documented in TestCurrentBehavior):
 """
 
 import asyncio
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
-import pytest
 
 from src.everbot.core.models.system_event import build_system_event
 from src.everbot.core.runtime.inspector import InspectionResult, emit_push_message
@@ -185,7 +183,7 @@ class TestTargetContentParity:
             dedupe_key="heartbeat:demo_agent:reflect",
         )
         composed, _ = compose_message_with_mailbox_updates("test", [event])
-        title_lines = [l for l in composed.split("\n") if l.startswith("- [")]
+        title_lines = [line for line in composed.split("\n") if line.startswith("- [")]
         assert len(title_lines) == 1
         assert "系统健康快照" in title_lines[0]
         assert "Routine Task Summary" not in title_lines[0]
@@ -204,7 +202,7 @@ class TestTargetContentParity:
             ),
         ]
         composed, ack_ids = compose_message_with_mailbox_updates("test", events)
-        title_lines = [l for l in composed.split("\n") if l.startswith("- [")]
+        title_lines = [line for line in composed.split("\n") if line.startswith("- [")]
         assert len(title_lines) == 1
 
     def test_dedup_keeps_latest_when_dual_events_exist(self):
@@ -227,6 +225,6 @@ class TestTargetContentParity:
         composed, _ = compose_message_with_mailbox_updates(
             "test", [cron_event, inspector_event],
         )
-        title_lines = [l for l in composed.split("\n") if l.startswith("- [")]
+        title_lines = [line for line in composed.split("\n") if line.startswith("- [")]
         assert len(title_lines) == 1
         assert "系统健康快照" in title_lines[0]

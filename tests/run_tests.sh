@@ -12,6 +12,11 @@ export PYTHONPATH="${PROJECT_ROOT}"
 TYPE="${1:-all}"
 shift || true
 
+run_lint() {
+    echo "Running Lint..."
+    ruff check "${PROJECT_ROOT}"
+}
+
 run_unit() {
     echo "Running Unit Tests..."
     pytest tests/unit/ "$@"
@@ -29,15 +34,19 @@ run_e2e() {
 
 case "${TYPE}" in
     unit)
+        run_lint
         run_unit "$@"
         ;;
     integration)
+        run_lint
         run_integration "$@"
         ;;
     e2e)
+        run_lint
         run_e2e "$@"
         ;;
     all)
+        run_lint
         run_unit "$@"
         run_integration "$@"
         ;;

@@ -10,12 +10,11 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -23,10 +22,6 @@ from src.everbot.core.runtime.heartbeat import HeartbeatRunner
 from src.everbot.core.scanners.base import ScanResult
 from src.everbot.core.scanners.reflection_state import ReflectionState
 from src.everbot.core.tasks.task_manager import (
-    Task,
-    TaskList,
-    TaskState,
-    ParseStatus,
     get_due_tasks,
 )
 

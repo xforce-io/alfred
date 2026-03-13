@@ -5,14 +5,13 @@ Daily Attractor Case Generator
 """
 
 import os
-import random
 import json
 from datetime import datetime
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 
 try:
-    import akshare as ak
-    import yfinance as yf
+    import akshare as ak  # noqa: F401
+    import yfinance as yf  # noqa: F401
     HAS_DATA = True
 except ImportError:
     HAS_DATA = False

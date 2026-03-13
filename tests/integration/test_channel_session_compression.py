@@ -10,7 +10,6 @@ Tests cover two layers:
    actually sent to LLM are bounded (covers both everbot + dolphin layers)
 """
 
-import json
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -20,9 +19,8 @@ from dolphin.core.context.context import Context
 from dolphin.core.common.constants import KEY_HISTORY
 from dolphin.sdk.agent.dolphin_agent_snapshot import DolphinAgentSnapshot
 
-from src.everbot.core.session.compressor import COMPRESS_THRESHOLD, WINDOW_SIZE, SUMMARY_TAG
-from src.everbot.core.session.session import SessionManager, SessionData
-from src.everbot.core.session.persistence import SessionPersistence
+from src.everbot.core.session.compressor import SUMMARY_TAG
+from src.everbot.core.session.session import SessionManager
 
 
 @pytest.fixture(autouse=True)

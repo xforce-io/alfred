@@ -6,7 +6,6 @@
 
 import pytest
 import asyncio
-from pathlib import Path
 from src.everbot.core.agent.factory import AgentFactory
 from src.everbot.infra.user_data import UserDataManager
 
@@ -34,7 +33,7 @@ async def test_skill_loading():
         workspace_path=demo_workspace
     )
 
-    print(f"✓ Agent 创建成功")
+    print("✓ Agent 创建成功")
 
     # 检查可用工具
     print("\n2. 检查可用工具...")
@@ -42,7 +41,7 @@ async def test_skill_loading():
 
     # 获取所有可用的工具
     if hasattr(executor, 'skillkits'):
-        print(f"✓ Executor 有 skillkits 属性")
+        print("✓ Executor 有 skillkits 属性")
 
         # 列出所有 skillkit
         for skillkit in executor.skillkits:
@@ -51,7 +50,7 @@ async def test_skill_loading():
 
             # 如果是 resource_skillkit，检查其功能
             if skillkit_name == "resource_skillkit":
-                print(f"\n3. 检查 ResourceSkillkit...")
+                print("\n3. 检查 ResourceSkillkit...")
 
                 # 获取可用 skills
                 if hasattr(skillkit, 'get_available_skills'):
@@ -65,30 +64,30 @@ async def test_skill_loading():
                             print(f"      路径: {meta.base_path}")
 
                 # 测试加载 skill
-                print(f"\n4. 测试加载 example-skill...")
+                print("\n4. 测试加载 example-skill...")
                 if hasattr(skillkit, 'load_skill'):
                     content = skillkit.load_skill("example-skill")
                     if content and not content.startswith("Error"):
-                        print(f"✓ 加载成功!")
+                        print("✓ 加载成功!")
                         print(f"  内容长度: {len(content)} 字符")
-                        print(f"\n  内容预览:")
+                        print("\n  内容预览:")
                         lines = content.split('\n')[:10]
                         for line in lines:
                             print(f"    {line}")
                     else:
                         print(f"❌ 加载失败: {content}")
     else:
-        print(f"⚠️  Executor 没有 skillkits 属性")
+        print("⚠️  Executor 没有 skillkits 属性")
 
     # 尝试通过对话调用 skill 工具
-    print(f"\n5. 通过对话测试 skill 工具...")
+    print("\n5. 通过对话测试 skill 工具...")
     try:
         # 发送一个简单的消息测试 agent 是否能看到 skills
         result = await agent.continue_chat(
             user_input="列出所有可用的 resource skills"
         )
 
-        print(f"✓ Agent 响应:")
+        print("✓ Agent 响应:")
         if result and hasattr(result, 'answer'):
             print(f"  {result.answer[:500]}...")
         elif isinstance(result, dict) and 'answer' in result:

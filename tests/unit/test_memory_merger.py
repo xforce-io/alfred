@@ -1,9 +1,8 @@
 """Tests for MemoryMerger — scoring, reinforcement, decay, merge."""
 
-import pytest
 from datetime import datetime, timedelta, timezone
 
-from src.everbot.core.memory.merger import MemoryMerger, MergeResult, token_similarity, _SIMILARITY_THRESHOLD
+from src.everbot.core.memory.merger import MemoryMerger, token_similarity, _SIMILARITY_THRESHOLD
 from src.everbot.core.memory.models import MemoryEntry
 
 

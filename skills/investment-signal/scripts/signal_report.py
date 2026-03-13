@@ -188,7 +188,7 @@ def format_text_report(report: Dict[str, Any]) -> str:
     """Format full report as human-readable text"""
     lines = []
     lines.append(f"{'='*60}")
-    lines.append(f"  投资信号综合报告")
+    lines.append("  投资信号综合报告")
     lines.append(f"  {report['generated_at'][:19]}")
     lines.append(f"{'='*60}")
 
@@ -198,7 +198,7 @@ def format_text_report(report: Dict[str, Any]) -> str:
         if 'error' in macro:
             lines.append(f"\n  [宏观流动性] ❌ {macro['error']}")
         else:
-            lines.append(f"")
+            lines.append("")
             lines.append(format_macro_text(macro))
 
     # A股市场信号
@@ -207,7 +207,7 @@ def format_text_report(report: Dict[str, Any]) -> str:
         if 'error' in china:
             lines.append(f"\n  [A股市场信号] ❌ {china['error']}")
         else:
-            lines.append(f"")
+            lines.append("")
             lines.append(format_china_text(china))
 
     # 价值投资
@@ -216,9 +216,9 @@ def format_text_report(report: Dict[str, Any]) -> str:
         if isinstance(value, dict) and 'error' in value:
             lines.append(f"\n  [价值投资] ❌ {value['error']}")
         elif isinstance(value, list):
-            lines.append(f"")
+            lines.append("")
             lines.append(f"{'='*60}")
-            lines.append(f"  美股价值投资分析")
+            lines.append("  美股价值投资分析")
             lines.append(f"{'='*60}")
             for stock in value:
                 lines.append(format_text_single(stock))
@@ -229,39 +229,39 @@ def format_text_report(report: Dict[str, Any]) -> str:
         if isinstance(breakout, dict) and 'error' in breakout:
             lines.append(f"\n  [箱体突破] ❌ {breakout['error']}")
         elif isinstance(breakout, list):
-            lines.append(f"")
+            lines.append("")
             lines.append(f"{'='*60}")
-            lines.append(f"  箱体突破分析")
+            lines.append("  箱体突破分析")
             lines.append(f"{'='*60}")
             for stock in breakout:
                 lines.append(format_breakout_single(stock))
 
     # 信号汇总
     summary = report.get('signal_summary', {})
-    lines.append(f"")
+    lines.append("")
     lines.append(f"{'='*60}")
     lines.append(f"  信号汇总 (共 {summary.get('total_signals', 0)} 条)")
     lines.append(f"{'='*60}")
 
     if summary.get('critical_signals'):
-        lines.append(f"")
-        lines.append(f"  🔴 关键风险信号:")
+        lines.append("")
+        lines.append("  🔴 关键风险信号:")
         for sig in summary['critical_signals']:
             lines.append(f"    {sig}")
 
     if summary.get('warning_signals'):
-        lines.append(f"")
-        lines.append(f"  🟠 警告信号:")
+        lines.append("")
+        lines.append("  🟠 警告信号:")
         for sig in summary['warning_signals']:
             lines.append(f"    {sig}")
 
     if summary.get('positive_signals'):
-        lines.append(f"")
-        lines.append(f"  🟢 正面信号:")
+        lines.append("")
+        lines.append("  🟢 正面信号:")
         for sig in summary['positive_signals']:
             lines.append(f"    {sig}")
 
-    lines.append(f"")
+    lines.append("")
     lines.append(f"{'='*60}")
     return '\n'.join(lines)
 

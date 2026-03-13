@@ -424,6 +424,22 @@ class CodingMasterSkillkit(Skillkit):
         )
         return _result_to_str(tools.cmd_journal(args))
 
+    def _cm_regression(self, repo: str = "", **kwargs) -> str:
+        """全量回归测试：lint + typecheck + tests，在 session worktree 上运行。
+
+        不需要 feature 流程，不写 evidence/claims，只返回结果。
+        命令可通过项目根目录的 .coding-master.toml 配置覆盖。
+
+        Args:
+            repo (str): 目标仓库名称
+
+        Returns:
+            str: JSON — 包含 overall, lint, typecheck, test 各项结果
+        """
+        tools = _get_tools()
+        args = _make_args(repo=repo or None, agent=self._agent_id)
+        return _result_to_str(tools.cmd_regression(args))
+
     def _cm_change_summary(self, repo: str = "", base_ref: str = "", **kwargs) -> str:
         """生成变更摘要：包含 unified diff、worktree 路径、commit 信息。
 
@@ -673,6 +689,7 @@ class CodingMasterSkillkit(Skillkit):
             # Utility
             SkillFunction(self._cm_progress),
             SkillFunction(self._cm_journal),
+            SkillFunction(self._cm_regression),
             SkillFunction(self._cm_change_summary),
             SkillFunction(self._cm_doctor),
             # File operations (v4.5)

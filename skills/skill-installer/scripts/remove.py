@@ -105,7 +105,7 @@ def remove_skill(skill_name: str, force: bool = False, keep_backup: bool = False
         return True
 
     except PermissionError:
-        print(f"Error: Permission denied. Try running with sudo or check file permissions.", file=sys.stderr)
+        print("Error: Permission denied. Try running with sudo or check file permissions.", file=sys.stderr)
         return False
     except Exception as e:
         print(f"Error removing skill: {e}", file=sys.stderr)

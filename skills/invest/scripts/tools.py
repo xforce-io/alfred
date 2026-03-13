@@ -7,7 +7,6 @@ import argparse
 import importlib.util
 import json
 import os
-import sys
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path

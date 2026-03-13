@@ -1,6 +1,5 @@
 """Tests for test_runner.py — pytest output parsing and report structure."""
 
-import pytest
 
 from test_runner import _parse_pytest_output, TestResult, LintResult, TestReport
 

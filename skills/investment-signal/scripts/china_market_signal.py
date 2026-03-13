@@ -37,15 +37,15 @@ logger = logging.getLogger(__name__)
 def _check_dependencies():
     missing = []
     try:
-        import pandas
+        import pandas  # noqa: F401
     except ImportError:
         missing.append('pandas')
     try:
-        import numpy
+        import numpy  # noqa: F401
     except ImportError:
         missing.append('numpy')
     try:
-        import tushare
+        import tushare  # noqa: F401
     except ImportError:
         missing.append('tushare')
     if missing:
@@ -502,17 +502,17 @@ def format_text(result: Dict[str, Any]) -> str:
     """Format result as human-readable text"""
     lines = []
     lines.append(f"{'='*60}")
-    lines.append(f"  A股/港股市场信号监控报告")
+    lines.append("  A股/港股市场信号监控报告")
     lines.append(f"  {result['analyzed_at'][:19]}")
     lines.append(f"{'='*60}")
-    lines.append(f"")
+    lines.append("")
     lines.append(f"  综合状态: {result['status_icon']} {result['status']} ({result['status_cn']})")
     lines.append(f"  风险评分: {result['risk_score']}/100")
-    lines.append(f"")
+    lines.append("")
 
     # 维度评分
     lines.append(f"  {'─'*50}")
-    lines.append(f"  维度评分:")
+    lines.append("  维度评分:")
     dim_labels = {
         'northbound': '北向资金  (30%)',
         'turnover': '两市成交额 (25%)',
@@ -536,16 +536,16 @@ def format_text(result: Dict[str, Any]) -> str:
                 lines.append(f"      最新: {dim_data['latest']:+.1f}亿 | 近5日: {dim_data.get('recent_5d_sum', '?'):+.1f}亿 | 连续流出: {dim_data.get('consecutive_outflow', 0)}日")
 
     # 信号
-    lines.append(f"")
+    lines.append("")
     lines.append(f"  {'─'*50}")
-    lines.append(f"  触发信号:")
+    lines.append("  触发信号:")
     if result['signals']:
         for sig in result['signals']:
             lines.append(f"    {sig}")
     else:
-        lines.append(f"    无触发信号")
+        lines.append("    无触发信号")
 
-    lines.append(f"")
+    lines.append("")
     lines.append(f"{'='*60}")
     return '\n'.join(lines)
 

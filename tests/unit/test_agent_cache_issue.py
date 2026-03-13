@@ -13,9 +13,6 @@
 
 import pytest
 import asyncio
-import tempfile
-import shutil
-from pathlib import Path
 from src.everbot.core.agent.factory import AgentFactory
 from src.everbot.core.session.session import SessionManager
 from src.everbot.infra.user_data import UserDataManager
@@ -32,14 +29,10 @@ class TestAgentCacheIssue:
         """
         user_data = UserDataManager()
         demo_workspace = user_data.agents_dir / "demo_agent"
-        agent_dph_path = demo_workspace / "agent.dph"
-        
+
         if not demo_workspace.exists():
             pytest.skip("Demo agent 工作区不存在")
-        
-        # 读取原始 agent.dph
-        original_content = agent_dph_path.read_text()
-        
+
         # 创建 SessionManager（模拟 web 服务的缓存机制）
         session_manager = SessionManager(user_data.sessions_dir)
         session_id = "test_cache_session"

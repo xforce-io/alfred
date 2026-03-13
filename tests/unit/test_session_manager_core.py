@@ -1,8 +1,9 @@
 """Unit tests for SessionManager and SessionPersistence core methods with zero coverage."""
 
+import asyncio
 from pathlib import Path
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -559,7 +560,6 @@ class TestSaveSessionLockAlreadyHeld:
         agent = _make_mock_agent()
 
         # Spy on persistence.save to confirm it's called
-        original_save = manager.persistence.save
         save_called = {"value": False}
 
         async def fake_save(*args, **kwargs):
@@ -569,7 +569,6 @@ class TestSaveSessionLockAlreadyHeld:
 
         # Spy on update_atomic to confirm it's NOT called
         update_atomic_called = {"value": False}
-        original_update_atomic = manager.update_atomic
 
         async def fake_update_atomic(*args, **kwargs):
             update_atomic_called["value"] = True

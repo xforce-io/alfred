@@ -3,10 +3,9 @@ Agent Factory 测试
 """
 
 import pytest
-import asyncio
 import threading
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 import tempfile
 
 from src.everbot.infra.user_data import UserDataManager

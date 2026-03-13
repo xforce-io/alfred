@@ -93,7 +93,7 @@ def test_compose_message_truncates_long_detail():
     message, _ = compose_message_with_mailbox_updates("1", mailbox)
 
     # Extract the Detail: line
-    detail_lines = [l for l in message.split("\n") if l.strip().startswith("Detail:")]
+    detail_lines = [line for line in message.split("\n") if line.strip().startswith("Detail:")]
     assert len(detail_lines) == 1
     detail_content = detail_lines[0].split("Detail:", 1)[1].strip()
     assert len(detail_content) <= 2010, (

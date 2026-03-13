@@ -16,7 +16,6 @@ if _scripts_dir not in sys.path:
 
 from engine import (
     ClaudeCodeEngine,
-    CodingEngine,
     EngineResult,
     get_engine,
     MODE_PROMPTS,

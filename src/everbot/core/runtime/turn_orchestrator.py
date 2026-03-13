@@ -463,21 +463,29 @@ class TurnOrchestrator:
         consecutive_empty_llm_rounds = 0
         last_successful_tool_output = ""  # fallback when LLM returns empty
         output_chars = 0  # approximate output token tracking (chars produced by LLM)
-        # Repeated-text loop detection: track LLM text fingerprint per round.
+        # Repeated-text loop detection: track LLM text fingerprints across
+        # a sliding window to catch both consecutive and alternating loops.
         _round_text = ""
-        _prev_fp = ""
-        _similar_rounds = 0
+        _recent_fps: list[str] = []  # sliding window of recent fingerprints
+        _LOOP_WINDOW = max(4, policy.max_consecutive_similar_llm_rounds)
 
         def _check_round_text_loop() -> bool:
-            """Compare current round's text to previous; return True if limit hit."""
-            nonlocal _round_text, _prev_fp, _similar_rounds
+            """Detect degenerate loops: consecutive repeats OR alternating patterns.
+
+            Fires when recent ``_LOOP_WINDOW`` rounds contain ≤2 distinct
+            fingerprints — catches both "AAAA" and "ABAB" patterns.
+            """
+            nonlocal _round_text
             text = _round_text
             _round_text = ""
             fp = hashlib.sha256(text.strip()[:_FINGERPRINT_CHARS].encode()).hexdigest()[:12] if text else ""
-            if fp and _prev_fp:
-                _similar_rounds = _similar_rounds + 1 if fp == _prev_fp else 0
-            _prev_fp = fp
-            return _similar_rounds >= policy.max_consecutive_similar_llm_rounds
+            if not fp:
+                return False
+            _recent_fps.append(fp)
+            if len(_recent_fps) < _LOOP_WINDOW:
+                return False
+            window = _recent_fps[-_LOOP_WINDOW:]
+            return len(set(window)) <= 2
 
         async for event in event_stream:
             # External cancellation — emit partial results instead of
@@ -566,7 +574,7 @@ class TurnOrchestrator:
                         if tool_execution_count > 0 and _check_round_text_loop():
                             yield TurnEvent(
                                 type=TurnEventType.TURN_ERROR,
-                                error=f"REPEATED_TEXT_LOOP: {_similar_rounds + 1} consecutive similar LLM outputs",
+                                error=f"REPEATED_TEXT_LOOP: {len(_recent_fps)} rounds with {len(set(_recent_fps[-_LOOP_WINDOW:]))} distinct outputs in last {_LOOP_WINDOW}",
                                 answer=response, tool_call_count=tool_call_count,
                                 tool_execution_count=tool_execution_count,
                                 tool_names_executed=list(tool_names_executed),
@@ -683,7 +691,7 @@ class TurnOrchestrator:
                     if tool_execution_count > 0 and _check_round_text_loop():
                         yield TurnEvent(
                             type=TurnEventType.TURN_ERROR,
-                            error=f"REPEATED_TEXT_LOOP: {_similar_rounds + 1} consecutive similar LLM outputs",
+                            error=f"REPEATED_TEXT_LOOP: {len(_recent_fps)} rounds with {len(set(_recent_fps[-_LOOP_WINDOW:]))} distinct outputs in last {_LOOP_WINDOW}",
                             answer=response, tool_call_count=tool_call_count,
                             tool_execution_count=tool_execution_count,
                             tool_names_executed=list(tool_names_executed),

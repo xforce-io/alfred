@@ -11,15 +11,13 @@ These tests MUST FAIL with the current code to prove the bug exists.
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import pytest
 
 from dolphin.core.common.constants import KEY_HISTORY
 from src.everbot.web import app as web_app
 
-from .conftest import FakeContext, FakeSnapshot, ScriptedAgent, receive_until
+from .conftest import ScriptedAgent
 
 
 # ---------------------------------------------------------------------------

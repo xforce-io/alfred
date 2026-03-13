@@ -234,7 +234,6 @@ class ChannelCoreService:
                 (not isinstance(history_messages, list) or len(history_messages) == 0)
                 and agent.state != AgentState.PAUSED
             )
-            has_streamed = False
             response = ""
             llm_started = False
 
@@ -313,7 +312,6 @@ class ChannelCoreService:
                         self._record_timeline_event(session_id, "llm_start", **event_meta)
                     await on_event(OutboundMessage(session_id, te.content, msg_type="delta"))
                     response += te.content
-                    has_streamed = True
 
                 elif te.type == TurnEventType.SKILL:
                     self._record_timeline_event(session_id, "skill", skill_name=te.skill_name, status=te.status, **event_meta)
@@ -336,7 +334,6 @@ class ChannelCoreService:
                         "status": te.status, "skill_name": te.skill_name,
                         "skill_args": te.skill_args, "skill_output": te.skill_output,
                     }))
-                    has_streamed = True
 
                 elif te.type == TurnEventType.TOOL_CALL:
                     tool_call_count += 1
@@ -355,7 +352,6 @@ class ChannelCoreService:
                         "skill_args_total_chars": te.args_total_chars,
                         "skill_output": None,
                     }))
-                    has_streamed = True
 
                 elif te.type == TurnEventType.TOOL_OUTPUT:
                     if te.status == "failed":
@@ -374,7 +370,6 @@ class ChannelCoreService:
                         "skill_output_total_chars": te.output_total_chars,
                         "tool_reference_id": te.reference_id,
                     }))
-                    has_streamed = True
 
                 elif te.type == TurnEventType.STATUS:
                     await on_event(OutboundMessage(session_id, te.content, msg_type="status"))
@@ -424,9 +419,7 @@ class ChannelCoreService:
             # and `response` just accumulates a copy — no need to re-send.
             # But in tool-use mode, the final answer may arrive only in
             # TURN_COMPLETE.answer without any prior LLM_DELTA, so we must
-            # check whether deltas were actually streamed (llm_started) rather
-            # than just whether any event was streamed (has_streamed includes
-            # tool call/output events).
+            # check whether deltas were actually streamed (llm_started).
             if not llm_started and response:
                 response = self._strip_heartbeat_token_for_chat(response)
                 if response:

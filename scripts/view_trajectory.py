@@ -138,8 +138,8 @@ def print_trajectory_list(files: List[Tuple[Path, dict]], use_rich: bool = True)
 
             console.print()
             console.print(table)
-            console.print(f"\n💡 使用 --index N 查看第 N 个文件")
-            console.print(f"💡 使用 --latest 查看最新的文件\n")
+            console.print("\n💡 使用 --index N 查看第 N 个文件")
+            console.print("💡 使用 --latest 查看最新的文件\n")
         except ImportError:
             use_rich = False
 
@@ -427,7 +427,6 @@ def print_summary(data: Dict[str, Any], use_rich: bool = False):
         from rich.console import Console
         from rich.table import Table
         from rich.panel import Panel
-        from rich.text import Text
 
         console = Console()
 

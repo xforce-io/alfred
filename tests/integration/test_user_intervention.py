@@ -25,13 +25,11 @@ import pytest
 import asyncio
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, AsyncMock, patch
-from dataclasses import dataclass
-from typing import List, Dict, Any
+from unittest.mock import MagicMock
+from typing import List, Dict
 
 from dolphin.sdk.agent.dolphin_agent import DolphinAgent
-from dolphin.core.agent.agent_state import AgentState, PauseType
-from dolphin.core.common.enums import Messages, MessageRole
+from dolphin.core.agent.agent_state import AgentState
 
 
 class MockWebSocket:
@@ -109,7 +107,6 @@ async def test_repro_consecutive_user_messages():
     
     # Verify the intervention message is "lost" in the middle
     # The agent's response doesn't acknowledge the intervention
-    intervention_msg = history_messages[1]
     agent_response = history_messages[3]
     
     # The agent should have acknowledged the intervention (like "好的，我继续搜索")
@@ -150,7 +147,6 @@ async def test_interrupt_mechanism_available():
     Verify that DolphinAgent has the interrupt() and resume_with_input() methods
     that Alfred should be using.
     """
-    from dolphin.sdk.agent.dolphin_agent import DolphinAgent
     from dolphin.core.agent.base_agent import BaseAgent
     
     # Check that the methods exist
@@ -237,7 +233,7 @@ async def test_simulate_intervention_with_dolphin_agent():
     # Verify interrupt can be called (even when not running, should not crash)
     # When agent is not running, interrupt() logs warning but still succeeds
     result = await agent.interrupt()
-    assert result == True, "interrupt() should succeed"
+    assert result is True, "interrupt() should succeed"
     
     # Clean up
     await agent.terminate()
@@ -251,25 +247,12 @@ async def test_history_after_task_cancel():
     This simulates what happens in _process_message when CancelledError is caught.
     """
     # Simulate the state after a cancelled task writes to history
-    from src.everbot.core.session.session import SessionManager, SessionData
-    from dolphin.core.common.constants import KEY_HISTORY
+    from src.everbot.core.session.session import SessionManager
     
     with tempfile.TemporaryDirectory() as tmpdir:
         session_dir = Path(tmpdir)
-        manager = SessionManager(session_dir)
-        
-        # State 1: Original history before intervention
-        original_history = [
-            {"role": "user", "content": "搜索美联储主席候选人"}
-        ]
-        
-        # State 2: After CancelledError handler writes user message (bug)
-        # The cancelled task might still write the message
-        history_after_cancel = [
-            {"role": "user", "content": "搜索美联储主席候选人"},
-            {"role": "user", "content": "我帮你通过了验证"},  # Written by cancelled task
-        ]
-        
+        SessionManager(session_dir)
+
         # State 3: New task also writes the same or different message
         history_after_new_task = [
             {"role": "user", "content": "搜索美联储主席候选人"},
@@ -395,8 +378,7 @@ async def test_correct_intervention_with_interrupt_api():
     # Simulate history tracking with proper interrupt handling
     history = []
     interrupted = asyncio.Event()
-    pending_input = None
-    
+
     async def simulate_proper_task(message: str, history_list: list):
         """Simulate a task that properly handles interrupts"""
         history_list.append({"role": "user", "content": message})

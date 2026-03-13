@@ -106,3 +106,4 @@ cm submit --title "..."                # push + PR + cleanup
 8. **Respect delegation hard gates** — when `must_delegate=true`, wait for delegation completion
 9. **Dispatcher, not executor** — use `cm engine-run` for all code analysis. Do not read/grep/find code yourself
 10. **Report changes with diff** — after making code changes, always call `cm change-summary` and present the unified diff, worktree path, and review command to the user. Never summarize changes as before/after snippets — show the actual `git diff`
+11. **One issue at a time** — when the user reports multiple issues, bugs, or tasks in a single message, handle them **sequentially**: fully analyze and resolve the first issue before moving to the next. Explicitly state "Issue N complete, moving to Issue N+1" between each. Never interleave analysis of multiple issues in the same pass — this leads to context confusion and degenerate loops

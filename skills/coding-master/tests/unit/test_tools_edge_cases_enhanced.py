@@ -7,15 +7,9 @@ partial failures, and resource exhaustion scenarios.
 from __future__ import annotations
 
 import json
-import os
-import stat
-import subprocess
 import sys
-import tempfile
 import threading
-import time
 from pathlib import Path
-from unittest.mock import patch, mock_open, MagicMock
 
 import pytest
 
@@ -29,7 +23,6 @@ from tools import (
     _is_expired,
     _check_feature_md_sections,
     _slugify,
-    CM_DIR,
 )
 
 
@@ -76,7 +69,6 @@ class TestFilePermissionEdgeCases:
 
     def test_path_traversal_attempts(self, tmp_path):
         """Path traversal attempts in repo names should be handled."""
-        from tools import _slugify
         
         malicious_names = [
             "../../../etc/passwd",
@@ -515,7 +507,6 @@ class TestSlugifyEdgeCases:
 
     def test_slugify_empty_and_whitespace(self):
         """Handle empty and whitespace-only strings."""
-        from tools import _slugify
         
         assert _slugify("") == "feature"
         assert _slugify("   ") == "feature"
@@ -523,7 +514,6 @@ class TestSlugifyEdgeCases:
 
     def test_slugify_special_chars(self):
         """Handle various special characters."""
-        from tools import _slugify
         
         test_cases = [
             ("hello/world", "helloworld"),
@@ -549,7 +539,6 @@ class TestSlugifyEdgeCases:
 
     def test_slugify_multiple_spaces(self):
         """Handle multiple consecutive spaces."""
-        from tools import _slugify
         
         assert _slugify("hello   world") == "hello-world"
         assert _slugify("hello\t\t\tworld") == "hello-world"
@@ -557,7 +546,6 @@ class TestSlugifyEdgeCases:
 
     def test_slugify_leading_trailing_special(self):
         """Handle special chars at start and end."""
-        from tools import _slugify
         
         assert _slugify("!hello!") == "hello"
         assert _slugify("@#$hello%^&") == "hello"
@@ -565,7 +553,6 @@ class TestSlugifyEdgeCases:
 
     def test_slugify_very_long_string(self):
         """Handle very long strings."""
-        from tools import _slugify
         
         long_str = "a" * 1000
         result = _slugify(long_str)
@@ -574,7 +561,6 @@ class TestSlugifyEdgeCases:
 
     def test_slugify_unicode_normalization(self):
         """Handle unicode normalization."""
-        from tools import _slugify
         
         # Different representations of same character
         test_cases = [
@@ -650,7 +636,6 @@ class TestCliEdgeCases:
 
     def test_repo_name_with_special_chars(self):
         """Handle repo names with special characters."""
-        from tools import _slugify
         
         # These should be sanitized
         special_repos = [

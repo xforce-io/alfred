@@ -337,7 +337,7 @@ def test_truncate_preview():
 @pytest.mark.asyncio
 async def test_skill_budget_exceeded():
     """Exceeding max_tool_calls via skill events yields TURN_ERROR."""
-    calls = [_progress_event(_skill_call(f"_bash", pid=f"sk_{i}")) for i in range(5)]
+    calls = [_progress_event(_skill_call("_bash", pid=f"sk_{i}")) for i in range(5)]
     agent = _ScriptedAgent(calls)
     orch = TurnOrchestrator(TurnPolicy(max_attempts=1, max_tool_calls=3, max_consecutive_empty_llm_rounds=99))
     events: list[TurnEvent] = []
@@ -1758,8 +1758,8 @@ async def test_total_failed_tool_outputs_limit():
     script = []
     # 3 different failure signatures
     for i in range(3):
-        script.append(_progress_event(_tool_call(f"_bash", f"cmd{i}", pid=f"tc{i}")))
-        script.append(_progress_event(_tool_output(f"_bash", f"Command exited with code {i+1}", pid=f"to{i}")))
+        script.append(_progress_event(_tool_call("_bash", f"cmd{i}", pid=f"tc{i}")))
+        script.append(_progress_event(_tool_output("_bash", f"Command exited with code {i+1}", pid=f"to{i}")))
     agent = _ScriptedAgent(script)
     orch = TurnOrchestrator(TurnPolicy(
         max_attempts=1, max_tool_calls=20,
@@ -1931,9 +1931,6 @@ class TestTurnCancellationWorkPreservation:
             error_event = next(e for e in events if e.type == TurnEventType.TURN_ERROR)
             # Check if the error event carries any partial result
             has_partial_answer = bool(getattr(error_event, "answer", None))
-            has_tool_outputs = any(
-                e.type == TurnEventType.TOOL_OUTPUT for e in events
-            )
             assert has_partial_answer or has_complete, (
                 "Cancelled turn discarded all work: tool outputs and partial LLM "
                 f"response are lost. Got {len([e for e in events if e.type == TurnEventType.TOOL_OUTPUT])} "
@@ -1980,7 +1977,7 @@ class TestTurnCancellationWorkPreservation:
             # This is the bug — cancelled turns lose all accounting
             pytest.fail(
                 "Cancelled turn emitted TURN_ERROR without TURN_COMPLETE. "
-                f"3 tool calls were executed but their stats are discarded. "
+                "3 tool calls were executed but their stats are discarded. "
                 "The orchestrator should emit a TURN_COMPLETE with partial stats "
                 "even when cancelled, so callers can account for the work done."
             )
@@ -2169,7 +2166,6 @@ class TestGrepExcludeVenvDirectories:
         exclude list that includes .venv, node_modules, etc.
 
         This test checks whether such configuration exists."""
-        import importlib
         import inspect
 
         # Check if TurnPolicy or TurnOrchestrator has any exclude pattern config

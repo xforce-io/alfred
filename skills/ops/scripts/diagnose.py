@@ -133,8 +133,8 @@ def _check_logs(alfred_home: Path) -> List[Dict[str, Any]]:
             continue
 
         lines = _tail_file(log_file, 200)
-        error_count = sum(1 for l in lines if "ERROR" in l)
-        warning_count = sum(1 for l in lines if "WARNING" in l)
+        error_count = sum(1 for line in lines if "ERROR" in line)
+        warning_count = sum(1 for line in lines if "WARNING" in line)
 
         if error_count > 20:
             status = "critical"

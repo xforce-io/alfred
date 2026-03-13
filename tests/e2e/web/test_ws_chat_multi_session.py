@@ -73,9 +73,9 @@ def test_ws_chat_keeps_histories_isolated_between_sessions(client, isolated_web_
         assert any("message for A" == msg for msg in msgs_a)
         assert all("message for B" != msg for msg in msgs_a)
     else:
-        print(f"Warning: No user messages found in session A")
+        print("Warning: No user messages found in session A")
         
     if msgs_b:
         assert any("message for B" == msg for msg in msgs_b)
     else:
-        print(f"Warning: No user messages found in session B")
+        print("Warning: No user messages found in session B")

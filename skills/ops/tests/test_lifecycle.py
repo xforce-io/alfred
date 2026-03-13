@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import patch
 
 from lifecycle import cmd_start, cmd_stop, cmd_restart, _find_everbot_bin

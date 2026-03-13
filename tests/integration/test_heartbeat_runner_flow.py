@@ -14,7 +14,6 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -25,9 +24,6 @@ import pytest
 
 from src.everbot.core.runtime.heartbeat import HeartbeatRunner
 from src.everbot.core.tasks.task_manager import (
-    Task,
-    TaskList,
-    TaskState,
     ParseStatus,
 )
 
@@ -278,8 +274,6 @@ async def test_get_or_create_agent_uses_non_overwrite_trajectory_for_cached_agen
 
     # Stub _init_session_trajectory to check overwrite parameter
     init_traj_calls: list[dict] = []
-    original_init = runner._init_session_trajectory
-
     def _tracking_init(agent, overwrite=False):
         init_traj_calls.append({"agent": agent, "overwrite": overwrite})
 

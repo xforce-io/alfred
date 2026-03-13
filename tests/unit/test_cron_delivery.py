@@ -1,8 +1,6 @@
 """Unit tests for CronDelivery result delivery logic."""
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
-from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 

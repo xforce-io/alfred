@@ -1,6 +1,6 @@
 """Tests for ensure_continue_chat_compatibility."""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from src.everbot.infra.dolphin_compat import ensure_continue_chat_compatibility
 

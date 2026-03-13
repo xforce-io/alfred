@@ -2,11 +2,8 @@
 WebSocket chat happy-path tests.
 """
 
-import asyncio
 import json
-from types import SimpleNamespace
 
-import pytest
 
 from tests.e2e.web.conftest import ScriptedAgent, receive_until
 

@@ -170,7 +170,7 @@ def update_skill_from_git(skill_path: Path, url: Optional[str] = None) -> bool:
             print("Restored previous version")
             return False
     else:
-        print(f"Cannot update: no git repository and no source URL", file=sys.stderr)
+        print("Cannot update: no git repository and no source URL", file=sys.stderr)
         return False
 
 

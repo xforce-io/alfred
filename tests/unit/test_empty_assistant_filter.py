@@ -11,7 +11,6 @@ These tests MUST FAIL with the current code to prove the bug exists.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,7 +20,7 @@ import pytest
 
 from dolphin.core.common.constants import KEY_HISTORY
 from src.everbot.core.session.persistence import SessionPersistence
-from src.everbot.core.session.session import SessionManager, SessionData
+from src.everbot.core.session.session import SessionManager
 
 
 class MinimalContext:
@@ -315,14 +314,6 @@ async def test_trailing_messages_orphan_tool_calls_trimmed(tmp_path: Path):
     assert loaded is not None
 
     # The orphan assistant+tool_calls should have been trimmed
-    orphan_tool_calls = [
-        m for m in loaded.history_messages
-        if m.get("role") == "assistant" and m.get("tool_calls") and (
-            # Check if next message is NOT a tool response
-            loaded.history_messages.index(m) == len(loaded.history_messages) - 1 or
-            loaded.history_messages[loaded.history_messages.index(m) + 1].get("role") != "tool"
-        )
-    ]
     # The orphan should have been removed; only the trailing message remains
     assert any(
         m.get("content") == "Sorry, the search timed out."

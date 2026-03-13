@@ -40,11 +40,11 @@ logger = logging.getLogger(__name__)
 def _check_dependencies():
     missing = []
     try:
-        import pandas
+        import pandas  # noqa: F401
     except ImportError:
         missing.append('pandas')
     try:
-        import numpy
+        import numpy  # noqa: F401
     except ImportError:
         missing.append('numpy')
     if missing:
@@ -466,17 +466,17 @@ def format_text_single(result: Dict[str, Any]) -> str:
     lines.append(f"  箱体区间: {result['box_low']} ~ {result['box_high']} (宽度: {result['box_range_pct']}%)")
     lines.append(f"  突破幅度: {result['breakout_pct']}%")
     lines.append(f"  量比: {result['volume_ratio']}x")
-    lines.append(f"")
-    lines.append(f"  评分明细:")
+    lines.append("")
+    lines.append("  评分明细:")
     details = result['details']
     lines.append(f"    突破强度(40%): {details['strength_score']}")
     lines.append(f"    量能放大(30%): {details['volume_score']}")
     lines.append(f"    箱体紧度(30%): {details['tightness_score']}")
-    lines.append(f"")
-    lines.append(f"  信号:")
+    lines.append("")
+    lines.append("  信号:")
     for sig in result.get('signals', []):
         lines.append(f"    {sig}")
-    lines.append(f"")
+    lines.append("")
     lines.append(f"  建议: {result.get('recommendation', '')}")
     return '\n'.join(lines)
 
@@ -485,7 +485,7 @@ def format_text(results: List[Dict[str, Any]]) -> str:
     """Format breakout results as human-readable text"""
     lines = []
     lines.append(f"{'='*60}")
-    lines.append(f"  箱体突破分析报告")
+    lines.append("  箱体突破分析报告")
     lines.append(f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"{'='*60}")
 

@@ -4,7 +4,6 @@ Basic coverage for command parsing and entry points.
 """
 
 import pytest
-from unittest.mock import patch, MagicMock
 
 
 class TestCLIEntryPoints:

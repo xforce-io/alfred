@@ -5,12 +5,10 @@ EverBot 使用示例
 """
 
 import asyncio
-from pathlib import Path
-from datetime import datetime
 
 from src.everbot.infra.user_data import UserDataManager
 from src.everbot.infra.workspace import WorkspaceLoader
-from src.everbot.core.session.session import SessionManager, SessionData
+from src.everbot.core.session.session import SessionManager
 from src.everbot.infra.config import load_config, save_config
 
 
@@ -218,7 +216,7 @@ async def demo_config_management():
 
     # 3. 加载配置
     loaded_config = load_config(str(config_path))
-    print(f"✓ 配置已加载")
+    print("✓ 配置已加载")
     print(f"  - EverBot 启用: {loaded_config['everbot']['enabled']}")
     print(f"  - Agent 数量: {len(loaded_config['everbot']['agents'])}")
 

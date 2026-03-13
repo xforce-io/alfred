@@ -1,6 +1,5 @@
 """Unit tests for session mailbox atomic operations."""
 
-import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 

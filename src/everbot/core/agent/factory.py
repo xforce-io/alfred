@@ -473,7 +473,7 @@ Current time: $current_time
                     "",
                     "These paths are available on the local machine:",
                     f"- Workspace root: {safe_path(workspace_path)}",
-                    f"- Workspace files:",
+                    "- Workspace files:",
                     f"  - {safe_path(workspace_path / 'SOUL.md')}",
                     f"  - {safe_path(workspace_path / 'AGENTS.md')}",
                     f"  - {safe_path(workspace_path / 'USER.md')}",

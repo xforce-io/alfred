@@ -10,13 +10,12 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from contextlib import contextmanager
 
 import pytest
 
 from src.everbot.core.runtime.heartbeat import HeartbeatRunner
-from src.everbot.core.tasks.task_manager import TaskState
 
 
 # ── Helpers ──────────────────────────────────────────────────

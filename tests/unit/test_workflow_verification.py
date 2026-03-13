@@ -1,6 +1,5 @@
 """Unit tests for workflow verification module."""
 
-import asyncio
 
 import pytest
 

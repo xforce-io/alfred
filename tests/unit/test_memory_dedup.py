@@ -151,8 +151,8 @@ class TestPromptMemoryQuality:
         # Count unique semantic themes in the output
         # Currently: all 5 slots wasted on dolphin/长期记忆 variations
         # DESIRED: diverse selection, at most 1-2 entries per semantic cluster
-        lines = [l for l in result.split("\n") if l.startswith("- [")]
-        path_refs = sum(1 for l in lines if "long_term_memory_design.md" in l)
+        lines = [line for line in result.split("\n") if line.startswith("- [")]
+        path_refs = sum(1 for line in lines if "long_term_memory_design.md" in line)
         assert path_refs <= 1, (
             f"Expected at most 1 entry referencing the same doc path, "
             f"got {path_refs} near-duplicates consuming top-k slots"
@@ -186,10 +186,10 @@ class TestPromptMemoryQuality:
 
         mm = MemoryManager(md)
         result = mm.get_prompt_memories(top_k=10)
-        lines = [l for l in result.split("\n") if l.startswith("- [")]
+        lines = [line for line in result.split("\n") if line.startswith("- [")]
 
         # DESIRED: at least some preference entries should appear in top-10
-        preference_count = sum(1 for l in lines if "[preference]" in l)
+        preference_count = sum(1 for line in lines if "[preference]" in line)
         assert preference_count >= 1, (
             "Prompt memories should include diverse categories; "
             "all top-10 slots were consumed by [fact] entries"
@@ -238,7 +238,6 @@ class TestEndToEndDuplicateAccumulation:
 
         entries_s1 = MemoryStore(md).load()
         assert len(entries_s1) == 1
-        original_id = entries_s1[0].id
 
         # Session 2: LLM returns a rephrased version instead of reinforcing
         # (This is what actually happens in production)

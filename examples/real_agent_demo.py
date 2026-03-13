@@ -5,7 +5,6 @@
 """
 
 import asyncio
-from pathlib import Path
 
 from src.everbot import (
     UserDataManager,

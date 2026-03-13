@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -383,7 +383,7 @@ async def test_phase_group_abort_on_exhausted():
         "src.everbot.core.workflow.task_session.run_verification_cmd",
         return_value=CmdResult(exit_code=1, output="fail"),
     ):
-        events = await _collect_events(session)
+        await _collect_events(session)
 
     assert session.state.status == "failed"
 
@@ -438,7 +438,7 @@ async def test_total_timeout_exhaustion():
 
     session._phase_runner.run_phase = mock_run_phase
 
-    events = await _collect_events(session)
+    await _collect_events(session)
     # Timeout check happens at loop top before phase 2
     assert session.state.status == "failed"
 
@@ -587,7 +587,7 @@ async def test_setup_phase_runs_once():
         "src.everbot.core.workflow.task_session.run_verification_cmd",
         return_value=CmdResult(exit_code=0, output="ok"),
     ):
-        events = await _collect_events(session)
+        await _collect_events(session)
 
     # Setup should run exactly once, before the first iteration
     assert phase_calls.count("setup") == 1

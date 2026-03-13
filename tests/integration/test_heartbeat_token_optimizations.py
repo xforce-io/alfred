@@ -16,7 +16,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.everbot.core.runtime.heartbeat import HeartbeatRunner
-from src.everbot.core.tasks.task_manager import Task, TaskList, TaskState
 
 
 class _StubUserDataManager:
@@ -399,7 +398,7 @@ class TestAgentCreationSkip:
         runner.session_manager.acquire_session = AsyncMock(return_value=True)
         runner.session_manager.release_session = MagicMock()
 
-        result = await runner._execute_once()
+        await runner._execute_once()
         get_agent_mock.assert_awaited_once()
 
 

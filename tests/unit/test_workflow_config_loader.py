@@ -14,7 +14,6 @@ from src.everbot.core.workflow.exceptions import ConfigValidationError
 from src.everbot.core.workflow.models import (
     PhaseConfig,
     PhaseGroupConfig,
-    TaskSessionConfig,
 )
 
 

@@ -36,15 +36,15 @@ logger = logging.getLogger(__name__)
 def _check_dependencies():
     missing = []
     try:
-        import pandas
+        import pandas  # noqa: F401
     except ImportError:
         missing.append('pandas')
     try:
-        import numpy
+        import numpy  # noqa: F401
     except ImportError:
         missing.append('numpy')
     try:
-        import yfinance
+        import yfinance  # noqa: F401
     except ImportError:
         missing.append('yfinance')
     if missing:
@@ -610,8 +610,8 @@ def format_text_single(result: Dict[str, Any]) -> str:
         lines.append(f"  价格: ${price} | {cap_str} | {pe_str}")
         lines.append(f"  行业: {summary.get('sector', '')} / {summary.get('industry', '')}")
 
-    lines.append(f"")
-    lines.append(f"  五因子评分:")
+    lines.append("")
+    lines.append("  五因子评分:")
     criteria = result.get('criteria', {})
     for key in ['roe', 'debt', 'fcf', 'moat', 'valuation']:
         c = criteria.get(key, {})
@@ -620,12 +620,12 @@ def format_text_single(result: Dict[str, Any]) -> str:
         weight = c.get('weight', '?')
         lines.append(f"    {factor:<12} {score:>5}/100 (权重 {weight}%)")
 
-    lines.append(f"")
-    lines.append(f"  信号:")
+    lines.append("")
+    lines.append("  信号:")
     for sig in result.get('signals', []):
         lines.append(f"    {sig}")
 
-    lines.append(f"")
+    lines.append("")
     lines.append(f"  建议: {result.get('recommendation', '')}")
     return '\n'.join(lines)
 
@@ -634,7 +634,7 @@ def format_text_report(results: List[Dict[str, Any]]) -> str:
     """Format multiple stock results as text"""
     lines = []
     lines.append(f"{'='*60}")
-    lines.append(f"  美股价值投资分析报告")
+    lines.append("  美股价值投资分析报告")
     lines.append(f"{'='*60}")
 
     for result in results:
@@ -673,7 +673,7 @@ def main():
     else:
         if len(results) == 1:
             print(f"{'='*60}")
-            print(f"  美股价值投资分析报告")
+            print("  美股价值投资分析报告")
             print(f"{'='*60}")
             print(format_text_single(results[0]))
             print(f"{'='*60}")

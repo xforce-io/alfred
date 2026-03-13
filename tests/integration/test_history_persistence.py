@@ -4,7 +4,6 @@ import tempfile
 import json
 from pathlib import Path
 from dolphin.core.context.context import Context
-from dolphin.core.common.enums import Messages, MessageRole
 from dolphin.core.common.constants import KEY_HISTORY
 from dolphin.sdk.agent.dolphin_agent_snapshot import DolphinAgentSnapshot
 from src.everbot.core.session.session import SessionManager, SessionData

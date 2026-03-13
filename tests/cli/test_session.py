@@ -5,7 +5,6 @@ Basic coverage for session management commands.
 
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
-from pathlib import Path
 
 
 class TestSessionCommands:

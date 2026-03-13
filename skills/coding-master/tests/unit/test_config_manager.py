@@ -1,6 +1,5 @@
 """Tests for config_manager.py — ConfigManager CRUD."""
 
-import pytest
 import yaml
 
 from config_manager import ConfigManager

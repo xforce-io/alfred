@@ -16,7 +16,6 @@ from dolphin.core.context.context import Context
 from dolphin.sdk.agent.dolphin_agent_snapshot import DolphinAgentSnapshot
 
 from src.everbot.core.session.history_utils import (
-    prepare_for_restore,
     _is_heartbeat,
 )
 from src.everbot.core.session.session import SessionManager

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from observe import cmd_status, cmd_heartbeat, cmd_tasks, cmd_logs, cmd_metrics
 

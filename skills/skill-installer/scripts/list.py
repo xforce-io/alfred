@@ -5,7 +5,6 @@ List installed and available skills
 
 import argparse
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -150,7 +149,7 @@ def main():
             "skills": installed_skills
         }, indent=2))
     else:
-        print(f"Skills directories:")
+        print("Skills directories:")
         for d in skills_dirs:
             print(f"  - {d}")
         print()

@@ -4,10 +4,8 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from unittest import mock
 
@@ -90,7 +88,7 @@ class TestAtomicJsonUpdate:
     def test_no_write_on_failure_no_change(self, tmp_dir):
         path = tmp_dir / "test.json"
         path.write_text('{"a": 1}')
-        mtime_before = path.stat().st_mtime_ns
+        path.stat()  # ensure file exists before update attempt
         def updater(d):
             return {"ok": False, "error": "nope"}
         tools._atomic_json_update(path, updater)

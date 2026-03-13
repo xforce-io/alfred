@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from news_fetcher import NewsFetcher, _check_dependencies
-from rhino_analyzer import RhinoAnalyzer, CATEGORY_NAMES_ZH
+from rhino_analyzer import RhinoAnalyzer
 from asset_mapper import AssetMapper, ASSET_CLASSES
 from trend_tracker import TrendTracker
 

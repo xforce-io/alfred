@@ -1,8 +1,6 @@
 """Tests for MemoryStore — parsing, saving, round-trip, fault tolerance."""
 
-import pytest
 from pathlib import Path
-from datetime import datetime, timezone
 
 from src.everbot.core.memory.models import MemoryEntry
 from src.everbot.core.memory.store import MemoryStore

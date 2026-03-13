@@ -296,7 +296,7 @@ class TestSchedulerBackoff:
 
         # Restore into new scheduler
         schedule2 = AgentSchedule(agent_name="test_agent", interval_minutes=1)
-        scheduler2 = Scheduler(
+        Scheduler(
             agent_schedules={"test_agent": schedule2},
             state_file=state_file,
         )

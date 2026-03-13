@@ -16,7 +16,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 from dolphin.core.agent.agent_state import AgentState
-from dolphin.core.common.constants import KEY_HISTORY
 
 from src.everbot.core.channel.core_service import ChannelCoreService
 from src.everbot.core.channel.models import OutboundMessage

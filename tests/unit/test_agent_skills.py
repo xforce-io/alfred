@@ -9,7 +9,6 @@
 
 import pytest
 import asyncio
-from pathlib import Path
 from src.everbot.core.agent.factory import AgentFactory
 from src.everbot.infra.user_data import UserDataManager
 
@@ -46,24 +45,24 @@ async def test_agent_skills():
     config = agent1.global_config
 
     if hasattr(config, 'resource_skills'):
-        print(f"✓ resource_skills 配置存在")
+        print("✓ resource_skills 配置存在")
 
         if isinstance(config.resource_skills, dict):
             directories = config.resource_skills.get('directories', [])
-            print(f"✓ Skills 目录:")
+            print("✓ Skills 目录:")
             for dir_path in directories:
                 print(f"  - {dir_path}")
 
             # 检查 agent 专属目录是否在第一位
             agent_skills_dir = str(demo_workspace / "skills")
             if directories and agent_skills_dir in directories[0]:
-                print(f"✓ Agent 专属目录在最高优先级")
+                print("✓ Agent 专属目录在最高优先级")
             else:
-                print(f"⚠️  Agent 专属目录不在最高优先级")
+                print("⚠️  Agent 专属目录不在最高优先级")
         else:
-            print(f"⚠️  resource_skills 不是 dict 类型")
+            print("⚠️  resource_skills 不是 dict 类型")
     else:
-        print(f"⚠️  resource_skills 配置不存在")
+        print("⚠️  resource_skills 配置不存在")
 
     # 4. 检查 GlobalSkills
     print("\n4. 检查 GlobalSkills...")
@@ -78,7 +77,7 @@ async def test_agent_skills():
             resource_skillkit = getattr(loader_skill, "owner_skillkit", None)
 
     if resource_skillkit:
-        print(f"✓ ResourceSkillkit 已加载")
+        print("✓ ResourceSkillkit 已加载")
 
         # 获取可用 skills
         available_skills = resource_skillkit.get_available_skills()
@@ -90,7 +89,7 @@ async def test_agent_skills():
 
         # 测试加载 skill
         if "example-skill" in available_skills:
-            print(f"\n5. 测试加载 example-skill...")
+            print("\n5. 测试加载 example-skill...")
             content = resource_skillkit.load_skill("example-skill")
             if content and not content.startswith("Error"):
                 print(f"✓ Example skill 加载成功 ({len(content)} 字符)")
@@ -98,9 +97,9 @@ async def test_agent_skills():
             else:
                 print(f"❌ Example skill 加载失败: {content}")
         else:
-            print(f"\n⚠️  example-skill 不在可用列表中")
+            print("\n⚠️  example-skill 不在可用列表中")
     else:
-        print(f"⚠️  ResourceSkillkit 未找到")
+        print("⚠️  ResourceSkillkit 未找到")
 
     print("\n" + "=" * 60)
     print("测试完成")

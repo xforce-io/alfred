@@ -11,7 +11,6 @@ import argparse
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -207,7 +206,7 @@ class TestCmTestWritesEvidence:
         repo, data = _setup_developing(git_repo)
         with _mock_repo(repo):
             _write_and_commit(data["worktree"])
-            r = tools.cmd_test(make_args(repo=repo.name, feature=1))
+            tools.cmd_test(make_args(repo=repo.name, feature=1))
 
         evidence = json.loads((repo / tools.CM_DIR / tools.EVIDENCE_DIR / "1-verify.json").read_text())
         assert evidence["lint"]["passed"] is True

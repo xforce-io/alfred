@@ -5,10 +5,9 @@ EverBot 基础功能测试
 import pytest
 from pathlib import Path
 import tempfile
-import shutil
 
 from src.everbot.infra.user_data import UserDataManager
-from src.everbot.infra.workspace import WorkspaceLoader, WorkspaceInstructions
+from src.everbot.infra.workspace import WorkspaceLoader
 from src.everbot.infra.config import load_config, save_config, get_default_config
 
 

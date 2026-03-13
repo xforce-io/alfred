@@ -5,11 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Optional
 from urllib.parse import urlparse
 
 import httpx
-import websockets
 from websockets.asyncio.client import connect as ws_connect
 
 logger = logging.getLogger(__name__)

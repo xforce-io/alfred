@@ -19,7 +19,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-import pytest
 from dolphin.core.context.context import Context
 from dolphin.core.common.constants import KEY_HISTORY
 
@@ -27,9 +26,7 @@ from src.everbot.core.session.session import SessionManager
 from src.everbot.core.session.history_utils import (
     _is_heartbeat,
     _normalize_heartbeat,
-    prepare_for_restore,
     _HEARTBEAT_PREFIX,
-    _HEARTBEAT_CONTEXT_MARKER,
 )
 
 

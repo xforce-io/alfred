@@ -112,7 +112,8 @@ class RunLogger:
 
 async def restart_agent(cfg: Config) -> None:
     """Restart the EverBot daemon + web server between loop iterations."""
-    import subprocess, os
+    import subprocess
+    import os
 
     everbot_bin = Path(cfg.project_root).resolve() / cfg.everbot_bin
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
@@ -250,7 +251,7 @@ async def run_case(cfg: Config, case: TestCase, rlog: RunLogger) -> CaseResult:
         rlog.log(case.id, "agent_query", status="ok", query=case.query, answer=answer)
 
         # Step 2: Evaluate answer
-        print(f"  [2/4] Evaluating answer with Claude Code...")
+        print("  [2/4] Evaluating answer with Claude Code...")
         result = evaluator.check_answer(
             case.query, answer, case.expectation,
             command=cfg.claude_command, flags=cfg.claude_flags, timeout=cfg.claude_timeout,
@@ -282,7 +283,7 @@ async def run_case(cfg: Config, case: TestCase, rlog: RunLogger) -> CaseResult:
                  output=analysis)
 
         # Step 4a: Suggest test cases
-        print(f"  [4/4] Suggesting test cases & fixing...")
+        print("  [4/4] Suggesting test cases & fixing...")
         suggestion = evaluator.suggest_testcases(
             analysis,
             command=cfg.claude_command, flags=cfg.claude_flags, timeout=cfg.claude_timeout,
@@ -310,7 +311,7 @@ async def run_case(cfg: Config, case: TestCase, rlog: RunLogger) -> CaseResult:
 def print_summary(results: list[CaseResult]) -> None:
     """Print a summary table of all case results."""
     print(f"\n{_BOLD}{'='*60}")
-    print(f"  SUMMARY")
+    print("  SUMMARY")
     print(f"{'='*60}{_RESET}")
     print(f"  {'Case ID':<20} {'Status':<10} {'Iters':<8} {'Reason'}")
     print(f"  {'-'*56}")

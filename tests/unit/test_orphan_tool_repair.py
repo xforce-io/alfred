@@ -15,7 +15,7 @@ context blocks so they are never treated as orphans.
 from __future__ import annotations
 
 import pytest
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock
 
 from src.everbot.core.session.persistence import SessionPersistence
 from src.everbot.core.session.session_data import SessionData
@@ -103,7 +103,6 @@ class TestOrphanToolMessageRepair:
         restored = portable["history_messages"]
 
         # Should have no orphan tool messages — they should be promoted
-        tool_messages = [m for m in restored if m.get("role") == "tool"]
         orphan_tools = []
         for i, m in enumerate(restored):
             if m.get("role") == "tool":

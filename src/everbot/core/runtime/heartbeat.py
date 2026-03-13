@@ -936,7 +936,6 @@ If not, reply with `HEARTBEAT_OK`.
         job_session_id = self._build_job_session_id(task)
         self._record_runtime_metric("job_session_created")
         task_title = str(getattr(task, "title", "") or "")
-        task_desc = str(getattr(task, "description", "") or "")
         prompt = build_isolated_task_prompt(task)
         agent = await self._create_job_agent(job_session_id)
         job_system_prompt = self._build_job_system_prompt(agent, task)

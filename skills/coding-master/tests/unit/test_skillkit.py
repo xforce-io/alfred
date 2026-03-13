@@ -18,7 +18,6 @@ from coding_master_skillkit import (
     CodingMasterSkillkit,
     _GIT_ALLOWED,
     _make_args,
-    _result_to_str,
 )
 
 

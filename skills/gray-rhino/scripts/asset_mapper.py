@@ -4,7 +4,7 @@
 import argparse
 import json
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Dict, List, Optional
 
 

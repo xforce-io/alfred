@@ -5,12 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.everbot.channels.telegram_channel import TelegramChannel, TELEGRAM_MSG_LIMIT, _extract_urls
+from src.everbot.channels.telegram_channel import TelegramChannel, _extract_urls
 
 
 # ---------------------------------------------------------------------------

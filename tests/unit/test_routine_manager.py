@@ -14,7 +14,6 @@ from src.everbot.core.tasks.task_manager import (
     ParseStatus,
     TaskState,
     parse_heartbeat_md,
-    update_task_state,
 )
 
 

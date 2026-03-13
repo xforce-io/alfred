@@ -1,6 +1,5 @@
 """Tests for agent-scoped event broadcasting via events.py."""
 
-import asyncio
 import pytest
 
 from src.everbot.core.runtime import events

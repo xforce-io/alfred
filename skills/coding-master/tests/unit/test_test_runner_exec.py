@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import json
 import subprocess
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
-import pytest
 
 from test_runner import TestRunner, _exec, _truncate, _has_tool, _parse_pytest_output
 

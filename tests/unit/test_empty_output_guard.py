@@ -4,7 +4,6 @@ Simulates the whisper loop scenario: LLM repeatedly calls _python(whisper) with 
 Tests both EMPTY_OUTPUT_LOOP and REPEATED_TOOL_INTENT guards.
 """
 
-import asyncio
 import pytest
 
 from src.everbot.core.runtime.turn_orchestrator import TurnOrchestrator, _extract_tool_intent_signature

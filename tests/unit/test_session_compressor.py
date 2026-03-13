@@ -4,7 +4,6 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.everbot.core.session.compressor import (
-    COMPRESS_THRESHOLD,
     SUMMARY_TAG,
     WINDOW_SIZE,
     SessionCompressor,

@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
 
 from src.everbot.core.scanners.base import ScanResult
 from src.everbot.core.scanners.reflection_state import ReflectionState

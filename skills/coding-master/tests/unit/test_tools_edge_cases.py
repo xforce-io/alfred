@@ -10,11 +10,9 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -584,7 +582,7 @@ class TestDoctorRecovery:
 
         # Verify it's corrupted
         try:
-            data = json.loads(session_path.read_text())
+            json.loads(session_path.read_text())
             assert False, "Should have failed to parse"
         except json.JSONDecodeError:
             pass  # Expected

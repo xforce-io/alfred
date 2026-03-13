@@ -4,12 +4,11 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import shlex
 import shutil
 import subprocess
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 from pathlib import Path
 
 from config_manager import ConfigManager
@@ -190,16 +189,43 @@ def _has_tool(path: Path, tool: str) -> bool:
 
 # ── Pytest command resolution ──────────────────────────────
 
+def _find_venv_binary(project_path: Path, binary: str) -> Path | None:
+    """Find a binary in .venv/bin, falling back to the git main worktree.
+
+    Git worktrees share the code but not .venv.  When running inside a
+    worktree (session or feature), look for .venv in the main repo first.
+    """
+    local = project_path / ".venv" / "bin" / binary
+    if local.is_file():
+        return local
+    # Fall back to the main worktree (git worktree list --porcelain)
+    try:
+        r = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=project_path, capture_output=True, text=True, timeout=5,
+        )
+        for line in r.stdout.splitlines():
+            if line.startswith("worktree "):
+                main_repo = Path(line.split(" ", 1)[1])
+                candidate = main_repo / ".venv" / "bin" / binary
+                if candidate.is_file():
+                    return candidate
+                break  # first entry is always the main worktree
+    except Exception:
+        pass
+    return None
+
+
 def _resolve_pytest_command(project_path: Path) -> str:
     """Pick the best way to invoke pytest for a Python project.
 
     Priority:
-    1. .venv/bin/pytest (direct venv binary — works regardless of pip)
+    1. .venv/bin/pytest (local or main worktree — works regardless of pip)
     2. uv run pytest   (if uv project detected)
     3. pytest           (bare — relies on PATH)
     """
-    venv_pytest = project_path / ".venv" / "bin" / "pytest"
-    if venv_pytest.is_file():
+    venv_pytest = _find_venv_binary(project_path, "pytest")
+    if venv_pytest:
         return str(venv_pytest.resolve())
 
     if _is_uv_project(project_path):

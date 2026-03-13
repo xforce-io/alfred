@@ -729,7 +729,7 @@ def _load_project_config(cwd: Path) -> dict:
 
 def _run_tests(cwd: Path, cmd_override: str | None = None) -> dict:
     """Run tests in the given directory. Returns {ok, output}."""
-    from test_runner import TestRunner, _exec, _parse_pytest_output, _resolve_pytest_command
+    from test_runner import _exec, _parse_pytest_output, _resolve_pytest_command
 
     test_cmd = cmd_override
     if not test_cmd:
@@ -758,13 +758,14 @@ def _run_tests(cwd: Path, cmd_override: str | None = None) -> dict:
 
 def _run_lint(cwd: Path, cmd_override: str | None = None) -> dict:
     """Run lint in the given directory. Returns {passed, command, output}."""
-    from test_runner import _exec, _has_tool
+    from test_runner import _exec, _find_venv_binary, _has_tool
 
     lint_cmd = cmd_override
     if not lint_cmd:
         if (cwd / "pyproject.toml").exists():
             if _has_tool(cwd / "pyproject.toml", "ruff"):
-                lint_cmd = "ruff check ."
+                venv_ruff = _find_venv_binary(cwd, "ruff")
+                lint_cmd = f"{venv_ruff.resolve()} check ." if venv_ruff else "ruff check ."
         elif (cwd / "package.json").exists():
             lint_cmd = "npm run lint"
         elif (cwd / "Cargo.toml").exists():
@@ -781,7 +782,7 @@ def _run_lint(cwd: Path, cmd_override: str | None = None) -> dict:
 
 def _run_typecheck(cwd: Path, cmd_override: str | None = None) -> dict:
     """Run typecheck in the given directory. Returns {passed, command, output}."""
-    from test_runner import _exec, _has_tool, _resolve_pytest_command
+    from test_runner import _exec
 
     tc_cmd = cmd_override or _resolve_typecheck_command(cwd)
     if not tc_cmd:
@@ -795,16 +796,15 @@ def _run_typecheck(cwd: Path, cmd_override: str | None = None) -> dict:
 
 def _resolve_typecheck_command(cwd: Path) -> str | None:
     """Detect typecheck command for a project."""
-    from test_runner import _has_tool
+    from test_runner import _find_venv_binary, _has_tool
 
     if (cwd / "pyproject.toml").exists():
+        venv_mypy = _find_venv_binary(cwd, "mypy")
         if _has_tool(cwd / "pyproject.toml", "mypy"):
-            venv_mypy = cwd / ".venv" / "bin" / "mypy"
-            if venv_mypy.is_file():
+            if venv_mypy:
                 return f"{venv_mypy.resolve()} ."
             return "mypy ."
-        venv_mypy = cwd / ".venv" / "bin" / "mypy"
-        if venv_mypy.is_file():
+        if venv_mypy:
             return f"{venv_mypy.resolve()} ."
     elif (cwd / "tsconfig.json").exists():
         return "npx tsc --noEmit"
@@ -3317,7 +3317,6 @@ def cmd_edit(args) -> dict:
 def cmd_start(args) -> dict:
     """One-shot session setup: lock + copy plan + plan-ready. Rolls back on failure."""
     repo = _repo_path(args.repo)
-    lock_path = repo / CM_DIR / "lock.json"
     plan_path = repo / CM_DIR / "PLAN.md"
 
     # Step 1: Lock (cmd_lock handles join-or-create)
