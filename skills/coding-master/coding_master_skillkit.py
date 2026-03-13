@@ -73,6 +73,14 @@ def _make_args(**kwargs) -> Namespace:
         "engine": "claude-code",
         "timeout": 600,
         "max_turns": 30,
+        # v4.5 file operations
+        "start_line": None,
+        "end_line": None,
+        "max_results": None,
+        "context": None,
+        "glob": None,
+        "old_text": None,
+        "new_text": None,
     }
     defaults.update(kwargs)
     return Namespace(**defaults)
@@ -430,6 +438,110 @@ class CodingMasterSkillkit(Skillkit):
         return _result_to_str(tools.cmd_doctor(args))
 
     # ──────────────────────────────────────────────────────────
+    #  File operations (v4.5)
+    # ──────────────────────────────────────────────────────────
+
+    def _cm_read(self, repo: str = "", file: str = "",
+                 start_line: int = 0, end_line: int = 0,
+                 feature: int = 0, **kwargs) -> str:
+        """读取文件内容，支持行范围。自动感知 session/feature worktree。
+
+        Args:
+            repo (str): 目标仓库名称
+            file (str): 文件路径（绝对路径或相对于 worktree）
+            start_line (int): 起始行号（1-based，0 表示从头开始）
+            end_line (int): 结束行号（inclusive，0 表示到文件末尾）
+            feature (int): 可选的 feature 编号（在 feature worktree 中查找）
+
+        Returns:
+            str: JSON — 包含带行号的文件内容
+        """
+        tools = _get_tools()
+        args = _make_args(
+            repo=repo or None, file=file,
+            start_line=start_line or None,
+            end_line=end_line or None,
+            feature=feature or None,
+            agent=self._agent_id,
+        )
+        return _result_to_str(tools.cmd_read(args))
+
+    def _cm_find(self, repo: str = "", pattern: str = "",
+                 max_results: int = 50, feature: int = 0, **kwargs) -> str:
+        """按 glob 模式查找文件。自动感知 session/feature worktree。
+
+        Args:
+            repo (str): 目标仓库名称
+            pattern (str): Glob 模式（如 '**/*.py', 'src/**/test_*.py'）
+            max_results (int): 最大返回数（默认 50）
+            feature (int): 可选的 feature 编号
+
+        Returns:
+            str: JSON — 匹配的文件路径列表
+        """
+        tools = _get_tools()
+        args = _make_args(
+            repo=repo or None, pattern=pattern,
+            max_results=max_results,
+            feature=feature or None,
+            agent=self._agent_id,
+        )
+        return _result_to_str(tools.cmd_find(args))
+
+    def _cm_grep(self, repo: str = "", pattern: str = "",
+                 glob: str = "", context: int = 2,
+                 max_results: int = 20, feature: int = 0, **kwargs) -> str:
+        """搜索文件内容，返回匹配行。自动感知 session/feature worktree。
+
+        Args:
+            repo (str): 目标仓库名称
+            pattern (str): 正则表达式
+            glob (str): 文件过滤 glob（如 '*.py'）
+            context (int): 上下文行数（默认 2）
+            max_results (int): 最大匹配数（默认 20）
+            feature (int): 可选的 feature 编号
+
+        Returns:
+            str: JSON — 匹配行及上下文
+        """
+        tools = _get_tools()
+        args = _make_args(
+            repo=repo or None, pattern=pattern,
+            glob=glob or None,
+            context=context,
+            max_results=max_results,
+            feature=feature or None,
+            agent=self._agent_id,
+        )
+        return _result_to_str(tools.cmd_grep(args))
+
+    def _cm_edit(self, repo: str = "", file: str = "",
+                 old_text: str = "", new_text: str = "",
+                 feature: int = 0, **kwargs) -> str:
+        """精确替换编辑文件。仅在 deliver/debug 模式下可用。
+
+        old_text 必须在文件中唯一匹配，确保替换安全。
+
+        Args:
+            repo (str): 目标仓库名称
+            file (str): 文件路径
+            old_text (str): 要替换的原文（必须唯一匹配）
+            new_text (str): 替换后的文本
+            feature (int): 可选的 feature 编号
+
+        Returns:
+            str: JSON — 编辑结果
+        """
+        tools = _get_tools()
+        args = _make_args(
+            repo=repo or None, file=file,
+            old_text=old_text, new_text=new_text,
+            feature=feature or None,
+            agent=self._agent_id,
+        )
+        return _result_to_str(tools.cmd_edit(args))
+
+    # ──────────────────────────────────────────────────────────
     #  Escape hatches (controlled)
     # ──────────────────────────────────────────────────────────
 
@@ -544,6 +656,11 @@ class CodingMasterSkillkit(Skillkit):
             SkillFunction(self._cm_progress),
             SkillFunction(self._cm_journal),
             SkillFunction(self._cm_doctor),
+            # File operations (v4.5)
+            SkillFunction(self._cm_read),
+            SkillFunction(self._cm_find),
+            SkillFunction(self._cm_grep),
+            SkillFunction(self._cm_edit),
             # Escape hatches
             SkillFunction(self._cm_git),
         ]

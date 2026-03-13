@@ -75,10 +75,11 @@ class TestCreateSkills:
         assert "_cm_git" in names
         assert "_cm_engine_run" in names
 
-        # Removed: dispatcher should not have executor tools
-        assert "_cm_read" not in names
-        assert "_cm_grep" not in names
-        assert "_cm_find" not in names
+        # v4.5: file operation tools added
+        assert "_cm_read" in names
+        assert "_cm_grep" in names
+        assert "_cm_find" in names
+        assert "_cm_edit" in names
 
         # No _bash or _python tool
         assert "_bash" not in names
@@ -87,7 +88,7 @@ class TestCreateSkills:
     def test_skill_count(self):
         sk = CodingMasterSkillkit(agent_id="test")
         skills = sk._createSkills()
-        assert len(skills) == 19
+        assert len(skills) == 23  # 19 original + 4 file ops (read, find, grep, edit)
 
     def test_get_name(self):
         sk = CodingMasterSkillkit()

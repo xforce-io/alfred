@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -38,6 +39,9 @@ DELEGATION_DIR = "delegation"
 LEASE_MINUTES = 120
 READ_ONLY_MODES = {"review", "analyze"}  # These modes must not modify git state
 TEST_OUTPUT_MAX = 500
+# Commands that require session_phase in ("working", "integrating")
+# Note: "claim" is excluded — it has its own check allowing "reviewed" or "working"
+_WORKING_PHASE_COMMANDS = frozenset({"dev", "test", "done", "reopen", "integrate"})
 
 # ── Mode definitions: constraints, not pipelines ──
 MODES = {
@@ -49,6 +53,7 @@ MODES = {
             "integrate", "submit", "progress", "journal", "doctor",
             "delegate-prepare", "delegate-complete",
             "engine-run",
+            "read", "find", "grep", "edit",
         ],
         "completion_gate": "all features done + evidence pass",
         "description": "Feature delivery: plan → claim → dev → test → done → submit",
@@ -60,6 +65,7 @@ MODES = {
             "scope", "report", "progress", "journal", "doctor",
             "delegate-prepare", "delegate-complete",
             "engine-run",
+            "read", "find", "grep",
         ],
         "completion_gate": "report.md exists",
         "description": "Code review: structured analysis and feedback",
@@ -72,6 +78,7 @@ MODES = {
             "delegate-prepare", "delegate-complete",
             "dev", "test",  # debug may need code changes
             "engine-run",
+            "read", "find", "grep", "edit",
         ],
         "completion_gate": "diagnosis.md exists",
         "description": "Debug: investigate, diagnose, optionally fix",
@@ -83,6 +90,7 @@ MODES = {
             "scope", "report", "progress", "journal", "doctor",
             "delegate-prepare", "delegate-complete",
             "engine-run",
+            "read", "find", "grep",
         ],
         "completion_gate": "report.md exists",
         "description": "Analysis: understand code, produce structured conclusions",
@@ -759,11 +767,12 @@ def _delete_integration_report(repo: Path):
 # ══════════════════════════════════════════════════════════
 
 
-def _precondition_check(repo: Path, feature_id: str | None = None) -> dict | None:
+def _precondition_check(repo: Path, feature_id: str | None = None, *, command: str | None = None) -> dict | None:
     """Check preconditions before mutation commands.
 
     Returns error dict if precondition violated, None if OK.
-    Checks: lease validity, branch consistency, session not done.
+    Checks: lease validity, branch consistency, session not done,
+    mode gate, session phase gate.
     """
     # 1. Lease not expired
     lease = _check_lease(repo)
@@ -786,6 +795,28 @@ def _precondition_check(repo: Path, feature_id: str | None = None) -> dict | Non
     lock = _atomic_json_read(repo / CM_DIR / "lock.json")
     if lock.get("session_phase") == "done":
         return {"ok": False, "error": "Session already done. Start a new session with cm lock."}
+
+    # 4. Mode gate: command allowed in current session mode
+    if command:
+        mode = lock.get("mode", "deliver")
+        mode_def = MODES.get(mode)
+        if mode_def and command not in mode_def["allowed_commands"]:
+            return {
+                "ok": False,
+                "error": f"command '{command}' not available in '{mode}' mode",
+                "data": {
+                    "mode": mode,
+                    "allowed_commands": mode_def["allowed_commands"],
+                    "description": mode_def["description"],
+                },
+            }
+
+    # 5. Session phase gate: mutation commands require "working" or "integrating"
+    if command and command in _WORKING_PHASE_COMMANDS:
+        sp = lock.get("session_phase")
+        if sp not in ("working", "integrating"):
+            return {"ok": False, "error": f"session is '{sp}', command '{command}' requires "
+                    f"a claimed feature (session_phase: working or integrating)"}
 
     return None
 
@@ -887,6 +918,22 @@ def cmd_lock(args) -> dict:
                 action_taken["type"] = "overlay"
                 return {"ok": True, "data": dict(data)}
 
+            # Upgrade: review/analyze → debug
+            existing_mode = data.get("mode")
+            if not read_only and existing_read_only:
+                if existing_mode in ("review", "analyze") and mode == "debug":
+                    data["mode"] = "debug"
+                    data["read_only"] = False
+                    data["lease_expires_at"] = (now + timedelta(minutes=LEASE_MINUTES)).isoformat()
+                    agents = data.setdefault("session_agents", [])
+                    if agent not in agents:
+                        agents.append(agent)
+                    action_taken["type"] = "upgraded"
+                    return {"ok": True, "data": dict(data)}
+                else:
+                    return {"ok": False, "error": f"cannot upgrade from {existing_mode} to {mode}. "
+                            f"Only review/analyze → debug is supported."}
+
             # Same mode family: join the session
             data["lease_expires_at"] = (now + timedelta(minutes=LEASE_MINUTES)).isoformat()
             agents = data.setdefault("session_agents", [])
@@ -928,6 +975,34 @@ def cmd_lock(args) -> dict:
                         f"Read-only overlay ({mode}), branch: {current_branch or '(current)'}")
         return {"ok": True, "data": {"branch": current_branch or "", "read_only": True, "overlay": True,
                                      "next_action": next_action}}
+
+    # ── Upgraded from read-only to debug: create dev branch + session worktree ──
+    if action_taken["type"] == "upgraded":
+        lock = _atomic_json_read(lock_path)
+        # Read-only sessions use main as branch; upgrade needs a new dev branch
+        now = datetime.now(timezone.utc)
+        dev_branch = (
+            reuse_branch
+            or f"dev/{args.repo}-{now.strftime('%m%d-%H%M')}"
+        )
+        _atomic_json_update(lock_path, lambda d: (
+            d.update({"branch": dev_branch}), {"ok": True}
+        )[1])
+        lock["branch"] = dev_branch
+        session_result = _ensure_session_worktree(repo, lock)
+        if not session_result.get("ok"):
+            return session_result
+        session_wt = session_result["data"]["session_worktree"]
+        _save_session(repo, dev_branch, "debug", "locked")
+        _append_journal(repo, agent, "lock",
+                        f"Upgraded to debug mode, branch: {dev_branch}, worktree: {session_wt}")
+        return {"ok": True, "data": {
+            "branch": dev_branch,
+            "session_worktree": session_wt,
+            "mode": "debug",
+            "upgraded": True,
+            "next_action": _FLOW_AFTER_LOCK.get("debug"),
+        }}
 
     # ── Joined existing session: validate or recover session worktree ──
     if action_taken["type"] == "joined":
@@ -1189,7 +1264,7 @@ def cmd_claim(args) -> dict:
     agent = _resolve_agent(args)
 
     # Precondition check
-    pre_err = _precondition_check(repo)
+    pre_err = _precondition_check(repo, command="claim")
     if pre_err:
         return pre_err
 
@@ -1291,7 +1366,7 @@ def cmd_dev(args) -> dict:
     feature_id = str(args.feature)
 
     # Precondition check
-    pre_err = _precondition_check(repo, feature_id)
+    pre_err = _precondition_check(repo, feature_id, command="dev")
     if pre_err:
         return pre_err
     delegate_err = _check_delegation_gate(repo, feature_id)
@@ -1346,7 +1421,7 @@ def cmd_test(args) -> dict:
     feature_id = str(args.feature)
 
     # Precondition check
-    pre_err = _precondition_check(repo, feature_id)
+    pre_err = _precondition_check(repo, feature_id, command="test")
     if pre_err:
         return pre_err
     delegate_err = _check_delegation_gate(repo, feature_id)
@@ -1474,7 +1549,7 @@ def cmd_done(args) -> dict:
     agent = _resolve_agent(args)
 
     # Precondition check
-    pre_err = _precondition_check(repo, feature_id)
+    pre_err = _precondition_check(repo, feature_id, command="done")
     if pre_err:
         return pre_err
     delegate_err = _check_delegation_gate(repo, feature_id)
@@ -1570,7 +1645,7 @@ def cmd_reopen(args) -> dict:
     feature_id = str(args.feature)
 
     # Precondition check (skip feature-level branch check since it's done, not developing)
-    pre_err = _precondition_check(repo)
+    pre_err = _precondition_check(repo, command="reopen")
     if pre_err:
         return pre_err
 
@@ -1658,7 +1733,7 @@ def cmd_integrate(args) -> dict:
     repo = _resolve_locked_repo(args)
 
     # Precondition check
-    pre_err = _precondition_check(repo)
+    pre_err = _precondition_check(repo, command="integrate")
     if pre_err:
         return pre_err
 
@@ -1944,9 +2019,9 @@ def cmd_report(args) -> dict:
     agent = _resolve_agent(args)
     _append_journal(repo, agent, "report", f"Report written: {filename}")
 
-    # Auto-unlock for review/analyze/debug — report is the terminal artifact.
+    # Auto-unlock for review/analyze only — debug keeps session open for fixes.
     auto_unlocked = False
-    if mode in ("review", "analyze", "debug"):
+    if mode in ("review", "analyze"):
         try:
             cmd_unlock(args)
             auto_unlocked = True
@@ -2102,6 +2177,18 @@ def cmd_engine_run(args) -> dict:
     data = result.to_dict()
     if result.ok:
         data["next_action"] = _FLOW_AFTER_ENGINE.get(mode, _hint("cm report --content '...'", "Write report based on findings"))
+    else:
+        # Engine failed — provide fallback hint so agent can analyze manually
+        scope_data = _atomic_json_read(scope_path) if scope_path.exists() else {}
+        data["fallback_hint"] = {
+            "message": "Engine failed. Use cm read/grep/find to analyze manually.",
+            "suggested_steps": [
+                "cm find --pattern '**/*.py' to locate relevant files",
+                "cm grep --pattern '<keyword>' to search for code patterns",
+                "cm read --file <path> to read specific files",
+            ],
+            "scope_files": scope_data.get("files", []),
+        }
     return {"ok": result.ok, "data": data}
 
 
@@ -2762,6 +2849,204 @@ def _generate_pr_body(repo: Path) -> str:
     return "\n".join(lines)
 
 
+# ══════════════════════════════════════════════════════════
+#  File Operations (v4.5)
+# ══════════════════════════════════════════════════════════
+
+
+def _resolve_working_dir(repo: Path, args) -> Path:
+    """Resolve working directory: feature worktree > session worktree > repo root."""
+    lock = _atomic_json_read(repo / CM_DIR / "lock.json")
+
+    # If feature is specified and has a worktree, use it
+    feature_id = getattr(args, "feature", None)
+    if feature_id:
+        claims = _atomic_json_read(repo / CM_DIR / "claims.json")
+        feat = claims.get("features", {}).get(str(feature_id), {})
+        wt = feat.get("worktree")
+        if wt and Path(wt).exists():
+            return Path(wt)
+
+    # Otherwise use session worktree
+    session_wt = lock.get("session_worktree")
+    if session_wt and Path(session_wt).exists():
+        return Path(session_wt)
+
+    return repo
+
+
+def _is_within_repo(target: Path, repo: Path) -> bool:
+    """Check if target path is within repo or any of its worktrees."""
+    resolved = target.resolve()
+    # Allow repo itself
+    if resolved.is_relative_to(repo.resolve()):
+        return True
+    # Allow sibling worktree dirs (session and feature worktrees)
+    repo_parent = repo.resolve().parent
+    repo_name = repo.resolve().name
+    if resolved.is_relative_to(repo_parent):
+        rel = resolved.relative_to(repo_parent)
+        first_part = str(rel.parts[0]) if rel.parts else ""
+        if first_part.startswith(repo_name):
+            return True
+    return False
+
+
+def cmd_read(args) -> dict:
+    """Read file contents with optional line range.
+
+    Available in all modes. Auto-resolves paths relative to session/feature worktree.
+    """
+    repo = _resolve_locked_repo(args)
+    cwd = _resolve_working_dir(repo, args)
+    target = Path(args.file)
+    if not target.is_absolute():
+        target = cwd / target
+    target = target.resolve()
+
+    if not _is_within_repo(target, repo):
+        return {"ok": False, "error": f"path {target} is outside repo"}
+    if not target.exists():
+        return {"ok": False, "error": f"file not found: {target}"}
+    if target.is_dir():
+        return {"ok": False, "error": f"{target} is a directory, not a file"}
+
+    lines = target.read_text(errors="replace").splitlines(keepends=True)
+    start = max(1, getattr(args, "start_line", None) or 1)
+    end = min(len(lines), getattr(args, "end_line", None) or len(lines))
+
+    MAX_LINES = 2000
+    if end - start + 1 > MAX_LINES:
+        end = start + MAX_LINES - 1
+
+    selected = lines[start - 1:end]
+    numbered = "".join(f"{start + i:6d}\t{line}" for i, line in enumerate(selected))
+
+    return {"ok": True, "data": {
+        "file": str(target),
+        "start_line": start,
+        "end_line": end,
+        "total_lines": len(lines),
+        "content": numbered,
+    }}
+
+
+def cmd_find(args) -> dict:
+    """Find files by glob pattern.
+
+    Available in all modes. Searches relative to session/feature worktree.
+    """
+    repo = _resolve_locked_repo(args)
+    cwd = _resolve_working_dir(repo, args)
+    pattern = args.pattern
+    max_results = getattr(args, "max_results", 50) or 50
+
+    matches = sorted(cwd.glob(pattern))
+    files = [str(m.relative_to(cwd)) for m in matches if m.is_file()
+             and ".git" not in m.relative_to(cwd).parts]
+
+    truncated = len(files) > max_results
+    files = files[:max_results]
+
+    return {"ok": True, "data": {
+        "pattern": pattern,
+        "cwd": str(cwd),
+        "files": files,
+        "count": len(files),
+        "truncated": truncated,
+    }}
+
+
+def cmd_grep(args) -> dict:
+    """Search file contents by regex pattern.
+
+    Available in all modes. Searches relative to session/feature worktree.
+    Uses ripgrep if available, falls back to grep.
+    """
+    repo = _resolve_locked_repo(args)
+    cwd = _resolve_working_dir(repo, args)
+    pattern = args.pattern
+    file_glob = getattr(args, "glob", None)
+    context = getattr(args, "context", 2) or 2
+    max_results = getattr(args, "max_results", 20) or 20
+
+    rg = shutil.which("rg")
+    cmd = [rg] if rg else ["grep"]
+    if rg:
+        cmd += ["-n", f"-C{context}", "--max-count=5",
+                "--max-filesize=1M", "--no-heading",
+                f"--max-count={max_results}"]
+        if file_glob:
+            cmd += ["--glob", file_glob]
+        cmd += [pattern, str(cwd)]
+    else:
+        cmd += ["-rn", f"-C{context}", pattern, str(cwd)]
+        if file_glob:
+            cmd += ["--include", file_glob]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        output = result.stdout
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        return {"ok": False, "error": f"grep failed: {exc}"}
+
+    MAX_OUTPUT = 10000
+    truncated = len(output) > MAX_OUTPUT
+    if truncated:
+        output = output[:MAX_OUTPUT] + "\n...(output truncated)..."
+
+    return {"ok": True, "data": {
+        "pattern": pattern,
+        "cwd": str(cwd),
+        "output": output,
+        "truncated": truncated,
+    }}
+
+
+def cmd_edit(args) -> dict:
+    """Edit file by exact text replacement. Only available in deliver/debug modes.
+
+    old_text must match exactly once in the file for safety.
+    """
+    repo = _resolve_locked_repo(args)
+    mode = _get_session_mode(repo)
+    if mode in READ_ONLY_MODES:
+        return {"ok": False, "error": f"edit not allowed in {mode} mode (read-only)"}
+
+    cwd = _resolve_working_dir(repo, args)
+    target = Path(args.file)
+    if not target.is_absolute():
+        target = cwd / target
+    target = target.resolve()
+
+    if not _is_within_repo(target, repo):
+        return {"ok": False, "error": f"path {target} is outside repo"}
+    if not target.exists():
+        return {"ok": False, "error": f"file not found: {target}"}
+
+    content = target.read_text()
+    old_text = args.old_text
+    new_text = args.new_text
+
+    if old_text == new_text:
+        return {"ok": False, "error": "old_text and new_text are identical"}
+
+    count = content.count(old_text)
+    if count == 0:
+        return {"ok": False, "error": "old_text not found in file"}
+    if count > 1:
+        return {"ok": False, "error": f"old_text matches {count} locations; "
+                "provide more context to make it unique"}
+
+    new_content = content.replace(old_text, new_text, 1)
+    target.write_text(new_content)
+
+    return {"ok": True, "data": {
+        "file": str(target),
+        "replacements": 1,
+    }}
+
+
 def cmd_start(args) -> dict:
     """One-shot session setup: lock + copy plan + plan-ready. Rolls back on failure."""
     repo = _repo_path(args.repo)
@@ -2954,6 +3239,38 @@ def main():
     _add_global_args(p_doctor)
     p_doctor.add_argument("--fix", action="store_true")
 
+    # read (v4.5)
+    p_read = sub.add_parser("read", help="Read file contents")
+    _add_global_args(p_read)
+    p_read.add_argument("--file", required=True, help="File path")
+    p_read.add_argument("--start-line", type=int, default=None, dest="start_line")
+    p_read.add_argument("--end-line", type=int, default=None, dest="end_line")
+    p_read.add_argument("--feature", "-f", type=int, default=None)
+
+    # find (v4.5)
+    p_find = sub.add_parser("find", help="Find files by glob pattern")
+    _add_global_args(p_find)
+    p_find.add_argument("--pattern", required=True, help="Glob pattern")
+    p_find.add_argument("--max-results", type=int, default=50, dest="max_results")
+    p_find.add_argument("--feature", "-f", type=int, default=None)
+
+    # grep (v4.5)
+    p_grep = sub.add_parser("grep", help="Search file contents")
+    _add_global_args(p_grep)
+    p_grep.add_argument("--pattern", required=True, help="Regex pattern")
+    p_grep.add_argument("--glob", default=None, help="File filter glob")
+    p_grep.add_argument("--context", type=int, default=2)
+    p_grep.add_argument("--max-results", type=int, default=20, dest="max_results")
+    p_grep.add_argument("--feature", "-f", type=int, default=None)
+
+    # edit (v4.5)
+    p_edit = sub.add_parser("edit", help="Edit file by text replacement")
+    _add_global_args(p_edit)
+    p_edit.add_argument("--file", required=True, help="File path")
+    p_edit.add_argument("--old-text", required=True, dest="old_text")
+    p_edit.add_argument("--new-text", required=True, dest="new_text")
+    p_edit.add_argument("--feature", "-f", type=int, default=None)
+
     args = parser.parse_args()
 
     # Commands that don't require --repo
@@ -2990,6 +3307,10 @@ def main():
         "progress": cmd_progress,
         "journal": cmd_journal,
         "doctor": cmd_doctor,
+        "read": cmd_read,
+        "find": cmd_find,
+        "grep": cmd_grep,
+        "edit": cmd_edit,
     }
 
     if not args.command:

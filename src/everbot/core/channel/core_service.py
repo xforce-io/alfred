@@ -461,12 +461,13 @@ class ChannelCoreService:
                     source_type="chat_user",
                     run_id=run_id,
                 )
-                await self.session_manager.save_session(
-                    session_id,
-                    agent,
-                    lock_already_held=True,
-                )
-                await self._ack_mailbox_events(session_id, mailbox_ack_ids, lock_already_held=True)
+                if _restore_ok:
+                    await self.session_manager.save_session(
+                        session_id,
+                        agent,
+                        lock_already_held=True,
+                    )
+                    await self._ack_mailbox_events(session_id, mailbox_ack_ids, lock_already_held=True)
                 await on_event(OutboundMessage(session_id, "", msg_type="end", metadata={"status": "cancelled"}))
             except Exception as e:
                 logger.warning("Failed to save session on cancellation: %s", e)

@@ -561,6 +561,11 @@ class TelegramChannel:
             full_reply = f"{full_reply}\n\n{chr(10).join(summary_parts)}"
 
         converted_text, converted_entities = self._convert_markdown(full_reply)
+        logger.info(
+            "Markdown conversion: text_len=%d, entities=%s",
+            len(converted_text),
+            converted_entities[:3] if converted_entities else None,
+        )
         sent_any = False
         parts = self._split_message(converted_text)
         if len(parts) <= 1:
@@ -571,13 +576,21 @@ class TelegramChannel:
                     sent_any = True
         else:
             # Multi-part: slice entities for each chunk
+            logger.info(
+                "Multi-part split: %d parts, lengths=%s",
+                len(parts), [len(p) for p in parts],
+            )
             search_from = 0
-            for part in parts:
+            for i, part in enumerate(parts):
                 part_start = converted_text.find(part, search_from)
                 if part_start < 0:
                     part_start = search_from
                 part_entities = self._slice_entities(
                     converted_entities, part_start, len(part),
+                )
+                logger.info(
+                    "Part %d: start=%d, len=%d, sliced_entities=%s",
+                    i, part_start, len(part), part_entities[:3] if part_entities else [],
                 )
                 success = await self._send_message(
                     chat_id, part, part_entities or None,
@@ -707,6 +720,10 @@ class TelegramChannel:
                 payload: Dict[str, Any] = {"chat_id": chat_id, "text": text}
                 if entities:
                     payload["entities"] = entities
+                logger.info(
+                    "sendMessage: text_len=%d, has_entities=%s, entity_count=%d",
+                    len(text), bool(entities), len(entities) if entities else 0,
+                )
                 resp = await self._client.post(
                     f"{self._base_url}/sendMessage", json=payload,
                 )

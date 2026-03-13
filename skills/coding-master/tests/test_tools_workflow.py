@@ -656,3 +656,329 @@ class TestExtendedStatus:
             assert r["ok"]
             assert "stale" in r["data"].get("blocking_reason", "").lower()
             assert "cm test --feature 1" in r["data"].get("resume_hint", "")
+
+
+# ══════════════════════════════════════════════════════════
+#  Mode gate & session_phase enforcement (P0 + P1)
+# ══════════════════════════════════════════════════════════
+
+
+def _setup_locked_with_mode(git_repo, mode="deliver"):
+    """Lock workspace in a specific mode."""
+    with _mock_repo(git_repo):
+        r = tools.cmd_lock(make_args(repo=git_repo.name, mode=mode))
+        assert r["ok"], r
+    return git_repo
+
+
+class TestModeGateAndSessionPhase:
+    """P0: Mode gate enforcement via _precondition_check.
+    P1: session_phase validation for mutation commands."""
+
+    # ── P0: Mode gate rejects commands not in allowed_commands ──
+
+    def test_mode_gate_rejects_dev_in_review_mode(self, git_repo):
+        _setup_locked_with_mode(git_repo, mode="review")
+        with _mock_repo(git_repo):
+            r = tools.cmd_dev(make_args(repo=git_repo.name, feature=1))
+        assert r["ok"] is False
+        assert "not available in 'review' mode" in r["error"]
+
+    def test_mode_gate_rejects_test_in_analyze_mode(self, git_repo):
+        _setup_locked_with_mode(git_repo, mode="analyze")
+        with _mock_repo(git_repo):
+            r = tools.cmd_test(make_args(repo=git_repo.name, feature=1))
+        assert r["ok"] is False
+        assert "not available in 'analyze' mode" in r["error"]
+
+    def test_mode_gate_rejects_done_in_review_mode(self, git_repo):
+        _setup_locked_with_mode(git_repo, mode="review")
+        with _mock_repo(git_repo):
+            r = tools.cmd_done(make_args(repo=git_repo.name, feature=1))
+        assert r["ok"] is False
+        assert "not available in 'review' mode" in r["error"]
+
+    def test_mode_gate_rejects_claim_in_analyze_mode(self, git_repo):
+        _setup_locked_with_mode(git_repo, mode="analyze")
+        with _mock_repo(git_repo):
+            r = tools.cmd_claim(make_args(repo=git_repo.name, feature=1))
+        assert r["ok"] is False
+        assert "not available in 'analyze' mode" in r["error"]
+
+    def test_mode_gate_allows_dev_in_debug_mode(self, git_repo):
+        """debug mode allows dev/test — should NOT get mode gate error."""
+        _setup_locked_with_mode(git_repo, mode="debug")
+        with _mock_repo(git_repo):
+            r = tools.cmd_dev(make_args(repo=git_repo.name, feature=1))
+        # Will fail for other reasons (session_phase, no feature claimed),
+        # but NOT for mode gate
+        assert "not available" not in r.get("error", "")
+
+    # ── P1: session_phase gate for mutation commands ──
+
+    def test_session_phase_rejects_dev_when_locked(self, git_repo):
+        """cmd_dev rejected when session_phase is 'locked'."""
+        _setup_locked(git_repo)  # session_phase = "locked"
+        with _mock_repo(git_repo):
+            r = tools.cmd_dev(make_args(repo=git_repo.name, feature=1))
+        assert r["ok"] is False
+        assert "session" in r["error"].lower()
+        assert "working" in r["error"].lower() or "claimed" in r["error"].lower()
+
+    def test_session_phase_rejects_test_when_reviewed(self, git_repo):
+        """cmd_test rejected when session_phase is 'reviewed' (no feature claimed)."""
+        _setup_reviewed(git_repo)  # session_phase = "reviewed"
+        with _mock_repo(git_repo):
+            r = tools.cmd_test(make_args(repo=git_repo.name, feature=1))
+        assert r["ok"] is False
+        assert "session" in r["error"].lower()
+
+    def test_session_phase_rejects_done_when_locked(self, git_repo):
+        """cmd_done rejected when session_phase is 'locked'."""
+        _setup_locked(git_repo)
+        with _mock_repo(git_repo):
+            r = tools.cmd_done(make_args(repo=git_repo.name, feature=1))
+        assert r["ok"] is False
+        assert "session" in r["error"].lower()
+
+    def test_session_phase_allows_claim_when_reviewed(self, git_repo):
+        """Regression: cmd_claim should work in 'reviewed' phase."""
+        repo = _setup_reviewed(git_repo)
+        with _mock_repo(repo):
+            r = tools.cmd_claim(make_args(repo=repo.name, feature=1))
+        assert r["ok"] is True
+
+    def test_session_phase_allows_dev_when_working(self, git_repo):
+        """Regression: cmd_dev works after claim (session_phase='working')."""
+        repo, _ = _setup_claimed(git_repo)
+        _fill_analysis_plan(repo, 1)
+        with _mock_repo(repo):
+            r = tools.cmd_dev(make_args(repo=repo.name, feature=1))
+        assert r["ok"] is True
+
+
+# ══════════════════════════════════════════════════════════
+#  File operations (v4.5)
+# ══════════════════════════════════════════════════════════
+
+
+class TestCmRead:
+    """cmd_read: read file contents with optional line range."""
+
+    def test_read_existing_file(self, git_repo):
+        repo = _setup_locked(git_repo)
+        with _mock_repo(repo):
+            r = tools.cmd_read(make_args(repo=repo.name, file="README.md"))
+        assert r["ok"] is True
+        assert "# Test" in r["data"]["content"]
+        assert r["data"]["total_lines"] == 1
+
+    def test_read_with_line_range(self, git_repo):
+        repo = _setup_locked(git_repo)
+        # Write to repo (session worktree may exist, use absolute path)
+        (repo / "multi.txt").write_text("line1\nline2\nline3\nline4\nline5\n")
+        with _mock_repo(repo):
+            r = tools.cmd_read(make_args(repo=repo.name,
+                                         file=str(repo / "multi.txt"),
+                                         start_line=2, end_line=4))
+        assert r["ok"] is True
+        assert r["data"]["start_line"] == 2
+        assert r["data"]["end_line"] == 4
+        assert "line2" in r["data"]["content"]
+        assert "line1" not in r["data"]["content"]
+
+    def test_read_nonexistent_file(self, git_repo):
+        repo = _setup_locked(git_repo)
+        with _mock_repo(repo):
+            r = tools.cmd_read(make_args(repo=repo.name, file="nope.txt"))
+        assert r["ok"] is False
+        assert "not found" in r["error"]
+
+    def test_read_outside_repo(self, git_repo):
+        repo = _setup_locked(git_repo)
+        with _mock_repo(repo):
+            r = tools.cmd_read(make_args(repo=repo.name, file="/etc/passwd"))
+        assert r["ok"] is False
+        assert "outside repo" in r["error"]
+
+    def test_read_in_review_mode(self, git_repo):
+        """read should be allowed in review mode."""
+        repo = _setup_locked_with_mode(git_repo, mode="review")
+        with _mock_repo(repo):
+            r = tools.cmd_read(make_args(repo=repo.name, file="README.md"))
+        assert r["ok"] is True
+
+
+class TestCmFind:
+    """cmd_find: find files by glob pattern."""
+
+    def test_find_python_files(self, git_repo):
+        repo = _setup_locked(git_repo)
+        # Find the session worktree and create files there
+        lock = tools._atomic_json_read(repo / tools.CM_DIR / "lock.json")
+        wt = Path(lock.get("session_worktree", str(repo)))
+        (wt / "src").mkdir()
+        (wt / "src" / "foo.py").write_text("pass")
+        (wt / "src" / "bar.py").write_text("pass")
+        with _mock_repo(repo):
+            r = tools.cmd_find(make_args(repo=repo.name, pattern="src/*.py"))
+        assert r["ok"] is True
+        assert r["data"]["count"] == 2
+        assert "src/foo.py" in r["data"]["files"]
+
+    def test_find_truncation(self, git_repo):
+        repo = _setup_locked(git_repo)
+        lock = tools._atomic_json_read(repo / tools.CM_DIR / "lock.json")
+        wt = Path(lock.get("session_worktree", str(repo)))
+        for i in range(5):
+            (wt / f"f{i}.txt").write_text("x")
+        with _mock_repo(repo):
+            r = tools.cmd_find(make_args(repo=repo.name, pattern="*.txt",
+                                         max_results=3))
+        assert r["ok"] is True
+        assert r["data"]["count"] == 3
+        assert r["data"]["truncated"] is True
+
+
+class TestCmGrep:
+    """cmd_grep: search file contents."""
+
+    def test_grep_finds_pattern(self, git_repo):
+        repo = _setup_locked(git_repo)
+        lock = tools._atomic_json_read(repo / tools.CM_DIR / "lock.json")
+        wt = Path(lock.get("session_worktree", str(repo)))
+        (wt / "code.py").write_text("def hello():\n    return 42\n")
+        with _mock_repo(repo):
+            r = tools.cmd_grep(make_args(repo=repo.name, pattern="return 42"))
+        assert r["ok"] is True
+        assert "return 42" in r["data"]["output"]
+
+
+class TestCmEdit:
+    """cmd_edit: precise text replacement."""
+
+    def test_edit_in_deliver_mode(self, git_repo):
+        repo = _setup_locked(git_repo)
+        lock = tools._atomic_json_read(repo / tools.CM_DIR / "lock.json")
+        wt = Path(lock.get("session_worktree", str(repo)))
+        (wt / "target.py").write_text("old_value = 1\n")
+        with _mock_repo(repo):
+            r = tools.cmd_edit(make_args(
+                repo=repo.name, file="target.py",
+                old_text="old_value = 1", new_text="new_value = 2",
+            ))
+        assert r["ok"] is True
+        assert (wt / "target.py").read_text() == "new_value = 2\n"
+
+    def test_edit_rejected_in_review_mode(self, git_repo):
+        repo = _setup_locked_with_mode(git_repo, mode="review")
+        (repo / "target.py").write_text("x = 1\n")
+        with _mock_repo(repo):
+            r = tools.cmd_edit(make_args(
+                repo=repo.name, file="target.py",
+                old_text="x = 1", new_text="x = 2",
+            ))
+        assert r["ok"] is False
+        assert "read-only" in r["error"]
+
+    def test_edit_non_unique_match(self, git_repo):
+        repo = _setup_locked(git_repo)
+        lock = tools._atomic_json_read(repo / tools.CM_DIR / "lock.json")
+        wt = Path(lock.get("session_worktree", str(repo)))
+        (wt / "dup.py").write_text("x = 1\nx = 1\n")
+        with _mock_repo(repo):
+            r = tools.cmd_edit(make_args(
+                repo=repo.name, file="dup.py",
+                old_text="x = 1", new_text="x = 2",
+            ))
+        assert r["ok"] is False
+        assert "matches 2 locations" in r["error"]
+
+    def test_edit_allowed_in_debug_mode(self, git_repo):
+        repo = _setup_locked_with_mode(git_repo, mode="debug")
+        lock = tools._atomic_json_read(repo / tools.CM_DIR / "lock.json")
+        wt = Path(lock.get("session_worktree", str(repo)))
+        (wt / "fix.py").write_text("bug = True\n")
+        with _mock_repo(repo):
+            r = tools.cmd_edit(make_args(
+                repo=repo.name, file="fix.py",
+                old_text="bug = True", new_text="bug = False",
+            ))
+        assert r["ok"] is True
+
+
+# ══════════════════════════════════════════════════════════
+#  Lock upgrade (v4.5)
+# ══════════════════════════════════════════════════════════
+
+
+class TestLockUpgrade:
+    """cm lock upgrade: review/analyze → debug."""
+
+    def test_review_to_debug_upgrade(self, git_repo):
+        repo = _setup_locked_with_mode(git_repo, mode="review")
+        with _mock_repo(repo):
+            r = tools.cmd_lock(make_args(repo=repo.name, mode="debug"))
+        assert r["ok"] is True
+        assert r["data"].get("upgraded") is True
+        assert r["data"]["mode"] == "debug"
+        # Verify lock.json was updated
+        lock = tools._atomic_json_read(repo / tools.CM_DIR / "lock.json")
+        assert lock["mode"] == "debug"
+        assert lock["read_only"] is False
+
+    def test_analyze_to_debug_upgrade(self, git_repo):
+        repo = _setup_locked_with_mode(git_repo, mode="analyze")
+        with _mock_repo(repo):
+            r = tools.cmd_lock(make_args(repo=repo.name, mode="debug"))
+        assert r["ok"] is True
+        assert r["data"].get("upgraded") is True
+
+    def test_review_to_deliver_rejected(self, git_repo):
+        repo = _setup_locked_with_mode(git_repo, mode="review")
+        with _mock_repo(repo):
+            r = tools.cmd_lock(make_args(repo=repo.name, mode="deliver"))
+        assert r["ok"] is False
+        assert "cannot upgrade" in r["error"]
+
+    def test_debug_to_debug_idempotent(self, git_repo):
+        repo = _setup_locked_with_mode(git_repo, mode="debug")
+        with _mock_repo(repo):
+            r = tools.cmd_lock(make_args(repo=repo.name, mode="debug"))
+        # Should join (idempotent), not fail
+        assert r["ok"] is True
+
+
+# ══════════════════════════════════════════════════════════
+#  Report auto-unlock fix (v4.5)
+# ══════════════════════════════════════════════════════════
+
+
+class TestReportDebugNoAutoUnlock:
+    """cmd_report in debug mode should NOT auto-unlock."""
+
+    def test_debug_report_keeps_session(self, git_repo):
+        repo = _setup_locked_with_mode(git_repo, mode="debug")
+        # Create scope.json (required artifact)
+        scope_path = repo / tools.CM_DIR / "scope.json"
+        scope_path.parent.mkdir(parents=True, exist_ok=True)
+        scope_path.write_text('{"type": "repo"}')
+        with _mock_repo(repo):
+            r = tools.cmd_report(make_args(
+                repo=repo.name, content="# Diagnosis\nFound a bug.",
+            ))
+        assert r["ok"] is True
+        assert r["data"]["auto_unlocked"] is False
+        # Session should still be active
+        lock = tools._atomic_json_read(repo / tools.CM_DIR / "lock.json")
+        assert lock.get("session_phase") is not None
+        assert lock.get("mode") == "debug"
+
+    def test_review_report_auto_unlocks(self, git_repo):
+        repo = _setup_locked_with_mode(git_repo, mode="review")
+        with _mock_repo(repo):
+            r = tools.cmd_report(make_args(
+                repo=repo.name, content="# Review\nAll good.",
+            ))
+        assert r["ok"] is True
+        assert r["data"]["auto_unlocked"] is True
