@@ -21,6 +21,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install Dolphin SDK
+        run: |
+          pip install -e "git+https://github.com/kweaver-ai/dolphin.git@main#egg=dolphin"
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
