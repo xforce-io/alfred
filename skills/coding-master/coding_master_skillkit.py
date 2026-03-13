@@ -81,6 +81,7 @@ def _make_args(**kwargs) -> Namespace:
         "glob": None,
         "old_text": None,
         "new_text": None,
+        "base_ref": None,
     }
     defaults.update(kwargs)
     return Namespace(**defaults)
@@ -423,6 +424,23 @@ class CodingMasterSkillkit(Skillkit):
         )
         return _result_to_str(tools.cmd_journal(args))
 
+    def _cm_change_summary(self, repo: str = "", base_ref: str = "", **kwargs) -> str:
+        """生成变更摘要：包含 unified diff、worktree 路径、commit 信息。
+
+        用于向用户报告代码变更时，提供可 review 的完整信息。
+        完成代码修改后应调用此命令，让用户可以看到实际 diff 和本地路径。
+
+        Args:
+            repo (str): 目标仓库名称
+            base_ref (str): Diff 基准 ref（默认使用会话分支）
+
+        Returns:
+            str: JSON — 包含 diff, worktree, commit, review_command
+        """
+        tools = _get_tools()
+        args = _make_args(repo=repo or None, base_ref=base_ref or None, agent=self._agent_id)
+        return _result_to_str(tools.cmd_change_summary(args))
+
     def _cm_doctor(self, repo: str = "", fix: bool = False, **kwargs) -> str:
         """诊断工作区状态并可选自动修复。
 
@@ -655,6 +673,7 @@ class CodingMasterSkillkit(Skillkit):
             # Utility
             SkillFunction(self._cm_progress),
             SkillFunction(self._cm_journal),
+            SkillFunction(self._cm_change_summary),
             SkillFunction(self._cm_doctor),
             # File operations (v4.5)
             SkillFunction(self._cm_read),

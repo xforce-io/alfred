@@ -88,7 +88,7 @@ class TestCreateSkills:
     def test_skill_count(self):
         sk = CodingMasterSkillkit(agent_id="test")
         skills = sk._createSkills()
-        assert len(skills) == 23  # 19 original + 4 file ops (read, find, grep, edit)
+        assert len(skills) == 24  # 19 original + 4 file ops + change-summary
 
     def test_get_name(self):
         sk = CodingMasterSkillkit()

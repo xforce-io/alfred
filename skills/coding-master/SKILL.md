@@ -90,6 +90,7 @@ cm submit --title "..."                # push + PR + cleanup
 | `cm submit --title "..."` | deliver | Idempotent: push → PR → cleanup → unlock |
 | `cm renew` | all | Renew lock lease |
 | `cm journal --message "..."` | all | Append to JOURNAL.md |
+| `cm change-summary [--base-ref R]` | all | Generate change summary with unified diff + worktree path |
 | `cm doctor --repo <name>` | all | Diagnose state, `--fix` to auto-repair |
 | `cm status --repo <name>` | all | Show lock status |
 
@@ -104,3 +105,4 @@ cm submit --title "..."                # push + PR + cleanup
 7. **Trust local progress first** — when unsure, run `cm progress` and follow `next_action`
 8. **Respect delegation hard gates** — when `must_delegate=true`, wait for delegation completion
 9. **Dispatcher, not executor** — use `cm engine-run` for all code analysis. Do not read/grep/find code yourself
+10. **Report changes with diff** — after making code changes, always call `cm change-summary` and present the unified diff, worktree path, and review command to the user. Never summarize changes as before/after snippets — show the actual `git diff`

@@ -602,6 +602,54 @@ class TelegramChannel:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _normalize_tables(text: str) -> str:
+        """Convert pre-formatted tables (``+----`` separators) to standard
+        Markdown tables so that ``telegramify_markdown`` can recognise them.
+
+        LLMs sometimes produce tables with ``----+----`` separators or
+        data rows without leading ``|``.  This normalises the most common
+        variants into ``| --- | --- |`` format.
+        """
+        import re
+
+        lines = text.split("\n")
+        out: list[str] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            # Detect a separator line like "----+-----+-----" or "---+---"
+            if re.match(r"^[\s\-+]+$", line) and "+" in line and "-" in line:
+                # Look back for a header row and forward for data rows
+                # Convert this separator to |---|---|
+                cols = [seg for seg in re.split(r"\+", line) if seg.strip("-").strip("-") is not None]
+                ncols = len(cols)
+                md_sep = "| " + " | ".join(["---"] * ncols) + " |"
+
+                # Fix the header row (line before separator) if it uses bare pipes
+                if out and "|" in out[-1] and not out[-1].strip().startswith("|"):
+                    cells = [c.strip() for c in out[-1].split("|")]
+                    out[-1] = "| " + " | ".join(cells) + " |"
+
+                out.append(md_sep)
+                i += 1
+
+                # Fix subsequent data rows that use bare pipes
+                while i < len(lines):
+                    row = lines[i]
+                    if "|" in row and not row.strip().startswith("|"):
+                        # Check it looks like a data row (has similar # of pipes)
+                        cells = [c.strip() for c in row.split("|")]
+                        if len(cells) >= ncols - 1:
+                            out.append("| " + " | ".join(cells) + " |")
+                            i += 1
+                            continue
+                    break
+                continue
+            out.append(line)
+            i += 1
+        return "\n".join(out)
+
+    @staticmethod
     def _convert_markdown(text: str) -> tuple:
         """Convert standard Markdown to Telegram text + entities.
 
@@ -611,7 +659,18 @@ class TelegramChannel:
         if HAS_TELEGRAMIFY:
             try:
                 plain, entities = tg_md_convert(text)
-                return plain, [e.to_dict() for e in entities]
+                entity_dicts = [e.to_dict() for e in entities]
+                if entity_dicts:
+                    return plain, entity_dicts
+                # No entities produced — try normalising tables first
+                if "+" in text and "---" in text:
+                    normalised = TelegramChannel._normalize_tables(text)
+                    if normalised != text:
+                        plain2, entities2 = tg_md_convert(normalised)
+                        entity_dicts2 = [e.to_dict() for e in entities2]
+                        if entity_dicts2:
+                            return plain2, entity_dicts2
+                return plain, entity_dicts
             except Exception as exc:
                 logger.warning("telegramify_markdown conversion failed: %s", exc)
         # Fallback: strip heading markers, no entities
@@ -720,10 +779,6 @@ class TelegramChannel:
                 payload: Dict[str, Any] = {"chat_id": chat_id, "text": text}
                 if entities:
                     payload["entities"] = entities
-                logger.info(
-                    "sendMessage: text_len=%d, has_entities=%s, entity_count=%d",
-                    len(text), bool(entities), len(entities) if entities else 0,
-                )
                 resp = await self._client.post(
                     f"{self._base_url}/sendMessage", json=payload,
                 )

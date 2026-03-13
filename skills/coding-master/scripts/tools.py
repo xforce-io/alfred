@@ -52,7 +52,7 @@ MODES = {
             "plan-ready", "claim", "dev", "test", "done", "reopen",
             "integrate", "submit", "progress", "journal", "doctor",
             "delegate-prepare", "delegate-complete",
-            "engine-run",
+            "engine-run", "change-summary",
             "read", "find", "grep", "edit",
         ],
         "completion_gate": "all features done + evidence pass",
@@ -64,7 +64,7 @@ MODES = {
             "lock", "unlock", "status", "renew", "start",
             "scope", "report", "progress", "journal", "doctor",
             "delegate-prepare", "delegate-complete",
-            "engine-run",
+            "engine-run", "change-summary",
             "read", "find", "grep",
         ],
         "completion_gate": "report.md exists",
@@ -77,7 +77,7 @@ MODES = {
             "scope", "report", "progress", "journal", "doctor",
             "delegate-prepare", "delegate-complete",
             "dev", "test",  # debug may need code changes
-            "engine-run",
+            "engine-run", "change-summary",
             "read", "find", "grep", "edit",
         ],
         "completion_gate": "diagnosis.md exists",
@@ -89,7 +89,7 @@ MODES = {
             "lock", "unlock", "status", "renew", "start",
             "scope", "report", "progress", "journal", "doctor",
             "delegate-prepare", "delegate-complete",
-            "engine-run",
+            "engine-run", "change-summary",
             "read", "find", "grep",
         ],
         "completion_gate": "report.md exists",
@@ -1627,6 +1627,15 @@ def cmd_done(args) -> dict:
     if result.get("ok"):
         _append_journal(repo, agent, f"done feature-{feature_id}")
         data = result.get("data", {})
+
+        # Include change summary with diff and worktree path
+        lock = _atomic_json_read(repo / CM_DIR / "lock.json")
+        base_ref = lock.get("branch", "HEAD~1")
+        try:
+            data["change_summary"] = _build_change_summary(wt_path, base_ref)
+        except Exception as exc:
+            logger.debug("Failed to build change summary: %s", exc)
+
         if data.get("all_done"):
             data["next_action"] = _hint("cm integrate", "All features done, merge and run integration tests")
         elif data.get("unblocked"):
@@ -1908,6 +1917,19 @@ def cmd_submit(args) -> dict:
         except json.JSONDecodeError:
             pass
 
+    # Capture change summary before cleanup removes worktrees
+    try:
+        # Use main branch as base for the full diff
+        main_branch = _run_git(wt, ["symbolic-ref", "refs/remotes/origin/HEAD"], check=False).stdout.strip()
+        if not main_branch:
+            main_branch = "origin/main"
+        else:
+            main_branch = main_branch.replace("refs/remotes/", "")
+        change_summary = _build_change_summary(wt, main_branch)
+    except Exception as exc:
+        logger.debug("Failed to build change summary for submit: %s", exc)
+        change_summary = None
+
     # Cleanup feature worktrees + merged feature branches (best effort)
     plan = _parse_plan_md(repo / CM_DIR / "PLAN.md")
     claims = _atomic_json_read(repo / CM_DIR / "claims.json")
@@ -1943,14 +1965,17 @@ def cmd_submit(args) -> dict:
     features_completed = sum(1 for f in claims.get("features", {}).values() if f.get("phase") == "done")
     evidence_dir = str(repo / CM_DIR / EVIDENCE_DIR)
 
-    return {"ok": True, "data": {
+    result_data = {
         "branch": branch, "pr_url": pr_url,
         "evidence_dir": evidence_dir,
         "features_completed": features_completed,
         "features_total": features_total,
         "exit_status": "success",
         "journal": str(repo / CM_DIR / "JOURNAL.md"),
-    }}
+    }
+    if change_summary:
+        result_data["change_summary"] = change_summary
+    return {"ok": True, "data": result_data}
 
 
 def cmd_scope(args) -> dict:
@@ -2678,6 +2703,35 @@ def cmd_repos(_args) -> dict:
     return cfg.list_all()
 
 
+def cmd_change_summary(args) -> dict:
+    """Generate a structured change summary with unified diff, worktree path, and commit info.
+
+    Works with the current session's worktree. Useful for reporting code changes
+    to the user in a reviewable format.
+    """
+    repo = _resolve_locked_repo(args)
+    lock = _atomic_json_read(repo / CM_DIR / "lock.json")
+    wt = _get_session_worktree(repo, lock) or repo
+
+    base_ref = getattr(args, "base_ref", None) or lock.get("branch", "HEAD~1")
+    summary = _build_change_summary(wt, base_ref)
+
+    return {
+        "ok": True,
+        "data": {
+            "change_summary": summary,
+            "instruction": (
+                "Present this change summary to the user. MUST include:\n"
+                "1. The unified diff (in a code block)\n"
+                "2. The worktree path so they can review locally\n"
+                "3. The review command they can copy-paste\n"
+                "4. The diff stat summary\n"
+                "Do NOT rewrite the diff as before/after snippets — show the actual diff."
+            ),
+        },
+    }
+
+
 def cmd_doctor(args) -> dict:
     """Diagnose and fix state inconsistencies."""
     repo = _repo_path(args.repo)
@@ -2824,6 +2878,42 @@ def _doctor_auto_fix(repo: Path, issues: list[str]):
             branch_name = issue.split(": ", 1)[1] if ": " in issue else ""
             if branch_name:
                 _run_git(repo, ["branch", "-D", branch_name], check=False)
+
+
+DIFF_MAX_CHARS = 3000  # Truncate diff output to keep messages readable
+
+
+def _build_change_summary(worktree: Path, base_ref: str = "HEAD~1") -> dict:
+    """Build a structured change summary with unified diff, path, and commit info.
+
+    Returns a dict with keys: worktree, commit, files_changed, diff, review_command.
+    """
+    head = _run_git(worktree, ["rev-parse", "--short", "HEAD"], check=False).stdout.strip()
+    head_full = _run_git(worktree, ["rev-parse", "HEAD"], check=False).stdout.strip()
+    commit_msg = _run_git(worktree, ["log", "-1", "--pretty=%s"], check=False).stdout.strip()
+
+    # Get changed files
+    files_out = _run_git(worktree, ["diff", "--name-only", f"{base_ref}..HEAD"], check=False).stdout.strip()
+    files_changed = [f for f in files_out.splitlines() if f] if files_out else []
+
+    # Get unified diff
+    diff_out = _run_git(worktree, ["diff", f"{base_ref}..HEAD"], check=False).stdout
+    if len(diff_out) > DIFF_MAX_CHARS:
+        diff_out = diff_out[:DIFF_MAX_CHARS] + f"\n... (truncated, full diff: {len(diff_out)} chars)"
+
+    # Get stat summary
+    stat_out = _run_git(worktree, ["diff", "--stat", f"{base_ref}..HEAD"], check=False).stdout.strip()
+
+    return {
+        "worktree": str(worktree),
+        "commit": head,
+        "commit_full": head_full,
+        "commit_message": commit_msg,
+        "files_changed": files_changed,
+        "diff_stat": stat_out,
+        "diff": diff_out,
+        "review_command": f"cd {worktree} && git diff {base_ref}..HEAD",
+    }
 
 
 def _generate_pr_body(repo: Path) -> str:
@@ -3234,6 +3324,12 @@ def main():
     _add_global_args(p_journal)
     p_journal.add_argument("--message", "-m", required=True)
 
+    # change-summary
+    p_cs = sub.add_parser("change-summary", help="Generate change summary with diff")
+    _add_global_args(p_cs)
+    p_cs.add_argument("--base-ref", default=None, dest="base_ref",
+                       help="Base ref for diff (default: session branch)")
+
     # doctor
     p_doctor = sub.add_parser("doctor", help="Diagnose + fix state")
     _add_global_args(p_doctor)
@@ -3306,6 +3402,7 @@ def main():
         "submit": cmd_submit,
         "progress": cmd_progress,
         "journal": cmd_journal,
+        "change-summary": cmd_change_summary,
         "doctor": cmd_doctor,
         "read": cmd_read,
         "find": cmd_find,
