@@ -967,7 +967,11 @@ _FLOW_AFTER_ENGINE = {
     "debug":    _hint("cm report --content '...'", "Write diagnosis based on engine findings"),
 }
 
-_FLOW_AFTER_REPORT = _hint("cm unlock", "Report written, release session")
+_FLOW_AFTER_REPORT = _hint(
+    "cm unlock",
+    "Diagnosis written. If user wants fixes applied, use cm edit (stay in debug session); "
+    "call cm unlock only after all edits are verified with cm test."
+)
 
 
 # ══════════════════════════════════════════════════════════
@@ -1153,7 +1157,7 @@ def cmd_unlock(args) -> dict:
 
     lock = _atomic_json_read(lock_path)
     if not lock:
-        return {"ok": True}  # already unlocked
+        return {"ok": True, "next_action": _hint("cm lock", "No active lock. Call cm lock before any file operations.")}  # already unlocked
 
     force = getattr(args, "force", False)
     if not force and not lock.get("read_only", False):
@@ -1177,7 +1181,10 @@ def cmd_unlock(args) -> dict:
 
     def clear_lock(data):
         data.clear()
-        return {"ok": True}
+        return {"ok": True, "next_action": _hint(
+            "cm lock",
+            "Lock released. Call cm lock --mode <deliver|debug|review|analyze> before any file operations."
+        )}
 
     return _atomic_json_update(lock_path, clear_lock)
 
@@ -2183,7 +2190,14 @@ def cmd_report(args) -> dict:
             ),
         },
     }
-    if not auto_unlocked:
+    if auto_unlocked:
+        result["data"]["next_action"] = _hint(
+            "cm lock --mode deliver",
+            "Session ended (auto-unlocked). If user wants to act on findings, "
+            "re-lock with cm lock --mode deliver (full feature workflow) "
+            "or cm lock --mode debug (quick targeted fix)."
+        )
+    else:
         result["data"]["next_action"] = _FLOW_AFTER_REPORT
     return result
 

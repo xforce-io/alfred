@@ -92,6 +92,33 @@ def _result_to_str(result: dict) -> str:
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+def _safe_call(fn, *args, **kwargs) -> dict:
+    """Call a cmd_* function and return its result dict. Catches SystemExit so
+    the daemon process is not killed when tools._fail() is invoked internally.
+    tools._fail() prints a JSON error to stdout before calling sys.exit(1), so
+    we redirect stdout to capture that JSON and return it as a dict."""
+    import io
+    import contextlib
+
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            return fn(*args, **kwargs)
+    except SystemExit:
+        captured = buf.getvalue().strip()
+        if captured:
+            try:
+                return json.loads(captured)
+            except json.JSONDecodeError:
+                pass
+        return {"ok": False, "error": "command failed"}
+
+
+def _safe_cmd(fn, *args, **kwargs) -> str:
+    """Call a cmd_* function and return JSON string. See _safe_call."""
+    return _result_to_str(_safe_call(fn, *args, **kwargs))
+
+
 # Git subcommands that _cm_git allows
 _GIT_ALLOWED = frozenset({
     "add", "branch", "checkout", "commit", "diff", "log",
@@ -127,7 +154,7 @@ class CodingMasterSkillkit(Skillkit):
             str: JSON — 包含 repos, workspaces, envs 列表
         """
         tools = _get_tools()
-        return _result_to_str(tools.cmd_repos(_make_args()))
+        return _safe_cmd(tools.cmd_repos, _make_args())
 
     def _cm_start(self, repo: str, mode: str = "deliver",
                   branch: str = "", plan_file: str = "", **kwargs) -> str:
@@ -149,7 +176,7 @@ class CodingMasterSkillkit(Skillkit):
             plan_file=plan_file or None,
             agent=self._agent_id,
         )
-        return _result_to_str(tools.cmd_start(args))
+        return _safe_cmd(tools.cmd_start, args)
 
     def _cm_lock(self, repo: str, mode: str = "deliver",
                  branch: str = "", **kwargs) -> str:
@@ -171,7 +198,7 @@ class CodingMasterSkillkit(Skillkit):
             branch=branch or None,
             agent=self._agent_id,
         )
-        result = tools.cmd_lock(args)
+        result = _safe_call(tools.cmd_lock, args)
         # Track overlay mode: when a read-only lock overlays a deliver session,
         # lock.json still says "deliver" but this agent operates in review mode.
         if result.get("ok") and result.get("data", {}).get("overlay"):
@@ -192,7 +219,7 @@ class CodingMasterSkillkit(Skillkit):
         """
         tools = _get_tools()
         args = _make_args(repo=repo or None, force=force, agent=self._agent_id)
-        return _result_to_str(tools.cmd_unlock(args))
+        return _safe_cmd(tools.cmd_unlock, args)
 
     def _cm_status(self, repo: str = "", **kwargs) -> str:
         """查看当前工作区锁状态、会话模式、features 进度。
@@ -205,7 +232,7 @@ class CodingMasterSkillkit(Skillkit):
         """
         tools = _get_tools()
         args = _make_args(repo=repo or None, agent=self._agent_id)
-        return _result_to_str(tools.cmd_status(args))
+        return _safe_cmd(tools.cmd_status, args)
 
     # ──────────────────────────────────────────────────────────
     #  Feature delivery pipeline
@@ -223,7 +250,7 @@ class CodingMasterSkillkit(Skillkit):
         """
         tools = _get_tools()
         args = _make_args(repo=repo or None, feature=feature, agent=self._agent_id)
-        return _result_to_str(tools.cmd_claim(args))
+        return _safe_cmd(tools.cmd_claim, args)
 
     def _cm_dev(self, repo: str = "", feature: int = 0, **kwargs) -> str:
         """将 feature 推进到 developing 阶段。需要先完成 Analysis 和 Plan。
@@ -237,7 +264,7 @@ class CodingMasterSkillkit(Skillkit):
         """
         tools = _get_tools()
         args = _make_args(repo=repo or None, feature=feature, agent=self._agent_id)
-        return _result_to_str(tools.cmd_dev(args))
+        return _safe_cmd(tools.cmd_dev, args)
 
     def _cm_test(self, repo: str = "", feature: int = 0, **kwargs) -> str:
         """运行 feature 的测试 + lint + typecheck，写入 evidence。
@@ -251,7 +278,7 @@ class CodingMasterSkillkit(Skillkit):
         """
         tools = _get_tools()
         args = _make_args(repo=repo or None, feature=feature, agent=self._agent_id)
-        return _result_to_str(tools.cmd_test(args))
+        return _safe_cmd(tools.cmd_test, args)
 
     def _cm_done(self, repo: str = "", feature: int = 0, **kwargs) -> str:
         """标记 feature 完成。需要通过测试且有 evidence。
@@ -265,7 +292,7 @@ class CodingMasterSkillkit(Skillkit):
         """
         tools = _get_tools()
         args = _make_args(repo=repo or None, feature=feature, agent=self._agent_id)
-        return _result_to_str(tools.cmd_done(args))
+        return _safe_cmd(tools.cmd_done, args)
 
     def _cm_reopen(self, repo: str = "", feature: int = 0, **kwargs) -> str:
         """重新打开已完成的 feature 进行修复。
@@ -279,7 +306,7 @@ class CodingMasterSkillkit(Skillkit):
         """
         tools = _get_tools()
         args = _make_args(repo=repo or None, feature=feature, agent=self._agent_id)
-        return _result_to_str(tools.cmd_reopen(args))
+        return _safe_cmd(tools.cmd_reopen, args)
 
     def _cm_integrate(self, repo: str = "", **kwargs) -> str:
         """合并所有 done features 到开发分支，运行集成测试。
@@ -292,7 +319,7 @@ class CodingMasterSkillkit(Skillkit):
         """
         tools = _get_tools()
         args = _make_args(repo=repo or None, agent=self._agent_id)
-        return _result_to_str(tools.cmd_integrate(args))
+        return _safe_cmd(tools.cmd_integrate, args)
 
     def _cm_submit(self, repo: str = "", title: str = "", **kwargs) -> str:
         """Push 代码并创建 PR，清理 worktrees。
@@ -306,7 +333,7 @@ class CodingMasterSkillkit(Skillkit):
         """
         tools = _get_tools()
         args = _make_args(repo=repo or None, title=title, agent=self._agent_id)
-        return _result_to_str(tools.cmd_submit(args))
+        return _safe_cmd(tools.cmd_submit, args)
 
     # ──────────────────────────────────────────────────────────
     #  Analysis / Review mode
@@ -337,7 +364,7 @@ class CodingMasterSkillkit(Skillkit):
             agent=self._agent_id,
             mode_override=self._overlay_mode,
         )
-        return _result_to_str(tools.cmd_scope(args))
+        return _safe_cmd(tools.cmd_scope, args)
 
     def _cm_report(self, repo: str = "", content: str = "",
                    file: str = "", **kwargs) -> str:
@@ -359,7 +386,7 @@ class CodingMasterSkillkit(Skillkit):
             agent=self._agent_id,
             mode_override=self._overlay_mode,
         )
-        return _result_to_str(tools.cmd_report(args))
+        return _safe_cmd(tools.cmd_report, args)
 
     def _cm_engine_run(self, repo: str = "", goal: str = "",
                        engine: str = "claude-code", timeout: int = 600,
@@ -388,7 +415,7 @@ class CodingMasterSkillkit(Skillkit):
             max_turns=max_turns,
             agent=self._agent_id,
         )
-        return _result_to_str(tools.cmd_engine_run(args))
+        return _safe_cmd(tools.cmd_engine_run, args)
 
     # ──────────────────────────────────────────────────────────
     #  Utility
@@ -405,7 +432,7 @@ class CodingMasterSkillkit(Skillkit):
         """
         tools = _get_tools()
         args = _make_args(repo=repo or None, agent=self._agent_id)
-        return _result_to_str(tools.cmd_progress(args))
+        return _safe_cmd(tools.cmd_progress, args)
 
     def _cm_journal(self, message: str, repo: str = "", **kwargs) -> str:
         """向 JOURNAL.md 追加一条日志。
@@ -422,7 +449,7 @@ class CodingMasterSkillkit(Skillkit):
             repo=repo or None, message=message,
             agent=self._agent_id,
         )
-        return _result_to_str(tools.cmd_journal(args))
+        return _safe_cmd(tools.cmd_journal, args)
 
     def _cm_regression(self, repo: str = "", **kwargs) -> str:
         """全量回归测试：lint + typecheck + tests，在 session worktree 上运行。
@@ -438,7 +465,7 @@ class CodingMasterSkillkit(Skillkit):
         """
         tools = _get_tools()
         args = _make_args(repo=repo or None, agent=self._agent_id)
-        return _result_to_str(tools.cmd_regression(args))
+        return _safe_cmd(tools.cmd_regression, args)
 
     def _cm_change_summary(self, repo: str = "", base_ref: str = "", **kwargs) -> str:
         """生成变更摘要：包含 unified diff、worktree 路径、commit 信息。
@@ -455,7 +482,7 @@ class CodingMasterSkillkit(Skillkit):
         """
         tools = _get_tools()
         args = _make_args(repo=repo or None, base_ref=base_ref or None, agent=self._agent_id)
-        return _result_to_str(tools.cmd_change_summary(args))
+        return _safe_cmd(tools.cmd_change_summary, args)
 
     def _cm_doctor(self, repo: str = "", fix: bool = False, **kwargs) -> str:
         """诊断工作区状态并可选自动修复。
@@ -469,7 +496,7 @@ class CodingMasterSkillkit(Skillkit):
         """
         tools = _get_tools()
         args = _make_args(repo=repo or None, fix=fix, agent=self._agent_id)
-        return _result_to_str(tools.cmd_doctor(args))
+        return _safe_cmd(tools.cmd_doctor, args)
 
     # ──────────────────────────────────────────────────────────
     #  File operations (v4.5)
@@ -498,7 +525,7 @@ class CodingMasterSkillkit(Skillkit):
             feature=feature or None,
             agent=self._agent_id,
         )
-        return _result_to_str(tools.cmd_read(args))
+        return _safe_cmd(tools.cmd_read, args)
 
     def _cm_find(self, repo: str = "", pattern: str = "",
                  max_results: int = 50, feature: int = 0, **kwargs) -> str:
@@ -520,7 +547,7 @@ class CodingMasterSkillkit(Skillkit):
             feature=feature or None,
             agent=self._agent_id,
         )
-        return _result_to_str(tools.cmd_find(args))
+        return _safe_cmd(tools.cmd_find, args)
 
     def _cm_grep(self, repo: str = "", pattern: str = "",
                  glob: str = "", context: int = 2,
@@ -547,7 +574,7 @@ class CodingMasterSkillkit(Skillkit):
             feature=feature or None,
             agent=self._agent_id,
         )
-        return _result_to_str(tools.cmd_grep(args))
+        return _safe_cmd(tools.cmd_grep, args)
 
     def _cm_edit(self, repo: str = "", file: str = "",
                  old_text: str = "", new_text: str = "",
@@ -573,7 +600,7 @@ class CodingMasterSkillkit(Skillkit):
             feature=feature or None,
             agent=self._agent_id,
         )
-        return _result_to_str(tools.cmd_edit(args))
+        return _safe_cmd(tools.cmd_edit, args)
 
     # ──────────────────────────────────────────────────────────
     #  Escape hatches (controlled)

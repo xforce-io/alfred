@@ -495,7 +495,7 @@ class TelegramChannel:
         streaming_message_id: Optional[int] = None
         accumulated_text = ""
         last_update_time = 0.0
-        min_update_interval = 0.15  # 150ms throttle for smoother streaming
+        min_update_interval = 1.0   # 1s throttle — Telegram rate-limits editMessageText at ~30/min
         min_streaming_chars = 15    # Min chars before starting streaming
         streaming_cursor = "▌"      # Typing cursor indicator
         streaming_failed = False
@@ -508,7 +508,7 @@ class TelegramChannel:
 
         async def flush_streaming() -> None:
             """Flush accumulated text to Telegram if streaming is active."""
-            nonlocal streaming_message_id, last_update_time, streaming_failed
+            nonlocal streaming_message_id, last_update_time, streaming_failed, min_update_interval
             if streaming_failed or not accumulated_text:
                 return
 
@@ -553,6 +553,10 @@ class TelegramChannel:
                 )
                 if success:
                     last_update_time = current_time
+                else:
+                    # Edit failed (likely 429) — back off by doubling the interval
+                    min_update_interval = min(min_update_interval * 2, 10.0)
+                    last_update_time = current_time  # prevent immediate retry
 
         async def on_event(out: OutboundMessage) -> None:
             nonlocal tool_call_count, accumulated_text
@@ -619,10 +623,10 @@ class TelegramChannel:
                 summary_parts.append(f"🔧 {tool_call_count} commands executed")
             full_reply = f"{full_reply}\n\n{chr(10).join(summary_parts)}"
 
-        # If streaming worked, update with final text (remove ellipsis)
+        # If streaming worked, update with final text (remove cursor, apply formatting)
         if streaming_message_id and not streaming_failed:
-            # Final update without ellipsis
-            await self._edit_message(chat_id, streaming_message_id, full_reply[:TELEGRAM_MSG_LIMIT])
+            final_text, final_entities = self._convert_markdown(full_reply[:TELEGRAM_MSG_LIMIT])
+            await self._edit_message(chat_id, streaming_message_id, final_text, final_entities)
             return
 
         # Fallback: batch send (original behavior)
@@ -911,7 +915,8 @@ class TelegramChannel:
                 await asyncio.sleep(2 ** attempt)
         return False
 
-    async def _edit_message(self, chat_id: str, message_id: int, text: str) -> bool:
+    async def _edit_message(self, chat_id: str, message_id: int, text: str,
+                            entities: list | None = None) -> bool:
         """Edit an existing message. Returns True if successful."""
         if not text:
             return True
@@ -920,10 +925,13 @@ class TelegramChannel:
         if self._client is None:
             return False
 
+        payload: dict = {"chat_id": chat_id, "message_id": message_id, "text": text}
+        if entities:
+            payload["entities"] = entities
+
         try:
             resp = await self._client.post(
-                f"{self._base_url}/editMessageText",
-                json={"chat_id": chat_id, "message_id": message_id, "text": text},
+                f"{self._base_url}/editMessageText", json=payload,
             )
             data = resp.json()
             if data.get("ok"):
