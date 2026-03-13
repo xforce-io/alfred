@@ -561,11 +561,6 @@ class TelegramChannel:
             full_reply = f"{full_reply}\n\n{chr(10).join(summary_parts)}"
 
         converted_text, converted_entities = self._convert_markdown(full_reply)
-        logger.info(
-            "Markdown conversion: text_len=%d, entities=%s",
-            len(converted_text),
-            converted_entities[:3] if converted_entities else None,
-        )
         sent_any = False
         parts = self._split_message(converted_text)
         if len(parts) <= 1:
@@ -575,22 +570,18 @@ class TelegramChannel:
                 if success:
                     sent_any = True
         else:
-            # Multi-part: slice entities for each chunk
-            logger.info(
-                "Multi-part split: %d parts, lengths=%s",
-                len(parts), [len(p) for p in parts],
-            )
+            # Multi-part: slice entities for each chunk.
+            # Entity offsets are in UTF-16 code units, so convert
+            # Python string positions to UTF-16 before slicing.
             search_from = 0
-            for i, part in enumerate(parts):
+            for part in parts:
                 part_start = converted_text.find(part, search_from)
                 if part_start < 0:
                     part_start = search_from
+                utf16_offset = self._utf16_len(converted_text[:part_start])
+                utf16_length = self._utf16_len(part)
                 part_entities = self._slice_entities(
-                    converted_entities, part_start, len(part),
-                )
-                logger.info(
-                    "Part %d: start=%d, len=%d, sliced_entities=%s",
-                    i, part_start, len(part), part_entities[:3] if part_entities else [],
+                    converted_entities, utf16_offset, utf16_length,
                 )
                 success = await self._send_message(
                     chat_id, part, part_entities or None,
@@ -636,10 +627,19 @@ class TelegramChannel:
         return '\n'.join(result), None
 
     @staticmethod
+    def _utf16_len(text: str) -> int:
+        """Return the length of *text* in UTF-16 code units (what Telegram uses)."""
+        return len(text.encode("utf-16-le")) // 2
+
+    @staticmethod
     def _slice_entities(
         entities: Optional[list], part_offset: int, part_length: int,
     ) -> list:
-        """Extract and re-offset entities that fall within a text slice."""
+        """Extract and re-offset entities that fall within a text slice.
+
+        All values (part_offset, part_length, entity offsets/lengths) must be
+        in UTF-16 code units to match the Telegram Bot API convention.
+        """
         if not entities:
             return []
         part_end = part_offset + part_length
@@ -733,6 +733,10 @@ class TelegramChannel:
 
                 # Fallback to plain text if entities send fails
                 if entities:
+                    logger.warning(
+                        "sendMessage with entities failed: %s — retrying without entities",
+                        data.get("description", "unknown"),
+                    )
                     resp = await self._client.post(
                         f"{self._base_url}/sendMessage",
                         json={"chat_id": chat_id, "text": text},
