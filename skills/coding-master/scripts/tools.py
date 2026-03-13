@@ -354,6 +354,38 @@ def _slugify(text: str) -> str:
     return s[:30] or "feature"
 
 
+_DIFF_RANGE_PATTERN = re.compile(r"^[\w\-./~^:@]+$")
+
+
+def _is_valid_diff_range(diff_range: str) -> bool:
+    """
+    Validate diff_range to prevent argument injection.
+    Only allows valid git revision range characters:
+    - alphanumeric, hyphen, dot, slash, tilde, caret, colon, at
+    - rejects shell metacharacters, semicolons, pipes, redirections
+    """
+    if not diff_range or len(diff_range) > 200:
+        return False
+    # Check for shell metacharacters and option injection patterns
+    dangerous_chars = set(";|&$`'\"\\<>()*?[]{}\n\r\t")
+    if any(c in diff_range for c in dangerous_chars):
+        return False
+    # Check for option injection (e.g., --output, -o)
+    if diff_range.startswith("-"):
+        return False
+    # Validate against allowed pattern
+    parts = diff_range.split("..")
+    if len(parts) > 2:
+        return False
+    for part in parts:
+        part = part.lstrip("^")  # Allow ^ prefix for negation
+        if not part:
+            continue
+        if not _DIFF_RANGE_PATTERN.match(part):
+            return False
+    return True
+
+
 def _run_git(repo: Path, cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
     """Run a git command, return CompletedProcess."""
     return subprocess.run(
@@ -2100,6 +2132,9 @@ def _get_scope_context(repo: Path, scope: dict) -> str:
 
     if scope_type == "diff":
         diff_range = scope.get("diff_range", "HEAD~1..HEAD")
+        # Validate diff_range to prevent argument injection
+        if not _is_valid_diff_range(diff_range):
+            return f"(invalid diff range: {diff_range})"
         try:
             result = _run_git(repo, ["diff", diff_range], check=False)
             diff_text = result.stdout
