@@ -17,6 +17,7 @@ from dolphin.core.skill.skillkit import Skillkit
 from dolphin.core.skill.skill_function import SkillFunction
 
 from ..core.channel.session_resolver import ChannelSessionResolver
+from ..core.models.constants import TIMEOUT_UPLOAD, LIMIT_CAPTION
 
 logger = logging.getLogger(__name__)
 
@@ -66,11 +67,11 @@ class TelegramSkillkit(Skillkit):
     async def _send_document(self, chat_id: str, file_path: str, caption: str = "") -> dict:
         """调用 Telegram sendDocument API。"""
         filename = os.path.basename(file_path)
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=TIMEOUT_UPLOAD) as client:
             with open(file_path, "rb") as f:
                 data = {"chat_id": chat_id}
                 if caption:
-                    data["caption"] = caption[:1024]  # Telegram caption 限制
+                    data["caption"] = caption[:LIMIT_CAPTION]  # Telegram caption 限制
                 resp = await client.post(
                     f"{self._base_url}/sendDocument",
                     data=data,
@@ -81,11 +82,11 @@ class TelegramSkillkit(Skillkit):
     async def _send_photo_api(self, chat_id: str, file_path: str, caption: str = "") -> dict:
         """调用 Telegram sendPhoto API。"""
         filename = os.path.basename(file_path)
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=TIMEOUT_UPLOAD) as client:
             with open(file_path, "rb") as f:
                 data = {"chat_id": chat_id}
                 if caption:
-                    data["caption"] = caption[:1024]
+                    data["caption"] = caption[:LIMIT_CAPTION]
                 resp = await client.post(
                     f"{self._base_url}/sendPhoto",
                     data=data,

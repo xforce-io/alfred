@@ -21,6 +21,7 @@ from ..core.agent.factory import get_agent_factory
 from ..infra.process import DaemonLock, write_pid_file, remove_pid_file
 from ..core.runtime.scheduler import AgentSchedule, InspectorSchedule, Scheduler, SchedulerTask
 from ..channels.telegram_channel import TelegramChannel
+from ..core.models.constants import DAEMON_IDLE_SLEEP
 
 logger = logging.getLogger(__name__)
 
@@ -499,7 +500,7 @@ class EverBotDaemon:
             if not self.heartbeat_runners:
                 logger.warning("无心跳任务，守护进程将保持空闲状态")
                 while self._running:
-                    await asyncio.sleep(60)
+                    await asyncio.sleep(DAEMON_IDLE_SLEEP)
                 return
 
             # All scheduling goes through the unified Scheduler
