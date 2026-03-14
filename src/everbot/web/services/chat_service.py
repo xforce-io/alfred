@@ -32,14 +32,16 @@ class ChatService:
     MAX_TOOL_OUTPUT_PREVIEW_CHARS = CHAT_POLICY.max_tool_output_preview_chars
 
     def __init__(self):
-        # Active WebSocket connections: session_id -> WebSocket
-        self._active_connections: Dict[str, WebSocket] = {}
+        # Active WebSocket connections: session_id -> set[WebSocket]
+        self._active_connections: Dict[str, set[WebSocket]] = {}
         # Agent-scoped connections: agent_name -> set of (session_id, WebSocket)
         self._connections_by_agent: Dict[str, set] = {}
         # Last activity time: session_id -> timestamp (time.time())
         self._last_activity: Dict[str, float] = {}
         # Per-agent last broadcast: agent_name -> timestamp (for agent-scope idle gate)
         self._last_agent_broadcast: Dict[str, float] = {}
+        # Session bootstrap locks: session_id -> asyncio.Lock
+        self._bootstrap_locks: Dict[str, asyncio.Lock] = {}
 
         self.agent_service = AgentService()
         self.user_data = get_user_data_manager()
@@ -54,20 +56,53 @@ class ChatService:
 
     def _register_connection(self, session_id: str, agent_name: str, websocket: WebSocket):
         """Register a WebSocket in both session and agent indices."""
-        self._active_connections[session_id] = websocket
+        if session_id not in self._active_connections:
+            self._active_connections[session_id] = set()
+        self._active_connections[session_id].add(websocket)
         if agent_name not in self._connections_by_agent:
             self._connections_by_agent[agent_name] = set()
         self._connections_by_agent[agent_name].add((session_id, websocket))
 
-    def _unregister_connection(self, session_id: str, agent_name: str):
+    def _unregister_connection(
+        self,
+        session_id: str,
+        agent_name: str,
+        websocket: Optional[WebSocket] = None,
+    ):
         """Remove a WebSocket from both session and agent indices."""
-        ws = self._active_connections.pop(session_id, None)
-        self._last_activity.pop(session_id, None)
+        session_sockets = self._active_connections.get(session_id)
+        if session_sockets is not None:
+            if websocket is None:
+                session_sockets.clear()
+            else:
+                session_sockets.discard(websocket)
+            if not session_sockets:
+                self._active_connections.pop(session_id, None)
+                self._last_activity.pop(session_id, None)
         if agent_name in self._connections_by_agent:
-            self._connections_by_agent[agent_name].discard((session_id, ws))
+            if websocket is None:
+                stale_entries = {
+                    (sid, ws)
+                    for sid, ws in self._connections_by_agent[agent_name]
+                    if sid == session_id
+                }
+                for entry in stale_entries:
+                    self._connections_by_agent[agent_name].discard(entry)
+            else:
+                self._connections_by_agent[agent_name].discard((session_id, websocket))
             if not self._connections_by_agent[agent_name]:
                 del self._connections_by_agent[agent_name]
                 self._last_agent_broadcast.pop(agent_name, None)
+
+    def _get_bootstrap_lock(self, session_id: str) -> asyncio.Lock:
+        """Return one bootstrap lock for a session."""
+        if not hasattr(self, "_bootstrap_locks"):
+            self._bootstrap_locks = {}
+        lock = self._bootstrap_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._bootstrap_locks[session_id] = lock
+        return lock
 
     def _mark_activity(self, session_id: str, agent_name: Optional[str] = None):
         """Mark current time as the latest activity for a session."""
@@ -116,26 +151,26 @@ class ChatService:
                 except Exception as e:
                     if not isinstance(e, (ConnectionResetError, BrokenPipeError, OSError)):
                         logger.warning("WebSocket send error (agent scope): %s", e)
-                    self._active_connections.pop(sid, None)
-                    self._connections_by_agent.get(agent_name, set()).discard((sid, ws))
+                    self._unregister_connection(sid, agent_name, ws)
             self._last_agent_broadcast[agent_name] = now
         else:
             # Session-scope (default)
             target_session_id = routing.target_session_id
             if not target_session_id:
                 return
-            websocket = self._active_connections.get(target_session_id)
-            if not websocket:
+            websockets = list(self._active_connections.get(target_session_id, set()))
+            if not websockets:
                 return
             last_t = self._last_activity.get(target_session_id, 0)
             if (not bypass_idle_gate) and (time.time() - last_t < 20):
                 return
-            try:
-                await websocket.send_json(data)
-            except Exception as e:
-                if not isinstance(e, (ConnectionResetError, BrokenPipeError, OSError)):
-                    logger.warning("WebSocket send error (session scope): %s", e)
-                self._active_connections.pop(target_session_id, None)
+            for websocket in websockets:
+                try:
+                    await websocket.send_json(data)
+                except Exception as e:
+                    if not isinstance(e, (ConnectionResetError, BrokenPipeError, OSError)):
+                        logger.warning("WebSocket send error (session scope): %s", e)
+                    self._unregister_connection(target_session_id, agent_name or "", websocket)
 
     def _resolve_session_id_for_agent(self, agent_name: str, requested_session_id: Optional[str]) -> str:
         """Resolve session id and enforce agent-scoped id prefix."""
@@ -164,46 +199,47 @@ class ChatService:
                 await self.session_manager.migrate_legacy_sessions_for_agent(agent_name)
                 history_sent = False
 
-                agent = self.session_manager.get_cached_agent(session_id)
-                logger.debug("Cached agent for %s: %s", session_id, agent is not None)
+                async with self._get_bootstrap_lock(session_id):
+                    agent = self.session_manager.get_cached_agent(session_id)
+                    logger.debug("Cached agent for %s: %s", session_id, agent is not None)
 
-                if not agent:
-                    logger.debug("Creating new agent instance for session: %s", session_id)
-                    agent = await self.agent_service.create_agent_instance(agent_name)
-                    ChannelCoreService._bind_session_id_to_context(agent, session_id)
-                    self._core._init_session_trajectory(agent, agent_name, session_id, overwrite=False)
+                    if not agent:
+                        logger.debug("Creating new agent instance for session: %s", session_id)
+                        agent = await self.agent_service.create_agent_instance(agent_name)
+                        ChannelCoreService._bind_session_id_to_context(agent, session_id)
+                        self._core._init_session_trajectory(agent, agent_name, session_id, overwrite=False)
 
-                    session_data = await self.session_manager.load_session(session_id)
-                    if session_data:
-                        self.session_manager.restore_timeline(session_id, session_data.timeline or [])
-                        await self.session_manager.restore_to_agent(agent, session_data)
-                        display_messages = session_data.history_messages or []
-                        logger.debug("History restored: %d messages", len(display_messages))
-                        await websocket.send_json({
-                            "type": "history",
-                            "session_id": session_id,
-                            "messages": display_messages,
-                        })
-                        history_sent = True
+                        session_data = await self.session_manager.load_session(session_id)
+                        if session_data:
+                            self.session_manager.restore_timeline(session_id, session_data.timeline or [])
+                            await self.session_manager.restore_to_agent(agent, session_data)
+                            display_messages = session_data.history_messages or []
+                            logger.debug("History restored: %d messages", len(display_messages))
+                            await websocket.send_json({
+                                "type": "history",
+                                "session_id": session_id,
+                                "messages": display_messages,
+                            })
+                            history_sent = True
 
-                    self.session_manager.cache_agent(session_id, agent, agent_name, "auto")
-                else:
-                    logger.debug("Reusing existing agent instance for session: %s", session_id)
-                    ChannelCoreService._bind_session_id_to_context(agent, session_id)
-                    self._core._init_session_trajectory(agent, agent_name, session_id, overwrite=False)
-                    session_data = await self.session_manager.load_session(session_id)
-                    if session_data:
-                        self.session_manager.restore_timeline(session_id, session_data.timeline or [])
-                    if session_data and session_data.history_messages:
-                        await self.session_manager.restore_to_agent(agent, session_data)
-                        display_messages = session_data.history_messages or []
-                        logger.debug("Restored %d messages to agent context", len(display_messages))
-                        await websocket.send_json({
-                            "type": "history",
-                            "session_id": session_id,
-                            "messages": display_messages,
-                        })
-                        history_sent = True
+                        self.session_manager.cache_agent(session_id, agent, agent_name, "auto")
+                    else:
+                        logger.debug("Reusing existing agent instance for session: %s", session_id)
+                        ChannelCoreService._bind_session_id_to_context(agent, session_id)
+                        self._core._init_session_trajectory(agent, agent_name, session_id, overwrite=False)
+                        session_data = await self.session_manager.load_session(session_id)
+                        if session_data:
+                            self.session_manager.restore_timeline(session_id, session_data.timeline or [])
+                        if session_data and session_data.history_messages:
+                            await self.session_manager.restore_to_agent(agent, session_data)
+                            display_messages = session_data.history_messages or []
+                            logger.debug("Restored %d messages to agent context", len(display_messages))
+                            await websocket.send_json({
+                                "type": "history",
+                                "session_id": session_id,
+                                "messages": display_messages,
+                            })
+                            history_sent = True
 
                 logger.debug("Agent ready: %s", agent.name)
 
@@ -322,7 +358,7 @@ class ChatService:
                     data = await websocket.receive_json()
                     self._mark_activity(session_id, agent_name)
                 except Exception as e:
-                    self._unregister_connection(session_id, agent_name)
+                    self._unregister_connection(session_id, agent_name, websocket)
                     logger.debug("Connection closed or error: %s", e)
                     break
 
@@ -412,7 +448,7 @@ class ChatService:
         except Exception:
             logger.error("WebSocket error:\n%s", traceback.format_exc())
         finally:
-            self._unregister_connection(session_id, agent_name)
+            self._unregister_connection(session_id, agent_name, websocket)
             if 'mailbox_poll_task' in locals() and mailbox_poll_task and not mailbox_poll_task.done():
                 mailbox_poll_task.cancel()
             if 'current_task' in locals() and current_task and not current_task.done():

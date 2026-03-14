@@ -1,11 +1,20 @@
 ---
 name: invest
-description: Unified investment environment analysis skill. Use it when the user asks about current investment environment, macro liquidity, China market posture, geopolitical risk, causal transmission, asset-level probabilities, or scenario-based investment views.
+description: Primary investment analysis entrypoint. Use it when the user asks about current investment environment, event-driven probability graph simulation, macro liquidity, China market posture, geopolitical risk, causal transmission, asset-level probabilities, or scenario-based investment views.
 ---
 
 # Invest
 
-Use this skill when the user wants an investment environment readout, not just a raw data dump.
+Use this skill as the single top-level investment analysis entrypoint.
+
+This skill is designed for event-driven probability graph simulation rather than raw indicator dumping. It consolidates observable signals from lower-level modules and turns them into explainable transmission paths and asset-level probability views.
+
+## Positioning
+
+- `invest` is the only user-facing investment skill.
+- Observable data collection is delegated to lower-level signal modules.
+- News-driven risk detection can be delegated to gray-rhino style event sources.
+- Output must emphasize uncertainty and must not be framed as investment advice.
 
 ## Workflow
 
@@ -44,6 +53,7 @@ $INV status
 
 - `scan` writes observable states only. Analyst states from `node` take precedence.
 - The default graph already includes a minimal set of macro, China flow, geopolitics, valuation, and asset nodes.
+- `scan` may internally reuse lower-level signal scripts for macro, China market, and risk observations.
 - `edge --prob` validates state names and probability range before persisting.
 - `chain` validates that every hop exists and rejects cyclic or disconnected paths.
 - `infer` can auto-discover simple paths up to `--max-hops` and returns `skipped_chains` for invalid paths instead of silently dropping them.

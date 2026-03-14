@@ -66,6 +66,18 @@ _PERMANENT_ERROR_MARKERS: list[str] = [
 ]
 
 
+def _llm_progress_fingerprint(progress: dict[str, Any]) -> str:
+    """Deduplicate replayed LLM progress from cumulative `_progress` events."""
+    payload = {
+        "id": progress.get("id", ""),
+        "status": progress.get("status", ""),
+        "delta": progress.get("delta", ""),
+        "answer": progress.get("answer", ""),
+        "think": progress.get("think", ""),
+    }
+    return json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str)
+
+
 def _is_permanent_error(exc: BaseException) -> bool:
     """Return True if *exc* looks like a non-retryable error."""
     # 1. Check HTTP status_code attribute (httpx/aiohttp/requests exceptions)
@@ -1345,6 +1357,7 @@ If not, reply with `HEARTBEAT_OK`.
         """Extract final LLM text from streamed turn events."""
         answer = ""
         deltas: list[str] = []
+        seen_llm_progress: set[str] = set()
         for event in events:
             if not isinstance(event, dict):
                 continue
@@ -1356,6 +1369,10 @@ If not, reply with `HEARTBEAT_OK`.
                     continue
                 if progress.get("stage") != "llm":
                     continue
+                progress_fp = _llm_progress_fingerprint(progress)
+                if progress_fp in seen_llm_progress:
+                    continue
+                seen_llm_progress.add(progress_fp)
                 part = progress.get("delta")
                 if isinstance(part, str) and part:
                     deltas.append(part)

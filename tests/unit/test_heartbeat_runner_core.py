@@ -225,6 +225,21 @@ class TestExtractLlmResult:
         ]
         assert HeartbeatRunner._extract_llm_result(events) == "kept"
 
+    def test_cumulative_progress_replay_is_deduplicated(self):
+        events = [
+            {"_progress": [{"stage": "llm", "id": "llm1", "delta": "Hello "}]},
+            {"_progress": [
+                {"stage": "llm", "id": "llm1", "delta": "Hello "},
+                {"stage": "tool_call", "id": "tc1", "tool_name": "_read_file", "args": "/tmp/a.txt"},
+            ]},
+            {"_progress": [
+                {"stage": "llm", "id": "llm1", "delta": "Hello "},
+                {"stage": "tool_call", "id": "tc1", "tool_name": "_read_file", "args": "/tmp/a.txt"},
+                {"stage": "llm", "id": "llm2", "delta": "World"},
+            ]},
+        ]
+        assert HeartbeatRunner._extract_llm_result(events) == "Hello World"
+
 
 # ============================================================
 # 4. _normalize_reflection_routine

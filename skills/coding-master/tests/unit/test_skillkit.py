@@ -87,7 +87,7 @@ class TestCreateSkills:
     def test_skill_count(self):
         sk = CodingMasterSkillkit(agent_id="test")
         skills = sk._createSkills()
-        assert len(skills) == 24  # 19 original + 4 file ops + change-summary
+        assert len(skills) == 25  # 19 original + 4 file ops + change-summary + doctor
 
     def test_get_name(self):
         sk = CodingMasterSkillkit()
@@ -137,6 +137,78 @@ class TestCmGit:
         mock_run.assert_called_once()
         call_kwargs = mock_run.call_args
         assert call_kwargs.kwargs["cwd"] == "/my/repo"
+
+    @patch("subprocess.run")
+    def test_explicit_cwd_uses_matching_lock_only(self, mock_run, sk):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        sk._find_active_lock = MagicMock(
+            side_effect=[
+                {
+                    "mode": "deliver",
+                    "_repo_path": "/my/repo",
+                }
+            ]
+        )
+        with patch("coding_master_skillkit._get_tools") as mock_tools:
+            mock_tools.return_value.CM_DIR = ".cm"
+            mock_tools.return_value._atomic_json_read.return_value = {
+                "features": {"1": {"phase": "developing"}}
+            }
+            result = json.loads(sk._cm_git(subcmd="commit", args="-m test", cwd="/my/repo"))
+
+        assert result["ok"] is True
+        sk._find_active_lock.assert_called_once_with("/my/repo")
+
+    def test_explicit_cwd_ignores_unrelated_active_lock(self, sk):
+        sk._find_active_lock = MagicMock(return_value=None)
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            result = json.loads(sk._cm_git(subcmd="commit", args="-m test", cwd="/my/repo"))
+
+        assert result["ok"] is True
+        sk._find_active_lock.assert_called_once_with("/my/repo")
+        assert mock_run.call_args.kwargs["cwd"] == "/my/repo"
+
+    def test_find_active_lock_matches_explicit_cwd(self, sk, tmp_path):
+        repo_a = tmp_path / "repo-a"
+        repo_b = tmp_path / "repo-b"
+        repo_a.mkdir()
+        repo_b.mkdir()
+        (repo_a / ".cm").mkdir()
+        (repo_b / ".cm").mkdir()
+        (repo_a / ".cm" / "lock.json").write_text("{}")
+        (repo_b / ".cm" / "lock.json").write_text("{}")
+
+        def _lock_for(repo_path: Path, mode: str) -> dict:
+            return {
+                "mode": mode,
+                "session_phase": "active",
+                "session_worktree": str(repo_path / "session"),
+            }
+
+        with patch("coding_master_skillkit._get_tools") as mock_tools:
+            mock_tools.return_value.CM_DIR = ".cm"
+            mock_tools.return_value.ConfigManager.return_value._section.return_value = {
+                "workspaces": {
+                    "repo-a": {"path": str(repo_a)},
+                    "repo-b": {"path": str(repo_b)},
+                }
+            }
+
+            def read_side_effect(path):
+                if path == repo_a / ".cm" / "lock.json":
+                    return _lock_for(repo_a, "review")
+                if path == repo_b / ".cm" / "lock.json":
+                    return _lock_for(repo_b, "deliver")
+                return {}
+
+            mock_tools.return_value._atomic_json_read.side_effect = read_side_effect
+
+            lock = sk._find_active_lock(str(repo_b))
+
+        assert lock is not None
+        assert lock["mode"] == "deliver"
+        assert lock["_repo_path"] == str(repo_b.resolve())
 
 
 # ===========================================================================

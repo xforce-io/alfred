@@ -445,7 +445,8 @@ class TestIdempotency:
         with _mock_repo(repo):
             r = tools.cmd_claim(make_args(repo=repo.name, feature=1))
             assert not r["ok"]
-            assert "plan-ready" in r["error"]
+            assert "locked" in r["error"]
+            assert "next_action" in r
 
     def test_reopen_not_done_rejected(self, git_repo):
         repo, _ = _setup_developing(git_repo)

@@ -211,8 +211,8 @@ class TestChatServiceRouting:
         svc._register_connection("sess_a", "bot1", ws1)
         svc._register_connection("sess_b", "bot1", ws2)
 
-        assert svc._active_connections["sess_a"] is ws1
-        assert svc._active_connections["sess_b"] is ws2
+        assert svc._active_connections["sess_a"] == {ws1}
+        assert svc._active_connections["sess_b"] == {ws2}
         assert len(svc._connections_by_agent["bot1"]) == 2
 
         svc._unregister_connection("sess_a", "bot1")
@@ -275,3 +275,55 @@ class TestChatServiceRouting:
 
         assert len(ws1.sent) == 1
         assert len(ws2.sent) == 0
+
+    @pytest.mark.asyncio
+    async def test_same_session_session_scope_broadcast_reaches_all_connections(self):
+        """Session-scoped events should reach all sockets of the same session."""
+        from src.everbot.web.services.chat_service import ChatService
+        svc = ChatService.__new__(ChatService)
+        svc._active_connections = {}
+        svc._connections_by_agent = {}
+        svc._last_activity = {}
+        svc._last_agent_broadcast = {}
+        svc._bootstrap_locks = {}
+
+        ws1 = self._make_mock_ws()
+        ws2 = self._make_mock_ws()
+        svc._register_connection("sess_same", "bot1", ws1)
+        svc._register_connection("sess_same", "bot1", ws2)
+
+        assert svc._active_connections["sess_same"] == {ws1, ws2}
+        assert len(svc._connections_by_agent["bot1"]) == 2
+
+        data = {
+            "type": "delta",
+            "scope": "session",
+            "target_session_id": "sess_same",
+            "target_channel": "web",
+            "content": "latest only",
+        }
+        await svc._on_background_event("src", data)
+
+        assert len(ws1.sent) == 1
+        assert len(ws2.sent) == 1
+
+    def test_same_session_unregister_removes_only_target_socket(self):
+        """Unregister should keep sibling sockets and avoid stale agent entries."""
+        from src.everbot.web.services.chat_service import ChatService
+        svc = ChatService.__new__(ChatService)
+        svc._active_connections = {}
+        svc._connections_by_agent = {}
+        svc._last_activity = {}
+        svc._last_agent_broadcast = {}
+        svc._bootstrap_locks = {}
+
+        ws1 = self._make_mock_ws()
+        ws2 = self._make_mock_ws()
+        svc._register_connection("sess_same", "bot1", ws1)
+        svc._register_connection("sess_same", "bot1", ws2)
+
+        svc._unregister_connection("sess_same", "bot1", ws2)
+
+        assert svc._active_connections["sess_same"] == {ws1}
+        assert "bot1" in svc._connections_by_agent
+        assert svc._connections_by_agent["bot1"] == {("sess_same", ws1)}

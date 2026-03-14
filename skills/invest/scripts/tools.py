@@ -5,12 +5,40 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import io
 import json
+import logging
 import os
+import sys
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+
+@contextmanager
+def _suppress_stderr():
+    """Capture stderr from submodules so it doesn't leak to the terminal.
+
+    Any logger.error() or print(..., file=sys.stderr) from dynamically loaded
+    modules is swallowed here; the caller is expected to surface errors through
+    the structured JSON output instead.
+    """
+    old_stderr = sys.stderr
+    old_handlers: list = []
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        if isinstance(handler, logging.StreamHandler) and handler.stream is old_stderr:
+            old_handlers.append(handler)
+            root_logger.removeHandler(handler)
+    sys.stderr = io.StringIO()
+    try:
+        yield sys.stderr
+    finally:
+        sys.stderr = old_stderr
+        for handler in old_handlers:
+            root_logger.addHandler(handler)
 
 
 def _utc_now() -> str:
@@ -233,6 +261,10 @@ def _chain_branch_key(path: List[str]) -> str:
     if len(path) >= 2:
         return f"{path[0]}->{path[1]}"
     return path[0]
+
+
+def _path_hops(path: List[str]) -> int:
+    return max(0, len(path) - 1)
 
 
 def _graph_adjacency(graph: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -481,30 +513,31 @@ def cmd_scan(args: argparse.Namespace) -> None:
     errors: List[str] = []
     module_payloads: Dict[str, Any] = {}
 
-    for module_name in requested:
-        if module_name == "macro":
-            try:
-                result = _load_macro_result(args.lookback_days)
-                module_payloads["macro"] = result
-                observations.extend(_map_macro(result))
-            except Exception as exc:
-                errors.append(f"macro: {exc}")
-        elif module_name == "china":
-            try:
-                result = _load_china_result(min(args.lookback_days, 60))
-                module_payloads["china"] = result
-                observations.extend(_map_china(result))
-            except Exception as exc:
-                errors.append(f"china: {exc}")
-        elif module_name == "rhino":
-            try:
-                result = _load_rhino_result(args.max_age, args.top, args.rhino_lookback)
-                module_payloads["rhino"] = result
-                observations.extend(_map_rhino(result))
-            except Exception as exc:
-                errors.append(f"rhino: {exc}")
-        else:
-            errors.append(f"unknown module: {module_name}")
+    with _suppress_stderr():
+        for module_name in requested:
+            if module_name == "macro":
+                try:
+                    result = _load_macro_result(args.lookback_days)
+                    module_payloads["macro"] = result
+                    observations.extend(_map_macro(result))
+                except Exception as exc:
+                    errors.append(f"macro: {exc}")
+            elif module_name == "china":
+                try:
+                    result = _load_china_result(min(args.lookback_days, 60))
+                    module_payloads["china"] = result
+                    observations.extend(_map_china(result))
+                except Exception as exc:
+                    errors.append(f"china: {exc}")
+            elif module_name == "rhino":
+                try:
+                    result = _load_rhino_result(args.max_age, args.top, args.rhino_lookback)
+                    module_payloads["rhino"] = result
+                    observations.extend(_map_rhino(result))
+                except Exception as exc:
+                    errors.append(f"rhino: {exc}")
+            else:
+                errors.append(f"unknown module: {module_name}")
 
     updated = _apply_observations(graph, observations)
     _save_graph(graph)
@@ -742,8 +775,10 @@ def _infer(
     targets: Optional[List[str]] = None,
     *,
     max_hops: int = 6,
+    min_hops: int = 1,
 ) -> Dict[str, Any]:
     observed_nodes = sum(1 for n in graph["nodes"].values() if _node_effective(n)[0] is not None)
+    min_hops = max(1, min_hops)
 
     chain_candidates = list(graph["chains"])
     seen_paths = {tuple(chain["path"]) for chain in chain_candidates}
@@ -756,6 +791,9 @@ def _infer(
     raw_chains: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
     skipped_chains: List[Dict[str, Any]] = []
     for chain in chain_candidates:
+        hop_count = _path_hops(chain["path"])
+        if hop_count < min_hops:
+            continue
         try:
             preview = _preview_chain(graph, chain["path"])
         except Exception as exc:
@@ -808,6 +846,7 @@ def _infer(
                 "target_state": target_state,
                 "root_node": preview["root_node"],
                 "path_length": len(chain["path"]),
+                "hop_count": _path_hops(chain["path"]),
                 "auto_discovered": bool(chain.get("auto_discovered")),
             }
         )
@@ -840,6 +879,7 @@ def _infer(
     return {
         "timestamp": _utc_now(),
         "observed_nodes": observed_nodes,
+        "min_hops": min_hops,
         "top_chains": top_chains,
         "asset_summary": asset_summary,
         "skipped_chains": skipped_chains,
@@ -849,7 +889,7 @@ def _infer(
 def cmd_infer(args: argparse.Namespace) -> None:
     graph = _load_graph()
     targets = [part.strip() for part in args.target.split(",")] if args.target else None
-    result = _infer(graph, args.top, targets, max_hops=args.max_hops)
+    result = _infer(graph, args.top, targets, max_hops=args.max_hops, min_hops=args.min_hops)
     snapshot = {
         "graph_updated_at": graph["updated_at"],
         **result,
@@ -865,12 +905,32 @@ def _format_report(graph: Dict[str, Any], inference: Dict[str, Any]) -> str:
     lines.append("")
 
     top_chains = inference.get("top_chains", [])
+    multi_hop_chains = [chain for chain in top_chains if int(chain.get("hop_count", 0)) >= 2]
+    direct_chains = [chain for chain in top_chains if int(chain.get("hop_count", 0)) < 2]
+
+    min_hops = inference.get("min_hops")
+    if isinstance(min_hops, int) and min_hops > 1:
+        lines.append(f"Chain filter: minimum hops = {min_hops}")
+        lines.append("")
+
     if top_chains:
-        lines.append("Active causal chains:")
-        for chain in top_chains[:5]:
-            path = " -> ".join(step["node"] for step in chain["path_detail"])
-            pct = round(chain["probability"] * 100, 1)
-            lines.append(f"- {chain['label']}: {path} ({pct}%, impact {chain['impact']})")
+        if multi_hop_chains:
+            lines.append("Multi-hop causal chains:")
+            for chain in multi_hop_chains[:5]:
+                path = " -> ".join(step["node"] for step in chain["path_detail"])
+                pct = round(chain["probability"] * 100, 1)
+                lines.append(f"- {chain['label']}: {path} ({pct}%, impact {chain['impact']})")
+            lines.append("")
+
+        if direct_chains:
+            lines.append("Direct causal chains:")
+            for chain in direct_chains[:5]:
+                path = " -> ".join(step["node"] for step in chain["path_detail"])
+                pct = round(chain["probability"] * 100, 1)
+                lines.append(f"- {chain['label']}: {path} ({pct}%, impact {chain['impact']})")
+            lines.append("")
+    else:
+        lines.append("No causal chains passed the current filter.")
         lines.append("")
 
     summary = inference.get("asset_summary", {})
@@ -1015,6 +1075,7 @@ def build_parser() -> argparse.ArgumentParser:
     infer.add_argument("--top", type=int, default=5)
     infer.add_argument("--target")
     infer.add_argument("--max-hops", type=int, default=6)
+    infer.add_argument("--min-hops", type=int, default=1)
     infer.set_defaults(func=cmd_infer)
 
     report = sub.add_parser("report", help="Format report")

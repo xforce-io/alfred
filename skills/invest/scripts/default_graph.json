@@ -201,9 +201,11 @@
       "from": "northbound_flow",
       "to": "a_share",
       "probabilities": {
+        "heavy_inflow->bullish": 0.80,
         "inflow->bullish": 0.65,
         "neutral->neutral": 0.60,
-        "outflow->bearish": 0.65
+        "outflow->bearish": 0.65,
+        "heavy_outflow->bearish": 0.80
       },
       "method": "default_prior",
       "reason": "Default flow-to-equity prior"

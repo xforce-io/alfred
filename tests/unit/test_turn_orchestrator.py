@@ -104,6 +104,38 @@ async def test_basic_llm_delta_flow():
 
 
 @pytest.mark.asyncio
+async def test_cumulative_progress_does_not_duplicate_llm_deltas():
+    """Cumulative `_progress` replays must not duplicate prior LLM output."""
+    agent = _ScriptedAgent([
+        _progress_event(_llm_delta("Hello ", pid="llm1")),
+        _progress_event(
+            _llm_delta("Hello ", pid="llm1"),
+            _tool_call("_read_file", "/tmp/a.txt", pid="tc1"),
+        ),
+        _progress_event(
+            _llm_delta("Hello ", pid="llm1"),
+            _tool_call("_read_file", "/tmp/a.txt", pid="tc1"),
+            _tool_output("_read_file", "content", pid="to1"),
+        ),
+        _progress_event(
+            _llm_delta("Hello ", pid="llm1"),
+            _tool_call("_read_file", "/tmp/a.txt", pid="tc1"),
+            _tool_output("_read_file", "content", pid="to1"),
+            _llm_delta("world", pid="llm2"),
+        ),
+    ])
+    orch = TurnOrchestrator(TurnPolicy(max_attempts=1, max_tool_calls=10, max_consecutive_empty_llm_rounds=99))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "hi"):
+        events.append(te)
+
+    complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
+    assert complete.answer == "Hello world"
+    deltas = [e.content for e in events if e.type == TurnEventType.LLM_DELTA]
+    assert deltas == ["Hello ", "world"]
+
+
+@pytest.mark.asyncio
 async def test_tool_call_budget_exceeded():
     """Exceeding max_tool_calls yields TURN_ERROR."""
     calls = [_progress_event(_tool_call(f"tool_{i}", pid=f"tc_{i}")) for i in range(5)]

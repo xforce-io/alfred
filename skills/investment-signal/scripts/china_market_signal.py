@@ -228,12 +228,14 @@ class ChinaMarketSignalAnalyzer:
         # 计算北向净流入 (百万元)
         north_net = None
         if 'north_money' in df.columns:
-            north_net = df['north_money']
+            north_net = pd.to_numeric(df['north_money'], errors='coerce')
         elif 'hgt' in df.columns and 'sgt' in df.columns:
-            north_net = df['hgt'] + df['sgt']
+            north_net = pd.to_numeric(df['hgt'], errors='coerce') + pd.to_numeric(df['sgt'], errors='coerce')
 
-        if north_net is None or north_net.empty:
+        if north_net is None or north_net.dropna().empty:
             return {'error': '无法计算北向净流入', 'risk_score': 50}
+
+        north_net = north_net.dropna()
 
         # 转为亿元
         north_net_yi = north_net / 100  # 百万→亿
@@ -426,14 +428,14 @@ class ChinaMarketSignalAnalyzer:
         # 南向净流入 (百万元)
         south_net = None
         if 'south_money' in df.columns:
-            south_net = df['south_money']
-        elif 'hgt' in df.columns:
-            # moneyflow_hsgt returns: ggt_ss (港股通上海), ggt_sz (港股通深圳)
-            if 'ggt_ss' in df.columns and 'ggt_sz' in df.columns:
-                south_net = df['ggt_ss'] + df['ggt_sz']
+            south_net = pd.to_numeric(df['south_money'], errors='coerce')
+        elif 'ggt_ss' in df.columns and 'ggt_sz' in df.columns:
+            south_net = pd.to_numeric(df['ggt_ss'], errors='coerce') + pd.to_numeric(df['ggt_sz'], errors='coerce')
 
-        if south_net is None or south_net.empty:
+        if south_net is None or south_net.dropna().empty:
             return {'error': '无法计算南向净流入', 'risk_score': 50}
+
+        south_net = south_net.dropna()
 
         south_net_yi = south_net / 100  # 百万→亿
 

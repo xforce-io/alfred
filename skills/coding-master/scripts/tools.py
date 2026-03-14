@@ -392,6 +392,29 @@ def _ensure_gitignore(repo: Path):
         gi.write_text(f"{marker}\n.coding-master.lock\n")
 
 
+def _reset_plan_layer(repo: Path):
+    """Clean stale plan-layer state when creating a new session.
+
+    Removes per-session files (PLAN.md, claims.json, features/, evidence/)
+    while preserving cross-session files (session.json, JOURNAL.md).
+    """
+    import shutil
+    cm = repo / CM_DIR
+    if not cm.is_dir():
+        return
+    # Per-session files to remove
+    for name in ("PLAN.md", "claims.json", "engine-attempts.json",
+                 "engine_result.json", "scope.json", "CRITICAL_ISSUES.md"):
+        p = cm / name
+        if p.exists():
+            p.unlink()
+    # Per-session directories to remove
+    for name in ("features", "evidence", "delegation"):
+        p = cm / name
+        if p.is_dir():
+            shutil.rmtree(p, ignore_errors=True)
+
+
 def _slugify(text: str) -> str:
     s = re.sub(r"[^\w\s-]", "", text.lower().strip())
     s = re.sub(r"[\s_]+", "-", s)
@@ -1114,13 +1137,32 @@ def cmd_lock(args) -> dict:
             session_result = _ensure_session_worktree(repo, existing_data)
             if not session_result.get("ok"):
                 return session_result
-            existing_data["session_worktree"] = session_result["data"]["session_worktree"]
+            session_wt = session_result["data"]["session_worktree"]
+            existing_data["session_worktree"] = session_wt
+            # Detect and fix worktree branch mismatch (e.g. manual checkout)
+            if session_wt and existing_branch:
+                try:
+                    actual = _run_git(
+                        Path(session_wt),
+                        ["rev-parse", "--abbrev-ref", "HEAD"],
+                        check=False,
+                    ).stdout.strip()
+                    if actual and actual != existing_branch:
+                        _run_git(Path(session_wt), ["checkout", existing_branch], check=False)
+                        existing_data["branch_mismatch"] = {
+                            "expected": existing_branch,
+                            "was": actual,
+                            "action": "auto-checkout",
+                        }
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                    pass
         _append_journal(repo, agent, "lock", f"Joined session, branch: {existing_branch}")
         existing_data["next_action"] = next_action
         return {"ok": True, "data": existing_data}
 
-    # ── New session created ──
+    # ── New session created: clean stale plan-layer state ──
     _ensure_gitignore(repo)
+    _reset_plan_layer(repo)
 
     # Read-only modes: no branch creation, no git state changes
     if read_only:
@@ -1383,8 +1425,18 @@ def cmd_claim(args) -> dict:
     # Check session_phase
     lock = _atomic_json_read(lock_path)
     if lock.get("session_phase") == "locked":
-        return {"ok": False, "error": "session is locked, "
-                "run cm plan-ready first to review PLAN.md before claiming features"}
+        plan_path = repo / CM_DIR / "PLAN.md"
+        if plan_path.exists():
+            return {"ok": False, "error": "session is locked but PLAN.md exists. "
+                    "You must advance to reviewed phase before claiming.",
+                    "next_action": {"tool": "_cm_start", "args": {"repo": args.repo, "mode": "deliver",
+                                    "plan_file": str(plan_path)}},
+                    "hint": "Call _cm_start to validate PLAN.md and advance the session."}
+        return {"ok": False, "error": "session is locked and PLAN.md does not exist yet.",
+                "next_action": {"tool": "_cm_edit", "args": {"repo": args.repo,
+                                "file": ".coding-master/PLAN.md", "old_text": "",
+                                "new_text": "# <title>\n\n## Feature 1: <description>\n- **Scope**: <files>\n- **Changes**: <what to change>"}},
+                "hint": "Create PLAN.md first with _cm_edit, then call _cm_start."}
     if lock.get("session_phase") not in ("reviewed", "working"):
         return {"ok": False, "error": f"session is {lock.get('session_phase')}, cannot claim"}
 
@@ -1637,12 +1689,14 @@ def cmd_test(args) -> dict:
             "evidence": evidence,
         }}
 
+    # Write evidence BEFORE updating claims so cmd_done always finds it
+    # even if the process crashes between these two operations.
+    _write_evidence(repo, feature_id, evidence)
+
     result = _atomic_json_update(claims_path, update_test_state)
     if not result.get("ok"):
         _delete_evidence(repo, feature_id)
         return result
-
-    _write_evidence(repo, feature_id, evidence)
     if overall == "passed":
         result.setdefault("data", {})["next_action"] = _hint(
             f"cm done --feature {feature_id}", "Tests passed, mark feature complete")
@@ -3095,6 +3149,20 @@ def _build_change_summary(worktree: Path, base_ref: str = "HEAD~1") -> dict:
     # Get stat summary
     stat_out = _run_git(worktree, ["diff", "--stat", f"{base_ref}..HEAD"], check=False).stdout.strip()
 
+    # Build GitHub compare URL if possible
+    diff_url = None
+    try:
+        resolved_base = _run_git(worktree, ["rev-parse", "--verify", base_ref], check=False).stdout.strip()
+        remote_url = _run_git(worktree, ["remote", "get-url", "origin"], check=False).stdout.strip()
+        if remote_url and resolved_base and head_full:
+            # Normalize to https URL: git@github.com:owner/repo.git → https://github.com/owner/repo
+            if remote_url.startswith("git@"):
+                remote_url = remote_url.replace(":", "/", 1).replace("git@", "https://", 1)
+            repo_url = remote_url.removesuffix(".git")
+            diff_url = f"{repo_url}/compare/{resolved_base}...{head_full}"
+    except Exception:
+        pass
+
     return {
         "worktree": str(worktree),
         "commit": head,
@@ -3103,6 +3171,7 @@ def _build_change_summary(worktree: Path, base_ref: str = "HEAD~1") -> dict:
         "files_changed": files_changed,
         "diff_stat": stat_out,
         "diff": diff_out,
+        "diff_url": diff_url,
         "review_command": f"cd {worktree} && git diff {base_ref}..HEAD",
     }
 
@@ -3159,16 +3228,19 @@ def _resolve_working_dir(repo: Path, args) -> Path:
 def _is_within_repo(target: Path, repo: Path) -> bool:
     """Check if target path is within repo or any of its worktrees."""
     resolved = target.resolve()
+    repo_resolved = repo.resolve()
     # Allow repo itself
-    if resolved.is_relative_to(repo.resolve()):
+    if resolved.is_relative_to(repo_resolved):
         return True
     # Allow sibling worktree dirs (session and feature worktrees)
-    repo_parent = repo.resolve().parent
-    repo_name = repo.resolve().name
+    # Must match exact naming convention: {repo}-session or {repo}-feature-{id}
+    repo_parent = repo_resolved.parent
+    repo_name = repo_resolved.name
     if resolved.is_relative_to(repo_parent):
         rel = resolved.relative_to(repo_parent)
         first_part = str(rel.parts[0]) if rel.parts else ""
-        if first_part.startswith(repo_name):
+        if (first_part == f"{repo_name}-session"
+                or first_part.startswith(f"{repo_name}-feature-")):
             return True
     return False
 
@@ -3254,7 +3326,7 @@ def cmd_grep(args) -> dict:
     rg = shutil.which("rg")
     cmd = [rg] if rg else ["grep"]
     if rg:
-        cmd += ["-n", f"-C{context}", "--max-count=5",
+        cmd += ["-n", f"-C{context}",
                 "--max-filesize=1M", "--no-heading",
                 f"--max-count={max_results}"]
         if file_glob:
@@ -3288,20 +3360,93 @@ def cmd_edit(args) -> dict:
     """Edit file by exact text replacement. Only available in deliver/debug modes.
 
     old_text must match exactly once in the file for safety.
+    Requires a feature in 'developing' phase (deliver mode) or an active debug session.
     """
     repo = _resolve_locked_repo(args)
     mode = _get_session_mode(repo)
     if mode in READ_ONLY_MODES:
         return {"ok": False, "error": f"edit not allowed in {mode} mode (read-only)"}
 
-    cwd = _resolve_working_dir(repo, args)
-    target = Path(args.file)
-    if not target.is_absolute():
-        target = cwd / target
-    target = target.resolve()
+    # Resolve target path early so we can check if it's CM metadata.
+    # CM metadata (.coding-master/*.md) lives in the repo root, not in worktrees.
+    cm_dir = (repo / CM_DIR).resolve()
+    raw_file = Path(args.file)
+
+    if raw_file.is_absolute():
+        target = raw_file.resolve()
+        # Absolute path into worktree for a .md file that doesn't exist?
+        # Check if it belongs under .coding-master/ in the repo root instead.
+        if not target.exists() and target.suffix == ".md":
+            cm_candidate = (repo / CM_DIR / target.name).resolve()
+            if str(cm_candidate).startswith(str(cm_dir)):
+                target = cm_candidate
+    elif raw_file.parts[0] == CM_DIR:
+        # Relative path starting with .coding-master/ → resolve against repo root
+        target = (repo / raw_file).resolve()
+    elif CM_DIR in raw_file.parts:
+        # Agents sometimes nest .coding-master/ under a wrong prefix
+        # (e.g. "skills/coding-master/.coding-master/PLAN.md").
+        # Extract from .coding-master/ onward and resolve against repo root.
+        cm_idx = list(raw_file.parts).index(CM_DIR)
+        cm_relative = Path(*raw_file.parts[cm_idx:])
+        target = (repo / cm_relative).resolve()
+    else:
+        cwd = _resolve_working_dir(repo, args)
+        target = (cwd / raw_file).resolve()
+        # If not found in cwd, check .coding-master/ as fallback for bare filenames.
+        # Agents often pass bare "PLAN.md" instead of ".coding-master/PLAN.md"
+        if not target.exists() and raw_file.suffix == ".md" and len(raw_file.parts) == 1:
+            cm_candidate = (repo / CM_DIR / raw_file).resolve()
+            if str(cm_candidate).startswith(str(cm_dir)):
+                target = cm_candidate
+
+    is_cm_metadata = (
+        str(target).startswith(str(cm_dir))
+        and target.suffix == ".md"
+    )
 
     if not _is_within_repo(target, repo):
         return {"ok": False, "error": f"path {target} is outside repo"}
+
+    # Require a feature in 'developing' phase for deliver mode (source code only)
+    if mode == "deliver" and not is_cm_metadata:
+        claims = _atomic_json_read(repo / CM_DIR / "claims.json")
+        features = claims.get("features", {}) if claims else {}
+        has_developing = any(
+            f.get("phase") == "developing" for f in features.values()
+        )
+        if not has_developing:
+            lock = _atomic_json_read(repo / CM_DIR / "lock.json")
+            phase = lock.get("session_phase", "locked") if lock else "locked"
+            if phase == "locked":
+                return {"ok": False,
+                        "error": "Cannot edit source code: no feature in 'developing' phase. Session is 'locked'.",
+                        "next_action": {"tool": "_cm_start", "args": {"repo": args.repo, "mode": "deliver"}},
+                        "hint": "Call _cm_start first to set up the session, then _cm_claim and _cm_dev to start a feature."}
+            elif phase == "reviewed":
+                # Find first unclaimed feature
+                plan = _parse_plan_md(repo / CM_DIR / "PLAN.md")
+                first_feature = 1
+                for fid_str, f in features.items():
+                    if f.get("phase") in (None, "unclaimed"):
+                        first_feature = int(fid_str)
+                        break
+                return {"ok": False,
+                        "error": "Cannot edit source code: no feature in 'developing' phase. Session is 'reviewed'.",
+                        "next_action": {"tool": "_cm_claim", "args": {"repo": args.repo, "feature": first_feature}},
+                        "hint": f"Call _cm_claim(feature={first_feature}) then _cm_dev(feature={first_feature}) to start developing."}
+            else:
+                return {"ok": False,
+                        "error": f"Cannot edit source code: no feature in 'developing' phase. Session is '{phase}'.",
+                        "hint": "Run _cm_claim + _cm_dev first before editing code."}
+
+    # For CM metadata: old_text="" means create/overwrite (PLAN.md is "write once per session")
+    if is_cm_metadata and args.old_text == "":
+        target.parent.mkdir(parents=True, exist_ok=True)
+        created = not target.exists()
+        target.write_text(args.new_text)
+        return {"ok": True, "data": {"file": str(target), "replacements": 1, "created": created}}
+
     if not target.exists():
         return {"ok": False, "error": f"file not found: {target}"}
 

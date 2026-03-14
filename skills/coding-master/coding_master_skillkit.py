@@ -126,6 +126,11 @@ _GIT_ALLOWED = frozenset({
     "show", "tag", "pull", "fetch", "cherry-pick",
 })
 
+# Git subcommands that mutate the repo — blocked in read-only modes
+_GIT_MUTATING = frozenset({
+    "add", "commit", "push", "merge", "rebase", "cherry-pick", "reset", "stash",
+})
+
 
 
 class CodingMasterSkillkit(Skillkit):
@@ -634,6 +639,44 @@ class CodingMasterSkillkit(Skillkit):
                 "error": "No active session. Lock a repo first, or specify cwd.",
             })
 
+        # Block mutating git commands in read-only modes or without a developing feature
+        if subcmd in _GIT_MUTATING:
+            lock = self._find_active_lock(work_dir if cwd else None)
+            if lock:
+                mode = lock.get("mode", "deliver")
+                if mode in ("review", "analyze"):
+                    return _result_to_str({
+                        "ok": False,
+                        "error": f"git {subcmd} not allowed in {mode} mode (read-only). "
+                                 "Switch to deliver mode first.",
+                    })
+                if mode == "deliver" and subcmd in ("add", "commit"):
+                    repo_path = Path(lock.get("_repo_path", "")) if lock.get("_repo_path") else None
+                    if repo_path:
+                        tools = _get_tools()
+                        claims = tools._atomic_json_read(repo_path / tools.CM_DIR / "claims.json")
+                        features = claims.get("features", {}) if claims else {}
+                        has_developing = any(
+                            f.get("phase") == "developing" for f in features.values()
+                        )
+                        if not has_developing:
+                            phase = lock.get("session_phase", "locked")
+                            if phase == "locked":
+                                hint = ("Session is in 'locked' phase — create "
+                                        ".coding-master/PLAN.md first, then run "
+                                        "cm plan-ready to validate it.")
+                            elif phase == "reviewed":
+                                hint = ("Session is in 'reviewed' phase — run "
+                                        "cm claim --feature N to claim a feature, "
+                                        "then cm dev --feature N to start developing.")
+                            else:
+                                hint = "Run cm claim + cm dev first."
+                            return _result_to_str({
+                                "ok": False,
+                                "error": f"git {subcmd} requires a feature in "
+                                         f"'developing' phase. {hint}",
+                            })
+
         try:
             cmd_parts = ["git", subcmd]
             if args:
@@ -665,9 +708,10 @@ class CodingMasterSkillkit(Skillkit):
     #  Internal helpers
     # ──────────────────────────────────────────────────────────
 
-    def _resolve_session_cwd(self) -> str | None:
-        """Find current session worktree or repo path from lock state."""
+    def _find_active_lock(self, cwd: str | None = None) -> dict | None:
+        """Find active lock data with repo path injected as _repo_path."""
         tools = _get_tools()
+        target_path = Path(cwd).expanduser().resolve() if cwd else None
         try:
             cfg = tools.ConfigManager()
             section = cfg._section()
@@ -681,12 +725,32 @@ class CodingMasterSkillkit(Skillkit):
                 if lock_path.exists():
                     lock = tools._atomic_json_read(lock_path)
                     if lock and lock.get("session_phase") != "done":
-                        wt = lock.get("session_worktree", "")
-                        if wt and Path(wt).exists():
-                            return wt
-                        return str(repo_path)
+                        if target_path is not None:
+                            session_wt = lock.get("session_worktree", "")
+                            lock_targets = [repo_path]
+                            if session_wt:
+                                lock_targets.append(Path(session_wt).expanduser().resolve())
+                            if not any(
+                                target_path == candidate or candidate in target_path.parents
+                                for candidate in lock_targets
+                            ):
+                                continue
+                        lock["_repo_path"] = str(repo_path)
+                        return lock
         except Exception as exc:
-            logger.debug("Failed to resolve session cwd: %s", exc)
+            logger.debug("Failed to find active lock: %s", exc)
+        return None
+
+    def _resolve_session_cwd(self) -> str | None:
+        """Find current session worktree or repo path from lock state."""
+        lock = self._find_active_lock()
+        if lock:
+            wt = lock.get("session_worktree", "")
+            if wt and Path(wt).exists():
+                return wt
+            repo_path = lock.get("_repo_path", "")
+            if repo_path:
+                return repo_path
         return None
 
     # ──────────────────────────────────────────────────────────

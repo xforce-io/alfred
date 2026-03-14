@@ -1,13 +1,23 @@
 ---
 name: investment-signal
-description: 投资信号检测 — 宏观流动性 + 美股价值投资 + A股市场信号 + 箱体突破
+description: Internal observable and signal module for invest. Provides macro liquidity, value, China market, and breakout scripts for lower-level analysis and debugging.
 version: "2.0.0"
 tags: [investing, macro, value-investing, china-market, breakout, signals, finance]
 ---
 
 # Investment Signal Detector
 
-投资信号检测技能，整合四个核心分析维度：
+This skill is not the preferred top-level entrypoint for investment analysis.
+
+Use `invest` first when the user wants an investment view, scenario analysis, or probability graph reasoning. This skill exists as a lower-level signal module that provides observable inputs and standalone script access for development, debugging, and focused indicator checks.
+
+## Positioning
+
+- Preferred user-facing entrypoint: `invest`
+- Current role of `investment-signal`: lower-level signal and observable provider
+- Best use cases: script-level debugging, focused metric inspection, and reusable signal generation
+
+投资信号模块当前整合四个核心分析维度：
 
 1. **宏观流动性监控** — 净流动性、SOFR、MOVE 指数、日元套利
 2. **美股价值投资框架** — ROE、负债率、FCF、护城河、估值
@@ -16,6 +26,7 @@ tags: [investing, macro, value-investing, china-market, breakout, signals, finan
 
 ## When to Use
 
+- 优先原则：如果用户要的是投资环境判断、事件传导分析、概率图推演，优先使用 `invest`
 - 用户询问当前宏观流动性状态、市场风险水平
 - 用户要求评估某只美股的基本面质量
 - 用户希望获取综合投资信号报告
@@ -163,6 +174,10 @@ python scripts/signal_report.py --all --symbols AAPL --format json
 
 ## Usage Examples
 
+### Top-level routing
+用户问: "当前市场环境如何？如果地缘冲突升级，会传导到哪些资产？"
+→ 优先使用 `invest`
+
 ### 检测宏观流动性
 用户问: "当前宏观流动性状态如何？"
 → 运行 `python scripts/macro_liquidity.py --format text`
@@ -203,3 +218,9 @@ pip install fredapi yfinance tushare pandas numpy
 |----------------|------------------------|-----------------------------|
 | FRED_API_KEY   | 宏观分析必需             | FRED API Key，免费申请        |
 | TUSHARE_TOKEN  | A股信号/tushare突破必需   | Tushare Pro Token，注册获取   |
+
+## Migration Note
+
+- Keep this skill as an implementation layer.
+- Route general investment requests to `invest`.
+- Use standalone scripts here only when direct signal inspection is the goal.

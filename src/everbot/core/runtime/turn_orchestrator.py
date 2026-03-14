@@ -35,6 +35,55 @@ from .turn_policy import (  # noqa: F401 — re-exported
 logger = logging.getLogger(__name__)
 
 
+def _progress_fingerprint(progress: Dict[str, Any]) -> str:
+    """Build a stable fingerprint for one progress item.
+
+    Dolphin-style streams may resend the full accumulated ``_progress`` list
+    on every event. Consumers must therefore ignore already-seen items,
+    including repeated LLM deltas, while still allowing genuine updates with
+    changed content/status to pass through.
+    """
+    stage = progress.get("stage") or ""
+    pid = progress.get("id") or ""
+    status = progress.get("status") or ""
+    if stage == "llm":
+        payload = {
+            "stage": stage,
+            "id": pid,
+            "status": status,
+            "delta": progress.get("delta", ""),
+            "answer": progress.get("answer", ""),
+            "think": progress.get("think", ""),
+        }
+    elif stage == "skill":
+        skill_info = progress.get("skill_info") or {}
+        payload = {
+            "stage": stage,
+            "id": pid,
+            "status": status,
+            "name": skill_info.get("name") or progress.get("tool_name") or "",
+            "args": skill_info.get("args") or progress.get("args") or "",
+            "output": (
+                progress.get("answer")
+                or progress.get("block_answer")
+                or progress.get("output")
+                or ""
+            ),
+        }
+    else:
+        payload = {
+            "stage": stage,
+            "id": pid,
+            "status": status,
+            "tool_name": progress.get("tool_name", ""),
+            "args": progress.get("args", ""),
+            "output": progress.get("output", ""),
+            "reference_id": progress.get("reference_id", ""),
+        }
+    raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
 # ---------------------------------------------------------------------------
 # Helpers (stateless, extracted from ChatService)
 # ---------------------------------------------------------------------------
@@ -204,10 +253,23 @@ _READ_ONLY_INTENT_PREFIXES = frozenset({
     "read_file:", "search_grep:", "search_bash:", "bash_read:",
 })
 
+# Tool name suffixes that indicate read-only skill tools (e.g. _cm_status,
+# _cm_read, _cm_repos).  These get the higher max_same_readonly_intent limit.
+_READ_ONLY_TOOL_SUFFIXES = (
+    "_status", "_repos", "_read", "_find", "_grep", "_progress",
+    "_show", "_list", "_check", "_scope",
+)
+
 
 def _is_read_only_intent(intent_sig: str) -> bool:
     """Return True if the intent signature represents a read-only operation."""
-    return any(intent_sig.startswith(p) for p in _READ_ONLY_INTENT_PREFIXES)
+    if any(intent_sig.startswith(p) for p in _READ_ONLY_INTENT_PREFIXES):
+        return True
+    # tool_exec:<tool_name>:<hash> — check tool name for read-only suffixes
+    if intent_sig.startswith("tool_exec:"):
+        tool_name = intent_sig.split(":", 2)[1] if ":" in intent_sig else ""
+        return any(tool_name.endswith(s) for s in _READ_ONLY_TOOL_SUFFIXES)
+    return False
 
 
 _FINGERPRINT_CHARS = 120  # chars of LLM text to fingerprint per round
@@ -329,30 +391,61 @@ class TurnOrchestrator:
     def _check_empty_output_loop(
         self,
         llm_had_output_this_round: bool,
+        llm_had_think_this_round: bool,
         tool_execution_count: int,
         consecutive_empty_llm_rounds: int,
+        consecutive_think_only_rounds: int,
         response: str,
         tool_call_count: int,
         tool_names_executed: list,
         failed_tool_outputs: int,
     ) -> Optional[TurnEvent]:
-        """Return a TURN_ERROR event if too many consecutive tool calls had no LLM output."""
+        """Return a TURN_ERROR event if too many consecutive tool calls had no LLM output.
+
+        Tracks two separate counters:
+        - ``consecutive_empty_llm_rounds``: rounds with zero output (no delta, no think).
+        - ``consecutive_think_only_rounds``: rounds with reasoning but no visible text.
+
+        Think-only rounds are given a higher tolerance (the model may legitimately
+        reason before calling a tool), but sustained think-only loops still trigger.
+        """
         if llm_had_output_this_round or tool_execution_count == 0:
             return None
-        consecutive_empty_llm_rounds += 1
-        if consecutive_empty_llm_rounds >= self.policy.max_consecutive_empty_llm_rounds:
-            return TurnEvent(
-                type=TurnEventType.TURN_ERROR,
-                error=(
-                    f"EMPTY_OUTPUT_LOOP: {consecutive_empty_llm_rounds} consecutive "
-                    f"tool calls with no LLM text output (model likely degraded)"
-                ),
-                answer=response,
-                tool_call_count=tool_call_count,
-                tool_execution_count=tool_execution_count,
-                tool_names_executed=list(tool_names_executed),
-                failed_tool_outputs=failed_tool_outputs,
-            )
+        # Truly empty (no delta, no think)
+        if not llm_had_think_this_round:
+            consecutive_empty_llm_rounds += 1
+            if consecutive_empty_llm_rounds >= self.policy.max_consecutive_empty_llm_rounds:
+                return TurnEvent(
+                    type=TurnEventType.TURN_ERROR,
+                    error=(
+                        f"EMPTY_OUTPUT_LOOP: {consecutive_empty_llm_rounds} consecutive "
+                        f"tool calls with no LLM text output (model likely degraded)"
+                    ),
+                    answer=response,
+                    tool_call_count=tool_call_count,
+                    tool_execution_count=tool_execution_count,
+                    tool_names_executed=list(tool_names_executed),
+                    failed_tool_outputs=failed_tool_outputs,
+                )
+        # Think-only (reasoning but no visible delta)
+        else:
+            consecutive_think_only_rounds += 1
+            think_limit = self.policy.max_consecutive_think_only_rounds
+            if think_limit is None:
+                think_limit = max(5, self.policy.max_tool_calls // 2)
+            if consecutive_think_only_rounds >= think_limit:
+                return TurnEvent(
+                    type=TurnEventType.TURN_ERROR,
+                    error=(
+                        f"THINK_ONLY_LOOP: {consecutive_think_only_rounds} consecutive "
+                        f"tool calls with reasoning but no visible output"
+                    ),
+                    answer=response,
+                    tool_call_count=tool_call_count,
+                    tool_execution_count=tool_execution_count,
+                    tool_names_executed=list(tool_names_executed),
+                    failed_tool_outputs=failed_tool_outputs,
+                )
         return None
 
     def _check_intent_dedup(
@@ -460,7 +553,9 @@ class TurnOrchestrator:
         # the model has likely degraded (e.g. high-context collapse) and we
         # should stop early rather than burning tokens in a loop.
         llm_had_output_this_round = False
+        llm_had_think_this_round = False
         consecutive_empty_llm_rounds = 0
+        consecutive_think_only_rounds = 0
         last_successful_tool_output = ""  # fallback when LLM returns empty
         output_chars = 0  # approximate output token tracking (chars produced by LLM)
         # Repeated-text loop detection: track LLM text fingerprints across
@@ -468,6 +563,7 @@ class TurnOrchestrator:
         _round_text = ""
         _recent_fps: list[str] = []  # sliding window of recent fingerprints
         _LOOP_WINDOW = max(4, policy.max_consecutive_similar_llm_rounds)
+        seen_progress_fingerprints: set[str] = set()
 
         def _check_round_text_loop() -> bool:
             """Detect degenerate loops: consecutive repeats OR alternating patterns.
@@ -516,6 +612,10 @@ class TurnOrchestrator:
 
             non_progress_count = 0
             for progress in event.get("_progress", []):
+                progress_fp = _progress_fingerprint(progress)
+                if progress_fp in seen_progress_fingerprints:
+                    continue
+                seen_progress_fingerprints.add(progress_fp)
                 pid = progress.get("id") or ""
                 status = progress.get("status") or ""
                 stage = progress.get("stage")
@@ -530,6 +630,7 @@ class TurnOrchestrator:
                             llm_started = True
                         llm_had_output_this_round = True
                         consecutive_empty_llm_rounds = 0
+                        consecutive_think_only_rounds = 0
                         response += delta
                         _round_text += delta
                         yield TurnEvent(type=TurnEventType.LLM_DELTA, content=delta)
@@ -539,16 +640,14 @@ class TurnOrchestrator:
                             llm_started = True
                         llm_had_output_this_round = True
                         consecutive_empty_llm_rounds = 0
-                    # Reasoning output (think) indicates the model is actively
-                    # working, even when it produces no user-visible text
-                    # (e.g. deciding to call a tool).  Mark the round as
-                    # having output so the first few think-only rounds don't
-                    # trigger a false positive, but do NOT reset the
-                    # consecutive counter — if the model keeps calling tools
-                    # with think-only output (no visible delta), it's likely
-                    # stuck in a loop (e.g. repeated whisper calls).
+                        consecutive_think_only_rounds = 0
+                    # Reasoning output (think) means the model is actively
+                    # working, but it is NOT user-visible text.  We track it
+                    # separately: a few think-only rounds are normal (model
+                    # reasons before calling a tool), but sustained think-only
+                    # rounds with no visible delta indicate a loop.
                     if think and not llm_had_output_this_round:
-                        llm_had_output_this_round = True
+                        llm_had_think_this_round = True
 
                 elif stage == "skill":
                     if pid and sent_progress.get(pid) == status:
@@ -563,8 +662,10 @@ class TurnOrchestrator:
                     if status in ("running", "processing"):
                         # Empty-output loop detection
                         err = self._check_empty_output_loop(
-                            llm_had_output_this_round, tool_execution_count,
-                            consecutive_empty_llm_rounds, response,
+                            llm_had_output_this_round, llm_had_think_this_round,
+                            tool_execution_count,
+                            consecutive_empty_llm_rounds, consecutive_think_only_rounds,
+                            response,
                             tool_call_count, tool_names_executed, failed_tool_outputs,
                         )
                         if err:
@@ -582,8 +683,12 @@ class TurnOrchestrator:
                             )
                             return
                         if not llm_had_output_this_round and tool_execution_count > 0:
-                            consecutive_empty_llm_rounds += 1
+                            if llm_had_think_this_round:
+                                consecutive_think_only_rounds += 1
+                            else:
+                                consecutive_empty_llm_rounds += 1
                         llm_had_output_this_round = False
+                        llm_had_think_this_round = False
 
                         # Skill invocation → count as tool call (unless exempt)
                         if s_name not in policy.budget_exempt_tools:
@@ -680,8 +785,10 @@ class TurnOrchestrator:
 
                     # Empty-output loop detection
                     err = self._check_empty_output_loop(
-                        llm_had_output_this_round, tool_execution_count,
-                        consecutive_empty_llm_rounds, response,
+                        llm_had_output_this_round, llm_had_think_this_round,
+                        tool_execution_count,
+                        consecutive_empty_llm_rounds, consecutive_think_only_rounds,
+                        response,
                         tool_call_count, tool_names_executed, failed_tool_outputs,
                     )
                     if err:
@@ -699,8 +806,12 @@ class TurnOrchestrator:
                         )
                         return
                     if not llm_had_output_this_round and tool_execution_count > 0:
-                        consecutive_empty_llm_rounds += 1
+                        if llm_had_think_this_round:
+                            consecutive_think_only_rounds += 1
+                        else:
+                            consecutive_empty_llm_rounds += 1
                     llm_had_output_this_round = False
+                    llm_had_think_this_round = False
 
                     if t_name not in policy.budget_exempt_tools:
                         tool_call_count += 1
@@ -904,6 +1015,7 @@ async def _drain_after_timeout(
     deadline = asyncio.get_event_loop().time() + extra_timeout
     collected_outputs: list[str] = []
     final_response = ""
+    seen_progress_fingerprints: set[str] = set()
     try:
         while asyncio.get_event_loop().time() < deadline:
             try:
@@ -915,6 +1027,10 @@ async def _drain_after_timeout(
             if not isinstance(item, dict) or "_progress" not in item:
                 continue
             for progress in item.get("_progress", []):
+                progress_fp = _progress_fingerprint(progress)
+                if progress_fp in seen_progress_fingerprints:
+                    continue
+                seen_progress_fingerprints.add(progress_fp)
                 stage = progress.get("stage")
                 status = progress.get("status", "")
                 if stage == "skill" and status in ("completed", "failed"):

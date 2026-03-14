@@ -69,6 +69,7 @@ class TurnPolicy:
     max_same_tool_intent: int = 6
     max_same_readonly_intent: int = 10
     max_consecutive_empty_llm_rounds: int = 3
+    max_consecutive_think_only_rounds: Optional[int] = None  # defaults to max_tool_calls // 2
     max_consecutive_similar_llm_rounds: int = 4
     max_non_progress_events: int = 500
     max_tool_args_preview_chars: int = 500

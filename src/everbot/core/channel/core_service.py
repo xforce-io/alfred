@@ -483,7 +483,7 @@ class ChannelCoreService:
                     run_id=run_id,
                 )
                 err_msg = str(e)
-                if err_msg.startswith(("TOOL_CALL_BUDGET_EXCEEDED", "REPEATED_TOOL_INTENT")):
+                if err_msg.startswith(("TOOL_CALL_BUDGET_EXCEEDED", "REPEATED_TOOL_INTENT", "THINK_ONLY_LOOP", "EMPTY_OUTPUT_LOOP")):
                     summary = _build_circuit_break_summary(e, "budget")
                     await on_event(OutboundMessage(session_id, summary, msg_type="text"))
                 elif err_msg.startswith("REPEATED_TOOL_FAILURES"):

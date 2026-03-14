@@ -21,6 +21,7 @@ from tools import (
     _atomic_json_update,
     _atomic_json_read,
     _is_expired,
+    _is_within_repo,
     _check_feature_md_sections,
     _slugify,
 )
@@ -676,5 +677,97 @@ class TestSystemEnvironmentEdgeCases:
     def test_signal_interruption(self):
         """Handle signal interruption during operations."""
         # Signal handling would require more complex setup
-        # Documented as a scenario to consider  
+        # Documented as a scenario to consider
         pass
+
+
+# ═══════════════════════════════════════════════════════════
+#  Path Traversal Security Tests
+# ═══════════════════════════════════════════════════════════
+
+
+class TestIsWithinRepo:
+    """Test _is_within_repo rejects paths outside the repo and its worktrees."""
+
+    def test_allows_path_inside_repo(self, tmp_path):
+        repo = tmp_path / "myapp"
+        repo.mkdir()
+        target = repo / "src" / "main.py"
+        target.parent.mkdir(parents=True)
+        target.touch()
+        assert _is_within_repo(target, repo) is True
+
+    def test_allows_session_worktree(self, tmp_path):
+        repo = tmp_path / "myapp"
+        repo.mkdir()
+        session_wt = tmp_path / "myapp-session"
+        session_wt.mkdir()
+        target = session_wt / "src" / "main.py"
+        target.parent.mkdir(parents=True)
+        target.touch()
+        assert _is_within_repo(target, repo) is True
+
+    def test_allows_feature_worktree(self, tmp_path):
+        repo = tmp_path / "myapp"
+        repo.mkdir()
+        feat_wt = tmp_path / "myapp-feature-1"
+        feat_wt.mkdir()
+        target = feat_wt / "src" / "main.py"
+        target.parent.mkdir(parents=True)
+        target.touch()
+        assert _is_within_repo(target, repo) is True
+
+    def test_rejects_sibling_with_prefix_match(self, tmp_path):
+        """Regression: 'myapp-evil'.startswith('myapp') was True before fix."""
+        repo = tmp_path / "myapp"
+        repo.mkdir()
+        evil = tmp_path / "myapp-evil"
+        evil.mkdir()
+        target = evil / "secrets.txt"
+        target.touch()
+        assert _is_within_repo(target, repo) is False
+
+    def test_rejects_sibling_with_longer_name(self, tmp_path):
+        """Regression: 'myapplication' starts with 'myapp'."""
+        repo = tmp_path / "myapp"
+        repo.mkdir()
+        sibling = tmp_path / "myapplication"
+        sibling.mkdir()
+        target = sibling / "config.py"
+        target.touch()
+        assert _is_within_repo(target, repo) is False
+
+    def test_rejects_unrelated_path(self, tmp_path):
+        repo = tmp_path / "myapp"
+        repo.mkdir()
+        target = tmp_path / "other-project" / "file.py"
+        target.parent.mkdir(parents=True)
+        target.touch()
+        assert _is_within_repo(target, repo) is False
+
+    def test_rejects_parent_path(self, tmp_path):
+        repo = tmp_path / "myapp"
+        repo.mkdir()
+        target = tmp_path / "file.py"
+        target.touch()
+        assert _is_within_repo(target, repo) is False
+
+    def test_allows_feature_worktree_high_id(self, tmp_path):
+        repo = tmp_path / "myapp"
+        repo.mkdir()
+        feat_wt = tmp_path / "myapp-feature-42"
+        feat_wt.mkdir()
+        target = feat_wt / "code.py"
+        target.touch()
+        assert _is_within_repo(target, repo) is True
+
+    def test_rejects_feature_like_without_id(self, tmp_path):
+        """'myapp-feature' without trailing '-{id}' should be rejected."""
+        repo = tmp_path / "myapp"
+        repo.mkdir()
+        bad = tmp_path / "myapp-feature"
+        bad.mkdir()
+        target = bad / "file.py"
+        target.touch()
+        # "myapp-feature".startswith("myapp-feature-") is False, so rejected
+        assert _is_within_repo(target, repo) is False

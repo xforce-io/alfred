@@ -857,6 +857,19 @@ class TestCmEdit:
     """cmd_edit: precise text replacement."""
 
     def test_edit_in_deliver_mode(self, git_repo):
+        repo, claim_data = _setup_developing(git_repo)
+        wt = Path(claim_data["worktree"])
+        (wt / "target.py").write_text("old_value = 1\n")
+        with _mock_repo(repo):
+            r = tools.cmd_edit(make_args(
+                repo=repo.name, file="target.py",
+                old_text="old_value = 1", new_text="new_value = 2",
+                feature=1,
+            ))
+        assert r["ok"] is True
+        assert (wt / "target.py").read_text() == "new_value = 2\n"
+
+    def test_edit_rejected_without_developing_feature(self, git_repo):
         repo = _setup_locked(git_repo)
         lock = tools._atomic_json_read(repo / tools.CM_DIR / "lock.json")
         wt = Path(lock.get("session_worktree", str(repo)))
@@ -866,8 +879,8 @@ class TestCmEdit:
                 repo=repo.name, file="target.py",
                 old_text="old_value = 1", new_text="new_value = 2",
             ))
-        assert r["ok"] is True
-        assert (wt / "target.py").read_text() == "new_value = 2\n"
+        assert r["ok"] is False
+        assert "developing" in r["error"]
 
     def test_edit_rejected_in_review_mode(self, git_repo):
         repo = _setup_locked_with_mode(git_repo, mode="review")
@@ -881,14 +894,14 @@ class TestCmEdit:
         assert "read-only" in r["error"]
 
     def test_edit_non_unique_match(self, git_repo):
-        repo = _setup_locked(git_repo)
-        lock = tools._atomic_json_read(repo / tools.CM_DIR / "lock.json")
-        wt = Path(lock.get("session_worktree", str(repo)))
+        repo, claim_data = _setup_developing(git_repo)
+        wt = Path(claim_data["worktree"])
         (wt / "dup.py").write_text("x = 1\nx = 1\n")
         with _mock_repo(repo):
             r = tools.cmd_edit(make_args(
                 repo=repo.name, file="dup.py",
                 old_text="x = 1", new_text="x = 2",
+                feature=1,
             ))
         assert r["ok"] is False
         assert "matches 2 locations" in r["error"]
@@ -904,6 +917,210 @@ class TestCmEdit:
                 old_text="bug = True", new_text="bug = False",
             ))
         assert r["ok"] is True
+
+    def test_edit_plan_md_in_locked_phase(self, git_repo):
+        """PLAN.md can be created via edit in locked phase (no developing feature needed)."""
+        repo = _setup_locked(git_repo)
+        with _mock_repo(repo):
+            r = tools.cmd_edit(make_args(
+                repo=repo.name, file=f"{tools.CM_DIR}/PLAN.md",
+                old_text="", new_text="# Feature Plan\n\n## Features\n\n### Feature 1: Fix bug\n",
+            ))
+        assert r["ok"] is True
+        assert r["data"].get("created") is True
+        plan_path = repo / tools.CM_DIR / "PLAN.md"
+        assert plan_path.exists()
+        assert "Feature 1" in plan_path.read_text()
+
+    def test_edit_feature_md_in_locked_phase(self, git_repo):
+        """features/*.md can be written in locked phase (CM metadata)."""
+        repo = _setup_locked(git_repo)
+        features_dir = repo / tools.CM_DIR / "features"
+        features_dir.mkdir(parents=True, exist_ok=True)
+        md_path = features_dir / "01-fix-bug.md"
+        md_path.write_text("# Feature 1\n")
+        with _mock_repo(repo):
+            r = tools.cmd_edit(make_args(
+                repo=repo.name, file=f"{tools.CM_DIR}/features/01-fix-bug.md",
+                old_text="# Feature 1", new_text="# Feature 1: Fix bug\n\n## Analysis\nDone.",
+            ))
+        assert r["ok"] is True
+
+    def test_edit_overwrite_existing_plan_md(self, git_repo):
+        """old_text='' on existing PLAN.md overwrites it (stale state from previous session)."""
+        repo = _setup_locked(git_repo)
+        plan_path = repo / tools.CM_DIR / "PLAN.md"
+        plan_path.write_text("# Old stale plan from previous session\n")
+        with _mock_repo(repo):
+            r = tools.cmd_edit(make_args(
+                repo=repo.name, file=f"{tools.CM_DIR}/PLAN.md",
+                old_text="", new_text="# New Plan\n\n## Features\n\n### Feature 1: Fix\n",
+            ))
+        assert r["ok"] is True
+        assert "New Plan" in plan_path.read_text()
+        assert "Old stale" not in plan_path.read_text()
+
+    def test_edit_bare_plan_md_in_locked_phase(self, git_repo):
+        """Bare 'PLAN.md' (without .coding-master/ prefix) auto-resolves to CM metadata."""
+        repo = _setup_locked(git_repo)
+        with _mock_repo(repo):
+            r = tools.cmd_edit(make_args(
+                repo=repo.name, file="PLAN.md",
+                old_text="", new_text="# Feature Plan\n\n## Features\n\n### Feature 1: Fix bug\n",
+            ))
+        assert r["ok"] is True
+        assert r["data"].get("created") is True
+        plan_path = repo / tools.CM_DIR / "PLAN.md"
+        assert plan_path.exists()
+
+    def test_edit_absolute_worktree_plan_md_in_locked_phase(self, git_repo):
+        """Absolute path to worktree PLAN.md auto-resolves to .coding-master/PLAN.md."""
+        repo = _setup_locked(git_repo)
+        lock = tools._atomic_json_read(repo / tools.CM_DIR / "lock.json")
+        wt = Path(lock.get("session_worktree", str(repo)))
+        # Agent passes absolute worktree path like /path/alfred-session/PLAN.md
+        abs_path = str(wt / "PLAN.md")
+        with _mock_repo(repo):
+            r = tools.cmd_edit(make_args(
+                repo=repo.name, file=abs_path,
+                old_text="", new_text="# Feature Plan\n\n## Features\n\n### Feature 1: Fix bug\n",
+            ))
+        assert r["ok"] is True
+        assert r["data"].get("created") is True
+        # Should have been created under .coding-master/, not worktree
+        plan_path = repo / tools.CM_DIR / "PLAN.md"
+        assert plan_path.exists()
+
+    def test_edit_source_still_blocked_in_locked_phase(self, git_repo):
+        """Source code edit is still blocked without developing feature."""
+        repo = _setup_locked(git_repo)
+        lock = tools._atomic_json_read(repo / tools.CM_DIR / "lock.json")
+        wt = Path(lock.get("session_worktree", str(repo)))
+        (wt / "target.py").write_text("old_value = 1\n")
+        with _mock_repo(repo):
+            r = tools.cmd_edit(make_args(
+                repo=repo.name, file="target.py",
+                old_text="old_value = 1", new_text="new_value = 2",
+            ))
+        assert r["ok"] is False
+        assert "developing" in r["error"]
+
+    def test_edit_nested_cm_dir_path_resolves_to_plan(self, git_repo):
+        """Path like 'skills/coding-master/.coding-master/PLAN.md' should resolve to .coding-master/PLAN.md.
+
+        Agents sometimes prefix .coding-master/ with the skill directory they were reading.
+        """
+        repo = _setup_locked(git_repo)
+        with _mock_repo(repo):
+            r = tools.cmd_edit(make_args(
+                repo=repo.name,
+                file="skills/coding-master/.coding-master/PLAN.md",
+                old_text="",
+                new_text="# Feature Plan\n\n## Features\n\n### Feature 1: Fix bug\n",
+            ))
+        assert r["ok"] is True, f"Expected ok, got: {r}"
+        assert r["data"].get("created") is True
+        plan_path = repo / tools.CM_DIR / "PLAN.md"
+        assert plan_path.exists()
+
+    def test_edit_error_hint_includes_example(self, git_repo):
+        """Error hint for locked phase should include a concrete _cm_edit example."""
+        repo = _setup_locked(git_repo)
+        lock = tools._atomic_json_read(repo / tools.CM_DIR / "lock.json")
+        wt = Path(lock.get("session_worktree", str(repo)))
+        (wt / "target.py").write_text("x = 1\n")
+        with _mock_repo(repo):
+            r = tools.cmd_edit(make_args(
+                repo=repo.name, file="target.py",
+                old_text="x = 1", new_text="x = 2",
+            ))
+        assert r["ok"] is False
+        # Error should include actionable guidance for the agent
+        assert "next_action" in r
+        assert "hint" in r
+
+
+# ══════════════════════════════════════════════════════════
+#  Lock branch consistency
+# ══════════════════════════════════════════════════════════
+
+
+class TestLockBranchConsistency:
+    """cmd_lock: joined session should detect worktree branch mismatch."""
+
+    def test_lock_join_detects_branch_mismatch(self, git_repo):
+        """When joining a session, if worktree branch differs from lock, report it."""
+        repo = _setup_locked(git_repo)
+        lock = tools._atomic_json_read(repo / tools.CM_DIR / "lock.json")
+        wt = Path(lock["session_worktree"])
+        lock_branch = lock["branch"]
+
+        # Simulate branch mismatch: checkout a different branch in the worktree
+        subprocess.run(
+            ["git", "checkout", "-b", "rogue-branch"],
+            cwd=wt, capture_output=True, check=True,
+        )
+
+        # Join the session again
+        with _mock_repo(repo):
+            r = tools.cmd_lock(make_args(repo=repo.name))
+
+        assert r["ok"] is True
+        # Should warn about or fix the branch mismatch
+        data = r.get("data", {})
+        actual_branch_in_wt = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=wt, capture_output=True, text=True,
+        ).stdout.strip()
+        # After join, worktree should be on the lock branch, or result should warn
+        assert (
+            actual_branch_in_wt == lock_branch
+            or data.get("branch_mismatch")
+            or "mismatch" in str(data).lower()
+        ), f"Worktree on '{actual_branch_in_wt}' but lock says '{lock_branch}', no warning/fix"
+
+
+# ══════════════════════════════════════════════════════════
+#  Plan layer cleanup on new session
+# ══════════════════════════════════════════════════════════
+
+
+class TestPlanLayerCleanup:
+    """New session cleans stale plan-layer state."""
+
+    def test_new_lock_cleans_stale_plan(self, git_repo):
+        """Stale PLAN.md from previous session is removed on new lock."""
+        repo = _setup_locked(git_repo)
+        # Create stale plan-layer files as if from a previous session
+        cm = repo / tools.CM_DIR
+        (cm / "PLAN.md").write_text("# Old plan\n")
+        (cm / "claims.json").write_text('{"features":{"1":{"phase":"done"}}}')
+        features_dir = cm / "features"
+        features_dir.mkdir(parents=True, exist_ok=True)
+        (features_dir / "01-old.md").write_text("# Old feature\n")
+        # Unlock current session
+        with _mock_repo(repo):
+            tools.cmd_unlock(make_args(repo=repo.name, force=True))
+        # Lock again — should clean stale state
+        with _mock_repo(repo):
+            r = tools.cmd_lock(make_args(repo=repo.name, mode="deliver"))
+        assert r["ok"] is True
+        assert not (cm / "PLAN.md").exists()
+        assert not (cm / "claims.json").exists()
+        assert not features_dir.exists()
+
+    def test_new_lock_preserves_session_json(self, git_repo):
+        """session.json survives across sessions (cross-session by design)."""
+        repo = _setup_locked(git_repo)
+        cm = repo / tools.CM_DIR
+        session_path = cm / "session.json"
+        assert session_path.exists()
+        old_content = session_path.read_text()
+        with _mock_repo(repo):
+            tools.cmd_unlock(make_args(repo=repo.name, force=True))
+        with _mock_repo(repo):
+            tools.cmd_lock(make_args(repo=repo.name, mode="deliver"))
+        assert session_path.exists()
 
 
 # ══════════════════════════════════════════════════════════
@@ -981,3 +1198,37 @@ class TestReportDebugNoAutoUnlock:
             ))
         assert r["ok"] is True
         assert r["data"]["auto_unlocked"] is True
+
+
+class TestChangeSummaryDiffUrl:
+    def test_diff_url_resolves_local_base_ref_to_commit_sha(self, git_repo):
+        subprocess.run(
+            ["git", "remote", "add", "origin", "git@github.com:org/test-repo.git"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+        (git_repo / "README.md").write_text("# Test\nupdated\n")
+        subprocess.run(["git", "add", "README.md"], cwd=git_repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "update readme"], cwd=git_repo, capture_output=True, check=True)
+
+        base_sha = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD~1"],
+            cwd=git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+        summary = tools._build_change_summary(git_repo, "HEAD~1")
+
+        assert summary["diff_url"] == (
+            f"https://github.com/org/test-repo/compare/{base_sha}...{head_sha}"
+        )
