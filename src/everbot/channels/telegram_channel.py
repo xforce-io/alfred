@@ -32,6 +32,15 @@ from ..core.runtime.events import resolve_routing
 from ..core.session.session import SessionManager
 from ..infra.user_data import get_user_data_manager
 from ..core.agent.agent_service import AgentService
+from ..core.models.constants import (
+    TIMEOUT_FAST,
+    TIMEOUT_MEDIUM,
+    QUEUE_MAX_SIZE,
+    QUEUE_MAX_SIZE_PER_CHAT,
+    MAX_RETRIES,
+    TYPING_INDICATOR_INTERVAL,
+    POLLING_ERROR_SLEEP,
+)
 from . import telegram_commands
 from . import telegram_media
 
@@ -102,7 +111,7 @@ class TelegramChannel:
         self._poll_task: Optional[asyncio.Task] = None
 
         # Phase 1: Polling/processing decoupling
-        self._inbound_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+        self._inbound_queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_MAX_SIZE)
         self._chat_queues: Dict[str, asyncio.Queue] = {}
         self._chat_workers: Dict[str, asyncio.Task] = {}
         self._dispatcher_task: Optional[asyncio.Task] = None
@@ -232,7 +241,7 @@ class TelegramChannel:
                     dedupe_key=f"heartbeat:{agent_name}:{run_id}",
                 )
                 ok = await self._session_manager.deposit_mailbox_event(
-                    tg_session_id, event, timeout=5.0, blocking=False,
+                    tg_session_id, event, timeout=TIMEOUT_FAST, blocking=False,
                 )
                 if not ok:
                     logger.warning(
@@ -295,7 +304,7 @@ class TelegramChannel:
                 raise
             except Exception as exc:
                 logger.error("Telegram polling error: %s", exc)
-                await asyncio.sleep(5)
+                await asyncio.sleep(POLLING_ERROR_SLEEP)
 
     # ------------------------------------------------------------------
     # Dispatcher & per-chat workers
@@ -306,7 +315,7 @@ class TelegramChannel:
         while self._running:
             try:
                 update = await asyncio.wait_for(
-                    self._inbound_queue.get(), timeout=1.0
+                    self._inbound_queue.get(), timeout=TIMEOUT_FAST
                 )
             except asyncio.TimeoutError:
                 continue
@@ -319,7 +328,7 @@ class TelegramChannel:
                 continue
 
             if chat_id not in self._chat_queues:
-                self._chat_queues[chat_id] = asyncio.Queue(maxsize=20)
+                self._chat_queues[chat_id] = asyncio.Queue(maxsize=QUEUE_MAX_SIZE_PER_CHAT)
             chat_q = self._chat_queues[chat_id]
 
             try:
@@ -342,7 +351,7 @@ class TelegramChannel:
             return
         while True:
             try:
-                update = await asyncio.wait_for(q.get(), timeout=30.0)
+                update = await asyncio.wait_for(q.get(), timeout=TIMEOUT_MEDIUM)
             except asyncio.TimeoutError:
                 break
             except asyncio.CancelledError:
@@ -817,7 +826,7 @@ class TelegramChannel:
         try:
             while True:
                 await self._send_chat_action(chat_id, "typing")
-                await asyncio.sleep(4)
+                await asyncio.sleep(TYPING_INDICATOR_INTERVAL)
         except asyncio.CancelledError:
             pass
 
@@ -838,8 +847,7 @@ class TelegramChannel:
         if self._client is None:
             return False
 
-        max_retries = 3
-        for attempt in range(max_retries):
+        for attempt in range(MAX_RETRIES):
             try:
                 payload: Dict[str, Any] = {"chat_id": chat_id, "text": text}
                 if entities:
@@ -867,19 +875,19 @@ class TelegramChannel:
 
                 logger.warning(
                     "sendMessage failed for chat %s (attempt %d/%d): %s",
-                    chat_id, attempt + 1, max_retries,
+                    chat_id, attempt + 1, MAX_RETRIES,
                     data.get("description", "unknown"),
                 )
             except Exception as exc:
                 logger.warning(
                     "sendMessage exception for chat %s (attempt %d/%d): [%s] %r",
-                    chat_id, attempt + 1, max_retries, type(exc).__name__, exc,
+                    chat_id, attempt + 1, MAX_RETRIES, type(exc).__name__, exc,
                 )
 
-            if attempt < max_retries - 1:
+            if attempt < MAX_RETRIES - 1:
                 await asyncio.sleep(2 ** attempt)  # 1s, 2s
 
-        logger.error("Failed to send Telegram message to %s after %d retries", chat_id, max_retries)
+        logger.error("Failed to send Telegram message to %s after %d retries", chat_id, MAX_RETRIES)
         return False
 
     async def _send_plain_message(self, chat_id: str, text: str) -> bool:
@@ -891,8 +899,7 @@ class TelegramChannel:
         if self._client is None:
             return False
 
-        max_retries = 3
-        for attempt in range(max_retries):
+        for attempt in range(MAX_RETRIES):
             try:
                 resp = await self._client.post(
                     f"{self._base_url}/sendMessage",
@@ -903,15 +910,15 @@ class TelegramChannel:
                     return True
                 logger.warning(
                     "sendPlainMessage failed for chat %s (attempt %d/%d): %s",
-                    chat_id, attempt + 1, max_retries,
+                    chat_id, attempt + 1, MAX_RETRIES,
                     data.get("description", "unknown"),
                 )
             except Exception as exc:
                 logger.warning(
                     "sendPlainMessage exception for chat %s (attempt %d/%d): [%s] %r",
-                    chat_id, attempt + 1, max_retries, type(exc).__name__, exc,
+                    chat_id, attempt + 1, MAX_RETRIES, type(exc).__name__, exc,
                 )
-            if attempt < max_retries - 1:
+            if attempt < MAX_RETRIES - 1:
                 await asyncio.sleep(2 ** attempt)
         return False
 
@@ -940,9 +947,6 @@ class TelegramChannel:
             logger.debug("editMessageText failed: %s", data.get("description", "unknown"))
         except Exception as exc:
             logger.debug("editMessageText exception: [%s] %r", type(exc).__name__, exc)
-        return False
-
-        logger.error("Failed to send plain message to %s after %d retries", chat_id, max_retries)
         return False
 
     # ------------------------------------------------------------------
