@@ -88,6 +88,23 @@ class TestParseHeartbeatMd:
         result = parse_heartbeat_md(md)
         assert result.status == ParseStatus.CORRUPTED
 
+    def test_json_block_without_newline_after_fence(self):
+        """LLM sometimes writes ```json{ without a newline — must still parse."""
+        block = json.dumps({"version": 1, "tasks": [{"id": "t1", "title": "T1"}]}, indent=2)
+        md = f"# HEARTBEAT\n\n## Tasks\n\n```json{block}\n```\n"
+        result = parse_heartbeat_md(md)
+        assert result.status == ParseStatus.OK
+        assert result.task_list is not None
+        assert result.task_list.tasks[0].id == "t1"
+
+    def test_json_block_with_trailing_space_after_fence(self):
+        """```json  { (spaces before brace) should also parse."""
+        block = json.dumps({"version": 1, "tasks": [{"id": "t2", "title": "T2"}]}, indent=2)
+        md = f"# HEARTBEAT\n\n## Tasks\n\n```json  {block}\n```\n"
+        result = parse_heartbeat_md(md)
+        assert result.status == ParseStatus.OK
+        assert result.task_list.tasks[0].id == "t2"
+
     def test_multiple_tasks_parsed(self):
         data = {
             "version": 1,

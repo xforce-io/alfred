@@ -201,7 +201,7 @@ class EverBotDaemon:
                 primary_session_id=runner.primary_session_id,
             )
             if inspection.push_message:
-                from everbot.core.runtime.inspector import emit_push_message
+                from ..core.runtime.inspector import emit_push_message
                 await emit_push_message(
                     inspection.push_message,
                     primary_session_id=runner.primary_session_id,

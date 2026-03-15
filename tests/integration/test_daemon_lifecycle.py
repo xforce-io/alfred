@@ -8,13 +8,14 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from src.everbot.cli import daemon as daemon_module
 from src.everbot.infra.config import save_config
 from src.everbot.infra.user_data import UserDataManager
+from src.everbot.core.runtime.inspector import InspectionResult
 
 
 class _FakeRunner:
@@ -509,3 +510,101 @@ async def test_daemon_unified_scheduler_routes_inline_tasks(monkeypatch, tmp_pat
 
     snapshot = json.loads(daemon.user_data.status_file.read_text(encoding="utf-8"))
     assert "demo_agent" in snapshot["heartbeats"]
+
+
+class _FakeInspector:
+    """Fake inspector that returns a push_message on first call."""
+
+    def __init__(self, push_message: str):
+        self._push_message = push_message
+        self.inspect_calls = 0
+
+    async def inspect(self, **_kwargs):
+        self.inspect_calls += 1
+        if self.inspect_calls == 1:
+            return InspectionResult(push_message=self._push_message)
+        return InspectionResult()
+
+    def should_skip(self, **_kwargs):
+        return False
+
+
+class _FakeRunnerWithInspector(_FakeTickRunner):
+    """Tick runner that exposes _inspector and required runner attrs."""
+
+    def __init__(self, *, push_message: str = "alert!", **kwargs):
+        super().__init__(**kwargs)
+        self._inspector = _FakeInspector(push_message)
+        self.primary_session_id = f"tg_session_{self.agent_name}"
+        self.broadcast_scope = "agent"
+
+    async def _get_or_create_agent(self):
+        return SimpleNamespace()
+
+    async def _run_agent(self, *_a, **_kw):
+        return ""
+
+    async def _inject_heartbeat_context(self, *_a, **_kw):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_daemon_inspector_push_message_calls_emit(monkeypatch, tmp_path: Path):
+    """_run_inspector must call emit_push_message when inspection returns push_message.
+
+    Regression test for the ModuleNotFoundError bug where the lazy import inside
+    _run_inspector used `from everbot.core...` instead of a relative import.
+    """
+    alfred_home = tmp_path / ".alfred"
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        {
+            "everbot": {
+                "enabled": True,
+                "agents": {
+                    "demo_agent": {
+                        "heartbeat": {
+                            "enabled": True,
+                            "interval": 1,
+                            "active_hours": [0, 24],
+                        }
+                    }
+                },
+            }
+        },
+        str(config_path),
+    )
+
+    monkeypatch.setattr(
+        daemon_module,
+        "get_user_data_manager",
+        lambda: UserDataManager(alfred_home=alfred_home),
+    )
+    monkeypatch.setattr(daemon_module, "HeartbeatRunner", _FakeRunnerWithInspector)
+    monkeypatch.setattr(
+        daemon_module,
+        "get_agent_factory",
+        lambda **kwargs: SimpleNamespace(create_agent=AsyncMock()),
+    )
+    _FakeRunnerWithInspector.instances.clear()
+
+    emitted: list[str] = []
+
+    async def _fake_emit(push_message, **_kwargs):
+        emitted.append(push_message)
+
+    with patch(
+        "src.everbot.core.runtime.inspector.emit_push_message",
+        side_effect=_fake_emit,
+    ):
+        daemon = daemon_module.EverBotDaemon(config_path=str(config_path))
+        run_task = asyncio.create_task(daemon.start())
+        await asyncio.sleep(0.5)
+        await daemon.stop()
+        await asyncio.wait_for(run_task, timeout=2.0)
+
+    assert len(_FakeRunnerWithInspector.instances) == 1
+    inspector = _FakeRunnerWithInspector.instances[0]._inspector
+    assert inspector.inspect_calls >= 1, "Inspector was never called"
+    assert emitted, "emit_push_message was never called — import may have failed"
+    assert emitted[0] == "alert!"
