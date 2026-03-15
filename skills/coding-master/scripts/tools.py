@@ -2479,30 +2479,33 @@ def _run_engine_for_feature(
     """
     from engine import get_engine
 
-    # Read feature data
-    claims = _atomic_json_read(repo / CM_DIR / "claims.json") or {}
-    feat = claims.get("features", {}).get(feature_id, {})
-    wt = worktree_override or Path(feat.get("worktree", str(repo)))
-    if not wt.exists():
-        return {"ok": False, "error": f"worktree {wt} does not exist"}
-
-    # Read feature spec from PLAN.md
-    plan = _parse_plan_md(repo / CM_DIR / "PLAN.md")
-    spec = plan.get(feature_id, {})
-
-    # Read current feature markdown
-    feat_md = _find_feature_md(repo, feature_id)
-    feat_md_content = feat_md.read_text() if feat_md and feat_md.exists() else ""
-
-    # Build prompt
-    prompt = _build_feature_engine_prompt(phase, spec, feat_md_content, test_output)
-
-    # Get engine
-    engine_name = getattr(args, "engine", "claude-code")
     try:
-        engine = get_engine(engine_name)
+        # Read feature data
+        claims = _atomic_json_read(repo / CM_DIR / "claims.json") or {}
+        feat = claims.get("features", {}).get(feature_id, {})
+        wt = worktree_override or Path(feat.get("worktree", str(repo)))
+        if not wt.exists():
+            return {"ok": False, "error": f"worktree {wt} does not exist"}
+
+        # Read feature spec from PLAN.md
+        plan = _parse_plan_md(repo / CM_DIR / "PLAN.md")
+        spec = plan.get(feature_id, {})
+
+        # Read current feature markdown
+        feat_md = _find_feature_md(repo, feature_id)
+        feat_md_content = feat_md.read_text() if feat_md and feat_md.exists() else ""
+
+        # Build prompt
+        prompt = _build_feature_engine_prompt(phase, spec, feat_md_content, test_output)
+
+        # Get engine
+        engine_name = getattr(args, "engine", "claude-code")
+        try:
+            engine = get_engine(engine_name)
+        except Exception as exc:
+            return {"ok": False, "error": f"engine '{engine_name}' not available: {exc}"}
     except Exception as exc:
-        return {"ok": False, "error": f"engine '{engine_name}' not available: {exc}"}
+        return {"ok": False, "error": f"setup error in _run_engine_for_feature: {exc}"}
 
     max_turns = _ENGINE_MAX_TURNS.get(phase, 30)
     timeout = getattr(args, "timeout", 600)
