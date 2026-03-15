@@ -1572,7 +1572,9 @@ def cmd_dev(args) -> dict:
 
     result = _atomic_json_update(claims_path, do_dev)
     if result.get("ok"):
-        result.setdefault("data", {})["next_action"] = _hint(
+        worktree = _get_feature_worktree(claims_path, feature_id)
+        result.setdefault("data", {})["worktree"] = worktree
+        result["data"]["next_action"] = _hint(
             f"cm test --feature {feature_id}",
             "Write code and commit, then run tests")
     return result
