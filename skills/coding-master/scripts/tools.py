@@ -35,6 +35,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from config_manager import ConfigManager
+from integration_failure_classifier import IntegrationFailureClassifier
 
 CM_DIR = ".coding-master"
 SESSION_FILE = "session.json"       # persistent session history (survives unlock)
@@ -2035,8 +2036,10 @@ def cmd_integrate(args) -> dict:
                 "error": merge_rc.stderr.strip(),
             }
             _write_integration_report(repo, report)
+            classifier = IntegrationFailureClassifier(report)
             return {"ok": False, "error": f"merge failed ({fb}): {merge_rc.stderr.strip()}. "
-                    "Run cm reopen for the conflicting feature, resolve, then retry"}
+                    "Run cm reopen for the conflicting feature, resolve, then retry",
+                    "data": {"classification": classifier.summary()}}
         else:
             head_r = _run_git(wt, ["rev-parse", "HEAD"], check=False)
             commit = head_r.stdout.strip() if head_r.returncode == 0 else ""
@@ -2065,9 +2068,11 @@ def cmd_integrate(args) -> dict:
             "test": {"passed": False, "output": output_summary},
         }
         _write_integration_report(repo, report)
+        classifier = IntegrationFailureClassifier(report)
         return {"ok": False, "error": "integration tests failed",
                 "data": {"output": output_summary,
-                         "hint": "cm reopen → fix → cm test → cm done → retry cm integrate"}}
+                         "hint": "cm reopen → fix → cm test → cm done → retry cm integrate",
+                         "classification": classifier.summary()}}
 
     # Write integration report (success)
     report = {
