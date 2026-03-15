@@ -4130,11 +4130,18 @@ def cmd_next(args) -> dict:
         if last_bp == bp_key and not intent:
             repeat_count += 1
             if repeat_count >= 2:
-                result["warning"] = (
-                    f"STOP calling _cm_next — you have received '{bp}' {repeat_count + 1} times "
-                    f"without making changes. You MUST use _cm_edit to do the work described "
-                    f"in 'instruction' BEFORE calling _cm_next again."
-                )
+                if bp == "review_changes":
+                    result["warning"] = (
+                        f"STOP — you have called _cm_next without intent {repeat_count + 1} times at "
+                        f"'review_changes'. You MUST pass intent based on user's decision: "
+                        f"intent='confirm' / intent='fix' / intent='abort'."
+                    )
+                else:
+                    result["warning"] = (
+                        f"STOP calling _cm_next — you have received '{bp}' {repeat_count + 1} times "
+                        f"without making changes. You MUST use _cm_edit to do the work described "
+                        f"in 'instruction' BEFORE calling _cm_next again."
+                    )
                 result["instruction"] = (
                     f"⚠ REPEATED BREAKPOINT ({repeat_count + 1}x). "
                     + result.get("instruction", "")
@@ -4360,8 +4367,9 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
             return _recurse()  # retry integrate
 
         # Integrate succeeded → transition to "reviewing" for diff review
+        # Clear diff_shown so the fresh diff is presented on first review
         _atomic_json_update(repo / CM_DIR / "lock.json", lambda d: (
-            d.update({"session_phase": "reviewing"}), {"ok": True},
+            d.update({"session_phase": "reviewing", "_review_diff_shown": False}), {"ok": True},
         )[1])
         return _recurse()
 
@@ -4414,7 +4422,9 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
                         "or _cm_next(intent='confirm') to submit anyway."
                     ),
                 }
-            # Back to review_changes with updated diff
+            # Back to review_changes with updated diff — reset diff_shown so new diff is shown
+            _atomic_json_update(repo / CM_DIR / "lock.json",
+                                lambda d: (d.update({"_review_diff_shown": False}), {"ok": True})[1])
             return _recurse()
 
         if intent == "abort":
@@ -4435,8 +4445,23 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
             }
 
         # No matching intent → return review_changes breakpoint with diff
+        # If diff was already shown, skip recomputing — just remind agent to pass intent
+        diff_shown = lock.get("_review_diff_shown", False)
+        if diff_shown:
+            return {
+                "ok": True,
+                "breakpoint": "review_changes",
+                "instruction": (
+                    "⚠️ Diff already presented. You MUST pass intent — do NOT call _cm_next without it:\n"
+                    "• _cm_next(intent='confirm')               — user approved\n"
+                    "• _cm_next(intent='fix', feedback='...')   — user wants changes\n"
+                    "• _cm_next(intent='abort')                 — user cancelled"
+                ),
+            }
         session_wt = Path(session_wt_str) if session_wt_str else repo
         diff_summary = _get_diff_summary(session_wt)
+        _atomic_json_update(repo / CM_DIR / "lock.json",
+                            lambda d: (d.update({"_review_diff_shown": True}), {"ok": True})[1])
         return {
             "ok": True,
             "breakpoint": "review_changes",
