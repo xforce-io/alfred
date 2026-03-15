@@ -113,6 +113,7 @@ Use `intent` to signal what you just did or want to trigger:
 | `confirm` | At `review_changes`: approve the diff and submit |
 | `fix` | At `review_changes`: request an inline fix. Pass `feedback="what to change"` |
 | `abort` | At `review_changes`: discard PR, preserve work on branch, unlock session |
+| `skip_feature` | At `working`: skip a feature. Pass `feature=N`. Marks feature as skipped, removes its worktree, continues to next feature or integrate. |
 | `scope` | Define analysis scope. Can also just pass `diff`/`files` directly without `intent="scope"`. |
 | `submit` | Force submit with explicit title. Usually not needed — auto-submits with title from PLAN.md. |
 

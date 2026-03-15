@@ -2007,7 +2007,11 @@ def cmd_integrate(args) -> dict:
     merge_results = []
 
     for fid in merge_order:
-        fb = claims["features"].get(fid, {}).get("branch")
+        feat_entry = claims["features"].get(fid, {})
+        if feat_entry.get("phase") == "skipped":
+            merge_results.append({"feature": fid, "status": "skipped"})
+            continue
+        fb = feat_entry.get("branch")
         if not fb:
             continue
         merge_rc = subprocess.run(
@@ -2216,12 +2220,14 @@ def cmd_submit(args) -> dict:
     claims = _atomic_json_read(repo / CM_DIR / "claims.json")
     features_total = len(plan)
     features_completed = sum(1 for f in claims.get("features", {}).values() if f.get("phase") == "done")
+    features_skipped = sum(1 for f in claims.get("features", {}).values() if f.get("phase") == "skipped")
     evidence_dir = str(repo / CM_DIR / EVIDENCE_DIR)
 
     result_data = {
         "branch": branch, "pr_url": pr_url,
         "evidence_dir": evidence_dir,
         "features_completed": features_completed,
+        "features_skipped": features_skipped,
         "features_total": features_total,
         "exit_status": "success",
         "journal": str(repo / CM_DIR / "JOURNAL.md"),
@@ -4200,6 +4206,28 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
         claims = _atomic_json_read(claims_path) or {}
         plan = _parse_plan_md(plan_path)
 
+        # Handle skip_feature intent: mark a feature as skipped so it's excluded
+        if intent == "skip_feature":
+            fid_to_skip = str(getattr(args, "feature", "") or "")
+            if not fid_to_skip:
+                return {"ok": False, "error": "pass feature=N to identify which feature to skip"}
+            feat = claims.get("features", {}).get(fid_to_skip, {})
+            if not feat:
+                return {"ok": False, "error": f"feature {fid_to_skip} not found in claims"}
+            wt = feat.get("worktree", "")
+
+            def _mark_skipped(data):
+                f = data.get("features", {}).get(fid_to_skip, {})
+                f["phase"] = "skipped"
+                f["skipped_at"] = datetime.now(timezone.utc).isoformat()
+                return {"ok": True}
+            _atomic_json_update(repo / CM_DIR / "claims.json", _mark_skipped)
+            if wt:
+                _remove_worktree(repo, wt)
+            agent = _resolve_agent(args)
+            _append_journal(repo, agent, "skip_feature", f"Feature {fid_to_skip} skipped by user request")
+            return _recurse()
+
         # Check for any in-progress feature first
         in_progress = _in_progress_feature(claims)
         if in_progress:
@@ -4226,12 +4254,11 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
                             "feature_md": str(feat_md) if feat_md else "",
                         }
                     engine_result = _run_engine_for_feature(repo, fid, "analyze", args)
-                    if not engine_result.get("ok"):
+                    # Always re-check sections — engine may report ok=True but not write them
+                    has_analysis, has_plan = _check_feature_md_sections(feat_md)
+                    if not has_analysis or not has_plan:
                         _increment_engine_retry(repo, fid, "analyze")
-                        # Re-check if engine wrote the sections despite error
-                        has_analysis, has_plan = _check_feature_md_sections(feat_md)
-                        if not has_analysis or not has_plan:
-                            return _recurse()  # retry
+                        return _recurse()  # retry
                     _reset_engine_retries(repo, fid)
                 # Analysis + Plan filled → auto dev
                 dev_result_args = copy.copy(args)
@@ -4318,21 +4345,23 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
                 return claim_result
             return _recurse()
 
-        # All features done → auto integrate
+        # All features done or skipped → auto integrate
+        _TERMINAL_PHASES = ("done", "skipped")
         all_done = all(
-            claims.get("features", {}).get(fid, {}).get("phase") == "done"
+            claims.get("features", {}).get(fid, {}).get("phase") in _TERMINAL_PHASES
             for fid in plan
         )
         if not all_done:
             pending = [
                 fid for fid in plan
-                if claims.get("features", {}).get(fid, {}).get("phase") != "done"
+                if claims.get("features", {}).get(fid, {}).get("phase") not in _TERMINAL_PHASES
             ]
             return {
                 "ok": False,
                 "breakpoint": "blocked",
                 "instruction": (
                     f"Features {pending} are blocked on unfinished dependencies. "
+                    "To skip a feature: _cm_next(intent='skip_feature', feature=N). "
                     "Check _cm_status for details."
                 ),
             }
