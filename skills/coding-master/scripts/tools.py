@@ -961,10 +961,10 @@ def _precondition_check(repo: Path, feature_id: str | None = None, *, command: s
                 },
             }
 
-    # 5. Session phase gate: mutation commands require "working" or "integrating"
+    # 5. Session phase gate: mutation commands require "working", "integrating", or "reviewing"
     if command and command in _WORKING_PHASE_COMMANDS:
         sp = lock.get("session_phase")
-        if sp not in ("working", "integrating"):
+        if sp not in ("working", "integrating", "reviewing"):
             return {"ok": False, "error": f"session is '{sp}', command '{command}' requires "
                     f"a claimed feature (session_phase: working or integrating)"}
 
@@ -1335,7 +1335,7 @@ def _compute_blocking_reason(
 
     # Priority 2: integration failed
     report_path = repo / CM_DIR / EVIDENCE_DIR / "integration-report.json"
-    if lock.get("session_phase") == "integrating":
+    if lock.get("session_phase") in ("integrating", "reviewing"):
         pass  # integration succeeded, no blocking
     elif report_path.exists():
         try:
@@ -2108,9 +2108,12 @@ def cmd_submit(args) -> dict:
     repo = _resolve_locked_repo(args)
     lock = _atomic_json_read(repo / CM_DIR / "lock.json")
 
-    if lock.get("session_phase") != "integrating":
-        return {"ok": False, "error": f"session is {lock.get('session_phase')}, "
-                "run cm integrate first"}
+    phase = lock.get("session_phase")
+    if phase == "reviewing":
+        return {"ok": False, "error": "session is awaiting diff review; "
+                "call _cm_next(intent='confirm') to approve and submit"}
+    if phase != "integrating":
+        return {"ok": False, "error": f"session is {phase}, run cm integrate first"}
 
     branch = lock.get("branch", "dev/unknown")
 
@@ -2462,6 +2465,53 @@ def _build_feature_engine_prompt(
         )
     else:
         return f"Implement the feature: {title}\nTask: {task}\n"
+
+
+def _get_diff_summary(session_wt: Path, base_branch: str = "main") -> dict:
+    """Compute git diff summary between session worktree HEAD and base branch."""
+    try:
+        # Use merge-base so we only show changes introduced in this session
+        merge_base = subprocess.run(
+            ["git", "merge-base", "HEAD", base_branch],
+            cwd=session_wt, capture_output=True, text=True, timeout=30,
+        )
+        base_ref = merge_base.stdout.strip() if merge_base.returncode == 0 else base_branch
+
+        stat = subprocess.run(
+            ["git", "diff", f"{base_ref}..HEAD", "--stat"],
+            cwd=session_wt, capture_output=True, text=True, timeout=30,
+        )
+        diff = subprocess.run(
+            ["git", "diff", f"{base_ref}..HEAD"],
+            cwd=session_wt, capture_output=True, text=True, timeout=30,
+        )
+        diff_text = diff.stdout
+        if len(diff_text) > 8000:
+            diff_text = diff_text[:8000] + "\n... [truncated]"
+
+        files_changed = []
+        insertions = 0
+        deletions = 0
+        for line in stat.stdout.splitlines():
+            if "|" in line:
+                files_changed.append(line.split("|")[0].strip())
+            m = re.search(r"(\d+) insertion", line)
+            if m:
+                insertions = int(m.group(1))
+            m = re.search(r"(\d+) deletion", line)
+            if m:
+                deletions = int(m.group(1))
+
+        return {
+            "files_changed": files_changed,
+            "insertions": insertions,
+            "deletions": deletions,
+            "diff_stat": stat.stdout.strip()[:2000],
+            "diff_text": diff_text,
+        }
+    except Exception as exc:
+        return {"error": str(exc), "files_changed": [], "insertions": 0, "deletions": 0,
+                "diff_stat": "", "diff_text": ""}
 
 
 def _run_engine_for_feature(
@@ -3098,6 +3148,8 @@ def _generate_session_steps(session_phase: str, plan_exists: bool) -> list[str]:
         return []
     if session_phase == "integrating":
         return ["Run cm submit --title '...'"]
+    if session_phase == "reviewing":
+        return ["Review diff, then _cm_next(intent='confirm') or _cm_next(intent='fix', feedback='...')"]
     return []
 
 
@@ -4306,7 +4358,96 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
             if session_wt:
                 _auto_commit(Path(session_wt))
             return _recurse()  # retry integrate
+
+        # Integrate succeeded → transition to "reviewing" for diff review
+        _atomic_json_update(repo / CM_DIR / "lock.json", lambda d: (
+            d.update({"session_phase": "reviewing"}), {"ok": True},
+        )[1])
         return _recurse()
+
+    # ── reviewing phase → diff review before submit ───────────────────────────
+    if phase == "reviewing":
+        intent = getattr(args, "intent", None)
+        session_wt_str = lock.get("session_worktree", "")
+
+        if intent == "confirm":
+            # User approved → transition to "integrating" → recurse → auto submit
+            _atomic_json_update(repo / CM_DIR / "lock.json", lambda d: (
+                d.update({"session_phase": "integrating"}), {"ok": True},
+            )[1])
+            return _recurse()
+
+        if intent == "fix":
+            feedback = getattr(args, "feedback", "") or getattr(args, "message", "")
+            if not session_wt_str:
+                return {"ok": False, "error": "session worktree not found"}
+            session_wt = Path(session_wt_str)
+            engine_result = _run_engine_for_feature(
+                repo, "session", "fix", args,
+                test_output=f"User review feedback: {feedback}",
+                worktree_override=session_wt,
+            )
+            if not engine_result.get("ok"):
+                return {
+                    "ok": False,
+                    "breakpoint": "engine_failed",
+                    "phase": "review_fix",
+                    "error": engine_result.get("error", "engine fix failed"),
+                    "instruction": (
+                        "Engine failed to apply the fix. "
+                        "Fix manually via _cm_edit, then call _cm_next(intent='confirm') to submit "
+                        "or _cm_next(intent='abort') to discard."
+                    ),
+                }
+            _auto_commit(session_wt, "fix: user-requested change before submit")
+            # Re-run tests in session worktree
+            test_result = _run_tests(session_wt)
+            if not test_result.get("passed"):
+                return {
+                    "ok": False,
+                    "breakpoint": "engine_failed",
+                    "phase": "review_fix_test",
+                    "error": test_result.get("output", "tests failed after fix"),
+                    "instruction": (
+                        "Fix applied but tests are failing. "
+                        "Call _cm_next(intent='fix', feedback='...') to retry, "
+                        "or _cm_next(intent='confirm') to submit anyway."
+                    ),
+                }
+            # Back to review_changes with updated diff
+            return _recurse()
+
+        if intent == "abort":
+            branch = lock.get("branch", "unknown")
+            # Set phase to "done" so cmd_unlock doesn't refuse; worktree will be cleaned up
+            _atomic_json_update(repo / CM_DIR / "lock.json", lambda d: (
+                d.update({"session_phase": "done"}), {"ok": True},
+            )[1])
+            cmd_unlock(args)
+            return {
+                "ok": True,
+                "breakpoint": "complete",
+                "pr_url": "",
+                "instruction": (
+                    f"Session aborted. No PR created. "
+                    f"Your integrated work is preserved on branch '{branch}'."
+                ),
+            }
+
+        # No matching intent → return review_changes breakpoint with diff
+        session_wt = Path(session_wt_str) if session_wt_str else repo
+        diff_summary = _get_diff_summary(session_wt)
+        return {
+            "ok": True,
+            "breakpoint": "review_changes",
+            "instruction": (
+                "Integration complete. Review the diff below, then:\n"
+                "• Approve: _cm_next(intent='confirm')\n"
+                "• Request fix: _cm_next(intent='fix', feedback='what to change')\n"
+                "• Abort (no PR): _cm_next(intent='abort')"
+            ),
+            "diff_summary": diff_summary,
+        }
 
     # ── integrating phase → auto submit ──────────────────────────────────────
     if phase == "integrating":

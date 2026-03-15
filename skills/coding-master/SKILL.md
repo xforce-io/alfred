@@ -90,7 +90,8 @@ _cm_next(repo="<name>", intent="submit", title="feat: ...")
 |-----------|--------------|-----------|
 | `write_plan` | PLAN.md is missing or empty | Write `.coding-master/PLAN.md` via `_cm_edit`, then call `_cm_next` |
 | `engine_failed` | Engine failed after 3 retries | Review `error` field. Optionally fix manually via `_cm_edit`, then call `_cm_next`. Or report the failure to user. |
-| `complete` | All features done, PR submitted | Present PR URL to user |
+| `review_changes` | Integration done; awaiting diff review | Present `diff_summary` to user. Then call `_cm_next(intent='confirm')`, `_cm_next(intent='fix', feedback='...')`, or `_cm_next(intent='abort')` |
+| `complete` | All features done, PR submitted (or aborted) | Present `pr_url` to user (empty string if aborted) |
 
 > **Note**: Analysis, coding, and test-fixing are handled automatically by the engine (claude-code subprocess). The agent never needs to edit source code directly.
 
@@ -109,6 +110,9 @@ Use `intent` to signal what you just did or want to trigger:
 | Intent | When to use |
 |--------|------------|
 | *(none)* | Continue from current state (most common — just call `_cm_next` after writing PLAN.md) |
+| `confirm` | At `review_changes`: approve the diff and submit |
+| `fix` | At `review_changes`: request an inline fix. Pass `feedback="what to change"` |
+| `abort` | At `review_changes`: discard PR, preserve work on branch, unlock session |
 | `scope` | Define analysis scope. Can also just pass `diff`/`files` directly without `intent="scope"`. |
 | `submit` | Force submit with explicit title. Usually not needed — auto-submits with title from PLAN.md. |
 
