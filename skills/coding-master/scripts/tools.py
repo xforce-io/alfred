@@ -684,6 +684,17 @@ def _parse_plan_md(path: Path) -> dict:
     return features
 
 
+def _parse_max_features(path: Path) -> int:
+    """Parse `## Max Features: N` from PLAN.md. Returns 1 if not declared."""
+    if not path.exists():
+        return 1
+    for line in path.read_text().splitlines():
+        m = re.match(r"^## Max Features:\s*(\d+)", line, re.IGNORECASE)
+        if m:
+            return max(1, min(int(m.group(1)), 10))  # clamp to [1, 10]
+    return 1
+
+
 def _topo_sort(plan: dict) -> list[str]:
     """Topological sort of feature IDs by dependency order."""
     from collections import deque
@@ -1431,6 +1442,20 @@ def cmd_plan_ready(args) -> dict:
                 "The headings '### Feature N:', '#### Task', and '#### Acceptance Criteria' "
                 "are REQUIRED and must be spelled exactly as shown. "
                 "Use _cm_edit to fix PLAN.md, then call _cm_next again."
+            ),
+        }
+
+    # Feature count constraint: default 1, overridable via `## Max Features: N` in PLAN.md
+    max_features = _parse_max_features(plan_path)
+    if len(plan) > max_features:
+        return {
+            "ok": False,
+            "error": (
+                f"PLAN.md has {len(plan)} features but max_features={max_features}. "
+                f"Merge into {max_features} feature(s), or add '## Max Features: N' "
+                f"(with a justification line) after '## Origin Task' to raise the limit. "
+                f"Analysis/scan work should NOT be a separate feature — "
+                f"it belongs in the engine's analyze phase."
             ),
         }
 
@@ -3499,6 +3524,9 @@ def _doctor_auto_fix(repo: Path, issues: list[str]):
             if not session_result.get("ok"):
                 continue
 
+        elif "claims.json references Feature" in issue:
+            _reconcile_plan_claims(repo)
+
         elif "expired" in issue:
             pass  # Don't auto-fix expired locks — user should decide
 
@@ -3878,7 +3906,12 @@ def cmd_edit(args) -> dict:
             target.write_text(args.new_text)
         except OSError as e:
             return {"ok": False, "error": f"file write failed: {e}"}
-        return {"ok": True, "data": {"file": str(target), "replacements": 1, "created": created}}
+        result = {"ok": True, "data": {"file": str(target), "replacements": 1, "created": created}}
+        if target.name == "PLAN.md":
+            orphans = _reconcile_plan_claims(repo)
+            if orphans:
+                result["data"]["reconciled_orphans"] = orphans
+        return result
 
     if not target.exists():
         return {"ok": False, "error": f"file not found: {target}"}
@@ -3903,10 +3936,15 @@ def cmd_edit(args) -> dict:
     except OSError as e:
         return {"ok": False, "error": f"file write failed: {e}"}
 
-    return {"ok": True, "data": {
+    result = {"ok": True, "data": {
         "file": str(target),
         "replacements": 1,
     }}
+    if is_cm_metadata and target.name == "PLAN.md":
+        orphans = _reconcile_plan_claims(repo)
+        if orphans:
+            result["data"]["reconciled_orphans"] = orphans
+    return result
 
 
 def cmd_start(args) -> dict:
@@ -3990,14 +4028,9 @@ _PLAN_TEMPLATE = """\
 - [ ] <criterion one>
 - [ ] <criterion two>
 
-### Feature 2: <short title>
-**Depends on**: Feature 1
-
-#### Task
-<describe the specific work>
-
-#### Acceptance Criteria
-- [ ] <criterion one>
+<!-- Only add more features if the task genuinely requires independent, parallel work streams.
+     Most tasks need just 1 feature. Do NOT split analysis/scan into a separate feature —
+     analysis is part of each feature's engine phase, not a standalone feature. -->
 """
 
 _SCOPE_TEMPLATE = """\
@@ -4020,12 +4053,58 @@ def _next_claimable_feature(plan: dict, claims: dict) -> str | None:
     return None
 
 
-def _in_progress_feature(claims: dict) -> tuple[str, str] | None:
-    """Return (feature_id, phase) for any feature currently in-progress."""
+def _in_progress_feature(claims: dict, plan: dict | None = None) -> tuple[str, str] | None:
+    """Return (feature_id, phase) for any feature currently in-progress.
+
+    When *plan* is provided, features not present in the plan are skipped
+    (they are orphaned claims left over from a mid-session PLAN.md edit).
+    """
     for fid, feat in claims.get("features", {}).items():
         if feat.get("phase") in ("analyzing", "developing"):
+            if plan is not None and fid not in plan:
+                continue
             return fid, feat["phase"]
     return None
+
+
+def _reconcile_plan_claims(repo: Path) -> list[str]:
+    """Mark claims entries as skipped when their feature was removed from PLAN.md.
+
+    Returns the list of orphaned feature IDs that were cleaned up.
+    Called at cmd_next entry and after PLAN.md edits to keep the two data
+    sources consistent.
+    """
+    plan = _parse_plan_md(repo / CM_DIR / "PLAN.md")
+    if not plan:
+        return []  # empty/missing plan — don't reconcile to avoid wiping everything
+
+    claims = _atomic_json_read(repo / CM_DIR / "claims.json") or {}
+    features = claims.get("features", {})
+    orphans = [fid for fid in features
+               if fid not in plan and features[fid].get("phase") not in ("done", "skipped")]
+    if not orphans:
+        return []
+
+    # Clean up worktrees for active orphans
+    for fid in orphans:
+        feat = features[fid]
+        wt = feat.get("worktree")
+        if wt and feat.get("phase") in ("analyzing", "developing"):
+            _remove_worktree(repo, wt)
+
+    # Mark orphans as skipped (preserves audit trail)
+    def _mark_orphans(data):
+        for fid in orphans:
+            f = data.get("features", {}).get(fid)
+            if f:
+                f["phase"] = "skipped"
+                f["skipped_reason"] = "removed_from_plan"
+        return {"ok": True}
+    _atomic_json_update(repo / CM_DIR / "claims.json", _mark_orphans)
+
+    _append_journal(repo, "system", "reconcile",
+                    f"Orphaned features cleaned: {orphans}")
+    return orphans
 
 
 def cmd_next(args) -> dict:
@@ -4143,18 +4222,21 @@ def cmd_next(args) -> dict:
         if last_bp == bp_key and not intent:
             repeat_count += 1
             if repeat_count >= 2:
+                # Hard block — return error to break the loop
                 if bp == "review_changes":
-                    result["warning"] = (
+                    msg = (
                         f"STOP — you have called _cm_next without intent {repeat_count + 1} times at "
                         f"'review_changes'. You MUST pass intent based on user's decision: "
                         f"intent='confirm' / intent='fix' / intent='abort'."
                     )
                 else:
-                    result["warning"] = (
+                    msg = (
                         f"STOP calling _cm_next — you have received '{bp}' {repeat_count + 1} times "
                         f"without making changes. You MUST use _cm_edit to do the work described "
                         f"in 'instruction' BEFORE calling _cm_next again."
                     )
+                result["ok"] = False
+                result["error"] = msg
                 result["instruction"] = (
                     f"⚠ REPEATED BREAKPOINT ({repeat_count + 1}x). "
                     + result.get("instruction", "")
@@ -4187,6 +4269,9 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
                 "instruction": (
                     "Create PLAN.md at '.coding-master/PLAN.md' using _cm_edit "
                     "(old_text='', new_text=<your plan>). "
+                    "IMPORTANT: Keep it minimal — most tasks need only 1 feature. "
+                    "Do NOT split scanning/analysis into a separate feature (that is the engine's job). "
+                    "Only create multiple features for genuinely independent work streams. "
                     "Then call _cm_next again — it will auto-validate and advance."
                 ),
                 "template": _PLAN_TEMPLATE,
@@ -4213,6 +4298,11 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
         claims = _atomic_json_read(claims_path) or {}
         plan = _parse_plan_md(plan_path)
 
+        # ── Reconcile: clean orphaned claims for features deleted from PLAN.md ──
+        orphans = _reconcile_plan_claims(repo)
+        if orphans:
+            claims = _atomic_json_read(claims_path) or {}  # re-read after mutation
+
         # Handle skip_feature intent: mark a feature as skipped so it's excluded
         if intent == "skip_feature":
             fid_to_skip = str(getattr(args, "feature", "") or "")
@@ -4236,7 +4326,7 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
             return _recurse()
 
         # Check for any in-progress feature first
-        in_progress = _in_progress_feature(claims)
+        in_progress = _in_progress_feature(claims, plan)
         if in_progress:
             fid, feat_phase = in_progress
             spec = plan.get(fid, {})
@@ -4475,7 +4565,7 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
                 "breakpoint": "complete",
                 "pr_url": "",
                 "instruction": (
-                    f"Session aborted. No PR created. "
+                    f"STOP — do NOT call _cm_next again. Session aborted. No PR created. "
                     f"Your integrated work is preserved on branch '{branch}'."
                 ),
             }
@@ -4540,7 +4630,7 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
             "ok": True,
             "breakpoint": "complete",
             "pr_url": submit_result.get("data", {}).get("pr_url", ""),
-            "instruction": "All done! Session submitted and PR created.",
+            "instruction": "STOP — do NOT call _cm_next again. Session submitted and PR created. Present the result to the user.",
         }
 
     return {
@@ -4639,7 +4729,7 @@ def _cmd_next_review(repo: Path, lock: dict, args, mode: str, intent, _recurse) 
         return {
             "ok": True,
             "breakpoint": "complete",
-            "instruction": f"{mode.capitalize()} session complete. Report saved.",
+            "instruction": f"STOP — do NOT call _cm_next again. {mode.capitalize()} session complete. Report saved.",
             "report": str(report_path),
         }
 

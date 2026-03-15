@@ -91,7 +91,7 @@ _cm_next(repo="<name>", intent="submit", title="feat: ...")
 | `write_plan` | PLAN.md is missing or empty | Write `.coding-master/PLAN.md` via `_cm_edit`, then call `_cm_next` |
 | `engine_failed` | Engine failed after 3 retries | Review `error` field. Optionally fix manually via `_cm_edit`, then call `_cm_next`. Or report the failure to user. |
 | `review_changes` | Integration done; awaiting diff review | Present `diff_summary` to user. Then call `_cm_next(intent='confirm')`, `_cm_next(intent='fix', feedback='...')`, or `_cm_next(intent='abort')` |
-| `complete` | All features done, PR submitted (or aborted) | Present `pr_url` to user (empty string if aborted) |
+| `complete` | All features done, PR submitted (or aborted) | **STOP — do NOT call `_cm_next` again.** Present `pr_url` to user (empty string if aborted). Session is finished. |
 
 > **Note**: Analysis, coding, and test-fixing are handled automatically by the engine (claude-code subprocess). The agent never needs to edit source code directly.
 
@@ -101,7 +101,7 @@ _cm_next(repo="<name>", intent="submit", title="feat: ...")
 |-----------|--------------|-----------|
 | `define_scope` | Scope not yet defined | Call `_cm_next(diff="HEAD~3..HEAD")` or `_cm_next(files="src/foo.py")` — scope+engine run in one step |
 | `write_report` | Engine finished; report not written | Write `.coding-master/report.md` via `_cm_edit`, then call `_cm_next` |
-| `complete` | Report written | Session complete; present findings to user |
+| `complete` | Report written | **STOP — do NOT call `_cm_next` again.** Session complete; present findings to user. |
 
 ## Intent Parameter
 
@@ -122,28 +122,68 @@ Use `intent` to signal what you just did or want to trigger:
 When `_cm_next` returns `write_plan`, write `.coding-master/PLAN.md` in this exact format:
 
 ```markdown
-# Plan
+# Feature Plan
 
-## Overview
-<brief description>
+## Origin Task
+<describe what needs to be done>
+
+## Features
 
 ### Feature 1: <title>
+**Depends on**: —
 
 #### Task
 <what to implement>
 
 #### Acceptance Criteria
-- <criterion 1>
-- <criterion 2>
-
-### Feature 2: <title>
-
-#### Task
-<what to implement>
-
-#### Acceptance Criteria
-- <criterion 1>
+- [ ] <criterion 1>
+- [ ] <criterion 2>
 ```
+
+**Default: 1 feature.** Most tasks need only one feature. Do NOT split analysis/scanning into a separate feature — that is the engine's analyze phase.
+
+If you genuinely need multiple features (independent, non-mergeable work streams), add `## Max Features: N` with a justification line after `## Origin Task`:
+
+```markdown
+## Max Features: 2
+Refactor and new logic are independent changes requiring separate interface validation.
+```
+
+Without this declaration, `plan-ready` will reject plans with more than 1 feature.
+
+## Breakpoint Discipline
+
+**The `instruction` field is mandatory.** When `_cm_next` returns a breakpoint with `feature=N`, you MUST work on Feature N — you cannot choose a different feature or bypass dependencies by passing `feature=M` to the next call. The system enforces dependency order; attempting to skip it will return the same breakpoint repeatedly.
+
+**Do not retry a breakpoint without doing the required work.** If you call `_cm_next` and get the same breakpoint 3+ times without completing the `instruction`, the system will **hard-block** with `ok: false`. This is not a warning — the tool will refuse to proceed. Stop and do the work first.
+
+**`complete` breakpoint = STOP.** Do NOT call `_cm_next` after receiving `complete`. The session is finished. Present the result to the user and wait for a new request.
+
+## Common Scenarios
+
+### User wants to review code before submitting
+
+The `review_changes` breakpoint shows the diff automatically after integration. To reach it:
+
+1. If features are still in progress and user wants to skip them:
+   ```
+   _cm_next(repo="<name>", intent="skip_feature", feature=N)
+   ```
+2. Then call `_cm_next(repo="<name>")` — system integrates and returns `review_changes` with `diff_summary`
+3. Present the diff to the user, then:
+   - User approves → `_cm_next(intent="confirm")`
+   - User wants changes → `_cm_next(intent="fix", feedback="...")`
+   - User cancels → `_cm_next(intent="abort")`
+
+**Do NOT** call `_cm_next(mode="review")` to show code diff — that starts a separate review session, not a diff of the current delivery.
+
+### User wants to skip a feature
+
+```
+_cm_next(repo="<name>", intent="skip_feature", feature=N)
+```
+
+Marks Feature N as skipped, cleans up its worktree, and auto-advances.
 
 ## Rules
 
@@ -158,4 +198,4 @@ When `_cm_next` returns `write_plan`, write `.coding-master/PLAN.md` in this exa
 9. **Trust the auto-advance** — when you call `_cm_next`, it may take minutes (engine is running); wait for the result
 10. **On `engine_failed`** — review the error, optionally fix with `_cm_edit`, then call `_cm_next` again; or report failure to user
 11. **One issue at a time** — handle multiple issues sequentially; fully resolve one before starting the next
-12. **Minimal PLAN** — for simple tasks, create a single-feature PLAN; do NOT over-decompose into multi-feature dependency chains
+12. **Default 1 feature** — plan-ready enforces max_features=1 by default. Only add `## Max Features: N` (with justification) when genuinely needed. Never split analysis/scan into a separate feature.

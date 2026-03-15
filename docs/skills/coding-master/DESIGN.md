@@ -221,6 +221,8 @@ _cm_next(mode="review")
 - **`_cm_next` 递归推进** — 自动跳过所有机械步骤，engine 处理所有代码工作
 - **Engine 重试保护** — 每阶段最多重试 3 次，超过返回 `engine_failed` 断点
 - **递归深度保护** — `max_depth=25`，支持 4 feature plan 的完整自动推进
+- **重复断点硬拦截** — agent 连续 3+ 次在同一断点调 `_cm_next` 而不做 work → `ok: false` 阻断循环（不是 warning）
+- **Post-complete 保护** — `complete` 断点后 agent 误调 `_cm_next` 时，orchestrator 的 `REPEATED_TOOL_INTENT` 检测（连续 6 次相同 tool call）自动拦截循环
 - **CLI 不受影响** — `cm lock`、`cm claim` 等命令仍可通过 CLI 手动调用
 
 ---
@@ -233,11 +235,12 @@ _cm_next(mode="review")
 <repo>/.coding-master/               # 被 .gitignore 忽略，仅本地协作状态
 ├── lock.json                        # 结构化：workspace 锁（工具原子读写，unlock 时清空）
 ├── session.json                     # 结构化：持久化 session 历史（跨 lock/unlock 生存）
+├── last_session.json                # 结构化：上次完成的 session 快照（submit 时写入，用于 cm progress 查询）
 ├── JOURNAL.md                       # MD：append-only 开发日志（跨 session 保留）
 │
 │   ── 以下为 per-session 状态，新 session lock 时自动清理 ──
-├── PLAN.md                          # MD：feature 规格（写一次，agent 读）
-├── claims.json                      # 结构化：feature 认领状态（工具原子读写）
+├── PLAN.md                          # MD：feature 规格（agent 写，可 mid-session 编辑）
+├── claims.json                      # 结构化：feature 认领状态（工具原子读写，与 PLAN.md 自动调和）
 │
 ├── features/                        # MD：每个 feature 的独立工作现场
 │   ├── 01-scanner-interface.md
@@ -265,7 +268,7 @@ _cm_next(mode="review")
 ├──────────────────────────────────────────────────────────┤
 │  计划层（MD）— agent 读写                                   │
 │                                                          │
-│  PLAN.md — feature 规格 + AC（写一次，所有 agent 只读）      │
+│  PLAN.md — feature 规格 + AC（agent 写，可 mid-session 编辑）│
 │  JOURNAL.md — 开发日志（通过 cm journal 追加）              │
 │  features/XX.md — 工作现场：分析/方案/AC打勾/日志（owner写） │
 ├──────────────────────────────────────────────────────────┤
@@ -393,11 +396,16 @@ cm lock        cm plan-ready          cm claim      cm integrate(pass)  cm submi
 **消费者**：agent 读（了解要做什么）
 **生命周期**：分析阶段创建一次 → 开发过程中基本不改 → 全部完成后归档
 
+**Feature 数量约束**：默认 max_features=1。Agent 认为确需多 feature 时，在 `## Origin Task` 之后添加 `## Max Features: N` 并附带理由。无此声明时 plan-ready 拒绝多于 1 个 feature 的 plan。纯分析/扫描不应拆为独立 feature（那是 engine analyze 阶段的职责）。
+
 ```markdown
 # Feature Plan
 
 ## Origin Task
 重构 inspector 模块，拆分 SessionScanner 和 ReportGenerator
+
+## Max Features: 2
+拆分和新逻辑实现是独立的代码变更，需要分步验证接口兼容性。
 
 ## Features
 
@@ -457,7 +465,7 @@ cm lock        cm plan-ready          cm claim      cm integrate(pass)  cm submi
 - **只写规格，不写进展** — 没有 Status、没有 Dev Log、没有 Test Results
 - **Acceptance Criteria 的 checkbox 在这里不打勾** — 这是"定义"，agent 在自己的 feature MD 里打勾
 - **Depends on 是文本** — agent 直接读懂依赖关系
-- **创建后基本不改** — 避免多 agent 同时编辑的冲突
+- **支持 mid-session 编辑** — 删除 feature 时 `_reconcile_plan_claims` 自动清理 claims.json 中的孤儿记录（标记为 skipped），并回收其 worktree
 
 ### 3.4 claims.json — Feature 状态（申请表）
 
@@ -546,6 +554,26 @@ cm lock        cm plan-ready          cm claim      cm integrate(pass)  cm submi
 ---
 
 **done 阶段**：无子状态，终态。
+
+**skipped 阶段**：终态。两种来源：
+1. agent 手动跳过：`_cm_next(intent='skip_feature', feature=N)`
+2. **自动调和**：当 PLAN.md 被编辑删除了某个 feature，`_reconcile_plan_claims` 自动将 claims.json 中对应的孤儿记录标记为 `phase: "skipped", skipped_reason: "removed_from_plan"`，并回收其 worktree。
+
+#### 3.4.x PLAN.md ↔ claims.json 一致性调和
+
+**问题**：PLAN.md 定义"哪些 feature 存在"，claims.json 记录"每个 feature 的状态"。Mid-session 编辑 PLAN.md 删除 feature 时，claims.json 中会残留孤儿记录。如果孤儿处于 `analyzing`/`developing` 等非终态，`_in_progress_feature` 会优先返回它，导致 `cmd_next` 死循环。
+
+**机制**：`_reconcile_plan_claims(repo)` — 以 PLAN.md 为权威，将 claims 中不在 plan 里的非终态 feature 标记为 skipped。
+
+**调用时机**（两个调用点 + 一个安全网）：
+1. **`cmd_next` 入口**（reviewed/working 阶段）：每次自动推进前先调和
+2. **`cmd_edit` 成功修改 PLAN.md 后**：在源头立即拦截不一致
+3. **安全网**：`_in_progress_feature(claims, plan)` 接受可选的 `plan` 参数，即使调和未执行也不会返回孤儿 feature
+
+**设计决策**：
+- 标记 skipped 而非删除 — 保留审计痕迹，`_TERMINAL_PHASES = ("done", "skipped")` 已覆盖
+- plan 为空时不调和 — 避免 PLAN.md 解析失败时误清所有 claims
+- 写入 JOURNAL — `"system" / "reconcile"` 事件记录哪些 feature 被清理
 
 ---
 
@@ -801,7 +829,7 @@ All 4 features done. PR created.
 - **Append-only + flock 保护** — 只追加，不修改历史条目。工具层通过 `flock + O_APPEND` 写入，保证多 agent 同时追加不会互相覆盖（裸 read→append→write 会丢失并发写入）
 - **结构化前缀** — `## timestamp [agent] action` 格式，便于工具解析生成 PR body
 - **与 features/XX.md 互补** — JOURNAL 记录全局时间线和里程碑，feature MD 记录细节分析和开发过程
-- **与 PLAN.md 不同** — PLAN.md 是静态规格（写一次），JOURNAL.md 是动态过程（持续追加）
+- **与 PLAN.md 不同** — PLAN.md 是 feature 规格（可 mid-session 编辑，编辑后自动调和 claims），JOURNAL.md 是动态过程（持续追加）
 - **cm 工具自动追加关键事件** — 以下命令成功时自动往 JOURNAL.md 追加一行：`cm lock`、`cm plan-ready`、`cm claim`、`cm done`、`cm integrate`、`cm submit`。agent 可随时通过 `cm journal --message "..."` 补充上下文
 - **PR body 生成** — `cm submit` 时 `_generate_pr_body` 从 JOURNAL.md 提取里程碑条目（done/submit action），结合 PLAN.md 的 feature 列表生成结构化 PR body；agent 可在 submit 前追加一条 summary entry 来丰富 PR 描述
 
@@ -1753,9 +1781,18 @@ def cmd_plan_ready(args) -> dict:
 
     检查项：
     1. PLAN.md 存在且非空
-    2. 每个 feature 有 title、task、acceptance criteria
-    3. depends_on 引用的 feature ID 都存在
-    4. 依赖图无环
+    2. Feature 数量 ≤ max_features（默认 1；可通过 PLAN.md 顶部 `## Max Features: N` 声明覆盖）
+    3. 每个 feature 有 title、task、acceptance criteria
+    4. depends_on 引用的 feature ID 都存在
+    5. 依赖图无环
+
+    Feature 数量约束设计：
+    - 默认 max_features=1，绝大多数任务用单 feature 即可完成
+    - Agent 认为确需拆分时，在 PLAN.md 的 `## Origin Task` 之后添加 `## Max Features: N`（N ≤ 5），
+      并附带一行理由说明为什么不能合并为单 feature
+    - plan-ready 解析此声明并用它覆盖默认值；无声明则严格限制为 1
+    - 超过 max_features 时返回 ok=false，提示合并 feature
+    - 纯分析/扫描类工作不应拆为独立 feature（那是 engine 的 analyze 阶段的职责）
     """
     repo = _resolve_locked_repo(args)
     lock_path = repo / CM_DIR / "lock.json"
@@ -1767,6 +1804,17 @@ def cmd_plan_ready(args) -> dict:
     plan = _parse_plan_md(plan_path)
     if not plan:
         return {"ok": False, "error": "PLAN.md contains no parseable features"}
+
+    # Feature 数量约束：默认 1，可通过 PLAN.md 中 `## Max Features: N` 覆盖
+    max_features = _parse_max_features(plan_path)  # 默认返回 1
+    if len(plan) > max_features:
+        return {"ok": False, "error": (
+            f"PLAN.md has {len(plan)} features but max_features={max_features}. "
+            f"Merge into ≤{max_features} feature(s), or add '## Max Features: N' "
+            f"(with a justification line) after '## Origin Task' to raise the limit. "
+            f"Analysis/scan work should NOT be a separate feature — "
+            f"it belongs in the engine's analyze phase."
+        )}
 
     # 检查每个 feature 的完整性
     issues = []
@@ -3160,10 +3208,11 @@ PLAN.md 内容：
 
 **工具层**：`cmd_start` → `cmd_plan_ready` 执行：
 1. 读 `.coding-master/PLAN.md`，`_parse_plan_md` 解析出 4 个 feature
-2. 检查每个 feature：title ✓，task ✓，acceptance criteria ✓
-3. 检查 depends_on 引用合法性：Feature 2 → Feature 1 ✓，Feature 3 → Feature 1 ✓，Feature 4 → Feature 2,3 ✓
-4. 检查依赖图无环 ✓
-5. 原子更新 lock.json：session_phase `locked` → `reviewed`
+2. 检查 feature 数量 ≤ max_features（本例 PLAN.md 中声明了 `## Max Features: 4`）✓
+3. 检查每个 feature：title ✓，task ✓，acceptance criteria ✓
+4. 检查 depends_on 引用合法性：Feature 2 → Feature 1 ✓，Feature 3 → Feature 1 ✓，Feature 4 → Feature 2,3 ✓
+5. 检查依赖图无环 ✓
+6. 原子更新 lock.json：session_phase `locked` → `reviewed`
 
 **各层状态**：
 
@@ -3176,7 +3225,7 @@ PLAN.md 内容：
 
 **返回给 Agent A**：`{"ok":true, "data":{"features":4, "plan":["1","2","3","4"]}}`
 
-**设计意义**：这是 PLAN.md 的质量关卡。在此之前 agent 不能 claim 任何 feature。如果 PLAN.md 格式有问题（缺少 AC、依赖引用不存在、有环），工具会拒绝并报告具体问题。对于重要任务，人类可以在此阶段介入审核 PLAN.md 的拆分质量。
+**设计意义**：这是 PLAN.md 的质量关卡。在此之前 agent 不能 claim 任何 feature。检查项包括：格式完整性（缺少 AC、依赖引用不存在、有环）和 **feature 数量约束**（默认 max_features=1，防止 agent 过度拆分任务）。对于重要任务，人类可以在此阶段介入审核 PLAN.md 的拆分质量。
 
 ### Step 3: Agent A 认领 Feature 1
 
@@ -3793,7 +3842,10 @@ Agent 消化 engine 结果，生成人类可读的 review 报告。
 
 | 用例 | 输入 | 预期 |
 |------|------|------|
-| 正常 PLAN.md | 4 个完整 feature | session_phase → reviewed |
+| 单 feature（默认） | 1 个完整 feature，无 Max Features 声明 | session_phase → reviewed |
+| 多 feature + 声明 | 4 个 feature + `## Max Features: 4` | session_phase → reviewed |
+| 多 feature 无声明 | 3 个 feature，无 Max Features 声明 | 拒绝，"has 3 features but max_features=1" |
+| Max Features 声明但超出 | 3 个 feature + `## Max Features: 2` | 拒绝，"has 3 features but max_features=2" |
 | PLAN.md 不存在 | 无文件 | 拒绝，"PLAN.md not found" |
 | Feature 缺 Task | Feature 2 无 Task section | 拒绝，报告具体问题 |
 | Feature 缺 AC | Feature 1 无 Acceptance Criteria | 拒绝，报告具体问题 |
