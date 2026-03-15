@@ -1,7 +1,7 @@
 ---
 name: coding-master
 description: "Convention-driven code expert for all code-related work"
-version: "5.0.0"
+version: "5.1.0"
 tags: [coding, development, review, debug, analysis, pr, automation, parallel]
 ---
 
@@ -12,12 +12,21 @@ tags: [coding, development, review, debug, analysis, pr, automation, parallel]
 > **Primary entry point**: Call `_cm_next(repo="<name>")` — it drives the entire workflow automatically, stopping only when your input is needed.
 > **Session continuity**: If prior `_cm_next` results are visible in conversation history, continue by calling `_cm_next` again (not `_cm_status` or any internal tool).
 
-## Agent-Facing Tools (v5.0)
+## Your Role
+
+**You are a dispatcher, not a coder.** Your job:
+1. Understand user intent → write PLAN.md (task decomposition)
+2. Call `_cm_next` → engine (claude-code) handles all code work automatically
+3. Present results to user
+
+**Do NOT** read/grep/edit source code yourself. The engine does that.
+
+## Agent-Facing Tools (v5.1)
 
 | Tool | Purpose |
 |------|---------|
-| `_cm_next(repo, [intent], [mode], [force])` | **Primary workflow driver** — auto-advances through all mechanical steps, stops at creative breakpoints requiring your input |
-| `_cm_edit(repo, file, old_text, new_text)` | Edit files in the workspace (PLAN.md, feature MDs, report.md, source code) |
+| `_cm_next(repo, [intent], [mode], [force])` | **Primary workflow driver** — auto-advances through all steps including engine-delegated code work. Stops only at `write_plan`, `engine_failed`, or `complete`. |
+| `_cm_edit(repo, file, old_text, new_text)` | Edit planning files (PLAN.md, feature MDs, report.md). **Not for source code** — engine handles that. |
 | `_cm_read(repo, file)` | Read files from the workspace |
 | `_cm_find(repo, pattern)` | Find files by glob pattern |
 | `_cm_grep(repo, pattern, [path])` | Search file contents by regex |
@@ -80,10 +89,10 @@ _cm_next(repo="<name>", intent="submit", title="feat: ...")
 | Breakpoint | What it means | What to do |
 |-----------|--------------|-----------|
 | `write_plan` | PLAN.md is missing or empty | Write `.coding-master/PLAN.md` via `_cm_edit`, then call `_cm_next` |
-| `write_analysis` | Feature analysis+plan section needed | Write the Analysis and Plan sections in `features/NN.md` via `_cm_edit`, then call `_cm_next` |
-| `write_code` | Feature code changes needed | Edit source files via `_cm_edit`, then call `_cm_next(intent="test")` |
-| `fix_code` | Tests failed | Fix the failing code via `_cm_edit`, then call `_cm_next(intent="test")` |
-| `complete` | All features done, PR submitted | Session finished — present PR URL to user. (Title auto-generated from PLAN.md; only shown as `need_title` if auto-gen fails) |
+| `engine_failed` | Engine failed after 3 retries | Review `error` field. Optionally fix manually via `_cm_edit`, then call `_cm_next`. Or report the failure to user. |
+| `complete` | All features done, PR submitted | Present PR URL to user |
+
+> **Note**: Analysis, coding, and test-fixing are handled automatically by the engine (claude-code subprocess). The agent never needs to edit source code directly.
 
 ### review/debug/analyze mode breakpoints
 
@@ -99,10 +108,9 @@ Use `intent` to signal what you just did or want to trigger:
 
 | Intent | When to use |
 |--------|------------|
-| *(none)* | Continue from current state |
-| `test` | After editing code — triggers lint+typecheck+tests |
-| `scope` | Trigger scope definition (use with `diff`, `files`, `pr`, `goal`). Can also just pass `diff`/`files` directly to `_cm_next` without `intent="scope"`. |
-| `submit` | After all features done — triggers push+PR+cleanup. `title` optional (auto-generated from PLAN.md if omitted) |
+| *(none)* | Continue from current state (most common — just call `_cm_next` after writing PLAN.md) |
+| `scope` | Define analysis scope. Can also just pass `diff`/`files` directly without `intent="scope"`. |
+| `submit` | Force submit with explicit title. Usually not needed — auto-submits with title from PLAN.md. |
 
 ## PLAN.md Format
 
@@ -139,9 +147,10 @@ When `_cm_next` returns `write_plan`, write `.coding-master/PLAN.md` in this exa
 3. **Never force push**
 4. **Don't modify SKILL.md** — immutable convention
 5. **Test before done** — `_cm_next(intent="test")` must pass before `complete` breakpoint
-6. **Use `_cm_next` as the loop** — call it repeatedly; it decides what step comes next
-7. **Trust the breakpoint** — when `_cm_next` says `write_code`, write code; don't run extra diagnostics first
-8. **`_cm_edit` for all writes** — never use bash/write tools to modify workspace files
-9. **Dispatcher for analysis** — review/analyze/debug modes use engine subprocess; do not read/grep code yourself
-10. **Report changes with diff** — after code changes, call `_cm_next` and present the unified diff from `context.diff` to the user
+6. **Use `_cm_next` as the loop** — call it repeatedly; it drives the entire workflow including engine delegation
+7. **You are a dispatcher, not a coder** — do NOT read/grep/edit source code yourself; the engine handles all code work automatically
+8. **`_cm_edit` only for planning files** — use `_cm_edit` for PLAN.md, feature MDs, report.md; never for source code
+9. **Trust the auto-advance** — when you call `_cm_next`, it may take minutes (engine is running); wait for the result
+10. **On `engine_failed`** — review the error, optionally fix with `_cm_edit`, then call `_cm_next` again; or report failure to user
 11. **One issue at a time** — handle multiple issues sequentially; fully resolve one before starting the next
+12. **Minimal PLAN** — for simple tasks, create a single-feature PLAN; do NOT over-decompose into multi-feature dependency chains

@@ -123,33 +123,44 @@ Agent 只接触计划层（MD）和工具层（调用），永远不直接碰数
 
 **决策**：从"agent 编排 + 工具执行"转变为"系统编排 + agent 在断点创造"。
 
-**问题证据**：v4.6 的四层分组缓解了认知过载，但生产轨迹（2026-03-15）显示根因未解决：
-1. **Agent 仍需理解状态机** — 25 个工具全部暴露，agent 需要知道"locked → plan-ready → claim → dev → ..."的顺序
-2. **机械步骤占比高** — deliver 流程 12 步中只有 3 步需要 agent 创造力（写 plan、写 analysis、写代码），其余 9 步是确定性状态转换
-3. **错误消息修补无止境** — 每次轨迹分析发现新的循环，都是"error message 没说清下一步"，本质是 whack-a-mole
-
 **v5.0 核心洞察**：如果 12 步中 9 步不需要 agent 动脑，为什么要让 agent 调 9 个工具？系统应该自动跑完机械步骤，只在需要创造力的地方停下来（断点）。
 
-**两层工具结构**：
+**v5.1 进化**：v5.0 减少了机械步骤断点，但仍在"创造性断点"（write_analysis、write_code、fix_code）让 **agent** 通过 `_cm_edit` 逐行写代码。生产轨迹（2026-03-15）暴露根因：
+
+1. **弱模型干强模型的活** — agent（kimi-code）在 `write_code` 断点需要理解代码库、实现功能、修 bug，但它的能力不足，频繁空转调 `_cm_next` 不写代码
+2. **Engine 已经能做** — `cmd_engine_run` 调用 claude-code CLI（有 Read/Edit/Write/Bash 全套权限），deliver 模式的 prompt 和 tools 已定义，但 deliver 流程没用它
+3. **Agent 职责错位** — agent 应该做"理解用户意图 + 任务分解 + 呈现结果"，不应该做"读代码 + 写代码 + 修 bug"
+
+**v5.1 决策**：Agent 降级为**调度者**，Engine 接管所有代码工作。断点从 6 个降到 3 个。
+
+**三层架构**：
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Agent 层（7 个工具，agent 直接调用）                   │
+│  Agent 层（调度者 — 理解意图、写 PLAN、呈现结果）       │
 │                                                      │
 │  _cm_next    流水线推进（唯一的流程入口）               │
-│  _cm_edit    编辑文件（plan / feature MD / 源码）      │
+│  _cm_edit    编辑 PLAN.md / feature MD（规划文件）     │
 │  _cm_read    读文件                                   │
 │  _cm_find    找文件                                   │
 │  _cm_grep    搜内容                                   │
 │  _cm_status  状态 + 进度 + repos 列表                 │
 │  _cm_doctor  诊断 + 修复                              │
 ├─────────────────────────────────────────────────────┤
-│  Internal 层（不暴露给 agent，_cm_next 内部调用）       │
+│  Engine 层（执行者 — claude-code CLI 子进程）           │
+│                                                      │
+│  analyze:    读代码 + 写 Analysis/Plan 到 feature MD  │
+│  implement:  在 worktree 里实现功能                    │
+│  fix:        根据 test output 修复代码                 │
+│                                                      │
+│  权限: Read,Edit,Write,Glob,Grep,Bash                │
+│  运行目录: feature worktree（不是 repo root）          │
+├─────────────────────────────────────────────────────┤
+│  Internal 层（状态机 — _cm_next 和 engine 内部调用）    │
 │                                                      │
 │  cmd_lock / cmd_unlock / cmd_plan_ready              │
 │  cmd_claim / cmd_dev / cmd_test / cmd_done           │
 │  cmd_reopen / cmd_integrate / cmd_submit             │
-│  cmd_scope / cmd_engine_run / cmd_report             │
 │  cmd_git / cmd_journal / cmd_change_summary          │
 │                                                      │
 │  仍可通过 CLI (cm lock, cm claim ...) 手动调用        │
@@ -160,15 +171,22 @@ Agent 只接触计划层（MD）和工具层（调用），永远不直接碰数
 
 ```
 _cm_next()
-  ├─ 无 lock → auto lock → breakpoint: write_plan (附 template)
-  ├─ locked + PLAN.md → auto plan-ready → auto claim
-  │   → breakpoint: write_analysis (附 feature spec)
-  ├─ feature analyzing + 有 Analysis/Plan → auto dev
-  │   → breakpoint: write_code (附 worktree 路径)
-  ├─ _cm_next(intent="test") → auto test
-  │   ├─ fail → breakpoint: fix_code (附 test output)
-  │   └─ pass → auto done → auto claim next 或 auto integrate
-  └─ all done → auto integrate → auto submit (title 从 PLAN.md 自动提取)
+  ├─ 无 lock → auto lock
+  │   → no PLAN.md → breakpoint: write_plan (agent 写)
+  │   → PLAN.md ok → auto plan-ready → auto claim
+  │
+  ├─ feature analyzing
+  │   → ENGINE: analyze（读代码，写 Analysis+Plan 到 feature MD）
+  │   → auto dev → recurse
+  │
+  ├─ feature developing
+  │   → ENGINE: implement（在 worktree 里写代码）
+  │   → auto commit → auto test
+  │   ├─ pass → auto done → auto claim next 或 integrate
+  │   └─ fail → ENGINE: fix（带 test output 重试，最多 3 次）
+  │       └─ 仍失败 → breakpoint: engine_failed
+  │
+  └─ all done → auto integrate → auto submit
       → breakpoint: complete (附 PR URL)
 ```
 
@@ -188,19 +206,18 @@ _cm_next(mode="review")
 ```json
 {
   "ok": true,
-  "breakpoint": "write_code",
-  "feature": 1,
-  "worktree": "/path/to/alfred-feature-1",
-  "instruction": "编写代码实现 Feature 1，完成后调 _cm_next(intent='test')",
-  "context": {"title": "...", "task": "...", "acceptance_criteria": ["..."]}
+  "breakpoint": "complete",
+  "pr_url": "https://github.com/.../pull/42",
+  "instruction": "PR 已创建，将结果展示给用户。"
 }
 ```
 
 **关键设计约束**：
-- **Agent 只调 `_cm_next` + `_cm_edit`** — 流程入口唯一，编辑入口唯一，不可能选错工具
+- **Agent 只调 `_cm_next` + `_cm_edit`** — Agent 编辑仅限 PLAN.md 等规划文件，源码编辑由 engine 完成
 - **状态机对 agent 不可见** — agent 不知道 session_phase、feature_phase 等概念
-- **`_cm_next` 递归推进** — 自动跳过所有机械步骤，直到碰到需要 agent 创造力的断点
-- **递归深度保护** — `max_depth=10`，超过则返回当前状态 + 建议 `_cm_doctor`
+- **`_cm_next` 递归推进** — 自动跳过所有机械步骤，engine 处理所有代码工作
+- **Engine 重试保护** — 每阶段最多重试 3 次，超过返回 `engine_failed` 断点
+- **递归深度保护** — `max_depth=25`，支持 4 feature plan 的完整自动推进
 - **CLI 不受影响** — `cm lock`、`cm claim` 等命令仍可通过 CLI 手动调用
 
 ---

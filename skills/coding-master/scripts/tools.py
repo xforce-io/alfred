@@ -2401,6 +2401,178 @@ def _get_scope_context(repo: Path, scope: dict) -> str:
     return "(no specific scope context)"
 
 
+# ── Engine-delegated deliver helpers (v5.1) ────────────────────────────────
+
+MAX_ENGINE_RETRIES = 3
+
+# Max turns per engine phase (more complex phases get more turns)
+_ENGINE_MAX_TURNS = {"analyze": 15, "implement": 30, "fix": 20}
+
+
+def _build_feature_engine_prompt(
+    phase: str,
+    spec: dict,
+    feature_md_content: str,
+    test_output: str = "",
+) -> str:
+    """Build engine prompt for a deliver sub-phase (analyze/implement/fix)."""
+    title = spec.get("title", "")
+    task = spec.get("task", "")
+    criteria = spec.get("criteria", "")
+
+    if phase == "analyze":
+        return (
+            "You are a senior engineer. Analyze the codebase to understand how to "
+            f"implement the following feature, then write your analysis.\n\n"
+            f"## Feature: {title}\n\n"
+            f"### Task\n{task}\n\n"
+            f"### Acceptance Criteria\n{criteria}\n\n"
+            f"### Current Feature Markdown\n```\n{feature_md_content}\n```\n\n"
+            "## Instructions\n"
+            "1. Read the relevant source code to understand the current implementation.\n"
+            "2. Edit the feature markdown file above — fill in the `## Analysis` section "
+            "with your findings and the `## Plan` section with numbered implementation steps.\n"
+            "3. Do NOT modify any source code in this phase.\n"
+        )
+    elif phase == "implement":
+        return (
+            "You are a senior engineer. Implement the feature described below.\n\n"
+            f"## Feature: {title}\n\n"
+            f"### Task\n{task}\n\n"
+            f"### Acceptance Criteria\n{criteria}\n\n"
+            f"### Analysis & Plan\n```\n{feature_md_content}\n```\n\n"
+            "## Instructions\n"
+            "1. Follow the Plan in the feature markdown above.\n"
+            "2. Edit source files to implement the feature.\n"
+            "3. Keep changes minimal and focused.\n"
+            "4. Do NOT run tests yourself — the system will run them after you finish.\n"
+        )
+    elif phase == "fix":
+        return (
+            "You are a senior engineer. Tests are failing after a code change. "
+            "Fix the code so all tests pass.\n\n"
+            f"## Feature: {title}\n\n"
+            f"### Task\n{task}\n\n"
+            f"### Test Output (failures)\n```\n{test_output}\n```\n\n"
+            "## Instructions\n"
+            "1. Read the failing test output above.\n"
+            "2. Find and fix the root cause in the source code.\n"
+            "3. Keep fixes minimal — only change what's needed to make tests pass.\n"
+            "4. Do NOT run tests yourself — the system will re-run them after you finish.\n"
+        )
+    else:
+        return f"Implement the feature: {title}\nTask: {task}\n"
+
+
+def _run_engine_for_feature(
+    repo: Path,
+    feature_id: str,
+    phase: str,
+    args,
+    test_output: str = "",
+    worktree_override: Path | None = None,
+) -> dict:
+    """Run the engine (claude-code CLI) for a deliver-mode feature phase.
+
+    Unlike cmd_engine_run (scope-based for review/analyze), this builds a
+    feature-specific prompt and runs in the feature worktree.
+    """
+    from engine import get_engine
+
+    # Read feature data
+    claims = _atomic_json_read(repo / CM_DIR / "claims.json") or {}
+    feat = claims.get("features", {}).get(feature_id, {})
+    wt = worktree_override or Path(feat.get("worktree", str(repo)))
+    if not wt.exists():
+        return {"ok": False, "error": f"worktree {wt} does not exist"}
+
+    # Read feature spec from PLAN.md
+    plan = _parse_plan_md(repo / CM_DIR / "PLAN.md")
+    spec = plan.get(feature_id, {})
+
+    # Read current feature markdown
+    feat_md = _find_feature_md(repo, feature_id)
+    feat_md_content = feat_md.read_text() if feat_md and feat_md.exists() else ""
+
+    # Build prompt
+    prompt = _build_feature_engine_prompt(phase, spec, feat_md_content, test_output)
+
+    # Get engine
+    engine_name = getattr(args, "engine", "claude-code")
+    try:
+        engine = get_engine(engine_name)
+    except Exception as exc:
+        return {"ok": False, "error": f"engine '{engine_name}' not available: {exc}"}
+
+    max_turns = _ENGINE_MAX_TURNS.get(phase, 30)
+    timeout = getattr(args, "timeout", 600)
+
+    agent = _resolve_agent(args)
+    _append_journal(repo, agent, f"engine-{phase}",
+                    f"Feature {feature_id}: engine {phase} start (engine={engine_name})")
+
+    try:
+        result = engine.run(
+            prompt=prompt,
+            repo_path=wt,
+            mode="deliver",
+            timeout=timeout,
+            max_turns=max_turns,
+        )
+    except Exception as exc:
+        _append_journal(repo, agent, f"engine-{phase}-error",
+                        f"Feature {feature_id}: engine error: {exc}")
+        return {"ok": False, "error": f"engine error: {exc}"}
+
+    _append_journal(repo, agent, f"engine-{phase}-done",
+                    f"Feature {feature_id}: engine {phase} done "
+                    f"(ok={result.ok}, files_changed={len(result.files_changed)})")
+
+    if not result.ok:
+        return {"ok": False, "error": result.error or "engine returned failure",
+                "summary": result.summary}
+
+    return {"ok": True, "summary": result.summary,
+            "files_changed": result.files_changed}
+
+
+def _get_engine_retry_count(repo: Path, feature_id: str, phase: str) -> int:
+    """Read engine retry count from lock.json."""
+    lock = _atomic_json_read(repo / CM_DIR / "lock.json") or {}
+    return lock.get("_engine_retries", {}).get(f"{feature_id}:{phase}", 0)
+
+
+def _increment_engine_retry(repo: Path, feature_id: str, phase: str) -> None:
+    """Increment engine retry count in lock.json."""
+    key = f"{feature_id}:{phase}"
+    def updater(data):
+        retries = data.setdefault("_engine_retries", {})
+        retries[key] = retries.get(key, 0) + 1
+        return {"ok": True}
+    _atomic_json_update(repo / CM_DIR / "lock.json", updater)
+
+
+def _reset_engine_retries(repo: Path, feature_id: str) -> None:
+    """Reset all retry counters for a feature (called on phase success)."""
+    def updater(data):
+        retries = data.get("_engine_retries", {})
+        for key in list(retries):
+            if key.startswith(f"{feature_id}:"):
+                del retries[key]
+        return {"ok": True}
+    _atomic_json_update(repo / CM_DIR / "lock.json", updater)
+
+
+def _auto_commit(wt: Path, message: str = "wip: coding-master auto-commit") -> None:
+    """Auto-commit any changes in a worktree. Mechanical step after engine edits."""
+    if not wt.exists():
+        return
+    gs = _run_git(wt, ["status", "--porcelain", "-uno"], check=False)
+    if gs.returncode == 0 and gs.stdout.strip():
+        _run_git(wt, ["add", "-A", "--", ":(exclude).coding-master"], check=False)
+        _run_git(wt, ["commit", "-m", message], check=False)
+
+
 def cmd_engine_run(args) -> dict:
     """Delegate code analysis to an engine subprocess (e.g. Claude Code CLI).
 
@@ -3810,8 +3982,17 @@ def cmd_next(args) -> dict:
     repo = _repo_path(args.repo)
     intent = getattr(args, "intent", None)
     mode = getattr(args, "mode", None) or "deliver"
+
+    # ── Repeated breakpoint detection ─────────────────────────────────────
+    # If the agent calls _cm_next without changing state (no _cm_edit, no intent),
+    # it will get the same breakpoint back. Detect and escalate.
     max_depth = getattr(args, "_depth", 0)
-    if max_depth > 12:
+    if max_depth == 0 and not intent:
+        lock_data = _atomic_json_read(repo / CM_DIR / "lock.json") or {}
+        last_bp = lock_data.get("_last_breakpoint")
+        # Will be checked after result is computed (see end of function)
+
+    if max_depth > 25:
         lock = _atomic_json_read(repo / CM_DIR / "lock.json")
         return {
             "ok": False,
@@ -3875,9 +4056,44 @@ def cmd_next(args) -> dict:
 
     # ── Route by mode ────────────────────────────────────────────────────────
     if locked_mode != "deliver":
-        return _cmd_next_review(repo, lock, args, locked_mode, intent, _recurse)
+        result = _cmd_next_review(repo, lock, args, locked_mode, intent, _recurse)
+    else:
+        result = _cmd_next_deliver(repo, lock, args, intent, _recurse)
 
-    return _cmd_next_deliver(repo, lock, args, intent, _recurse)
+    # ── Repeated breakpoint guard ─────────────────────────────────────────
+    # If this is a top-level call (not a _recurse) without intent, check if
+    # we're returning the same breakpoint as last time. If so, the agent
+    # called _cm_next without doing any work — escalate the instruction.
+    bp = result.get("breakpoint")
+    feat = result.get("feature")
+    if bp and max_depth == 0:
+        bp_key = f"{bp}:{feat}" if feat else bp
+        lock_data = _atomic_json_read(repo / CM_DIR / "lock.json") or {}
+        last_bp = lock_data.get("_last_breakpoint")
+        repeat_count = lock_data.get("_bp_repeat_count", 0)
+
+        if last_bp == bp_key and not intent:
+            repeat_count += 1
+            if repeat_count >= 2:
+                result["warning"] = (
+                    f"STOP calling _cm_next — you have received '{bp}' {repeat_count + 1} times "
+                    f"without making changes. You MUST use _cm_edit to do the work described "
+                    f"in 'instruction' BEFORE calling _cm_next again."
+                )
+                result["instruction"] = (
+                    f"⚠ REPEATED BREAKPOINT ({repeat_count + 1}x). "
+                    + result.get("instruction", "")
+                )
+        else:
+            repeat_count = 0
+
+        def _update_bp_tracking(data):
+            data["_last_breakpoint"] = bp_key
+            data["_bp_repeat_count"] = repeat_count
+            return {"ok": True}
+        _atomic_json_update(repo / CM_DIR / "lock.json", _update_bp_tracking)
+
+    return result
 
 
 def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
@@ -3932,21 +4148,29 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
             if feat_phase == "analyzing":
                 has_analysis, has_plan = _check_feature_md_sections(feat_md)
                 if not has_analysis or not has_plan:
-                    return {
-                        "ok": True,
-                        "breakpoint": "write_analysis",
-                        "feature": int(fid),
-                        "feature_md": str(feat_md) if feat_md else "",
-                        "instruction": (
-                            f"Fill ## Analysis and ## Plan sections in the feature markdown "
-                            f"using _cm_edit, then call _cm_next again."
-                        ),
-                        "context": {
-                            "title": spec.get("title", ""),
-                            "task": spec.get("task", ""),
-                            "acceptance_criteria": spec.get("criteria", ""),
-                        },
-                    }
+                    # ── ENGINE: analyze (read code, write Analysis+Plan) ──
+                    retries = _get_engine_retry_count(repo, fid, "analyze")
+                    if retries >= MAX_ENGINE_RETRIES:
+                        return {
+                            "ok": False,
+                            "breakpoint": "engine_failed",
+                            "feature": int(fid),
+                            "phase": "analyze",
+                            "instruction": (
+                                f"Engine failed to analyze Feature {fid} after {MAX_ENGINE_RETRIES} attempts. "
+                                "Write ## Analysis and ## Plan sections manually via _cm_edit, "
+                                "then call _cm_next again."
+                            ),
+                            "feature_md": str(feat_md) if feat_md else "",
+                        }
+                    engine_result = _run_engine_for_feature(repo, fid, "analyze", args)
+                    if not engine_result.get("ok"):
+                        _increment_engine_retry(repo, fid, "analyze")
+                        # Re-check if engine wrote the sections despite error
+                        has_analysis, has_plan = _check_feature_md_sections(feat_md)
+                        if not has_analysis or not has_plan:
+                            return _recurse()  # retry
+                    _reset_engine_retries(repo, fid)
                 # Analysis + Plan filled → auto dev
                 dev_result_args = copy.copy(args)
                 dev_result_args.feature = int(fid)
@@ -3959,16 +4183,11 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
                 feat_data = claims.get("features", {}).get(fid, {})
                 dev_state = feat_data.get("developing", {})
                 test_status = dev_state.get("test_status")
+                wt = Path(feat_data.get("worktree") or str(repo))
 
+                # ── Test intent: auto-commit + run tests ──
                 if intent == "test":
-                    # Auto-commit any staged/unstaged changes before testing.
-                    # Agent edits via _cm_edit — committing is a mechanical step.
-                    wt = feat_data.get("worktree") or str(repo)
-                    if Path(wt).exists():
-                        gs = _run_git(Path(wt), ["status", "--porcelain", "-uno"], check=False)
-                        if gs.returncode == 0 and gs.stdout.strip():
-                            _run_git(Path(wt), ["add", "-A", "--", ":(exclude).coding-master"], check=False)
-                            _run_git(Path(wt), ["commit", "-m", "wip: coding-master auto-commit before test"], check=False)
+                    _auto_commit(wt)
                     test_args = copy.copy(args)
                     test_args.feature = int(fid)
                     test_result = cmd_test(test_args)
@@ -3981,59 +4200,51 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
                     test_status = dev_state.get("test_status")
 
                     if test_status == "passed":
-                        # Auto done
+                        _reset_engine_retries(repo, fid)
                         done_args = copy.copy(args)
                         done_args.feature = int(fid)
                         done_result = cmd_done(done_args)
                         if not done_result.get("ok"):
                             return done_result
                         return _recurse()
-                    else:
-                        return {
-                            "ok": False,
-                            "breakpoint": "fix_code",
-                            "feature": int(fid),
-                            "worktree": feat_data.get("worktree", ""),
-                            "test_output": dev_state.get("test_output", ""),
-                            "instruction": (
-                                f"Tests failed. Fix the code with "
-                                f"_cm_edit(repo='{getattr(args, 'repo', '')}', file='<path>'), "
-                                f"then call _cm_next(repo='{getattr(args, 'repo', '')}', intent='test') again."
-                            ),
-                        }
+                    # Tests failed → fall through to fix below
 
-                # No test intent — prompt agent to write/test code
-                worktree = feat_data.get("worktree", "")
+                # ── ENGINE: implement or fix ──
                 if test_status == "failed":
+                    engine_phase = "fix"
+                    test_output = dev_state.get("test_output", "")
+                else:
+                    engine_phase = "implement"
+                    test_output = ""
+
+                retries = _get_engine_retry_count(repo, fid, engine_phase)
+                if retries >= MAX_ENGINE_RETRIES:
                     return {
                         "ok": False,
-                        "breakpoint": "fix_code",
+                        "breakpoint": "engine_failed",
                         "feature": int(fid),
-                        "worktree": worktree,
-                        "test_output": dev_state.get("test_output", ""),
+                        "phase": engine_phase,
+                        "worktree": str(wt),
+                        "test_output": test_output,
                         "instruction": (
-                            f"Tests failed. Fix the code with "
-                            f"_cm_edit(repo='{getattr(args, 'repo', '')}', file='<path>'), "
-                            f"then call _cm_next(repo='{getattr(args, 'repo', '')}', intent='test') to re-run tests."
+                            f"Engine failed to {engine_phase} Feature {fid} after "
+                            f"{MAX_ENGINE_RETRIES} attempts. "
+                            "Fix manually via _cm_edit, then call _cm_next again."
                         ),
                     }
-                return {
-                    "ok": True,
-                    "breakpoint": "write_code",
-                    "feature": int(fid),
-                    "worktree": worktree,
-                    "instruction": (
-                        f"Implement Feature {fid} in the worktree at '{worktree}'. "
-                        f"Use _cm_edit(repo='{getattr(args, 'repo', '')}', file='<relative-path>') to write code "
-                        f"(paths auto-resolve to the feature worktree). "
-                        f"When ready, call _cm_next(repo='{getattr(args, 'repo', '')}', intent='test') to run tests."
-                    ),
-                    "context": {
-                        "title": spec.get("title", ""),
-                        "task": spec.get("task", ""),
-                        "acceptance_criteria": spec.get("criteria", ""),
-                    },
-                }
+
+                engine_result = _run_engine_for_feature(
+                    repo, fid, engine_phase, args, test_output=test_output)
+                if not engine_result.get("ok"):
+                    _increment_engine_retry(repo, fid, engine_phase)
+                else:
+                    # Reset retries on success, but still need to test
+                    if engine_phase == "implement":
+                        _reset_engine_retries(repo, fid)
+
+                # Auto-commit engine's changes + auto-test
+                _auto_commit(wt)
+                return _recurse(intent="test")
 
         # No in-progress feature → find next claimable
         next_fid = _next_claimable_feature(plan, claims)
@@ -4066,19 +4277,32 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
 
         int_result = cmd_integrate(args)
         if not int_result.get("ok"):
-            # Auto-find which feature needs fixing
-            failing = int_result.get("data", {}).get("failed_features", [])
-            return {
-                "ok": False,
-                "breakpoint": "fix_integration",
-                "failed_features": failing,
-                "error": int_result.get("error", "integration failed"),
-                "instruction": (
-                    "Integration tests failed. Fix the code with _cm_edit, "
-                    "then call _cm_next(intent='test') to re-run feature tests, "
-                    "then _cm_next again to retry integration."
-                ),
-            }
+            # ── ENGINE: fix integration failure ──
+            retries = _get_engine_retry_count(repo, "integration", "fix")
+            if retries >= MAX_ENGINE_RETRIES:
+                failing = int_result.get("data", {}).get("failed_features", [])
+                return {
+                    "ok": False,
+                    "breakpoint": "engine_failed",
+                    "phase": "fix_integration",
+                    "failed_features": failing,
+                    "error": int_result.get("error", "integration failed"),
+                    "instruction": (
+                        f"Engine failed to fix integration after {MAX_ENGINE_RETRIES} attempts. "
+                        "Fix manually via _cm_edit, then call _cm_next again."
+                    ),
+                }
+            session_wt = lock.get("session_worktree", "")
+            engine_result = _run_engine_for_feature(
+                repo, "integration", "fix", args,
+                test_output=int_result.get("error", ""),
+                worktree_override=Path(session_wt) if session_wt else None,
+            )
+            if not engine_result.get("ok"):
+                _increment_engine_retry(repo, "integration", "fix")
+            if session_wt:
+                _auto_commit(Path(session_wt))
+            return _recurse()  # retry integrate
         return _recurse()
 
     # ── integrating phase → auto submit ──────────────────────────────────────
@@ -4087,7 +4311,7 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
         if not title:
             # Auto-generate title from PLAN.md origin task
             plan = _parse_plan_md(plan_path)
-            origin = _read_file(plan_path).split("\n") if plan_path.exists() else []
+            origin = plan_path.read_text().split("\n") if plan_path.exists() else []
             for line in origin:
                 line = line.strip()
                 if line and not line.startswith("#") and not line.startswith(">"):
