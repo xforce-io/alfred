@@ -1,6 +1,6 @@
 # Coding Master: 公约驱动 + 两层工具架构
 
-> **版本**: v5.0（v4.6 → 两层工具架构 / `_cm_next` 自动推进 / Agent 工具面 25→7 / 断点模式）
+> **版本**: v5.1（v4.6 → 两层工具架构 / `_cm_next` 自动推进 / Agent 工具面 25→7 / 断点模式 / Engine 接管代码工作 / review_changes 断点）
 > **创建时间**: 2026-03-08
 > **最后更新**: 2026-03-15
 > **状态**: Active
@@ -186,8 +186,11 @@ _cm_next()
   │   └─ fail → ENGINE: fix（带 test output 重试，最多 3 次）
   │       └─ 仍失败 → breakpoint: engine_failed
   │
-  └─ all done → auto integrate → auto submit
-      → breakpoint: complete (附 PR URL)
+  └─ all done → auto integrate
+      → breakpoint: review_changes (附 diff_summary)
+          ├─ _cm_next(intent="confirm") → auto submit → breakpoint: complete (附 PR URL)
+          ├─ _cm_next(intent="fix", feedback="...") → ENGINE fix in session wt → re-test → review_changes
+          └─ _cm_next(intent="abort") → unlock (work 保留在 branch) → breakpoint: complete (pr_url="")
 ```
 
 **`_cm_next` 断点模式（review/debug/analyze）**：
@@ -1435,23 +1438,19 @@ v4.6 的四层分组（L0-L3）缓解了认知过载，但 25 个工具仍全部
 Agent 只需要反复调用 `_cm_next`，系统告诉它做什么：
 
 ```
-Agent 典型流程:
+Agent 典型流程（v5.1）:
 
   _cm_next(repo)           → breakpoint: write_plan + template
   _cm_edit(PLAN.md)
   _cm_next(repo)           → auto plan-ready ✓ auto claim ✓
-                             breakpoint: write_analysis + feature spec
-  _cm_edit(features/01.md)
-  _cm_next(repo)           → auto dev ✓
-                             breakpoint: write_code + worktree 路径
-  _cm_edit(src/foo.py)
-  _cm_next(repo, intent="test")  → auto test ✓ auto done ✓
-                                   breakpoint: write_analysis + feature 2
-  ... 循环 ...
-  _cm_next(repo)           → all done, auto integrate ✓
-                             auto title (从 PLAN.md 提取) → auto submit ✓
-                             breakpoint: complete + PR URL
-                             （若 PLAN.md 无法提取 title → breakpoint: need_title）
+                             ENGINE: analyze → auto dev → ENGINE: implement → auto test
+                             ... Engine 自动循环所有 feature ...
+                             all done → auto integrate ✓
+                             breakpoint: review_changes + diff_summary
+  （用户审阅 diff）
+  _cm_next(repo, intent="confirm")  → auto submit ✓
+                                      breakpoint: complete + PR URL
+  （或 intent="fix"/"abort"）
 ```
 
 断点返回值契约：
@@ -1459,11 +1458,15 @@ Agent 典型流程:
 ```json
 {
   "ok": true,
-  "breakpoint": "write_code",
-  "feature": 1,
-  "worktree": "/path/to/alfred-feature-1",
-  "instruction": "编写代码实现 Feature 1，完成后调 _cm_next(intent='test')",
-  "context": {"title": "...", "task": "...", "acceptance_criteria": ["..."]}
+  "breakpoint": "review_changes",
+  "instruction": "Review diff. Confirm→_cm_next(intent='confirm'), Fix→_cm_next(intent='fix', feedback='...'), Abort→_cm_next(intent='abort')",
+  "diff_summary": {
+    "files_changed": ["src/foo.py", "tests/test_foo.py"],
+    "insertions": 42,
+    "deletions": 5,
+    "diff_stat": "...",
+    "diff_text": "..."
+  }
 }
 ```
 
@@ -1474,7 +1477,7 @@ Agent 典型流程:
 | `repo` | str | 必需，repo 名称 |
 | `mode` | str | 首次调用指定（deliver/review/debug/analyze），之后从 lock.json 读 |
 | `force` | bool | mode 冲突时强制切换（无进展的 session 自动切换，有 working/integrating 进展时需 force） |
-| `intent` | str | 触发特定操作：`test`（跑测试）、`scope`（定义分析范围，也可直接传 `diff`/`files`） |
+| `intent` | str | 触发特定操作：`confirm`（确认 diff 并提交）、`fix`（在 session worktree 修代码）、`abort`（放弃 PR，保留 branch）、`scope`（定义分析范围，也可直接传 `diff`/`files`） |
 | `diff` | str | 分析范围的 diff range（直接传即可，自动识别为 scope intent） |
 | `files` | str | 分析范围的 file list（直接传即可，自动识别为 scope intent） |
 | `title` | str | PR 标题（可选，缺失时从 PLAN.md 自动提取） |
@@ -1485,15 +1488,15 @@ Agent 典型流程:
 |------------|------|------|:---|
 | `write_plan` | deliver | PLAN.md 不存在 | `_cm_edit` 写 PLAN.md（返回值含 template） |
 | `fix_plan` | deliver | PLAN.md 格式解析失败 | `_cm_edit` 修 PLAN.md（返回值含格式说明） |
-| `write_analysis` | deliver | Feature 已 claim，需写 Analysis+Plan | `_cm_edit` 填 feature markdown |
-| `write_code` | deliver | Feature 进入 developing | `_cm_edit` 写源码，完成后 `_cm_next(intent="test")` |
-| `fix_code` | deliver | 测试失败 | `_cm_edit` 修代码，再 `_cm_next(intent="test")` |
-| `fix_integration` | deliver | 集成测试失败 | `_cm_edit` 修代码，再 `_cm_next(intent="test")` |
-| `need_title` | deliver | integration 完成，等待 PR title | `_cm_next(repo=..., title="feat: ...")` |
-| `complete` | all | 全流程完成 | 无需操作（deliver 模式返回 PR URL） |
+| `engine_failed` | deliver | Engine 重试 3 次后仍失败 | 查看 `error` 字段，告知用户或用 `_cm_edit` 手动修复后调 `_cm_next` |
+| `blocked` | deliver | 剩余 feature 全部等待依赖 | 告知用户依赖关系，等待人工解决 |
+| `review_changes` | deliver | 集成完成，等待用户审阅 diff | 展示 `diff_summary`，然后：确认→`_cm_next(intent="confirm")`；修改→`_cm_next(intent="fix", feedback="...")`；放弃→`_cm_next(intent="abort")` |
+| `complete` | all | 全流程完成（或 abort） | 展示 `pr_url`（abort 时为空字符串） |
 | `mode_conflict` | all | 当前 session mode 与请求 mode 不符 | `_cm_next(repo=..., mode=..., force=True)` 强制切换 |
-| `define_scope` | review/debug | 需要定义分析范围 | `_cm_next(intent="scope", diff="...")` |
+| `define_scope` | review/debug | 需要定义分析范围 | `_cm_next(diff="HEAD~3..HEAD")` 或 `_cm_next(files="src/foo.py")` |
 | `write_report` | review/debug | Engine 分析完成，需要写报告 | **先** `_cm_edit` 写 report/diagnosis，**再** `_cm_next` 完成 |
+
+> **v5.0 已移除的断点**（`write_analysis`、`write_code`、`fix_code`、`fix_integration`、`need_title`）：v5.1 全部由 Engine 自动处理，不再暴露给 Agent。
 
 #### Hints 一致性守护
 
