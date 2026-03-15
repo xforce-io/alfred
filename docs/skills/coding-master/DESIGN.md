@@ -1,8 +1,8 @@
-# Coding Master: 公约驱动 + 分层架构
+# Coding Master: 公约驱动 + 两层工具架构
 
-> **版本**: v4.5（v4.4 + 文件操作工具层 / Engine 降级 / 模式转换）
+> **版本**: v5.0（v4.6 → 两层工具架构 / `_cm_next` 自动推进 / Agent 工具面 25→7 / 断点模式）
 > **创建时间**: 2026-03-08
-> **最后更新**: 2026-03-13
+> **最后更新**: 2026-03-15
 > **状态**: Active
 
 ---
@@ -113,6 +113,96 @@ Agent 只接触计划层（MD）和工具层（调用），永远不直接碰数
 
 **Branch 复用**：`session.json` 持久化上一次 session 的 branch 名。`cm lock` 创建新 session 时，先读 `session.json` 中的 branch，检查该分支是否仍指向 HEAD（即没有产生过 commit）。如果是，则复用该分支；否则新建 `dev/<repo>-MMDD-HHMM`。这避免了 session 反复创建/销毁时产生大量空分支。优先级：用户 `--branch` 参数 > session.json 中可复用的分支 > 新时间戳分支。
 
+### T5: 平铺工具集 → 分层工具集 → 两层架构（v5.0）
+
+| 方案 | 优点 | 缺点 |
+|------|------|------|
+| 平铺（25 个工具同级暴露） | 实现简单；agent 可自由组合 | agent 认知负担重；选错→报错→猜→循环 |
+| 分层（v4.6：25 个工具按 L0-L3 分组 + available_actions） | 有层级意识；错误消息可精准 | 仍暴露 25 个工具；agent 仍需理解状态机 |
+| **两层架构（v5.0：7 个 Agent 工具 + 内部工具）（选定）** | agent 工具面降到 7 个；状态机对 agent 完全不可见 | `_cm_next` 内部逻辑复杂 |
+
+**决策**：从"agent 编排 + 工具执行"转变为"系统编排 + agent 在断点创造"。
+
+**问题证据**：v4.6 的四层分组缓解了认知过载，但生产轨迹（2026-03-15）显示根因未解决：
+1. **Agent 仍需理解状态机** — 25 个工具全部暴露，agent 需要知道"locked → plan-ready → claim → dev → ..."的顺序
+2. **机械步骤占比高** — deliver 流程 12 步中只有 3 步需要 agent 创造力（写 plan、写 analysis、写代码），其余 9 步是确定性状态转换
+3. **错误消息修补无止境** — 每次轨迹分析发现新的循环，都是"error message 没说清下一步"，本质是 whack-a-mole
+
+**v5.0 核心洞察**：如果 12 步中 9 步不需要 agent 动脑，为什么要让 agent 调 9 个工具？系统应该自动跑完机械步骤，只在需要创造力的地方停下来（断点）。
+
+**两层工具结构**：
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Agent 层（7 个工具，agent 直接调用）                   │
+│                                                      │
+│  _cm_next    流水线推进（唯一的流程入口）               │
+│  _cm_edit    编辑文件（plan / feature MD / 源码）      │
+│  _cm_read    读文件                                   │
+│  _cm_find    找文件                                   │
+│  _cm_grep    搜内容                                   │
+│  _cm_status  状态 + 进度 + repos 列表                 │
+│  _cm_doctor  诊断 + 修复                              │
+├─────────────────────────────────────────────────────┤
+│  Internal 层（不暴露给 agent，_cm_next 内部调用）       │
+│                                                      │
+│  cmd_lock / cmd_unlock / cmd_plan_ready              │
+│  cmd_claim / cmd_dev / cmd_test / cmd_done           │
+│  cmd_reopen / cmd_integrate / cmd_submit             │
+│  cmd_scope / cmd_engine_run / cmd_report             │
+│  cmd_git / cmd_journal / cmd_change_summary          │
+│                                                      │
+│  仍可通过 CLI (cm lock, cm claim ...) 手动调用        │
+└─────────────────────────────────────────────────────┘
+```
+
+**`_cm_next` 断点模式（deliver）**：
+
+```
+_cm_next()
+  ├─ 无 lock → auto lock → breakpoint: write_plan (附 template)
+  ├─ locked + PLAN.md → auto plan-ready → auto claim
+  │   → breakpoint: write_analysis (附 feature spec)
+  ├─ feature analyzing + 有 Analysis/Plan → auto dev
+  │   → breakpoint: write_code (附 worktree 路径)
+  ├─ _cm_next(intent="test") → auto test
+  │   ├─ fail → breakpoint: fix_code (附 test output)
+  │   └─ pass → auto done → auto claim next 或 auto integrate
+  └─ all done → auto integrate → auto submit (title 从 PLAN.md 自动提取)
+      → breakpoint: complete (附 PR URL)
+```
+
+**`_cm_next` 断点模式（review/debug/analyze）**：
+
+```
+_cm_next(mode="review")
+  ├─ 无 lock → auto lock(mode) → breakpoint: define_scope
+  ├─ _cm_next(diff="...") → auto scope + auto engine-run
+  │   → breakpoint: write_report (附 findings)
+  │   （也支持 intent="scope" 写法，但 diff/files 参数足以自动识别）
+  └─ report 已写 → auto unlock → breakpoint: complete
+```
+
+**断点返回值契约**：
+
+```json
+{
+  "ok": true,
+  "breakpoint": "write_code",
+  "feature": 1,
+  "worktree": "/path/to/alfred-feature-1",
+  "instruction": "编写代码实现 Feature 1，完成后调 _cm_next(intent='test')",
+  "context": {"title": "...", "task": "...", "acceptance_criteria": ["..."]}
+}
+```
+
+**关键设计约束**：
+- **Agent 只调 `_cm_next` + `_cm_edit`** — 流程入口唯一，编辑入口唯一，不可能选错工具
+- **状态机对 agent 不可见** — agent 不知道 session_phase、feature_phase 等概念
+- **`_cm_next` 递归推进** — 自动跳过所有机械步骤，直到碰到需要 agent 创造力的断点
+- **递归深度保护** — `max_depth=10`，超过则返回当前状态 + 建议 `_cm_doctor`
+- **CLI 不受影响** — `cm lock`、`cm claim` 等命令仍可通过 CLI 手动调用
+
 ---
 
 ## 3. 文件架构
@@ -159,17 +249,16 @@ Agent 只接触计划层（MD）和工具层（调用），永远不直接碰数
 │  JOURNAL.md — 开发日志（通过 cm journal 追加）              │
 │  features/XX.md — 工作现场：分析/方案/AC打勾/日志（owner写） │
 ├──────────────────────────────────────────────────────────┤
-│  工具层（Python）— agent 调用                                │
+│  工具层（Python）— 两层架构                                   │
 │                                                          │
-│  文件操作：cm read / find / grep / edit                    │
-│  Session 管理：cm lock / unlock / renew / status          │
-│  模式升级：cm lock --mode debug（review/analyze → debug）  │
-│  状态推进：cm claim / dev / test / done                    │
-│  Engine 加速：cm engine-run（子进程深度分析，可降级）         │
-│  信息查询：cm progress                                     │
-│  辅助操作：cm journal / submit / doctor                    │
+│  Agent 层（7 个，agent 直接调用）：                          │
+│    next / edit / read / find / grep / status / doctor     │
 │                                                          │
-│  每个工具做一件事：推进状态机 + 检查前置条件                   │
+│  Internal 层（不暴露，_cm_next 内部调用）：                    │
+│    lock / unlock / start / plan-ready                     │
+│    claim / dev / test / done / reopen                     │
+│    integrate / submit / git / journal / ...               │
+│                                                          │
 │  向上：被 agent 调用      向下：读写数据层                    │
 ├──────────────────────────────────────────────────────────┤
 │  数据层（JSON）— agent 不可见                               │
@@ -216,8 +305,8 @@ cm lock        cm plan-ready          cm claim      cm integrate(pass)  cm submi
 
 | session_phase | 含义 | 进入条件 | cm progress 显示 |
 |---------------|------|----------|------------------|
-| `locked` | workspace 锁定，尚未规划 | `cm lock` | PLAN.md 不存在："创建 PLAN.md 定义 feature 列表"；PLAN.md 已存在："运行 cm plan-ready 审核" |
-| `reviewed` | PLAN.md 已审核通过，可以开始开发 | `cm plan-ready` 检查通过 | "认领 feature 开始开发" |
+| `locked` | workspace 锁定，尚未规划 | `cm start` | PLAN.md 不存在："用 _cm_edit 创建 PLAN.md"；PLAN.md 已存在："运行 _cm_start 验证并推进" |
+| `reviewed` | PLAN.md 已审核通过，可以开始开发 | `cm start`（内部调 plan-ready）检查通过 | "认领 feature 开始开发" |
 | `working` | 有 feature 在进行中 | 第一个 `cm claim` | 显示各 feature 状态 |
 | `integrating` | 所有 feature done，集成验证通过 | `cm integrate` 成功 | "运行 cm submit 提交" |
 | `done` | 已提交并解锁 | `cm submit` 成功 | — |
@@ -237,7 +326,7 @@ cm lock        cm plan-ready          cm claim      cm integrate(pass)  cm submi
 }
 ```
 
-`session_phase` 由工具在关键操作时自动更新（`cm lock` → locked，`cm plan-ready` → reviewed，`cm claim` → working，`cm integrate` → integrating 等），agent 不需要手动管理。`cm progress` 是纯查询工具，只读取状态并展示，**不修改任何状态**。
+`session_phase` 由工具在关键操作时自动更新（`cm start` → locked/reviewed，`cm claim` → working，`cm integrate` → integrating 等），agent 不需要手动管理。`cm progress` 是纯查询工具，只读取状态并展示，**不修改任何状态**。
 
 为什么是 JSON 不是 MD：锁需要原子性判断（是否过期、是否已占用），session phase 需要精确枚举，程序解析 JSON 零歧义。
 
@@ -370,30 +459,21 @@ cm lock        cm plan-ready          cm claim      cm integrate(pass)  cm submi
                     plan: ─/done                  │
                                                   │
                                         ┌─────────┴──────────────────┐
-                                        │  developing 内部（双层循环）  │
+                                        │  developing 内部（test 循环） │
                                         │                            │
-                                        │  外层：review 循环          │
-                                        │  ┌──────────────────────┐  │
-                                        │  │ 内层：test 循环       │  │
-                                        │  │                      │  │
-                                        │  │ edit → commit → test ─┤  │
-                                        │  │  ↑          failed ──┘  │
-                                        │  │  └──────────────────    │
-                                        │  └── passed ──► review ─┤  │
-                                        │   ↑        changes_req ─┘  │
-                                        │   └─────────────────────   │
-                                        │      approved ──► done     │
+                                        │  edit → commit → test ─────┤│
+                                        │   ↑              failed ───┘│
+                                        │   └────────────────────     │
+                                        │             passed ──► done │
                                         │                            │
                                         │  代码变更后:                 │
                                         │  test passed → stale       │
-                                        │  review approved → stale   │
                                         └────────────────────────────┘
 ```
 
-**双层循环说明**：
-- **内层（test 循环）**：编码 → 提交 → `cm test`，解决"代码能不能跑"。test 失败则修复后重新 test。
-- **外层（review 循环）**：test 通过后 → `cm review`，由**独立 engine**（与开发 engine 不同）审查代码质量。review 不通过则打回修改，修改后需重新通过 test 内层。
-- `cm done` 要求 review 通过且不 stale 才允许标记完成。
+**test 循环说明**：
+- 编码 → 提交 → `cm test`，解决"代码能不能跑"。test 失败则修复后重新 test。
+- `cm done` 要求 `test_status == passed && test_commit == git HEAD`。
 
 每个阶段内部有**独立的子状态**，记录该阶段的进展和产出物。`cm progress` 从子状态生成精确的自然语言指引。
 
@@ -421,7 +501,7 @@ cm lock        cm plan-ready          cm claim      cm integrate(pass)  cm submi
 
 ---
 
-**developing 阶段**：编码 + 测试 + review 双层循环
+**developing 阶段**：编码 + 测试循环
 
 | 字段 | 取值 | 含义 |
 |------|------|------|
@@ -430,37 +510,18 @@ cm lock        cm plan-ready          cm claim      cm integrate(pass)  cm submi
 | `test_status` | `pending` / `passed` / `failed` | 最近一次测试结果 |
 | `test_commit` | `"a1b2c3d"` / `null` | 测试时的 HEAD SHA |
 | `test_passed_at` | ISO timestamp / `null` | 最近一次测试通过的时间 |
-| `test_output` | `"3 passed, 1 failed: test_scan_empty FAILED AssertionError..."` / `null` | 最近一次测试的输出摘要（截断到 500 字符） |
-| `review_status` | `pending` / `approved` / `changes_requested` | 最近一次 review 结果 |
-| `review_commit` | `"a1b2c3d"` / `null` | review 时的 HEAD SHA |
-| `review_engine` | `"gemini"` / `null` | 执行 review 的 engine 名称 |
-| `review_output` | review 正文（截断） / `null` | review 意见全文 |
-| `review_at` | ISO timestamp / `null` | 最近一次 review 时间 |
+| `test_output` | `"3 passed, 1 failed: ..."` / `null` | 最近一次测试的输出摘要（截断到 500 字符） |
 
-**内层（test 循环）**：
+**test 循环**：
 - `cm test` 更新 `test_status`、`test_commit`、`test_passed_at`、`test_output`；同时从 git log 更新 `commit_count`、`latest_commit`
 - test 失败 → 修复代码 → 重新 `cm test`
 - **自动回退**：`cm progress` 检测到 `test_commit ≠ latest_commit` 时，将 `test_status` 显示为 `stale`（需重新 cm test）
 - **接力支持**：`test_output` 持久化测试失败原因，接力 agent 无需重跑测试即可理解失败上下文
 
-**外层（review 循环）**：
-- `cm review` 的前置条件：`test_status == passed && test_commit == git HEAD`（同 cm done）
-- `cm review` 调用**独立 engine**（与开发 engine 不同，避免自己 review 自己）审查 `base..HEAD` 的 diff
-- engine 输出自由文本 review 意见，末尾必须包含标记行：`VERDICT: APPROVED` 或 `VERDICT: CHANGES_REQUESTED`
-- 工具解析标记行确定 `review_status`，其余文本存入 `review_output`
-- review 通过 → 返回 `diff_url`（GitHub compare 链接）+ review 摘要
-- review 不通过 → 返回问题列表 + next_action "fix and re-run cm review"，打回修改后需重新过 test 内层
-- **自动回退**：代码变更后 `review_status` 变为 stale（`review_commit ≠ HEAD`）
-
-**cm done 的前置条件**（双重 gate）：
+**cm done 的前置条件**：
 1. `test_status == passed && test_commit == git HEAD`
-2. `review_status == approved && review_commit == git HEAD`
-不满足任一条件则拒绝。
 
-**review engine 选择**：
-- 开发和 review 使用不同 engine，避免"自己 review 自己"
-- engine 配置来源：workspace config > `cm review --engine <name>` 参数 > 默认（第一个非开发 engine）
-- v1 可选 engine：`claude-code`（默认开发）、`gemini`（默认 review）
+> **v5.1 规划**：外层 review 循环（独立 engine 代码审查，`VERDICT: APPROVED/CHANGES_REQUESTED`）尚未实现，预留于多 agent 场景。
 
 ---
 
@@ -491,11 +552,7 @@ cm lock        cm plan-ready          cm claim      cm integrate(pass)  cm submi
         "test_status": "passed",
         "test_commit": "a1b2c3d",
         "test_passed_at": "2026-03-08T10:41:00Z",
-        "review_status": "approved",
-        "review_commit": "a1b2c3d",
-        "review_engine": "gemini",
-        "review_output": "Code looks good. Clean separation of concerns...\nVERDICT: APPROVED",
-        "review_at": "2026-03-08T10:41:30Z"
+        "test_output": null
       },
       "completed_at": "2026-03-08T10:42:00Z"
     },
@@ -517,11 +574,7 @@ cm lock        cm plan-ready          cm claim      cm integrate(pass)  cm submi
         "test_status": "failed",
         "test_commit": "a1b2c3d",
         "test_passed_at": null,
-        "review_status": "pending",
-        "review_commit": null,
-        "review_engine": null,
-        "review_output": null,
-        "review_at": null
+        "test_output": "test_scan_incremental FAILED - AssertionError: watermark not updated"
       }
     },
     "3": {
@@ -542,11 +595,7 @@ cm lock        cm plan-ready          cm claim      cm integrate(pass)  cm submi
         "test_status": "passed",
         "test_commit": "e4f5g6h",
         "test_passed_at": "2026-03-08T11:30:00Z",
-        "review_status": "changes_requested",
-        "review_commit": "e4f5g6h",
-        "review_engine": "gemini",
-        "review_output": "Missing error handling in scan_batch()...\nVERDICT: CHANGES_REQUESTED",
-        "review_at": "2026-03-08T11:31:00Z"
+        "test_output": null
       }
     }
   }
@@ -567,7 +616,7 @@ Feature 1 [done] dolphin-a
   worktree: ../alfred-feature-1
   feature_md: .coding-master/features/01-scanner-interface.md
   ✓ analyzing: analysis done, plan done
-  ✓ developing: 4 commits, tests passed (a1b2c3d), review approved (gemini)
+  ✓ developing: 4 commits, tests passed (a1b2c3d)
   ✓ completed
 
 Feature 2 [developing] dolphin-a
@@ -587,18 +636,14 @@ Feature 3 [developing] dolphin-b
   worktree: ../alfred-feature-3
   feature_md: .coding-master/features/03-report-generator.md
   ✓ analyzing: analysis done, plan done
-  ⚠ developing: 5 commits, tests passed (e4f5g6h), review CHANGES_REQUESTED (gemini)
-    review: Missing error handling in scan_batch()...
+  ✓ developing: 5 commits, tests passed (e4f5g6h)
   → 操作步骤:
-    1. cd ../alfred-feature-3
-    2. 阅读 review 意见修复代码
-    3. git commit
-    4. 运行 cm test --feature 3（代码变更后需重新测试）
-    5. 运行 cm review --feature 3
+    1. 阅读 {feature_md} 确认 Acceptance Criteria 全部满足
+    2. 运行 cm done --feature 3
 
 建议:
 - dolphin-a 修复 Feature 2 的测试失败（进入 worktree ../alfred-feature-2）
-- dolphin-b 根据 review 意见修复 Feature 3（review 打回后需重新 test → review）
+- dolphin-b 确认 AC 后标记 Feature 3 完成
 ```
 
 **接力 agent 通过 progress 获得的完整信息**：
@@ -617,7 +662,7 @@ Feature 3 [developing] dolphin-b
 | session_phase | PLAN.md 存在？ | 指引 |
 |---------------|---------------|------|
 | `locked` | 否 | 1. 分析需求 2. 创建 `.coding-master/PLAN.md`（按模板） |
-| `locked` | 是 | 1. 检查 PLAN.md 内容完整性（每个 feature 有 Task + AC + Depends on） 2. 运行 `cm plan-ready` |
+| `locked` | 是 | 1. 用 `_cm_edit` 创建 PLAN.md（每个 feature 有 Task + AC + Depends on） 2. 运行 `_cm_start` 验证并推进 |
 | `reviewed` | — | 1. 运行 `cm claim --feature N` 认领可用 feature |
 | `working` | — | （显示各 feature 的指引） |
 | `integrating` | — | 1. 运行 `cm submit --title "..."` 提交 |
@@ -634,10 +679,7 @@ Feature 3 [developing] dolphin-b
 | `developing` | `test_status == pending` | 1. `cd {worktree}` 2. 阅读 `{feature_md}` 的 Plan 了解开发计划 3. 编写代码 4. `git commit` 5. 运行 `cm test --feature N` |
 | `developing` | `test_status == failed` | 1. `cd {worktree}` 2. 阅读 `{feature_md}` 的 Dev Log 了解上下文 3. 失败原因: `{test_output}` 4. 修复代码 5. `git commit` 6. 运行 `cm test --feature N` |
 | `developing` | `test_status == passed, test_commit ≠ latest` | 1. `cd {worktree}` 2. 代码在测试后有变更 3. 运行 `cm test --feature N` 重新测试 |
-| `developing` | `test passed, review_status == pending` | 1. 运行 `cm review --feature N` 进行代码审查 |
-| `developing` | `test passed, review == changes_requested` | 1. `cd {worktree}` 2. 阅读 review 意见 3. 修复代码 4. `git commit` 5. `cm test --feature N` 6. `cm review --feature N` |
-| `developing` | `test passed, review == approved, review_commit ≠ latest` | 1. 代码在 review 后有变更 2. `cm test --feature N` 3. `cm review --feature N` |
-| `developing` | `test passed, review == approved, review_commit == latest` | 1. 阅读 `{feature_md}` 确认 Acceptance Criteria 全部满足 2. 运行 `cm done --feature N` |
+| `developing` | `test passed, test_commit == latest` | 1. 阅读 `{feature_md}` 确认 Acceptance Criteria 全部满足 2. 运行 `cm done --feature N` |
 | `done` | — | ✓ 已完成 |
 
 #### 3.4.5 隐式约定：pending feature 无需预写入
@@ -906,7 +948,7 @@ Agent B: "Feature 3 解锁了"
                           Session 状态机
                           ═════════════
 
-cm lock         cm plan-ready       cm claim(首次)    cm integrate      cm submit
+cm start        cm start(+PLAN)     cm claim(首次)    cm integrate      cm submit
    │                │                    │                │                │
    ▼                ▼                    ▼                ▼                ▼
 ┌────────┐    ┌──────────┐        ┌──────────┐    ┌─────────────┐    ┌──────┐
@@ -952,17 +994,19 @@ cm claim           cm dev          cm test    cm review      cm done
 
 **Deliver 指令序列与关键状态**：
 
-| 步骤 | 指令 | Session Phase | Feature Phase | 关键状态字段 | 前置条件 |
-|------|------|--------------|---------------|-------------|---------|
-| 1 | `cm lock` | → `locked` | — | `mode=deliver`, `branch`, `session_worktree` | 无活跃 session |
-| 2 | `cm plan-ready` | → `reviewed` | — | `plan_reviewed_at` | PLAN.md 存在且合法 |
-| 3 | `cm claim --feature N` | → `working`* | → `analyzing` | `agent`, `branch`, `worktree` | 无阻塞依赖，未被认领 |
-| 4 | `cm dev --feature N` | — | → `developing` | `analyzing.completed_at`, `developing.started_at` | Analysis + Plan 段落非空 |
-| 5 | `cm test --feature N` | — | — (子状态更新) | `test_status`, `test_commit`, `test_output` | phase=developing，无未提交变更 |
-| 6 | `cm review --feature N` | — | — (子状态更新) | `review_status`, `review_commit`, `review_output` | test 通过且 test_commit=HEAD |
-| 7 | `cm done --feature N` | — | → `done` | `completed_at`, `diff_url` | test 通过 + review approved，均不 stale |
-| 8 | `cm integrate` | → `integrating` | — | `integration_passed_at` | 所有 feature done |
-| 9 | `cm submit` | → `done` | — | PR URL | 集成测试通过 |
+| 步骤 | 指令 | Agent 调用 | Session Phase | Feature Phase | 关键状态字段 | 前置条件 |
+|------|------|-----------|--------------|---------------|-------------|---------|
+| 1 | `cm start` | `_cm_start` | → `locked`/`reviewed` | — | `mode=deliver`, `branch`, `session_worktree` | 无活跃 session（或自动 join） |
+| 2 | 创建 PLAN.md + `cm start` | `_cm_edit` + `_cm_start` | → `reviewed` | — | `plan_reviewed_at` | PLAN.md 存在且合法 |
+| 3 | `cm claim --feature N` | `_cm_claim` | → `working`* | → `analyzing` | `agent`, `branch`, `worktree` | 无阻塞依赖，未被认领 |
+| 4 | `cm dev --feature N` | `_cm_dev` | — | → `developing` | `analyzing.completed_at`, `developing.started_at` | Analysis + Plan 段落非空 |
+| 5 | `cm test --feature N` | `_cm_test` | — | — (子状态更新) | `test_status`, `test_commit`, `test_output` | phase=developing，无未提交变更 |
+| 6 | `cm review --feature N` | — | — | — (子状态更新) | `review_status`, `review_commit`, `review_output` | test 通过且 test_commit=HEAD |
+| 7 | `cm done --feature N` | `_cm_done` | — | → `done` | `completed_at`, `diff_url` | test 通过 + review approved，均不 stale |
+| 8 | `cm integrate` | `_cm_integrate` | → `integrating` | — | `integration_passed_at` | 所有 feature done |
+| 9 | `cm submit` | `_cm_submit` | → `done` | — | PR URL | 集成测试通过 |
+
+> **注意**：`cm plan-ready` 不作为独立工具暴露给 agent（无 `_cm_plan_ready`）。`_cm_start` 内部自动调用 plan-ready。Agent 的操作路径是：`_cm_edit` 创建 PLAN.md → `_cm_start` 验证并推进到 reviewed。
 
 \* 仅首次 claim 时从 `reviewed` → `working`，后续 claim 不变更 session phase。
 
@@ -1186,7 +1230,7 @@ version: "3.0.0"
 **Session 级**：
 1. **锁定** — `cm lock --repo <name>`（session: locked）
 2. **规划** — 创建 PLAN.md，定义 feature 列表和验收标准
-3. **审核** — `cm plan-ready` 检查 PLAN.md 格式和内容完整性（session: locked → reviewed）
+3. **审核** — `cm start` 内部调用 plan-ready 检查 PLAN.md 格式和内容完整性（session: locked → reviewed）
 
 **Feature 级**（每个 feature 重复）：
 4. **认领** — `cm claim --feature <n>`（feature: pending → analyzing，session: working）
@@ -1316,15 +1360,127 @@ skills/coding-master/
 ├── SKILL.md                     # 公约层：不可变的流程定义
 ├── coding_master_skillkit.py    # Dolphin 原生 tools 注册（替代 _bash + cm CLI）
 ├── scripts/
-│   ├── tools.py                 # 核心工具（~2900 行，含 v4 证据/委托/模式/engine）
+│   ├── tools.py                 # 核心工具（~3600 行，含 v4 证据/委托/模式/engine/文件操作）
 │   ├── engine.py                # Engine 抽象 + ClaudeCodeEngine 实现
 │   ├── config_manager.py        # 配置管理
 │   └── test_runner.py           # 测试运行器
 └── tests/
     └── unit/
         ├── test_engine.py       # Engine 单元测试
-        └── test_skillkit.py     # Skillkit 注册测试
+        └── test_skillkit.py     # Skillkit 注册测试 + hints 一致性守护
 ```
+
+#### 两层工具架构（v5.0）
+
+v4.6 的四层分组（L0-L3）缓解了认知过载，但 25 个工具仍全部暴露给 agent，根因未解决。v5.0 的核心转变：**agent 不再编排流程，系统自动推进，agent 只在创造性断点停下来写代码**。
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Agent 层（7 个工具 — agent 直接调用）                             │
+│                                                                 │
+│  _cm_next     流水线推进（唯一的流程入口）                          │
+│               自动跑完所有机械步骤，在断点停下                       │
+│               intent 参数触发特定操作（test / scope）              │
+│                                                                 │
+│  _cm_edit     编辑文件（plan / feature MD / 源码）                │
+│               .coding-master/*.md 元数据无门槛放行                │
+│               源码需 feature 在 developing 阶段                   │
+│                                                                 │
+│  _cm_read     读文件（无 lock 时 fallback 到原始仓库）             │
+│  _cm_find     找文件                                             │
+│  _cm_grep     搜索内容                                           │
+│                                                                 │
+│  _cm_status   查看状态 + 进度 + repos 列表                        │
+│               无 repo 参数 → 列出所有 repos                       │
+│               有 repo 参数 → 完整 session/feature 状态             │
+│                                                                 │
+│  _cm_doctor   诊断 + 修复（fix=True 时有写操作）                   │
+│                                                                 │
+│  设计原则：agent 日常只用 _cm_next + _cm_edit 两个工具。           │
+│  read/find/grep 用于理解代码。status/doctor 用于调试。             │
+├─────────────────────────────────────────────────────────────────┤
+│  Internal 层（不暴露给 agent — _cm_next 内部调用）                 │
+│                                                                 │
+│  Session:  cmd_lock / cmd_unlock / cmd_start / cmd_plan_ready   │
+│  Feature:  cmd_claim / cmd_dev / cmd_test / cmd_done            │
+│            cmd_reopen / cmd_integrate / cmd_submit              │
+│  开发:    cmd_git / cmd_journal / cmd_change_summary            │
+│  Review:  cmd_scope / cmd_engine_run / cmd_report               │
+│  辅助:    cmd_regression / cmd_renew                             │
+│                                                                 │
+│  仍可通过 CLI (cm lock, cm claim ...) 手动调用。                  │
+│  CLI 面向高级用户和调试，不影响 agent 工作流。                       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### `_cm_next` 断点模式
+
+Agent 只需要反复调用 `_cm_next`，系统告诉它做什么：
+
+```
+Agent 典型流程:
+
+  _cm_next(repo)           → breakpoint: write_plan + template
+  _cm_edit(PLAN.md)
+  _cm_next(repo)           → auto plan-ready ✓ auto claim ✓
+                             breakpoint: write_analysis + feature spec
+  _cm_edit(features/01.md)
+  _cm_next(repo)           → auto dev ✓
+                             breakpoint: write_code + worktree 路径
+  _cm_edit(src/foo.py)
+  _cm_next(repo, intent="test")  → auto test ✓ auto done ✓
+                                   breakpoint: write_analysis + feature 2
+  ... 循环 ...
+  _cm_next(repo)           → all done, auto integrate ✓
+                             auto title (从 PLAN.md 提取) → auto submit ✓
+                             breakpoint: complete + PR URL
+                             （若 PLAN.md 无法提取 title → breakpoint: need_title）
+```
+
+断点返回值契约：
+
+```json
+{
+  "ok": true,
+  "breakpoint": "write_code",
+  "feature": 1,
+  "worktree": "/path/to/alfred-feature-1",
+  "instruction": "编写代码实现 Feature 1，完成后调 _cm_next(intent='test')",
+  "context": {"title": "...", "task": "...", "acceptance_criteria": ["..."]}
+}
+```
+
+`_cm_next` 参数：
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `repo` | str | 必需，repo 名称 |
+| `mode` | str | 首次调用指定（deliver/review/debug/analyze），之后从 lock.json 读 |
+| `force` | bool | mode 冲突时强制切换（无进展的 session 自动切换，有 working/integrating 进展时需 force） |
+| `intent` | str | 触发特定操作：`test`（跑测试）、`scope`（定义分析范围，也可直接传 `diff`/`files`） |
+| `diff` | str | 分析范围的 diff range（直接传即可，自动识别为 scope intent） |
+| `files` | str | 分析范围的 file list（直接传即可，自动识别为 scope intent） |
+| `title` | str | PR 标题（可选，缺失时从 PLAN.md 自动提取） |
+
+#### 断点类型总表
+
+| breakpoint | 模式 | 含义 | Agent 接下来做什么 |
+|------------|------|------|:---|
+| `write_plan` | deliver | PLAN.md 不存在 | `_cm_edit` 写 PLAN.md（返回值含 template） |
+| `fix_plan` | deliver | PLAN.md 格式解析失败 | `_cm_edit` 修 PLAN.md（返回值含格式说明） |
+| `write_analysis` | deliver | Feature 已 claim，需写 Analysis+Plan | `_cm_edit` 填 feature markdown |
+| `write_code` | deliver | Feature 进入 developing | `_cm_edit` 写源码，完成后 `_cm_next(intent="test")` |
+| `fix_code` | deliver | 测试失败 | `_cm_edit` 修代码，再 `_cm_next(intent="test")` |
+| `fix_integration` | deliver | 集成测试失败 | `_cm_edit` 修代码，再 `_cm_next(intent="test")` |
+| `need_title` | deliver | integration 完成，等待 PR title | `_cm_next(repo=..., title="feat: ...")` |
+| `complete` | all | 全流程完成 | 无需操作（deliver 模式返回 PR URL） |
+| `mode_conflict` | all | 当前 session mode 与请求 mode 不符 | `_cm_next(repo=..., mode=..., force=True)` 强制切换 |
+| `define_scope` | review/debug | 需要定义分析范围 | `_cm_next(intent="scope", diff="...")` |
+| `write_report` | review/debug | Engine 分析完成，需要写报告 | **先** `_cm_edit` 写 report/diagnosis，**再** `_cm_next` 完成 |
+
+#### Hints 一致性守护
+
+`TestHintToolConsistency`（`tests/unit/test_skillkit.py`）确保所有 hints/errors 中的 `_cm_xxx` 引用都存在于 skillkit 注册表中。v5.0 中注册表只有 7 个工具，hints 只应引用这 7 个。
 
 ### 7.2 工具实现概要
 
@@ -1483,7 +1639,7 @@ def cmd_claim(args) -> dict:
     lock = _atomic_json_read(lock_path)
     if lock.get("session_phase") == "locked":
         return {"ok": False, "error": "session is locked, "
-                "run cm plan-ready first to review PLAN.md before claiming features"}
+                "create PLAN.md via cm edit, then run cm start to validate before claiming features"}
     if lock.get("session_phase") not in ("reviewed", "working"):
         return {"ok": False, "error": f"session is {lock.get('session_phase')}, cannot claim"}
 
@@ -2009,7 +2165,7 @@ def _generate_session_steps(session_phase: str, plan_exists: bool) -> list:
         if plan_exists:
             return [
                 "检查 PLAN.md 内容完整性（每个 feature 有 Task + Acceptance Criteria + Depends on）",
-                "运行 cm plan-ready",
+                "运行 _cm_start 验证 PLAN.md 并推进到 reviewed",
             ]
         return ["分析需求", "创建 .coding-master/PLAN.md（按 SKILL.md 模板）"]
     if session_phase == "reviewed":
@@ -2507,17 +2663,26 @@ def _parse_plan_md(path: Path) -> dict:
 
 解析失败的 feature 跳过不崩溃。agent 写坏了 PLAN.md 的某个 section，不影响其他 feature 的解析。
 
-### 7.4 文件操作工具（v4.5 新增）
+### 7.4 文件操作工具（v4.5 新增，v4.6 分层调整）
 
-文件操作工具是 agent 的基础代码作业能力，弥补 skillkit 宿主中无原生文件访问的缺口。所有文件操作工具自动感知 session worktree——有活跃 session 且有 worktree 时，默认在 worktree 中操作。
+文件操作工具是 agent 的基础代码作业能力，弥补 skillkit 宿主中无原生文件访问的缺口。
+
+**v4.6 分层调整**：只读操作（`read`/`find`/`grep`）属于 L0 层，无 lock 时 fallback 到原始仓库根目录。这解决了 "agent 只想读代码却被迫建 session → 建 session 失败 → 死循环" 的问题。写操作（`edit`）仍要求活跃 session + developing feature（L3 层）。
+
+所有文件操作工具自动感知 session worktree——有活跃 session 且有 worktree 时，默认在 worktree 中操作。
 
 #### 工作目录解析
 
 ```python
 def _resolve_working_dir(args) -> Path:
-    """解析工作目录：优先 session worktree，fallback 到 repo 根目录。"""
-    repo = _resolve_locked_repo(args)
+    """解析工作目录：优先 session worktree，fallback 到 repo 根目录。
+
+    v4.6：只读操作在无 lock 时直接返回 repo 根目录，不 _fail。
+    """
+    repo = _repo_path(args.repo)  # 不再调 _resolve_locked_repo
     lock = _atomic_json_read(repo / CM_DIR / "lock.json")
+    if not lock:
+        return repo  # L0 fallback: 无 session 时直接用原始仓库
     session_wt = lock.get("session_worktree")
     # 如果有 feature 参数且有 feature worktree，优先用 feature worktree
     feature_id = getattr(args, "feature", None)
@@ -2532,25 +2697,27 @@ def _resolve_working_dir(args) -> Path:
     return repo
 ```
 
-#### cm read — 读文件
+#### cm read — 读文件（L0 层，无门槛）
 
 ```python
 def cmd_read(args) -> dict:
     """读取文件内容。支持行范围，默认全文（上限 2000 行）。
+
+    L0 层工具：无 lock 时 fallback 到 repo 根目录。
 
     参数：
     - file: 文件路径（绝对路径或相对于 working dir）
     - start_line: 起始行号（1-based，可选）
     - end_line: 结束行号（inclusive，可选）
     """
-    cwd = _resolve_working_dir(args)
+    repo = _repo_path(args.repo)  # 不再要求 lock
+    cwd = _resolve_working_dir(repo, args)  # 有 session 时用 worktree，无则 repo 根
     target = Path(args.file)
     if not target.is_absolute():
         target = cwd / target
     target = target.resolve()
 
     # 安全检查：禁止读取 repo 外的文件
-    repo = _resolve_locked_repo(args)
     if not _is_within_repo(target, repo):
         return {"ok": False, "error": f"path {target} is outside repo"}
 
@@ -2969,9 +3136,9 @@ PLAN.md 内容：
 
 ### Step 2.5: Agent A 审核 PLAN.md
 
-**Agent A 操作**：`cm plan-ready`
+**Agent A 操作**：`_cm_start`（PLAN.md 已存在，自动触发 plan-ready）
 
-**工具层**：`cmd_plan_ready` 执行：
+**工具层**：`cmd_start` → `cmd_plan_ready` 执行：
 1. 读 `.coding-master/PLAN.md`，`_parse_plan_md` 解析出 4 个 feature
 2. 检查每个 feature：title ✓，task ✓，acceptance criteria ✓
 3. 检查 depends_on 引用合法性：Feature 2 → Feature 1 ✓，Feature 3 → Feature 1 ✓，Feature 4 → Feature 2,3 ✓
@@ -4186,8 +4353,9 @@ def parallel_run(n, cmd_fn):
 2. **agent 只接触上两层** — 读写 MD + 调用工具，永远不碰 JSON（就像用户不直接写数据库）
 3. **需要表达的上浮，需要保证的下沉** — agent 理解的用 MD，程序保证的用 JSON
 4. **公约不可变** — SKILL.md 是人类定义的宪法，agent 不得修改；违规由 inspector 检测纠正（公约约束而非技术强制）
-5. **工具只做机械活** — 不做编排、不做分析、不做开发
-6. **两级状态机 + 双关卡** — session 级（locked → reviewed → working → integrating → done）+ feature 级（pending → analyzing → developing → done）；Plan review 是入口关卡（防低质量拆分），Integration 是出口关卡（防合并回归）；`cm progress` 是纯查询工具，将两级状态翻译为分步操作指引，支持接力 agent 无缝接手
+5. **工具只做机械活** — 不做编排、不做分析、不做开发。`_cm_next` 是唯一例外：它编排机械步骤的自动推进，但创造性工作（写代码）仍由 agent 完成
+6. **两级状态机 + 双关卡** — session 级（locked → reviewed → working → integrating → done）+ feature 级（pending → analyzing → developing → done）；Plan review 是入口关卡（防低质量拆分），Integration 是出口关卡（防合并回归）
+6b. **两层工具架构 + 断点模式** — Agent 只接触 7 个工具（`_cm_next` + `_cm_edit` + read/find/grep + status + doctor），内部 15+ 个工具由 `_cm_next` 自动调用。状态机对 agent 不可见，`_cm_next` 自动推进机械步骤，只在需要创造力的断点停下来。Agent 的工作流简化为：调 `_cm_next` → 做系统说的事 → 再调 `_cm_next`
 7. **测试绑定 commit** — `cm test` 将测试结果（含输出摘要）写入 developing 子状态并绑定 commit SHA；代码变更后 test_commit ≠ latest_commit，`cm done` 拒绝，必须重新测试
 8. **双层质量循环** — 内层 test 循环解决"代码能不能跑"，外层 review 循环（独立 engine）解决"代码写得好不好"；review 打回触发新一轮 test 循环；`cm done` 要求双重 gate（test passed + review approved）均不 stale
 9. **三级测试** — feature 级 `cm test` 验证单个 feature；feature 级 `cm review` 独立 engine 审查代码质量；session 级 `cm integrate` 合并所有 feature 后跑全量测试，防止 feature 间交互导致的回归
@@ -4207,3 +4375,6 @@ def parallel_run(n, cmd_fn):
 22. **Evidence-driven 验证** — `evidence/N-verify.json` 记录结构化测试结果（pass/fail/skipped + 输出摘要），供接力 agent 和 integration 阶段引用
 23. **Delegation 硬关卡** — `delegation/N-delegation.json` 记录子任务委派，feature 完成前必须验证所有 delegation 已回收
 24. **Session Worktree 隔离** — `cm lock` 通过 `git worktree add` 在独立目录创建 session worktree，主 repo 工作区不受任何 session 操作影响。所有 session 级 git 操作（integrate merge、submit commit/push）在 session worktree 中执行。`cm submit` 完成后清理 session worktree。避免了 checkout 切分支导致用户未提交修改丢失的严重问题
+25. **Hints 闭环** — 所有 hints/errors/next_action 中引用的工具必须存在于 skillkit 注册表中（`TestHintToolConsistency` 守护测试强制）。v5.0 中注册表只有 7 个工具，hints 只应引用这 7 个
+26. **系统编排 + 断点创造** — 状态机由 `_cm_next` 自动推进（系统编排），agent 只在创造性断点停下来（写 plan、写 analysis、写代码、修 bug）。Agent 不需要知道 session_phase、feature_phase 等概念
+27. **断点契约** — `_cm_next` 的每个断点返回统一结构：`breakpoint` 类型 + `instruction` 自然语言指引 + `context` 必要上下文（feature spec、worktree 路径、test output 等）。Agent 只需按 instruction 操作

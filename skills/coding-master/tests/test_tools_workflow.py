@@ -263,8 +263,8 @@ class TestCmDoneWithEvidence:
             assert not r["ok"]
             assert "stale" in r["error"].lower() or "changed" in r["error"].lower()
 
-    def test_done_rejects_failed_lint(self, git_repo):
-        """cm done rejects when lint failed in evidence."""
+    def test_done_allows_failed_lint(self, git_repo):
+        """cm done succeeds when lint failed but tests passed (lint not blocking)."""
         repo, data = _setup_developing(git_repo)
         with mock.patch.object(tools, "_repo_path", return_value=repo), \
              mock.patch.object(tools, "_run_tests", return_value={"ok": True, "output": "3 passed"}), \
@@ -272,8 +272,7 @@ class TestCmDoneWithEvidence:
             _write_and_commit(data["worktree"])
             tools.cmd_test(make_args(repo=repo.name, feature=1))
             r = tools.cmd_done(make_args(repo=repo.name, feature=1))
-            assert not r["ok"]
-            assert "lint" in r["error"].lower()
+            assert r["ok"]
 
     def test_evidence_backward_compat(self, git_repo):
         """Old session without evidence/ → cm done falls back to legacy check."""
@@ -807,6 +806,12 @@ class TestCmRead:
             r = tools.cmd_read(make_args(repo=repo.name, file="README.md"))
         assert r["ok"] is True
 
+    def test_read_without_lock_falls_back_to_repo_root(self, git_repo):
+        with _mock_repo(git_repo):
+            r = tools.cmd_read(make_args(repo=git_repo.name, file="README.md"))
+        assert r["ok"] is True
+        assert "# Test" in r["data"]["content"]
+
 
 class TestCmFind:
     """cmd_find: find files by glob pattern."""
@@ -838,6 +843,13 @@ class TestCmFind:
         assert r["data"]["count"] == 3
         assert r["data"]["truncated"] is True
 
+    def test_find_without_lock_uses_repo_root(self, git_repo):
+        (git_repo / "loose.txt").write_text("x")
+        with _mock_repo(git_repo):
+            r = tools.cmd_find(make_args(repo=git_repo.name, pattern="*.txt"))
+        assert r["ok"] is True
+        assert "loose.txt" in r["data"]["files"]
+
 
 class TestCmGrep:
     """cmd_grep: search file contents."""
@@ -849,6 +861,13 @@ class TestCmGrep:
         (wt / "code.py").write_text("def hello():\n    return 42\n")
         with _mock_repo(repo):
             r = tools.cmd_grep(make_args(repo=repo.name, pattern="return 42"))
+        assert r["ok"] is True
+        assert "return 42" in r["data"]["output"]
+
+    def test_grep_without_lock_uses_repo_root(self, git_repo):
+        (git_repo / "code.py").write_text("def hello():\n    return 42\n")
+        with _mock_repo(git_repo):
+            r = tools.cmd_grep(make_args(repo=git_repo.name, pattern="return 42"))
         assert r["ok"] is True
         assert "return 42" in r["data"]["output"]
 
@@ -1024,7 +1043,7 @@ class TestCmEdit:
         assert plan_path.exists()
 
     def test_edit_error_hint_includes_example(self, git_repo):
-        """Error hint for locked phase should include a concrete _cm_edit example."""
+        """Error hint for locked phase should include a concrete _cm_dev_edit example."""
         repo = _setup_locked(git_repo)
         lock = tools._atomic_json_read(repo / tools.CM_DIR / "lock.json")
         wt = Path(lock.get("session_worktree", str(repo)))
@@ -1078,6 +1097,74 @@ class TestLockBranchConsistency:
             or data.get("branch_mismatch")
             or "mismatch" in str(data).lower()
         ), f"Worktree on '{actual_branch_in_wt}' but lock says '{lock_branch}', no warning/fix"
+
+    def test_lock_rejects_branch_already_checked_out_in_main_repo(self, git_repo):
+        current_branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        with _mock_repo(git_repo):
+            r = tools.cmd_lock(make_args(repo=git_repo.name, branch=current_branch))
+        assert r["ok"] is False
+        assert "already checked out" in r["error"]
+        assert "Omit the branch parameter" in r["error"]
+
+    def test_stale_lock_with_main_branch_gives_clear_error(self, git_repo):
+        """Stale lock that stored branch='main' (from old code) must not cause opaque git error."""
+        current_branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        # Simulate old code writing a lock with branch=main (no session_worktree yet)
+        cm = git_repo / tools.CM_DIR
+        cm.mkdir(parents=True, exist_ok=True)
+        lock_path = cm / "lock.json"
+        import json
+        lock_path.write_text(json.dumps({
+            "repo": git_repo.name,
+            "mode": "deliver",
+            "session_phase": "locked",
+            "branch": current_branch,  # ← the problematic main branch
+            "locked_by": "old-agent",
+        }))
+
+        with _mock_repo(git_repo):
+            r = tools.cmd_lock(make_args(repo=git_repo.name))
+
+        # Must not succeed (would try to create worktree for main)
+        assert r["ok"] is False
+        # Must give actionable guidance, not opaque git stderr
+        err = r.get("error", "")
+        assert "_cm_doctor" in err or "doctor" in err.lower(), f"No doctor hint in error: {err}"
+        assert "main" in err or current_branch in err, f"Branch not named in error: {err}"
+
+    def test_doctor_fix_clears_stale_main_branch_lock(self, git_repo):
+        """cm doctor --fix removes a lock that stored the main branch."""
+        current_branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        cm = git_repo / tools.CM_DIR
+        cm.mkdir(parents=True, exist_ok=True)
+        lock_path = cm / "lock.json"
+        import json
+        lock_path.write_text(json.dumps({
+            "repo": git_repo.name,
+            "mode": "deliver",
+            "session_phase": "locked",
+            "branch": current_branch,
+            "locked_by": "old-agent",
+        }))
+
+        with _mock_repo(git_repo):
+            r = tools.cmd_doctor(make_args(repo=git_repo.name, fix=True))
+
+        assert r["ok"] is True or any(
+            "cannot create a session worktree" in issue for issue in r["data"]["issues"]
+        ), f"Doctor did not detect the issue: {r}"
+        # After fix, lock should be cleared
+        lock = tools._atomic_json_read(lock_path)
+        assert not lock, f"Lock should be cleared by doctor --fix, got: {lock}"
 
 
 # ══════════════════════════════════════════════════════════

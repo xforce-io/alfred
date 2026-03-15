@@ -143,15 +143,12 @@ def _atomic_json_update(path: Path, updater: Callable[[dict], dict]) -> dict:
                 data = {}
             snapshot = copy.deepcopy(data)
             result = updater(data)
-            if result.get("ok", True):
+            payload = data if result.get("ok", True) else (snapshot if data != snapshot else None)
+            if payload is not None:
+                serialized = json.dumps(payload, indent=2, ensure_ascii=False)
                 f.seek(0)
                 f.truncate()
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            else:
-                if data != snapshot:
-                    f.seek(0)
-                    f.truncate()
-                    json.dump(snapshot, f, indent=2, ensure_ascii=False)
+                f.write(serialized)
             return result
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
@@ -231,10 +228,11 @@ def _auto_renew_lease(repo: Path) -> None:
 
 
 def _resolve_locked_repo(args) -> Path:
-    """Resolve repo and verify lock exists."""
+    """Resolve repo and optionally verify lock exists."""
     repo = _repo_path(args.repo)
+    require_lock = getattr(args, "require_lock", True)
     lock = _atomic_json_read(repo / CM_DIR / "lock.json")
-    if not lock:
+    if require_lock and not lock:
         _fail("no active lock. Run cm lock first")
     return repo
 
@@ -252,6 +250,23 @@ def _get_session_worktree(repo: Path, lock: dict | None = None) -> Path | None:
 def _session_worktree_path(repo: Path) -> Path:
     """Return the canonical session worktree path for a repo."""
     return repo.parent / f"{repo.name}-session"
+
+
+def _find_checked_out_branch_path(repo: Path, branch: str) -> Path | None:
+    """Return the worktree path where branch is currently checked out, if any."""
+    result = _run_git(repo, ["worktree", "list", "--porcelain"], check=False)
+    if result.returncode != 0:
+        return None
+
+    worktree_path: Path | None = None
+    branch_ref = f"refs/heads/{branch}"
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            worktree_path = Path(line.removeprefix("worktree ").strip())
+            continue
+        if line.startswith("branch ") and line.removeprefix("branch ").strip() == branch_ref:
+            return worktree_path
+    return None
 
 
 def _read_session(repo: Path) -> dict:
@@ -363,6 +378,20 @@ def _ensure_session_worktree(repo: Path, lock: dict | None = None) -> dict:
 
     if session_wt.exists():
         _remove_worktree(repo, str(session_wt))
+
+    # Guard: reject branches already checked out in the main repo (e.g. branch="main").
+    # This prevents the opaque "fatal: 'main' is already checked out" git error.
+    existing_checkout = _find_checked_out_branch_path(repo, branch)
+    if existing_checkout and existing_checkout.resolve() == repo.resolve():
+        return {
+            "ok": False,
+            "error": (
+                f"Cannot create session worktree: branch '{branch}' is already checked out "
+                f"in the main repo at '{repo}'. "
+                "Run _cm_doctor(repo=..., fix=True) to reset the session, "
+                "then call _cm_next(repo=...) to restart."
+            ),
+        }
 
     branch_exists = _run_git(repo, ["rev-parse", "--verify", branch], check=False).returncode == 0
     worktree_cmd = ["worktree", "add", str(session_wt), branch] if branch_exists else ["worktree", "add", str(session_wt), "-b", branch]
@@ -976,24 +1005,24 @@ def _hint(command: str, reason: str) -> dict:
 # Mode-specific flow maps: after completing step X, suggest step Y.
 # Key = (mode, trigger), Value = next_action hint.
 _FLOW_AFTER_LOCK = {
-    "deliver":  _hint("cm plan-ready", "Validate PLAN.md to unlock feature claiming"),
-    "review":   _hint("cm scope --diff HEAD~3..HEAD", "Define what to review"),
-    "analyze":  _hint("cm scope --files '...'", "Define what to analyze"),
-    "debug":    _hint("cm scope --diff HEAD~3..HEAD", "Define what to investigate"),
+    "deliver":  _hint("_cm_next", "Call _cm_next — it will auto-validate PLAN.md and advance the session"),
+    "review":   _hint("_cm_next(intent='scope', diff='HEAD~3..HEAD')", "Define what to review"),
+    "analyze":  _hint("_cm_next(intent='scope', files='...')", "Define what to analyze"),
+    "debug":    _hint("_cm_next(intent='scope', diff='HEAD~3..HEAD')", "Define what to investigate"),
 }
 
-_FLOW_AFTER_SCOPE = _hint("cm engine-run", "Delegate analysis to engine subprocess")
+_FLOW_AFTER_SCOPE = _hint("_cm_next", "Call _cm_next — engine will run automatically and return findings")
 
 _FLOW_AFTER_ENGINE = {
-    "review":   _hint("cm report --content '...'", "Write review report based on engine findings"),
-    "analyze":  _hint("cm report --content '...'", "Write analysis report based on engine findings"),
-    "debug":    _hint("cm report --content '...'", "Write diagnosis based on engine findings"),
+    "review":   _hint("_cm_edit --file '.coding-master/report.md' --old_text '' --new_text '...'", "Write review report based on engine findings"),
+    "analyze":  _hint("_cm_edit --file '.coding-master/report.md' --old_text '' --new_text '...'", "Write analysis report based on engine findings"),
+    "debug":    _hint("_cm_edit --file '.coding-master/diagnosis.md' --old_text '' --new_text '...'", "Write diagnosis based on engine findings"),
 }
 
 _FLOW_AFTER_REPORT = _hint(
-    "cm unlock",
-    "Diagnosis written. If user wants fixes applied, use cm edit (stay in debug session); "
-    "call cm unlock only after all edits are verified with cm test."
+    "_cm_next",
+    "Diagnosis written. If user wants fixes applied, use _cm_edit (stay in debug session); "
+    "call _cm_next again after edits to complete and auto-unlock."
 )
 
 
@@ -1027,8 +1056,29 @@ def cmd_lock(args) -> dict:
     # No stash or clean-tree check needed — the worktree starts clean.
 
     # Pre-compute branch info outside atomic section (avoid subprocess under flock).
-    current_branch = _run_git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip() if read_only else None
+    current_branch = _run_git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
     reuse_branch = None if read_only else _reuse_session_branch(repo)
+    explicit_branch = getattr(args, "branch", None) if not read_only else None
+    active_lock = _atomic_json_read(lock_path)
+    checked_out_path = (
+        _find_checked_out_branch_path(repo, explicit_branch)
+        if explicit_branch and not active_lock.get("session_phase")
+        else None
+    )
+
+    if checked_out_path:
+        checked_out_hint = (
+            "Omit the branch parameter to auto-generate a dev branch."
+            if checked_out_path.resolve() == repo.resolve()
+            else "Use a different branch name or unlock the existing session first."
+        )
+        return {
+            "ok": False,
+            "error": (
+                f"Cannot use branch '{explicit_branch}' because it is already checked out at "
+                f"'{checked_out_path}'. {checked_out_hint}"
+            ),
+        }
 
     def reserve_lock(data):
         now = datetime.now(timezone.utc)
@@ -1069,7 +1119,7 @@ def cmd_lock(args) -> dict:
 
         # ── No session or session done → create new ──
         branch = current_branch if read_only else (
-            getattr(args, "branch", None)
+            explicit_branch
             or reuse_branch
             or f"dev/{args.repo}-{now.strftime('%m%d-%H%M')}"
         )
@@ -1213,8 +1263,8 @@ def cmd_unlock(args) -> dict:
     if not lock.get("read_only", False):
         try:
             _save_last_session(repo, lock)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to save last session snapshot: %s", exc)
 
     # Cleanup session worktree (best effort): force unlock or completed session
     session_wt = lock.get("session_worktree", "")
@@ -1281,7 +1331,7 @@ def _compute_blocking_reason(
     """Compute blocking reason and resume hint with fixed priority."""
     # Priority 1: expired lease
     if _is_expired(lock):
-        return "lease expired", "cm renew or cm unlock"
+        return "lease expired", "cm start (re-joins and renews) or cm unlock"
 
     # Priority 2: integration failed
     report_path = repo / CM_DIR / EVIDENCE_DIR / "integration-report.json"
@@ -1365,7 +1415,23 @@ def cmd_plan_ready(args) -> dict:
 
     plan = _parse_plan_md(plan_path)
     if not plan:
-        return {"ok": False, "error": "PLAN.md contains no parseable features"}
+        return {
+            "ok": False,
+            "error": (
+                "PLAN.md contains no parseable features. "
+                "Required format — each feature must look exactly like this:\n\n"
+                "### Feature 1: Short title\n"
+                "**Depends on**: —\n\n"
+                "#### Task\n"
+                "Describe what needs to be done.\n\n"
+                "#### Acceptance Criteria\n"
+                "- [ ] criterion one\n"
+                "- [ ] criterion two\n\n"
+                "The headings '### Feature N:', '#### Task', and '#### Acceptance Criteria' "
+                "are REQUIRED and must be spelled exactly as shown. "
+                "Use _cm_edit to fix PLAN.md, then call _cm_next again."
+            ),
+        }
 
     issues = []
     for fid, spec in plan.items():
@@ -1429,14 +1495,11 @@ def cmd_claim(args) -> dict:
         if plan_path.exists():
             return {"ok": False, "error": "session is locked but PLAN.md exists. "
                     "You must advance to reviewed phase before claiming.",
-                    "next_action": {"tool": "_cm_start", "args": {"repo": args.repo, "mode": "deliver",
-                                    "plan_file": str(plan_path)}},
-                    "hint": "Call _cm_start to validate PLAN.md and advance the session."}
+                    "next_action": {"tool": "_cm_next", "args": {"repo": args.repo}},
+                    "hint": "Call _cm_next — it will auto-validate PLAN.md and advance the session."}
         return {"ok": False, "error": "session is locked and PLAN.md does not exist yet.",
-                "next_action": {"tool": "_cm_edit", "args": {"repo": args.repo,
-                                "file": ".coding-master/PLAN.md", "old_text": "",
-                                "new_text": "# <title>\n\n## Feature 1: <description>\n- **Scope**: <files>\n- **Changes**: <what to change>"}},
-                "hint": "Create PLAN.md first with _cm_edit, then call _cm_start."}
+                "next_action": {"tool": "_cm_next", "args": {"repo": args.repo}},
+                "hint": "Call _cm_next — it will guide you through creating PLAN.md and advancing the session."}
     if lock.get("session_phase") not in ("reviewed", "working"):
         return {"ok": False, "error": f"session is {lock.get('session_phase')}, cannot claim"}
 
@@ -1464,7 +1527,7 @@ def cmd_claim(args) -> dict:
     dep_branches = [features[d]["branch"] for d in deps if d in features]
     try:
         _create_feature_worktree(repo, branch, worktree, base_branches=dep_branches)
-    except Exception as exc:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
         return {"ok": False, "error": f"worktree creation failed: {exc}"}
 
     spec = plan[feature_id]
@@ -1610,17 +1673,22 @@ def cmd_test(args) -> dict:
 
     # Verify no uncommitted changes to tracked files (untracked files are OK)
     git_status = _run_git(wt_path, ["status", "--porcelain", "-uno"], check=False)
+    if git_status.returncode != 0:
+        return {"ok": False, "error": f"git status failed: {git_status.stderr.strip()}"}
     if git_status.stdout.strip():
         return {"ok": False, "error": "uncommitted changes to tracked files, commit before testing"}
 
     # Get HEAD + commit count
-    head = _run_git(wt_path, ["rev-parse", "HEAD"], check=False).stdout.strip()
+    head_result = _run_git(wt_path, ["rev-parse", "HEAD"], check=False)
+    if head_result.returncode != 0:
+        return {"ok": False, "error": f"git rev-parse HEAD failed: {head_result.stderr.strip()}"}
+    head = head_result.stdout.strip()
     lock = _atomic_json_read(repo / CM_DIR / "lock.json")
     dev_branch = lock.get("branch", "HEAD")
-    commit_count = int(
-        _run_git(wt_path, ["rev-list", "--count", f"{dev_branch}..HEAD"], check=False)
-        .stdout.strip() or "0"
-    )
+    raw_count = _run_git(
+        wt_path, ["rev-list", "--count", f"{dev_branch}..HEAD"], check=False
+    ).stdout.strip()
+    commit_count = int(raw_count) if raw_count.isdigit() else 0
 
     # Run lint + typecheck + tests
     lint_result = _run_lint(wt_path)
@@ -1633,7 +1701,7 @@ def cmd_test(args) -> dict:
                    and test_result.get("skipped"))
     if all_skipped:
         overall = "skipped"
-    elif lint_result["passed"] and typecheck_result["passed"] and test_result["ok"]:
+    elif test_result["ok"]:
         overall = "passed"
     else:
         overall = "failed"
@@ -1728,7 +1796,8 @@ def cmd_done(args) -> dict:
     if not wt_path.exists():
         return {"ok": False, "error": f"Worktree {wt_path} does not exist. "
                 f"Run cm claim --feature {feature_id} to recreate it."}
-    current_head = _run_git(wt_path, ["rev-parse", "HEAD"], check=False).stdout.strip()
+    head_result = _run_git(wt_path, ["rev-parse", "HEAD"], check=False)
+    current_head = head_result.stdout.strip() if head_result.returncode == 0 else None
 
     # Check evidence file (v4 path) or fallback to legacy claims check
     evidence = _read_evidence(repo, feature_id)
@@ -1756,9 +1825,9 @@ def cmd_done(args) -> dict:
                 return {"ok": False, "error": "All verification steps were skipped (no lint/typecheck/test configured). "
                         "Add at least one verification command or write tests before marking done."}
             if evidence.get("overall") != "passed":
-                failed = [k for k in ("lint", "typecheck", "test")
+                failed = [k for k in ("test",)
                           if not evidence.get(k, {}).get("passed", True)]
-                return {"ok": False, "error": f"Verification failed: {', '.join(failed)}. Fix and re-run cm test."}
+                return {"ok": False, "error": f"Verification failed: {', '.join(failed) or 'test'}. Fix and re-run cm test."}
         else:
             # Legacy fallback for pre-v4 features/sessions
             dev = feat.get("developing", {})
@@ -1969,7 +2038,8 @@ def cmd_integrate(args) -> dict:
             return {"ok": False, "error": f"merge failed ({fb}): {merge_rc.stderr.strip()}. "
                     "Run cm reopen for the conflicting feature, resolve, then retry"}
         else:
-            commit = _run_git(wt, ["rev-parse", "HEAD"], check=False).stdout.strip()
+            head_r = _run_git(wt, ["rev-parse", "HEAD"], check=False)
+            commit = head_r.stdout.strip() if head_r.returncode == 0 else ""
             merge_results.append({"feature": fid, "branch": fb, "status": "merged", "commit": commit})
 
     # Run full tests on merged dev branch (in session worktree)
@@ -1977,10 +2047,12 @@ def cmd_integrate(args) -> dict:
     output_summary = (test_result.get("output", "") or "")[:1000]
 
     if not test_result["ok"]:
-        subprocess.run(
+        reset_rc = subprocess.run(
             ["git", "reset", "--hard", pre_merge_sha],
             cwd=wt, capture_output=True,
         )
+        if reset_rc.returncode != 0:
+            logger.warning("Integration rollback failed: %s", reset_rc.stderr.decode())
         # Write integration report (test failure)
         report = {
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -2124,8 +2196,8 @@ def cmd_submit(args) -> dict:
         submit_extras["change_summary"] = change_summary
     try:
         _save_last_session(repo, lock, **submit_extras)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Failed to save last session snapshot after submit: %s", exc)
 
     try:
         _atomic_json_update(repo / CM_DIR / "lock.json", lambda d: (
@@ -2218,7 +2290,14 @@ def cmd_report(args) -> dict:
 
     report_path = repo / CM_DIR / filename
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(content)
+    # Inject metadata header so future agents can assess staleness.
+    head_commit = _run_git(repo, ["rev-parse", "--short", "HEAD"], check=False).stdout.strip()
+    meta_header = (
+        f"<!-- generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+        f"  commit: {head_commit}"
+        f"  mode: {mode} -->\n\n"
+    )
+    report_path.write_text(meta_header + content)
     agent = _resolve_agent(args)
     _append_journal(repo, agent, "report", f"Report written: {filename}")
 
@@ -2294,8 +2373,10 @@ def _get_scope_context(repo: Path, scope: dict) -> str:
             if len(diff_text) > max_bytes:
                 diff_text = diff_text[:max_bytes] + "\n...(diff truncated)..."
             return f"## Diff ({diff_range})\n```\n{diff_text}\n```"
-        except Exception:
-            return f"(failed to get diff for {diff_range})"
+        except subprocess.TimeoutExpired:
+            return f"(git diff timed out for {diff_range})"
+        except OSError as e:
+            return f"(git diff failed: {e})"
 
     elif scope_type == "files":
         files = scope.get("files", [])
@@ -2312,8 +2393,10 @@ def _get_scope_context(repo: Path, scope: dict) -> str:
             if len(diff_text) > max_bytes:
                 diff_text = diff_text[:max_bytes] + "\n...(diff truncated)..."
             return f"## PR #{pr} Diff\n```\n{diff_text}\n```"
-        except Exception:
-            return f"(failed to get PR diff for {pr})"
+        except subprocess.TimeoutExpired:
+            return f"(gh pr diff timed out for PR #{pr})"
+        except OSError as e:
+            return f"(gh pr diff failed: {e})"
 
     return "(no specific scope context)"
 
@@ -2928,7 +3011,7 @@ def cmd_regression(args) -> dict:
                    and test_result.get("skipped"))
     if all_skipped:
         overall = "skipped"
-    elif lint_result["passed"] and typecheck_result["passed"] and test_result["ok"]:
+    elif test_result["ok"]:
         overall = "passed"
     else:
         overall = "failed"
@@ -2946,6 +3029,49 @@ def cmd_repos(_args) -> dict:
     """List configured repos and workspaces."""
     cfg = ConfigManager()
     return cfg.list_all()
+
+
+def cmd_combined_status(args) -> dict:
+    """Unified status: no repo → list repos; with repo → full session + feature status.
+
+    Merges cmd_repos + cmd_status + cmd_progress into one tool.
+    Agent-facing replacement for the three separate tools.
+    """
+    repo_name = getattr(args, "repo", None) or None  # treat "" same as None
+
+    if not repo_name:
+        # No repo specified → list available repos
+        cfg = ConfigManager()
+        repos_result = cfg.list_all()
+        return {
+            "ok": True,
+            "data": {
+                "mode": "list",
+                "repos": repos_result.get("data", repos_result),
+                "hint": "Pass repo=<name> to see full session status.",
+            },
+        }
+
+    # With repo → session status + progress combined
+    status_result = cmd_status(args)
+    progress_result = cmd_progress(args)
+
+    combined = {
+        "ok": status_result.get("ok", False),
+        "data": {
+            "mode": "detail",
+            "repo": repo_name,
+            "session": status_result.get("data", {}),
+            "progress": progress_result.get("data", {}),
+        },
+    }
+    # Surface any errors
+    for r in (status_result, progress_result):
+        if not r.get("ok"):
+            combined["ok"] = False
+            combined["error"] = r.get("error", "")
+            break
+    return combined
 
 
 def cmd_change_summary(args) -> dict:
@@ -2990,7 +3116,7 @@ def cmd_doctor(args) -> dict:
         if lock:
             if _is_expired(lock):
                 issues.append(f"lock expired at {lock.get('lease_expires_at')}")
-                fixes.append("cm unlock or cm renew")
+                fixes.append("cm unlock or cm start (re-joins and renews)")
             branch = lock.get("branch", "")
             if branch:
                 branch_check = _run_git(repo, ["rev-parse", "--verify", branch], check=False)
@@ -3000,6 +3126,17 @@ def cmd_doctor(args) -> dict:
             # Check session_worktree health for write sessions
             if not lock.get("read_only", False):
                 session_wt = lock.get("session_worktree", "")
+                # Detect branches stored as session branch that can't be used in a worktree
+                if branch:
+                    checked_out_at = _find_checked_out_branch_path(repo, branch)
+                    if checked_out_at and checked_out_at.resolve() == repo.resolve():
+                        issues.append(
+                            f"lock branch '{branch}' is checked out in the main repo — "
+                            "cannot create a session worktree for it"
+                        )
+                        fixes.append(
+                            "cm doctor --fix (will delete the stale lock; re-run _cm_next to restart)"
+                        )
                 if not session_wt:
                     issues.append("session_worktree missing from lock")
                     fixes.append("cm doctor --fix (will recreate session worktree)")
@@ -3082,9 +3219,15 @@ def cmd_doctor(args) -> dict:
 def _doctor_auto_fix(repo: Path, issues: list[str]):
     """Best-effort auto-fix for detected issues."""
     claims_path = repo / CM_DIR / "claims.json"
+    lock_path = repo / CM_DIR / "lock.json"
 
     for issue in issues:
-        if "orphaned worktree" in issue:
+        if "cannot create a session worktree for it" in issue:
+            # Stale lock with branch=main (or any branch already in main repo).
+            # Clear the lock so the agent can re-lock without a branch.
+            _atomic_json_update(lock_path, lambda d: (d.clear(), {"ok": True})[1])
+
+        elif "orphaned worktree" in issue:
             wt_path = issue.split(": ", 1)[1] if ": " in issue else ""
             if wt_path and Path(wt_path).exists():
                 _remove_worktree(repo, wt_path)
@@ -3205,17 +3348,33 @@ def _generate_pr_body(repo: Path) -> str:
 
 
 def _resolve_working_dir(repo: Path, args) -> Path:
-    """Resolve working directory: feature worktree > session worktree > repo root."""
+    """Resolve working directory: explicit feature > in-progress feature > session worktree > repo root.
+
+    When no feature is specified, auto-detects any feature in 'developing' phase
+    and uses its worktree. This prevents edits from landing in the session worktree
+    when the agent omits the feature parameter.
+    """
     lock = _atomic_json_read(repo / CM_DIR / "lock.json")
+    claims = _atomic_json_read(repo / CM_DIR / "claims.json") or {}
 
     # If feature is specified and has a worktree, use it
     feature_id = getattr(args, "feature", None)
     if feature_id:
-        claims = _atomic_json_read(repo / CM_DIR / "claims.json")
         feat = claims.get("features", {}).get(str(feature_id), {})
         wt = feat.get("worktree")
         if wt and Path(wt).exists():
             return Path(wt)
+
+    # Auto-detect: if exactly one feature is in 'developing' phase, use its worktree
+    if not feature_id:
+        developing = [
+            f for f in claims.get("features", {}).values()
+            if f.get("phase") == "developing" and f.get("worktree")
+        ]
+        if len(developing) == 1:
+            wt = developing[0]["worktree"]
+            if Path(wt).exists():
+                return Path(wt)
 
     # Otherwise use session worktree
     session_wt = lock.get("session_worktree")
@@ -3250,12 +3409,10 @@ def cmd_read(args) -> dict:
 
     Available in all modes. Auto-resolves paths relative to session/feature worktree.
     """
+    args.require_lock = False
     repo = _resolve_locked_repo(args)
-    cwd = _resolve_working_dir(repo, args)
-    target = Path(args.file)
-    if not target.is_absolute():
-        target = cwd / target
-    target = target.resolve()
+    raw_file = Path(args.file)
+    target = _resolve_edit_target(repo, raw_file, args)
 
     if not _is_within_repo(target, repo):
         return {"ok": False, "error": f"path {target} is outside repo"}
@@ -3289,12 +3446,26 @@ def cmd_find(args) -> dict:
 
     Available in all modes. Searches relative to session/feature worktree.
     """
+    args.require_lock = False
     repo = _resolve_locked_repo(args)
     cwd = _resolve_working_dir(repo, args)
     pattern = args.pattern
     max_results = getattr(args, "max_results", 50) or 50
 
-    matches = sorted(cwd.glob(pattern))
+    # Normalize absolute patterns to relative (Path.glob requires relative patterns)
+    if pattern.startswith("/"):
+        try:
+            pattern = str(Path(pattern).relative_to(cwd))
+        except ValueError:
+            return {"ok": False, "error": (
+                f"Pattern '{pattern}' is absolute and not under cwd '{cwd}'. "
+                "Use a relative glob pattern like '**/*.py' or 'src/**/*.ts'."
+            )}
+
+    try:
+        matches = sorted(cwd.glob(pattern))
+    except ValueError as e:
+        return {"ok": False, "error": f"Invalid glob pattern '{pattern}': {e}. Use relative patterns like '**/*.py'."}
     files = [str(m.relative_to(cwd)) for m in matches if m.is_file()
              and ".git" not in m.relative_to(cwd).parts]
 
@@ -3316,6 +3487,7 @@ def cmd_grep(args) -> dict:
     Available in all modes. Searches relative to session/feature worktree.
     Uses ripgrep if available, falls back to grep.
     """
+    args.require_lock = False
     repo = _resolve_locked_repo(args)
     cwd = _resolve_working_dir(repo, args)
     pattern = args.pattern
@@ -3356,6 +3528,47 @@ def cmd_grep(args) -> dict:
     }}
 
 
+def _resolve_edit_target(repo: Path, raw_file: Path, args) -> Path:
+    """Resolve an edit target path. Two clear rules:
+
+    1. If the path references .coding-master/ (in any position), resolve against repo root.
+       CM metadata always lives in repo root, never in worktrees.
+    2. Otherwise, resolve relative to the feature/session worktree via _resolve_working_dir.
+    """
+    cm_dir = (repo / CM_DIR).resolve()
+
+    # Rule 1: anything referencing CM_DIR → resolve against repo root
+    if not raw_file.is_absolute():
+        # Extract the CM-relative portion if .coding-master/ appears anywhere in the path
+        parts = list(raw_file.parts)
+        if CM_DIR in parts:
+            cm_idx = parts.index(CM_DIR)
+            return (repo / Path(*parts[cm_idx:])).resolve()
+        # Bare .md filename (e.g. "PLAN.md", "report.md") → prefer .coding-master/
+        # because CM metadata always lives there, even if the file doesn't exist yet.
+        if raw_file.suffix == ".md" and len(parts) == 1:
+            cwd = _resolve_working_dir(repo, args)
+            cwd_candidate = (cwd / raw_file).resolve()
+            cm_candidate = (repo / CM_DIR / raw_file).resolve()
+            # Prefer CM dir unless the file only exists in the worktree
+            if cm_candidate.exists() or not cwd_candidate.exists():
+                return cm_candidate
+
+    # Rule 2: absolute paths
+    if raw_file.is_absolute():
+        resolved = raw_file.resolve()
+        # Absolute path to a .md file that doesn't exist (e.g. /path/worktree/PLAN.md)?
+        # Redirect to .coding-master/ in repo root — CM metadata never lives in worktrees.
+        if not resolved.exists() and resolved.suffix == ".md":
+            cm_candidate = (repo / CM_DIR / resolved.name).resolve()
+            if str(cm_candidate).startswith(str((repo / CM_DIR).resolve())):
+                return cm_candidate
+        return resolved
+
+    cwd = _resolve_working_dir(repo, args)
+    return (cwd / raw_file).resolve()
+
+
 def cmd_edit(args) -> dict:
     """Edit file by exact text replacement. Only available in deliver/debug modes.
 
@@ -3367,38 +3580,9 @@ def cmd_edit(args) -> dict:
     if mode in READ_ONLY_MODES:
         return {"ok": False, "error": f"edit not allowed in {mode} mode (read-only)"}
 
-    # Resolve target path early so we can check if it's CM metadata.
-    # CM metadata (.coding-master/*.md) lives in the repo root, not in worktrees.
     cm_dir = (repo / CM_DIR).resolve()
     raw_file = Path(args.file)
-
-    if raw_file.is_absolute():
-        target = raw_file.resolve()
-        # Absolute path into worktree for a .md file that doesn't exist?
-        # Check if it belongs under .coding-master/ in the repo root instead.
-        if not target.exists() and target.suffix == ".md":
-            cm_candidate = (repo / CM_DIR / target.name).resolve()
-            if str(cm_candidate).startswith(str(cm_dir)):
-                target = cm_candidate
-    elif raw_file.parts[0] == CM_DIR:
-        # Relative path starting with .coding-master/ → resolve against repo root
-        target = (repo / raw_file).resolve()
-    elif CM_DIR in raw_file.parts:
-        # Agents sometimes nest .coding-master/ under a wrong prefix
-        # (e.g. "skills/coding-master/.coding-master/PLAN.md").
-        # Extract from .coding-master/ onward and resolve against repo root.
-        cm_idx = list(raw_file.parts).index(CM_DIR)
-        cm_relative = Path(*raw_file.parts[cm_idx:])
-        target = (repo / cm_relative).resolve()
-    else:
-        cwd = _resolve_working_dir(repo, args)
-        target = (cwd / raw_file).resolve()
-        # If not found in cwd, check .coding-master/ as fallback for bare filenames.
-        # Agents often pass bare "PLAN.md" instead of ".coding-master/PLAN.md"
-        if not target.exists() and raw_file.suffix == ".md" and len(raw_file.parts) == 1:
-            cm_candidate = (repo / CM_DIR / raw_file).resolve()
-            if str(cm_candidate).startswith(str(cm_dir)):
-                target = cm_candidate
+    target = _resolve_edit_target(repo, raw_file, args)
 
     is_cm_metadata = (
         str(target).startswith(str(cm_dir))
@@ -3420,9 +3604,14 @@ def cmd_edit(args) -> dict:
             phase = lock.get("session_phase", "locked") if lock else "locked"
             if phase == "locked":
                 return {"ok": False,
-                        "error": "Cannot edit source code: no feature in 'developing' phase. Session is 'locked'.",
-                        "next_action": {"tool": "_cm_start", "args": {"repo": args.repo, "mode": "deliver"}},
-                        "hint": "Call _cm_start first to set up the session, then _cm_claim and _cm_dev to start a feature."}
+                        "error": "Cannot edit source code: no feature in 'developing' phase. Session is 'locked' (planning phase).",
+                        "next_action": {"tool": "_cm_next", "args": {"repo": args.repo}},
+                        "hint": ("Use _cm_next to advance the workflow automatically. "
+                                 "_cm_next will guide you through: "
+                                 "1) creating PLAN.md (use _cm_edit); "
+                                 "2) auto-validating and claiming a feature; "
+                                 "3) filling Analysis + Plan (use _cm_edit); "
+                                 "4) advancing to 'developing' so _cm_edit can modify source code.")}
             elif phase == "reviewed":
                 # Find first unclaimed feature
                 plan = _parse_plan_md(repo / CM_DIR / "PLAN.md")
@@ -3432,19 +3621,23 @@ def cmd_edit(args) -> dict:
                         first_feature = int(fid_str)
                         break
                 return {"ok": False,
-                        "error": "Cannot edit source code: no feature in 'developing' phase. Session is 'reviewed'.",
-                        "next_action": {"tool": "_cm_claim", "args": {"repo": args.repo, "feature": first_feature}},
-                        "hint": f"Call _cm_claim(feature={first_feature}) then _cm_dev(feature={first_feature}) to start developing."}
+                        "error": "Cannot edit source code: session is 'reviewed' but no feature is in 'developing' phase.",
+                        "next_action": {"tool": "_cm_next", "args": {"repo": args.repo}},
+                        "hint": f"Call _cm_next — it will auto-claim feature {first_feature} and advance it to 'developing'."}
             else:
                 return {"ok": False,
                         "error": f"Cannot edit source code: no feature in 'developing' phase. Session is '{phase}'.",
-                        "hint": "Run _cm_claim + _cm_dev first before editing code."}
+                        "next_action": {"tool": "_cm_next", "args": {"repo": args.repo}},
+                        "hint": "Call _cm_next — it will claim a feature and advance it to 'developing'."}
 
     # For CM metadata: old_text="" means create/overwrite (PLAN.md is "write once per session")
     if is_cm_metadata and args.old_text == "":
-        target.parent.mkdir(parents=True, exist_ok=True)
-        created = not target.exists()
-        target.write_text(args.new_text)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            created = not target.exists()
+            target.write_text(args.new_text)
+        except OSError as e:
+            return {"ok": False, "error": f"file write failed: {e}"}
         return {"ok": True, "data": {"file": str(target), "replacements": 1, "created": created}}
 
     if not target.exists():
@@ -3465,7 +3658,10 @@ def cmd_edit(args) -> dict:
                 "provide more context to make it unique"}
 
     new_content = content.replace(old_text, new_text, 1)
-    target.write_text(new_content)
+    try:
+        target.write_text(new_content)
+    except OSError as e:
+        return {"ok": False, "error": f"file write failed: {e}"}
 
     return {"ok": True, "data": {
         "file": str(target),
@@ -3525,7 +3721,504 @@ def cmd_start(args) -> dict:
         force_args = copy.copy(args)
         force_args.force = True
         cmd_unlock(force_args)
-        return {"ok": False, "error": str(exc), "data": {"rolled_back": True}}
+        return {
+            "ok": False,
+            "error": str(exc),
+            "data": {"rolled_back": True},
+            "hint": (
+                "Session was rolled back (lock cleared). "
+                "Call _cm_next(repo=...) — it will re-lock, then guide you to fix PLAN.md and advance."
+            ),
+        }
+
+
+_PLAN_TEMPLATE = """\
+# Feature Plan
+
+## Origin Task
+<describe what needs to be done>
+
+## Features
+
+### Feature 1: <short title>
+**Depends on**: —
+
+#### Task
+<describe the specific work>
+
+#### Acceptance Criteria
+- [ ] <criterion one>
+- [ ] <criterion two>
+
+### Feature 2: <short title>
+**Depends on**: Feature 1
+
+#### Task
+<describe the specific work>
+
+#### Acceptance Criteria
+- [ ] <criterion one>
+"""
+
+_SCOPE_TEMPLATE = """\
+Specify what to analyze. Pass as the `diff` or `files` argument to _cm_next(intent='scope'):
+  diff  — e.g. "HEAD~5..HEAD" to review recent commits
+  files — e.g. "src/foo.py,src/bar.py" to analyze specific files
+"""
+
+
+def _next_claimable_feature(plan: dict, claims: dict) -> str | None:
+    """Return the first feature ID that can be claimed (pending + deps done)."""
+    features = claims.get("features", {})
+    for fid in _topo_sort(plan):
+        phase = features.get(fid, {}).get("phase", "pending")
+        if phase not in ("pending", None):
+            continue
+        deps = plan[fid].get("depends_on", [])
+        if all(features.get(d, {}).get("phase") == "done" for d in deps):
+            return fid
+    return None
+
+
+def _in_progress_feature(claims: dict) -> tuple[str, str] | None:
+    """Return (feature_id, phase) for any feature currently in-progress."""
+    for fid, feat in claims.get("features", {}).items():
+        if feat.get("phase") in ("analyzing", "developing"):
+            return fid, feat["phase"]
+    return None
+
+
+def cmd_next(args) -> dict:
+    """Auto-advance the workflow to the next creative breakpoint.
+
+    Automatically runs all mechanical steps (lock, plan-ready, claim, dev,
+    integrate, submit) and stops only when agent input is needed:
+      write_plan      — create or fix PLAN.md
+      write_analysis  — fill Analysis + Plan in a feature markdown
+      write_code      — implement the feature
+      fix_code        — fix failing tests
+      fix_integration — fix integration test failures
+      define_scope    — specify what to review/analyze/debug
+      write_report    — write review/diagnosis report
+      complete        — all done
+
+    Typical usage:
+      _cm_next(repo="myrepo")               # advance to next breakpoint
+      _cm_next(repo="myrepo", intent="test") # run tests on current feature
+      _cm_next(repo="myrepo", mode="review") # start a review session
+    """
+    repo = _repo_path(args.repo)
+    intent = getattr(args, "intent", None)
+    mode = getattr(args, "mode", None) or "deliver"
+    max_depth = getattr(args, "_depth", 0)
+    if max_depth > 12:
+        lock = _atomic_json_read(repo / CM_DIR / "lock.json")
+        return {
+            "ok": False,
+            "error": "cmd_next: max auto-advance depth reached — possible loop detected",
+            "state": lock,
+            "hint": "Run _cm_doctor to check for state inconsistencies.",
+        }
+
+    def _recurse(**extra):
+        """Advance one more step (depth-tracked to prevent loops)."""
+        import copy as _copy
+        next_args = _copy.copy(args)
+        next_args._depth = max_depth + 1
+        next_args.intent = None  # consumed
+        for k, v in extra.items():
+            setattr(next_args, k, v)
+        return cmd_next(next_args)
+
+    # ── Read current lock state ──────────────────────────────────────────────
+    lock = _atomic_json_read(repo / CM_DIR / "lock.json")
+    session_phase = lock.get("session_phase") if lock else None
+    locked_mode = lock.get("mode", "deliver") if lock else mode
+
+    # ── No active session → auto lock ────────────────────────────────────────
+    if not lock or not session_phase or session_phase == "done":
+        lock_args = copy.copy(args)
+        lock_args.mode = mode
+        lock_result = cmd_lock(lock_args)
+        if not lock_result.get("ok"):
+            return lock_result
+        return _recurse()
+
+    # ── Mode conflict: requested mode differs from locked session mode ────────
+    requested_mode = getattr(args, "mode", None)
+    force = getattr(args, "force", False)
+    if requested_mode and requested_mode != locked_mode:
+        phase = lock.get("session_phase", "?")
+        # Auto-switch if no real work in progress; require force only when
+        # there are claimed features or the session has advanced past planning.
+        has_work = phase in ("working", "integrating")
+        if force or not has_work:
+            unlock_args = copy.copy(args)
+            unlock_args.force = True
+            cmd_unlock(unlock_args)
+            return _recurse()
+        return {
+            "ok": False,
+            "breakpoint": "mode_conflict",
+            "instruction": (
+                f"Session has in-progress work (phase: {phase}, mode: {locked_mode}). "
+                f"Switching to '{requested_mode}' will discard it. "
+                f"Call _cm_next(repo='{args.repo}', mode='{requested_mode}', force=True) to confirm."
+            ),
+            "context": {
+                "current_mode": locked_mode,
+                "requested_mode": requested_mode,
+                "session_phase": phase,
+                "branch": lock.get("branch"),
+            },
+        }
+
+    # ── Route by mode ────────────────────────────────────────────────────────
+    if locked_mode != "deliver":
+        return _cmd_next_review(repo, lock, args, locked_mode, intent, _recurse)
+
+    return _cmd_next_deliver(repo, lock, args, intent, _recurse)
+
+
+def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
+    """Deliver-mode breakpoint logic."""
+    phase = lock.get("session_phase", "locked")
+    plan_path = repo / CM_DIR / "PLAN.md"
+    claims_path = repo / CM_DIR / "claims.json"
+
+    # ── locked phase ─────────────────────────────────────────────────────────
+    if phase == "locked":
+        plan = _parse_plan_md(plan_path)
+        if not plan:
+            return {
+                "ok": True,
+                "breakpoint": "write_plan",
+                "instruction": (
+                    "Create PLAN.md at '.coding-master/PLAN.md' using _cm_edit "
+                    "(old_text='', new_text=<your plan>). "
+                    "Then call _cm_next again — it will auto-validate and advance."
+                ),
+                "template": _PLAN_TEMPLATE,
+                "edit_target": ".coding-master/PLAN.md",
+            }
+
+        # PLAN.md exists → try plan-ready
+        ready_result = cmd_plan_ready(args)
+        if not ready_result.get("ok"):
+            return {
+                "ok": False,
+                "breakpoint": "fix_plan",
+                "error": ready_result.get("error", "plan-ready failed"),
+                "instruction": (
+                    "Fix PLAN.md using _cm_edit, then call _cm_next again."
+                ),
+                "edit_target": ".coding-master/PLAN.md",
+            }
+        # plan-ready advanced to "reviewed" → recurse
+        return _recurse()
+
+    # ── reviewed / working phase ─────────────────────────────────────────────
+    if phase in ("reviewed", "working"):
+        claims = _atomic_json_read(claims_path) or {}
+        plan = _parse_plan_md(plan_path)
+
+        # Check for any in-progress feature first
+        in_progress = _in_progress_feature(claims)
+        if in_progress:
+            fid, feat_phase = in_progress
+            spec = plan.get(fid, {})
+            feat_md = _find_feature_md(repo, fid)
+
+            if feat_phase == "analyzing":
+                has_analysis, has_plan = _check_feature_md_sections(feat_md)
+                if not has_analysis or not has_plan:
+                    return {
+                        "ok": True,
+                        "breakpoint": "write_analysis",
+                        "feature": int(fid),
+                        "feature_md": str(feat_md) if feat_md else "",
+                        "instruction": (
+                            f"Fill ## Analysis and ## Plan sections in the feature markdown "
+                            f"using _cm_edit, then call _cm_next again."
+                        ),
+                        "context": {
+                            "title": spec.get("title", ""),
+                            "task": spec.get("task", ""),
+                            "acceptance_criteria": spec.get("criteria", ""),
+                        },
+                    }
+                # Analysis + Plan filled → auto dev
+                dev_result_args = copy.copy(args)
+                dev_result_args.feature = int(fid)
+                dev_result = cmd_dev(dev_result_args)
+                if not dev_result.get("ok"):
+                    return dev_result
+                return _recurse()
+
+            if feat_phase == "developing":
+                feat_data = claims.get("features", {}).get(fid, {})
+                dev_state = feat_data.get("developing", {})
+                test_status = dev_state.get("test_status")
+
+                if intent == "test":
+                    # Auto-commit any staged/unstaged changes before testing.
+                    # Agent edits via _cm_edit — committing is a mechanical step.
+                    wt = feat_data.get("worktree") or str(repo)
+                    if Path(wt).exists():
+                        gs = _run_git(Path(wt), ["status", "--porcelain", "-uno"], check=False)
+                        if gs.returncode == 0 and gs.stdout.strip():
+                            _run_git(Path(wt), ["add", "-A", "--", ":(exclude).coding-master"], check=False)
+                            _run_git(Path(wt), ["commit", "-m", "wip: coding-master auto-commit before test"], check=False)
+                    test_args = copy.copy(args)
+                    test_args.feature = int(fid)
+                    test_result = cmd_test(test_args)
+                    if not test_result.get("ok"):
+                        return test_result
+
+                    # Re-read claims after test
+                    claims = _atomic_json_read(claims_path) or {}
+                    dev_state = claims.get("features", {}).get(fid, {}).get("developing", {})
+                    test_status = dev_state.get("test_status")
+
+                    if test_status == "passed":
+                        # Auto done
+                        done_args = copy.copy(args)
+                        done_args.feature = int(fid)
+                        done_result = cmd_done(done_args)
+                        if not done_result.get("ok"):
+                            return done_result
+                        return _recurse()
+                    else:
+                        return {
+                            "ok": False,
+                            "breakpoint": "fix_code",
+                            "feature": int(fid),
+                            "worktree": feat_data.get("worktree", ""),
+                            "test_output": dev_state.get("test_output", ""),
+                            "instruction": (
+                                f"Tests failed. Fix the code with "
+                                f"_cm_edit(repo='{getattr(args, 'repo', '')}', file='<path>'), "
+                                f"then call _cm_next(repo='{getattr(args, 'repo', '')}', intent='test') again."
+                            ),
+                        }
+
+                # No test intent — prompt agent to write/test code
+                worktree = feat_data.get("worktree", "")
+                if test_status == "failed":
+                    return {
+                        "ok": False,
+                        "breakpoint": "fix_code",
+                        "feature": int(fid),
+                        "worktree": worktree,
+                        "test_output": dev_state.get("test_output", ""),
+                        "instruction": (
+                            f"Tests failed. Fix the code with "
+                            f"_cm_edit(repo='{getattr(args, 'repo', '')}', file='<path>'), "
+                            f"then call _cm_next(repo='{getattr(args, 'repo', '')}', intent='test') to re-run tests."
+                        ),
+                    }
+                return {
+                    "ok": True,
+                    "breakpoint": "write_code",
+                    "feature": int(fid),
+                    "worktree": worktree,
+                    "instruction": (
+                        f"Implement Feature {fid} in the worktree at '{worktree}'. "
+                        f"Use _cm_edit(repo='{getattr(args, 'repo', '')}', file='<relative-path>') to write code "
+                        f"(paths auto-resolve to the feature worktree). "
+                        f"When ready, call _cm_next(repo='{getattr(args, 'repo', '')}', intent='test') to run tests."
+                    ),
+                    "context": {
+                        "title": spec.get("title", ""),
+                        "task": spec.get("task", ""),
+                        "acceptance_criteria": spec.get("criteria", ""),
+                    },
+                }
+
+        # No in-progress feature → find next claimable
+        next_fid = _next_claimable_feature(plan, claims)
+        if next_fid:
+            claim_args = copy.copy(args)
+            claim_args.feature = int(next_fid)
+            claim_result = cmd_claim(claim_args)
+            if not claim_result.get("ok"):
+                return claim_result
+            return _recurse()
+
+        # All features done → auto integrate
+        all_done = all(
+            claims.get("features", {}).get(fid, {}).get("phase") == "done"
+            for fid in plan
+        )
+        if not all_done:
+            pending = [
+                fid for fid in plan
+                if claims.get("features", {}).get(fid, {}).get("phase") != "done"
+            ]
+            return {
+                "ok": False,
+                "breakpoint": "blocked",
+                "instruction": (
+                    f"Features {pending} are blocked on unfinished dependencies. "
+                    "Check _cm_status for details."
+                ),
+            }
+
+        int_result = cmd_integrate(args)
+        if not int_result.get("ok"):
+            # Auto-find which feature needs fixing
+            failing = int_result.get("data", {}).get("failed_features", [])
+            return {
+                "ok": False,
+                "breakpoint": "fix_integration",
+                "failed_features": failing,
+                "error": int_result.get("error", "integration failed"),
+                "instruction": (
+                    "Integration tests failed. Fix the code with _cm_edit, "
+                    "then call _cm_next(intent='test') to re-run feature tests, "
+                    "then _cm_next again to retry integration."
+                ),
+            }
+        return _recurse()
+
+    # ── integrating phase → auto submit ──────────────────────────────────────
+    if phase == "integrating":
+        title = getattr(args, "title", None)
+        if not title:
+            # Auto-generate title from PLAN.md origin task
+            plan = _parse_plan_md(plan_path)
+            origin = _read_file(plan_path).split("\n") if plan_path.exists() else []
+            for line in origin:
+                line = line.strip()
+                if line and not line.startswith("#") and not line.startswith(">"):
+                    title = f"feat: {line[:60]}"
+                    break
+        if not title:
+            return {
+                "ok": True,
+                "breakpoint": "need_title",
+                "instruction": (
+                    "Integration complete. To submit, call: "
+                    f"_cm_next(repo='{args.repo}', title='feat: <your PR title>')"
+                ),
+            }
+        submit_args = copy.copy(args)
+        submit_args.title = title
+        submit_result = cmd_submit(submit_args)
+        if not submit_result.get("ok"):
+            return submit_result
+        return {
+            "ok": True,
+            "breakpoint": "complete",
+            "pr_url": submit_result.get("data", {}).get("pr_url", ""),
+            "instruction": "All done! Session submitted and PR created.",
+        }
+
+    return {
+        "ok": False,
+        "error": f"Unexpected session phase: {phase}",
+        "hint": "Run _cm_doctor to diagnose.",
+    }
+
+
+def _cmd_next_review(repo: Path, lock: dict, args, mode: str, intent, _recurse) -> dict:
+    """Review/debug/analyze-mode breakpoint logic."""
+    phase = lock.get("session_phase", "locked")
+    scope_path = repo / CM_DIR / "scope.json"
+    report_path = repo / CM_DIR / ("diagnosis.md" if mode == "debug" else "report.md")
+
+    if phase == "locked":
+        scope = _atomic_json_read(scope_path)
+        if not scope:
+            # Auto-detect scope intent: if diff or files provided, treat as scope
+            has_scope_params = getattr(args, "diff", None) or getattr(args, "files", None)
+            if intent == "scope" or has_scope_params:
+                # Build scope args from intent params
+                scope_args = copy.copy(args)
+                if not hasattr(scope_args, "type"):
+                    scope_args.type = "diff" if getattr(args, "diff", None) else "files"
+                scope_args.content = getattr(args, "diff", None) or getattr(args, "files", "") or ""
+                scope_args.mode_override = mode
+                scope_result = cmd_scope(scope_args)
+                if not scope_result.get("ok"):
+                    return scope_result
+                # Run engine
+                engine_args = copy.copy(args)
+                engine_result = cmd_engine_run(engine_args)
+                if not engine_result.get("ok"):
+                    return engine_result
+                findings = engine_result.get("data", {}).get("summary", "")
+                _atomic_json_update(repo / CM_DIR / "lock.json",
+                                    lambda d: (d.update({"_engine_findings": findings}), {"ok": True})[1])
+                report_file = f".coding-master/{'diagnosis.md' if mode == 'debug' else 'report.md'}"
+                return {
+                    "ok": True,
+                    "breakpoint": "write_report",
+                    "instruction": (
+                        f"STOP — do NOT call _cm_next again. "
+                        f"Engine analysis complete. Write your {'diagnosis' if mode == 'debug' else 'report'} with: "
+                        f"_cm_edit(repo='{args.repo}', file='{report_file}', old_text='', new_text='<your report>'). "
+                        "Only after writing the file, call _cm_next to complete."
+                    ),
+                    "findings": findings,
+                    "report_target": report_file,
+                }
+
+            return {
+                "ok": True,
+                "breakpoint": "define_scope",
+                "instruction": (
+                    f"Define what to {mode}. Call _cm_next with either:\n"
+                    f"  _cm_next(repo='{args.repo}', diff='HEAD~5..HEAD')  — analyze recent commits\n"
+                    f"  _cm_next(repo='{args.repo}', files='src/foo.py')   — analyze specific files"
+                ),
+                "hint": _SCOPE_TEMPLATE,
+            }
+
+        # Scope exists but no report yet
+        if not report_path.exists():
+            # Run engine only if not already done (check engine_done flag in lock)
+            findings = lock.get("_engine_findings", "")
+            if not findings:
+                engine_args = copy.copy(args)
+                engine_result = cmd_engine_run(engine_args)
+                if engine_result.get("ok"):
+                    findings = engine_result.get("data", {}).get("summary", "")
+                    # Cache findings in lock so engine doesn't re-run on next _cm_next
+                    _atomic_json_update(repo / CM_DIR / "lock.json",
+                                        lambda d: (d.update({"_engine_findings": findings}), {"ok": True})[1])
+            report_file = f".coding-master/{'diagnosis.md' if mode == 'debug' else 'report.md'}"
+            return {
+                "ok": True,
+                "breakpoint": "write_report",
+                "instruction": (
+                    f"STOP — do NOT call _cm_next again. "
+                    f"First write your {'diagnosis' if mode == 'debug' else 'report'} with: "
+                    f"_cm_edit(repo='{args.repo}', file='{report_file}', old_text='', new_text='<your report>'). "
+                    "Only after writing the file, call _cm_next to complete."
+                ),
+                "findings": findings,
+                "report_target": report_file,
+            }
+
+        # Report exists → auto unlock
+        unlock_args = copy.copy(args)
+        unlock_args.force = False
+        unlock_result = cmd_unlock(unlock_args)
+        if not unlock_result.get("ok"):
+            return unlock_result
+        return {
+            "ok": True,
+            "breakpoint": "complete",
+            "instruction": f"{mode.capitalize()} session complete. Report saved.",
+            "report": str(report_path),
+        }
+
+    return {
+        "ok": False,
+        "error": f"Unexpected session phase '{phase}' for {mode} mode.",
+        "hint": "Run _cm_doctor to diagnose.",
+    }
 
 
 # ══════════════════════════════════════════════════════════

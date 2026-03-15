@@ -161,7 +161,7 @@ class CodingMasterSkillkit(Skillkit):
         tools = _get_tools()
         return _safe_cmd(tools.cmd_repos, _make_args())
 
-    def _cm_start(self, repo: str, mode: str = "deliver",
+    def _cm_session_start(self, repo: str, mode: str = "deliver",
                   branch: str = "", plan_file: str = "", **kwargs) -> str:
         """一键启动会话：lock + 复制 plan + plan-ready。失败时自动回滚。
 
@@ -183,7 +183,7 @@ class CodingMasterSkillkit(Skillkit):
         )
         return _safe_cmd(tools.cmd_start, args)
 
-    def _cm_lock(self, repo: str, mode: str = "deliver",
+    def _cm_session_lock(self, repo: str, mode: str = "deliver",
                  branch: str = "", **kwargs) -> str:
         """锁定工作区，创建开发分支（review/analyze 为只读锁）。
 
@@ -212,7 +212,7 @@ class CodingMasterSkillkit(Skillkit):
             self._overlay_mode = None
         return _result_to_str(result)
 
-    def _cm_unlock(self, repo: str = "", force: bool = False, **kwargs) -> str:
+    def _cm_session_unlock(self, repo: str = "", force: bool = False, **kwargs) -> str:
         """释放工作区锁。写会话未完成时需要 force=true。
 
         Args:
@@ -243,7 +243,7 @@ class CodingMasterSkillkit(Skillkit):
     #  Feature delivery pipeline
     # ──────────────────────────────────────────────────────────
 
-    def _cm_claim(self, repo: str = "", feature: int = 0, **kwargs) -> str:
+    def _cm_feat_claim(self, repo: str = "", feature: int = 0, **kwargs) -> str:
         """认领一个 feature，创建独立 worktree 和分支。
 
         Args:
@@ -257,7 +257,7 @@ class CodingMasterSkillkit(Skillkit):
         args = _make_args(repo=repo or None, feature=feature, agent=self._agent_id)
         return _safe_cmd(tools.cmd_claim, args)
 
-    def _cm_dev(self, repo: str = "", feature: int = 0, **kwargs) -> str:
+    def _cm_feat_dev(self, repo: str = "", feature: int = 0, **kwargs) -> str:
         """将 feature 推进到 developing 阶段。需要先完成 Analysis 和 Plan。
 
         Args:
@@ -271,7 +271,7 @@ class CodingMasterSkillkit(Skillkit):
         args = _make_args(repo=repo or None, feature=feature, agent=self._agent_id)
         return _safe_cmd(tools.cmd_dev, args)
 
-    def _cm_test(self, repo: str = "", feature: int = 0, **kwargs) -> str:
+    def _cm_feat_test(self, repo: str = "", feature: int = 0, **kwargs) -> str:
         """运行 feature 的测试 + lint + typecheck，写入 evidence。
 
         Args:
@@ -285,7 +285,7 @@ class CodingMasterSkillkit(Skillkit):
         args = _make_args(repo=repo or None, feature=feature, agent=self._agent_id)
         return _safe_cmd(tools.cmd_test, args)
 
-    def _cm_done(self, repo: str = "", feature: int = 0, **kwargs) -> str:
+    def _cm_feat_done(self, repo: str = "", feature: int = 0, **kwargs) -> str:
         """标记 feature 完成。需要通过测试且有 evidence。
 
         Args:
@@ -299,7 +299,7 @@ class CodingMasterSkillkit(Skillkit):
         args = _make_args(repo=repo or None, feature=feature, agent=self._agent_id)
         return _safe_cmd(tools.cmd_done, args)
 
-    def _cm_reopen(self, repo: str = "", feature: int = 0, **kwargs) -> str:
+    def _cm_feat_reopen(self, repo: str = "", feature: int = 0, **kwargs) -> str:
         """重新打开已完成的 feature 进行修复。
 
         Args:
@@ -313,7 +313,7 @@ class CodingMasterSkillkit(Skillkit):
         args = _make_args(repo=repo or None, feature=feature, agent=self._agent_id)
         return _safe_cmd(tools.cmd_reopen, args)
 
-    def _cm_integrate(self, repo: str = "", **kwargs) -> str:
+    def _cm_session_integrate(self, repo: str = "", **kwargs) -> str:
         """合并所有 done features 到开发分支，运行集成测试。
 
         Args:
@@ -326,7 +326,7 @@ class CodingMasterSkillkit(Skillkit):
         args = _make_args(repo=repo or None, agent=self._agent_id)
         return _safe_cmd(tools.cmd_integrate, args)
 
-    def _cm_submit(self, repo: str = "", title: str = "", **kwargs) -> str:
+    def _cm_session_submit(self, repo: str = "", title: str = "", **kwargs) -> str:
         """Push 代码并创建 PR，清理 worktrees。
 
         Args:
@@ -344,7 +344,7 @@ class CodingMasterSkillkit(Skillkit):
     #  Analysis / Review mode
     # ──────────────────────────────────────────────────────────
 
-    def _cm_scope(self, repo: str = "", diff: str = "", files: str = "",
+    def _cm_review_scope(self, repo: str = "", diff: str = "", files: str = "",
                   pr: str = "", goal: str = "", **kwargs) -> str:
         """定义分析/review 的范围。用于 review, debug, analyze 模式。
 
@@ -371,7 +371,7 @@ class CodingMasterSkillkit(Skillkit):
         )
         return _safe_cmd(tools.cmd_scope, args)
 
-    def _cm_report(self, repo: str = "", content: str = "",
+    def _cm_review_report(self, repo: str = "", content: str = "",
                    file: str = "", **kwargs) -> str:
         """写入会话报告或诊断。用于 review, debug, analyze 模式。
 
@@ -393,7 +393,7 @@ class CodingMasterSkillkit(Skillkit):
         )
         return _safe_cmd(tools.cmd_report, args)
 
-    def _cm_engine_run(self, repo: str = "", goal: str = "",
+    def _cm_review_engine(self, repo: str = "", goal: str = "",
                        engine: str = "claude-code", timeout: int = 600,
                        max_turns: int = 30, **kwargs) -> str:
         """委托引擎子进程执行代码分析。需先定义 scope。
@@ -439,7 +439,7 @@ class CodingMasterSkillkit(Skillkit):
         args = _make_args(repo=repo or None, agent=self._agent_id)
         return _safe_cmd(tools.cmd_progress, args)
 
-    def _cm_journal(self, message: str, repo: str = "", **kwargs) -> str:
+    def _cm_dev_journal(self, message: str, repo: str = "", **kwargs) -> str:
         """向 JOURNAL.md 追加一条日志。
 
         Args:
@@ -581,7 +581,7 @@ class CodingMasterSkillkit(Skillkit):
         )
         return _safe_cmd(tools.cmd_grep, args)
 
-    def _cm_edit(self, repo: str = "", file: str = "",
+    def _cm_dev_edit(self, repo: str = "", file: str = "",
                  old_text: str = "", new_text: str = "",
                  feature: int = 0, **kwargs) -> str:
         """精确替换编辑文件。仅在 deliver/debug 模式下可用。
@@ -611,7 +611,7 @@ class CodingMasterSkillkit(Skillkit):
     #  Escape hatches (controlled)
     # ──────────────────────────────────────────────────────────
 
-    def _cm_git(self, subcmd: str, args: str = "", cwd: str = "", **kwargs) -> str:
+    def _cm_dev_git(self, subcmd: str, args: str = "", cwd: str = "", **kwargs) -> str:
         """在工作区内执行 git 操作。仅允许安全的 git 子命令。
 
         Allowed: add, branch, checkout, cherry-pick, commit, diff, fetch,
@@ -661,16 +661,12 @@ class CodingMasterSkillkit(Skillkit):
                         )
                         if not has_developing:
                             phase = lock.get("session_phase", "locked")
-                            if phase == "locked":
-                                hint = ("Session is in 'locked' phase — create "
-                                        ".coding-master/PLAN.md first, then run "
-                                        "cm plan-ready to validate it.")
-                            elif phase == "reviewed":
-                                hint = ("Session is in 'reviewed' phase — run "
-                                        "cm claim --feature N to claim a feature, "
-                                        "then cm dev --feature N to start developing.")
-                            else:
-                                hint = "Run cm claim + cm dev first."
+                            hint = (
+                                f"Session phase is '{phase}'. "
+                                "Call _cm_next(repo=...) — it will automatically advance "
+                                "through lock/plan/claim/dev steps until a feature is in "
+                                "'developing' phase, then git operations will work."
+                            )
                             return _result_to_str({
                                 "ok": False,
                                 "error": f"git {subcmd} requires a feature in "
@@ -700,7 +696,7 @@ class CodingMasterSkillkit(Skillkit):
         except subprocess.TimeoutExpired:
             return _result_to_str({"ok": False, "error": "git command timed out (60s limit)"})
         except Exception as exc:
-            logger.debug("_cm_git failed: %s", exc, exc_info=True)
+            logger.debug("_cm_dev_git failed: %s", exc, exc_info=True)
             return _result_to_str({"ok": False, "error": str(exc)})
 
 
@@ -757,37 +753,94 @@ class CodingMasterSkillkit(Skillkit):
     #  Skillkit registration
     # ──────────────────────────────────────────────────────────
 
+    # ── Agent-facing tools (v5.0) ─────────────────────────────────────────────
+    # These 7 tools are the ONLY tools exposed to the agent.
+    # Internal tools (lock/unlock/claim/dev/test/done/integrate/submit/...)
+    # are called automatically by _cm_next and are NOT registered here.
+
+    def _cm_next(self, repo: str, mode: str = "deliver",
+                 intent: str = "", diff: str = "", files: str = "",
+                 title: str = "", force: bool = False, **kwargs) -> str:
+        """推进工作流到下一个断点。唯一的流程入口。
+
+        自动执行所有机械步骤（lock/plan验证/claim/dev/integrate/submit），
+        只在需要 Agent 创造力的地方停下来（write_plan/write_code/fix_code/write_report 等）。
+        返回 {ok, breakpoint, instruction, context}，按 instruction 行动后再次调用。
+
+        Args:
+            repo (str): 目标仓库名称（必填）
+            mode (str): 首次调用时指定工作模式：deliver/review/debug/analyze（之后从 lock 读取）
+            intent (str): 触发特定操作：'test'（运行测试）、'scope'（定义分析范围）、'submit'（推送 PR）
+            diff (str): intent='scope' 时的 diff range，如 'HEAD~5..HEAD'
+            files (str): intent='scope' 时的文件列表，如 'src/foo.py,src/bar.py'
+            title (str): intent='submit' 时的 PR 标题
+            force (bool): 当 mode 冲突时强制解锁当前 session 并切换到指定 mode
+
+        Returns:
+            str: JSON — {ok, breakpoint, instruction, context}
+        """
+        t = _get_tools()
+        return json.dumps(t.cmd_next(_make_args(
+            repo=repo, mode=mode or "deliver",
+            intent=intent or None,
+            diff=diff or None, files=files or None,
+            title=title or None,
+            force=force,
+            _depth=0,
+        )), ensure_ascii=False, indent=2)
+
+    def _cm_edit(self, repo: str = "", file: str = "",
+                 old_text: str = "", new_text: str = "",
+                 feature: int = 0, **kwargs) -> str:
+        """编辑文件。覆盖 PLAN.md / feature MD / 源码。唯一的写操作入口。
+
+        .coding-master/*.md 元数据文件无门槛可写。
+        源码文件需要 feature 在 developing 阶段（先调 _cm_next 获取 write_code 断点）。
+        创建新文件：old_text=''（write-once）。修改已有文件：old_text 必须精确匹配一次。
+
+        Args:
+            repo (str): 目标仓库名称
+            file (str): 文件路径，相对路径或绝对路径，如 '.coding-master/PLAN.md'、'src/foo.py'
+            old_text (str): 要替换的原始文本（空字符串表示新建/覆盖）
+            new_text (str): 替换后的新文本
+            feature (int): 可选，明确指定 feature worktree 上下文
+
+        Returns:
+            str: JSON — {ok, data: {file, replacements}}
+        """
+        t = _get_tools()
+        return json.dumps(t.cmd_edit(_make_args(
+            repo=repo, file=file, old_text=old_text, new_text=new_text,
+            feature=feature or None,
+        )), ensure_ascii=False, indent=2)
+
+    def _cm_status(self, repo: str = "", **kwargs) -> str:
+        """查看状态和进度。无 repo 时列出所有配置的仓库；有 repo 时返回 session + feature 详情。
+
+        Args:
+            repo (str): 目标仓库名称；留空则列出所有已配置的仓库
+
+        Returns:
+            str: JSON — 仓库列表或 session/feature 进度详情
+        """
+        t = _get_tools()
+        return json.dumps(t.cmd_combined_status(_make_args(repo=repo)),
+                          ensure_ascii=False, indent=2)
+
     def _createSkills(self) -> List[SkillFunction]:
+        # v5.0: only 7 agent-facing tools exposed.
+        # Internal tools (lock/claim/dev/test/done/integrate/submit/scope/engine/report/...)
+        # are called by _cm_next automatically and are NOT registered here.
         return [
-            # Session lifecycle
-            SkillFunction(self._cm_repos),
-            SkillFunction(self._cm_start),
-            SkillFunction(self._cm_lock),
-            SkillFunction(self._cm_unlock),
-            SkillFunction(self._cm_status),
-            # Feature delivery
-            SkillFunction(self._cm_claim),
-            SkillFunction(self._cm_dev),
-            SkillFunction(self._cm_test),
-            SkillFunction(self._cm_done),
-            SkillFunction(self._cm_reopen),
-            SkillFunction(self._cm_integrate),
-            SkillFunction(self._cm_submit),
-            # Analysis / Review
-            SkillFunction(self._cm_scope),
-            SkillFunction(self._cm_report),
-            SkillFunction(self._cm_engine_run),
-            # Utility
-            SkillFunction(self._cm_progress),
-            SkillFunction(self._cm_journal),
-            SkillFunction(self._cm_regression),
-            SkillFunction(self._cm_change_summary),
-            SkillFunction(self._cm_doctor),
-            # File operations (v4.5)
+            # 流程入口
+            SkillFunction(self._cm_next),
+            # 编辑（唯一的写操作入口）
+            SkillFunction(self._cm_edit),
+            # 文件探索（无门槛，任何时候可用）
             SkillFunction(self._cm_read),
             SkillFunction(self._cm_find),
             SkillFunction(self._cm_grep),
-            SkillFunction(self._cm_edit),
-            # Escape hatches
-            SkillFunction(self._cm_git),
+            # 状态与诊断
+            SkillFunction(self._cm_status),
+            SkillFunction(self._cm_doctor),
         ]

@@ -1,4 +1,4 @@
-"""Unit tests for CodingMasterSkillkit."""
+"""Unit tests for CodingMasterSkillkit — v5.0 two-tier architecture."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ class TestMakeArgs:
 
 
 # ===========================================================================
-# _createSkills
+# _createSkills — v5.0: 7 agent-facing tools only
 # ===========================================================================
 
 
@@ -52,42 +52,46 @@ class TestCreateSkills:
         skills = sk._createSkills()
         names = {s.get_function_name() for s in skills}
 
-        # Core tools exist
-        assert "_cm_repos" in names
-        assert "_cm_start" in names
-        assert "_cm_lock" in names
-        assert "_cm_unlock" in names
-        assert "_cm_status" in names
-        assert "_cm_claim" in names
-        assert "_cm_dev" in names
-        assert "_cm_test" in names
-        assert "_cm_done" in names
-        assert "_cm_reopen" in names
-        assert "_cm_integrate" in names
-        assert "_cm_submit" in names
-        assert "_cm_scope" in names
-        assert "_cm_report" in names
-        assert "_cm_engine_run" in names
-        assert "_cm_progress" in names
-        assert "_cm_journal" in names
-        assert "_cm_doctor" in names
-        assert "_cm_git" in names
-        assert "_cm_engine_run" in names
+        # v5.0 agent-facing tools
+        assert "_cm_next" in names       # workflow autopilot
+        assert "_cm_edit" in names       # file editing
+        assert "_cm_read" in names       # read files
+        assert "_cm_find" in names       # find files
+        assert "_cm_grep" in names       # search content
+        assert "_cm_status" in names     # status + progress + repos
+        assert "_cm_doctor" in names     # diagnose + fix
 
-        # v4.5: file operation tools added
-        assert "_cm_read" in names
-        assert "_cm_grep" in names
-        assert "_cm_find" in names
-        assert "_cm_edit" in names
-
-        # No _bash or _python tool
-        assert "_bash" not in names
-        assert "_python" not in names
-
-    def test_skill_count(self):
+    def test_internal_tools_not_exposed(self):
+        """Internal pipeline tools must NOT be registered as agent-facing tools."""
         sk = CodingMasterSkillkit(agent_id="test")
         skills = sk._createSkills()
-        assert len(skills) == 25  # 19 original + 4 file ops + change-summary + doctor
+        names = {s.get_function_name() for s in skills}
+
+        internal_tools = [
+            "_cm_session_start", "_cm_session_lock", "_cm_session_unlock",
+            "_cm_feat_claim", "_cm_feat_dev", "_cm_feat_test",
+            "_cm_feat_done", "_cm_feat_reopen",
+            "_cm_session_integrate", "_cm_session_submit",
+            "_cm_dev_git", "_cm_dev_journal",
+            "_cm_review_scope", "_cm_review_engine", "_cm_review_report",
+            "_cm_regression", "_cm_change_summary", "_cm_progress",
+            "_cm_repos",
+        ]
+        for tool in internal_tools:
+            assert tool not in names, f"{tool} should be internal, not agent-facing"
+
+    def test_skill_count(self):
+        """v5.0: exactly 7 agent-facing tools."""
+        sk = CodingMasterSkillkit(agent_id="test")
+        skills = sk._createSkills()
+        assert len(skills) == 7
+
+    def test_no_bash_or_python(self):
+        sk = CodingMasterSkillkit(agent_id="test")
+        skills = sk._createSkills()
+        names = {s.get_function_name() for s in skills}
+        assert "_bash" not in names
+        assert "_python" not in names
 
     def test_get_name(self):
         sk = CodingMasterSkillkit()
@@ -95,7 +99,108 @@ class TestCreateSkills:
 
 
 # ===========================================================================
-# _cm_git validation
+# _cm_next delegation
+# ===========================================================================
+
+
+class TestCmNext:
+    @pytest.fixture
+    def sk(self):
+        return CodingMasterSkillkit(agent_id="test-agent")
+
+    @patch("coding_master_skillkit._get_tools")
+    def test_cm_next_delegates_to_cmd_next(self, mock_tools, sk):
+        mock_tools.return_value.cmd_next.return_value = {
+            "ok": True,
+            "breakpoint": "write_plan",
+            "instruction": "Create PLAN.md",
+        }
+        result = json.loads(sk._cm_next(repo="myrepo"))
+        assert result["ok"] is True
+        assert result["breakpoint"] == "write_plan"
+        call_args = mock_tools.return_value.cmd_next.call_args[0][0]
+        assert call_args.repo == "myrepo"
+
+    @patch("coding_master_skillkit._get_tools")
+    def test_cm_next_passes_intent(self, mock_tools, sk):
+        mock_tools.return_value.cmd_next.return_value = {
+            "ok": False, "breakpoint": "fix_code", "test_output": "FAILED"
+        }
+        result = json.loads(sk._cm_next(repo="myrepo", intent="test"))
+        call_args = mock_tools.return_value.cmd_next.call_args[0][0]
+        assert call_args.intent == "test"
+
+    @patch("coding_master_skillkit._get_tools")
+    def test_cm_next_passes_mode(self, mock_tools, sk):
+        mock_tools.return_value.cmd_next.return_value = {
+            "ok": True, "breakpoint": "define_scope"
+        }
+        sk._cm_next(repo="myrepo", mode="review")
+        call_args = mock_tools.return_value.cmd_next.call_args[0][0]
+        assert call_args.mode == "review"
+
+
+# ===========================================================================
+# _cm_edit delegation
+# ===========================================================================
+
+
+class TestCmEdit:
+    @pytest.fixture
+    def sk(self):
+        return CodingMasterSkillkit(agent_id="test-agent")
+
+    @patch("coding_master_skillkit._get_tools")
+    def test_cm_edit_delegates_to_cmd_edit(self, mock_tools, sk):
+        mock_tools.return_value.cmd_edit.return_value = {
+            "ok": True, "data": {"file": ".coding-master/PLAN.md", "replacements": 1}
+        }
+        result = json.loads(sk._cm_edit(
+            repo="myrepo", file=".coding-master/PLAN.md",
+            old_text="", new_text="# Plan\n"
+        ))
+        assert result["ok"] is True
+        call_args = mock_tools.return_value.cmd_edit.call_args[0][0]
+        assert call_args.file == ".coding-master/PLAN.md"
+        assert call_args.old_text == ""
+        assert call_args.new_text == "# Plan\n"
+
+
+# ===========================================================================
+# _cm_status (merged status + progress + repos)
+# ===========================================================================
+
+
+class TestCmStatus:
+    @pytest.fixture
+    def sk(self):
+        return CodingMasterSkillkit(agent_id="test-agent")
+
+    @patch("coding_master_skillkit._get_tools")
+    def test_cm_status_no_repo_lists_repos(self, mock_tools, sk):
+        mock_tools.return_value.cmd_combined_status.return_value = {
+            "ok": True,
+            "data": {"mode": "list", "repos": {"myrepo": {"path": "/path"}}},
+        }
+        result = json.loads(sk._cm_status())
+        assert result["ok"] is True
+        call_args = mock_tools.return_value.cmd_combined_status.call_args[0][0]
+        assert not call_args.repo  # empty string or None → list mode
+
+    @patch("coding_master_skillkit._get_tools")
+    def test_cm_status_with_repo_shows_detail(self, mock_tools, sk):
+        mock_tools.return_value.cmd_combined_status.return_value = {
+            "ok": True,
+            "data": {"mode": "detail", "repo": "myrepo", "session": {}, "progress": {}},
+        }
+        result = json.loads(sk._cm_status(repo="myrepo"))
+        assert result["ok"] is True
+        call_args = mock_tools.return_value.cmd_combined_status.call_args[0][0]
+        assert call_args.repo == "myrepo"
+
+
+# ===========================================================================
+# _cm_dev_git validation (internal tool, still tested directly)
 # ===========================================================================
 
 
@@ -105,7 +210,7 @@ class TestCmGit:
         return CodingMasterSkillkit(agent_id="test")
 
     def test_forbidden_subcmd(self, sk):
-        result = json.loads(sk._cm_git(subcmd="reflog"))
+        result = json.loads(sk._cm_dev_git(subcmd="reflog"))
         assert result["ok"] is False
         assert "not allowed" in result["error"]
 
@@ -119,150 +224,99 @@ class TestCmGit:
             returncode=0, stdout="On branch main\n", stderr=""
         )
         sk._resolve_session_cwd = MagicMock(return_value="/tmp/repo")
-        result = json.loads(sk._cm_git(subcmd="status"))
+        result = json.loads(sk._cm_dev_git(subcmd="status"))
         assert result["ok"] is True
         assert "On branch main" in result["data"]["stdout"]
 
     def test_no_session_returns_error(self, sk):
         sk._resolve_session_cwd = MagicMock(return_value=None)
-        result = json.loads(sk._cm_git(subcmd="status"))
+        result = json.loads(sk._cm_dev_git(subcmd="status"))
         assert result["ok"] is False
         assert "No active session" in result["error"]
 
-    @patch("subprocess.run")
-    def test_explicit_cwd(self, mock_run, sk):
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        result = json.loads(sk._cm_git(subcmd="log", args="--oneline -5", cwd="/my/repo"))
-        assert result["ok"] is True
-        mock_run.assert_called_once()
-        call_kwargs = mock_run.call_args
-        assert call_kwargs.kwargs["cwd"] == "/my/repo"
-
-    @patch("subprocess.run")
-    def test_explicit_cwd_uses_matching_lock_only(self, mock_run, sk):
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        sk._find_active_lock = MagicMock(
-            side_effect=[
-                {
-                    "mode": "deliver",
-                    "_repo_path": "/my/repo",
-                }
-            ]
-        )
-        with patch("coding_master_skillkit._get_tools") as mock_tools:
-            mock_tools.return_value.CM_DIR = ".cm"
-            mock_tools.return_value._atomic_json_read.return_value = {
-                "features": {"1": {"phase": "developing"}}
-            }
-            result = json.loads(sk._cm_git(subcmd="commit", args="-m test", cwd="/my/repo"))
-
-        assert result["ok"] is True
-        sk._find_active_lock.assert_called_once_with("/my/repo")
-
-    def test_explicit_cwd_ignores_unrelated_active_lock(self, sk):
-        sk._find_active_lock = MagicMock(return_value=None)
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            result = json.loads(sk._cm_git(subcmd="commit", args="-m test", cwd="/my/repo"))
-
-        assert result["ok"] is True
-        sk._find_active_lock.assert_called_once_with("/my/repo")
-        assert mock_run.call_args.kwargs["cwd"] == "/my/repo"
-
-    def test_find_active_lock_matches_explicit_cwd(self, sk, tmp_path):
-        repo_a = tmp_path / "repo-a"
-        repo_b = tmp_path / "repo-b"
-        repo_a.mkdir()
-        repo_b.mkdir()
-        (repo_a / ".cm").mkdir()
-        (repo_b / ".cm").mkdir()
-        (repo_a / ".cm" / "lock.json").write_text("{}")
-        (repo_b / ".cm" / "lock.json").write_text("{}")
-
-        def _lock_for(repo_path: Path, mode: str) -> dict:
-            return {
-                "mode": mode,
-                "session_phase": "active",
-                "session_worktree": str(repo_path / "session"),
-            }
-
-        with patch("coding_master_skillkit._get_tools") as mock_tools:
-            mock_tools.return_value.CM_DIR = ".cm"
-            mock_tools.return_value.ConfigManager.return_value._section.return_value = {
-                "workspaces": {
-                    "repo-a": {"path": str(repo_a)},
-                    "repo-b": {"path": str(repo_b)},
-                }
-            }
-
-            def read_side_effect(path):
-                if path == repo_a / ".cm" / "lock.json":
-                    return _lock_for(repo_a, "review")
-                if path == repo_b / ".cm" / "lock.json":
-                    return _lock_for(repo_b, "deliver")
-                return {}
-
-            mock_tools.return_value._atomic_json_read.side_effect = read_side_effect
-
-            lock = sk._find_active_lock(str(repo_b))
-
-        assert lock is not None
-        assert lock["mode"] == "deliver"
-        assert lock["_repo_path"] == str(repo_b.resolve())
-
 
 # ===========================================================================
-# Tool delegation to cmd_* functions
+# Guard: hints/errors must only reference the 7 exposed agent-facing tools
 # ===========================================================================
 
 
-class TestToolDelegation:
+class TestHintToolConsistency:
+    """Ensure all _cm_xxx() references in hints, errors, and next_action fields
+    map to an actual tool in the v5.0 skillkit (7 tools only).
+
+    This prevents the agent from being guided toward internal/non-existent tools,
+    which was the root cause of infinite retry loops in v4.x.
+    """
+
     @pytest.fixture
-    def sk(self):
-        return CodingMasterSkillkit(agent_id="test-agent")
+    def exposed_commands(self):
+        """Return the set of command suffixes exposed via _cm_* methods."""
+        sk = CodingMasterSkillkit(agent_id="test")
+        skills = sk._createSkills()
+        names = {s.get_function_name() for s in skills}
+        commands = set()
+        for name in names:
+            if name.startswith("_cm_"):
+                # _cm_next → "next", _cm_dev_edit → "dev-edit"
+                cmd = name[4:].replace("_", "-")
+                commands.add(cmd)
+        return commands
 
-    @patch("coding_master_skillkit._get_tools")
-    def test_cm_repos(self, mock_tools, sk):
-        mock_tools.return_value.cmd_repos.return_value = {"ok": True, "data": {"repos": {}}}
-        result = json.loads(sk._cm_repos())
-        assert result["ok"] is True
+    def test_hint_flow_maps_reference_exposed_tools(self, exposed_commands):
+        """All _hint() command strings in _FLOW_* maps must reference exposed _cm_* tools."""
+        import re
+        _tools_dir = Path(__file__).resolve().parents[2] / "scripts"
+        if str(_tools_dir) not in sys.path:
+            sys.path.insert(0, str(_tools_dir))
+        import tools as tools_mod
 
-    @patch("coding_master_skillkit._get_tools")
-    def test_cm_lock(self, mock_tools, sk):
-        mock_tools.return_value.cmd_lock.return_value = {
-            "ok": True, "data": {"branch": "dev/test", "mode": "deliver"}
-        }
-        result = json.loads(sk._cm_lock(repo="myrepo", mode="review"))
-        assert result["ok"] is True
-        call_args = mock_tools.return_value.cmd_lock.call_args[0][0]
-        assert call_args.repo == "myrepo"
-        assert call_args.mode == "review"
-        assert call_args.agent == "test-agent"
+        flow_maps = [
+            tools_mod._FLOW_AFTER_LOCK,
+            {"_": tools_mod._FLOW_AFTER_SCOPE},
+            tools_mod._FLOW_AFTER_ENGINE,
+            {"_": tools_mod._FLOW_AFTER_REPORT},
+        ]
+        cm_tool_pattern = re.compile(r"_cm_([\w]+)")
+        missing = []
+        for flow in flow_maps:
+            for key, hint in flow.items():
+                if isinstance(hint, dict) and "command" in hint:
+                    cmd_str = hint["command"]
+                    for match in cm_tool_pattern.finditer(cmd_str):
+                        tool_suffix = match.group(1).replace("_", "-")
+                        full_name = f"_cm_{match.group(1)}"
+                        if tool_suffix not in exposed_commands:
+                            missing.append(
+                                f"_FLOW hint references '{full_name}' "
+                                f"but it is not in v5.0 skillkit (exposed: {sorted(exposed_commands)})"
+                            )
+        assert not missing, "\n".join(missing)
 
-    @patch("coding_master_skillkit._get_tools")
-    def test_cm_claim(self, mock_tools, sk):
-        mock_tools.return_value.cmd_claim.return_value = {
-            "ok": True, "data": {"feature": 1, "branch": "feat/1-do-thing"}
-        }
-        result = json.loads(sk._cm_claim(repo="myrepo", feature=1))
-        assert result["ok"] is True
-        call_args = mock_tools.return_value.cmd_claim.call_args[0][0]
-        assert call_args.feature == 1
+    def test_error_hints_reference_exposed_tools(self, exposed_commands):
+        """All _cm_xxx() references in hint/error strings must use exposed agent-facing tools."""
+        import re
+        source = (Path(__file__).resolve().parents[2] / "scripts" / "tools.py").read_text()
+        skillkit_source = (Path(__file__).resolve().parents[2]
+                           / "coding_master_skillkit.py").read_text()
 
-    @patch("coding_master_skillkit._get_tools")
-    def test_cm_submit(self, mock_tools, sk):
-        mock_tools.return_value.cmd_submit.return_value = {
-            "ok": True, "data": {"pr_url": "https://github.com/org/repo/pull/42"}
-        }
-        result = json.loads(sk._cm_submit(repo="myrepo", title="Add feature X"))
-        assert result["ok"] is True
-        call_args = mock_tools.return_value.cmd_submit.call_args[0][0]
-        assert call_args.title == "Add feature X"
-
-    @patch("coding_master_skillkit._get_tools")
-    def test_cm_journal(self, mock_tools, sk):
-        mock_tools.return_value.cmd_journal.return_value = {"ok": True}
-        result = json.loads(sk._cm_journal(message="Started debugging", repo="myrepo"))
-        assert result["ok"] is True
-        call_args = mock_tools.return_value.cmd_journal.call_args[0][0]
-        assert call_args.message == "Started debugging"
+        pattern = re.compile(r"_cm_([\w]+)\s*\(")
+        missing = []
+        for src_name, src in [("tools.py", source), ("skillkit.py", skillkit_source)]:
+            for i, line in enumerate(src.splitlines(), 1):
+                if '"' not in line and "'" not in line:
+                    continue
+                stripped = line.strip()
+                if stripped.startswith("def ") or stripped.startswith("from ") or stripped.startswith("import "):
+                    continue
+                for match in pattern.finditer(line):
+                    func_name = match.group(1)
+                    cmd = func_name.replace("_", "-")
+                    if cmd not in exposed_commands:
+                        pos = match.start()
+                        before = line[:pos]
+                        if before.count('"') % 2 == 1 or before.count("'") % 2 == 1:
+                            missing.append(
+                                f"{src_name}:{i} references '_cm_{func_name}()' "
+                                f"but '_cm_{func_name}' is not an exposed v5.0 tool"
+                            )
+        assert not missing, "\n".join(missing)

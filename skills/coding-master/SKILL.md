@@ -1,98 +1,136 @@
 ---
 name: coding-master
 description: "Convention-driven code expert for all code-related work"
-version: "4.1.0"
+version: "5.0.0"
 tags: [coding, development, review, debug, analysis, pr, automation, parallel]
 ---
 
 # Coding Master
 
-> **MANDATORY**: All code work MUST go through `cm` commands below.
-> Do NOT use raw bash/grep/read to substitute `cm` workflows.
-> **Session continuity**: If prior `cm` results are visible in conversation history, you are already initialized — skip `cm lock` / `cm repos` / `cm scope` and continue from where you left off. Only run `cm lock` on the very first message of a session.
-> **EXECUTE, DON'T DISPLAY**: Always run `cm` commands via the corresponding `_cm_*` tool calls (e.g. `_cm_lock`, `_cm_scope`, `_cm_engine_run`).
-> NEVER output commands as text/code blocks — the user cannot run them.
+> **MANDATORY**: All code work MUST go through `_cm_next` and the 7 agent-facing tools below.
+> Do NOT use raw bash/grep/read/write to substitute `cm` workflows.
+> **Primary entry point**: Call `_cm_next(repo="<name>")` — it drives the entire workflow automatically, stopping only when your input is needed.
+> **Session continuity**: If prior `_cm_next` results are visible in conversation history, continue by calling `_cm_next` again (not `_cm_status` or any internal tool).
 
-CLI: `cm <command> [options]`
+## Agent-Facing Tools (v5.0)
 
-All commands return JSON `{"ok": true, "data": {...}}` or `{"ok": false, "error": "..."}`.
+| Tool | Purpose |
+|------|---------|
+| `_cm_next(repo, [intent], [mode], [force])` | **Primary workflow driver** — auto-advances through all mechanical steps, stops at creative breakpoints requiring your input |
+| `_cm_edit(repo, file, old_text, new_text)` | Edit files in the workspace (PLAN.md, feature MDs, report.md, source code) |
+| `_cm_read(repo, file)` | Read files from the workspace |
+| `_cm_find(repo, pattern)` | Find files by glob pattern |
+| `_cm_grep(repo, pattern, [path])` | Search file contents by regex |
+| `_cm_status([repo])` | Without repo: list configured repos. With repo: show session + feature progress detail |
+| `_cm_doctor(repo, [fix])` | Diagnose workspace state; pass `fix=True` to auto-repair |
 
-## Quick Start by Mode
+## Quick Start
 
-### Discovery — list available repos
-
-```
-cm repos                              # list configured repos and workspaces
-```
-
-### review / debug / analyze (most common)
-
-```
-cm lock --repo <name> --mode review    # or debug / analyze
-cm scope --diff HEAD~3..HEAD           # define what to look at
-cm engine-run                          # delegate analysis to engine subprocess
-cm report --content '...'              # write findings based on engine results
-cm unlock                              # done
-```
-
-> **You are a dispatcher, not an executor.** Define scope, delegate to engine, consume results, write report.
-> `cm engine-run` invokes a subprocess that reads all files and returns structured findings.
-> Do NOT read/grep/find code yourself — that is the engine's job.
-
-### deliver (feature development)
+### Step 1 — Discover repos
 
 ```
-cm lock --repo <name>                  # default mode = deliver
-# Create .coding-master/PLAN.md with features + acceptance criteria
-cm plan-ready                          # validate plan
-cm claim --feature <n>                 # claim a feature
-# Write Analysis + Plan in features/XX.md
-cm dev --feature <n>                   # enter dev phase
-# Edit code, git commit
-cm test --feature <n>                  # run lint+typecheck+tests
-cm done --feature <n>                  # mark complete (requires tests passed)
-# Repeat claim → dev → test → done for each feature
-cm integrate                           # merge all → full tests
-cm submit --title "..."                # push + PR + cleanup
+_cm_status()                           # list all configured repos
+```
+
+### Step 2 — Start working
+
+```
+_cm_next(repo="<name>")                # starts or resumes — auto-advances to first breakpoint
+```
+
+`_cm_next` returns a **breakpoint** telling you exactly what to do next. Follow the `instruction` field.
+
+### Step 3 — At each breakpoint, provide what's needed, then call `_cm_next` again
+
+```
+_cm_edit(repo="<name>", file=".coding-master/PLAN.md", old_text="", new_text="...")
+_cm_next(repo="<name>")                # continue after editing
+```
+
+### Done — submit
+
+```
+_cm_next(repo="<name>", intent="submit", title="feat: ...")
 ```
 
 ## Modes
 
-| Mode | Purpose | Required Artifacts | Completion Gate |
-|------|---------|-------------------|-----------------|
-| `deliver` | Feature delivery (default) | `evidence/N-verify.json` per feature | all features done + evidence pass |
-| `review` | Code review & feedback | `scope.json`, `report.md` | report.md exists |
-| `debug` | Investigate & diagnose | `scope.json`, `diagnosis.md` | diagnosis.md exists |
-| `analyze` | Understand code, produce conclusions | `scope.json`, `report.md` | report.md exists |
+| Mode | Purpose | Set via |
+|------|---------|---------|
+| `deliver` | Feature delivery (default) | `_cm_next(mode="deliver")` or default |
+| `review` | Code review & feedback | `_cm_next(mode="review")` |
+| `debug` | Investigate & diagnose | `_cm_next(mode="debug")` |
+| `analyze` | Understand code, produce conclusions | `_cm_next(mode="analyze")` |
 
-**Constraints are hard, paths are soft.** `cm progress` tells you what's missing, not what order to do things.
+## Breakpoints
 
-## Tools
+`_cm_next` stops at **creative breakpoints** that require your input. Each returns:
 
-| Tool | Modes | Purpose |
-|------|-------|---------|
-| `cm start --repo <name> [--mode M] [--plan-file path]` | all | One-shot: lock + plan + plan-ready |
-| `cm lock --repo <name> [--mode M]` | all | Lock workspace, create dev branch |
-| `cm unlock --repo <name>` | all | Release lock |
-| `cm scope [--diff R] [--files F] [--pr N] [--goal G]` | review/debug/analyze | Define analysis scope |
-| `cm report [--content C] [--file F]` | review/debug/analyze | Write report or diagnosis |
-| `cm engine-run [--goal G] [--engine E] [--timeout T] [--max-turns N]` | all | Delegate analysis to engine subprocess |
-| `cm plan-ready` | deliver | Validate PLAN.md → session: locked → reviewed |
-| `cm claim --feature <n>` | deliver | Claim feature, create branch/worktree/feature-MD |
-| `cm delegate-prepare --feature <n>` | deliver | Write delegation request and mark delegation running |
-| `cm delegate-complete --feature <n>` | deliver | Verify delegation artifacts and unlock execute |
-| `cm dev --feature <n>` | deliver/debug | Check Analysis+Plan → analyzing → developing |
-| `cm test --feature <n>` | deliver/debug | Run lint+typecheck+tests → write evidence |
-| `cm done --feature <n>` | deliver | Check tests passed + no new commits → developing → done |
-| `cm reopen --feature <n>` | deliver | Integration fix: done → developing |
-| `cm integrate` | deliver | All done → merge feature branches → full tests |
-| `cm progress` | all | Show status + artifact gaps + action guidance |
-| `cm submit --title "..."` | deliver | Idempotent: push → PR → cleanup → unlock |
-| `cm renew` | all | Renew lock lease |
-| `cm journal --message "..."` | all | Append to JOURNAL.md |
-| `cm change-summary [--base-ref R]` | all | Generate change summary with unified diff + worktree path |
-| `cm doctor --repo <name>` | all | Diagnose state, `--fix` to auto-repair |
-| `cm status --repo <name>` | all | Show lock status |
+```json
+{
+  "ok": true,
+  "breakpoint": "<name>",
+  "instruction": "<what to do now>",
+  "context": { ... }
+}
+```
+
+### deliver mode breakpoints
+
+| Breakpoint | What it means | What to do |
+|-----------|--------------|-----------|
+| `write_plan` | PLAN.md is missing or empty | Write `.coding-master/PLAN.md` via `_cm_edit`, then call `_cm_next` |
+| `write_analysis` | Feature analysis+plan section needed | Write the Analysis and Plan sections in `features/NN.md` via `_cm_edit`, then call `_cm_next` |
+| `write_code` | Feature code changes needed | Edit source files via `_cm_edit`, then call `_cm_next(intent="test")` |
+| `fix_code` | Tests failed | Fix the failing code via `_cm_edit`, then call `_cm_next(intent="test")` |
+| `complete` | All features done, PR submitted | Session finished — present PR URL to user. (Title auto-generated from PLAN.md; only shown as `need_title` if auto-gen fails) |
+
+### review/debug/analyze mode breakpoints
+
+| Breakpoint | What it means | What to do |
+|-----------|--------------|-----------|
+| `define_scope` | Scope not yet defined | Call `_cm_next(diff="HEAD~3..HEAD")` or `_cm_next(files="src/foo.py")` — scope+engine run in one step |
+| `write_report` | Engine finished; report not written | Write `.coding-master/report.md` via `_cm_edit`, then call `_cm_next` |
+| `complete` | Report written | Session complete; present findings to user |
+
+## Intent Parameter
+
+Use `intent` to signal what you just did or want to trigger:
+
+| Intent | When to use |
+|--------|------------|
+| *(none)* | Continue from current state |
+| `test` | After editing code — triggers lint+typecheck+tests |
+| `scope` | Trigger scope definition (use with `diff`, `files`, `pr`, `goal`). Can also just pass `diff`/`files` directly to `_cm_next` without `intent="scope"`. |
+| `submit` | After all features done — triggers push+PR+cleanup. `title` optional (auto-generated from PLAN.md if omitted) |
+
+## PLAN.md Format
+
+When `_cm_next` returns `write_plan`, write `.coding-master/PLAN.md` in this exact format:
+
+```markdown
+# Plan
+
+## Overview
+<brief description>
+
+### Feature 1: <title>
+
+#### Task
+<what to implement>
+
+#### Acceptance Criteria
+- <criterion 1>
+- <criterion 2>
+
+### Feature 2: <title>
+
+#### Task
+<what to implement>
+
+#### Acceptance Criteria
+- <criterion 1>
+```
 
 ## Rules
 
@@ -100,10 +138,10 @@ cm submit --title "..."                # push + PR + cleanup
 2. **Never push main/master** — always on feature branches
 3. **Never force push**
 4. **Don't modify SKILL.md** — immutable convention
-5. **Test before done** — `cm done` checks evidence (overall=passed + commit=HEAD)
-6. **Release lock when done**
-7. **Trust local progress first** — when unsure, run `cm progress` and follow `next_action`
-8. **Respect delegation hard gates** — when `must_delegate=true`, wait for delegation completion
-9. **Dispatcher, not executor** — use `cm engine-run` for all code analysis. Do not read/grep/find code yourself
-10. **Report changes with diff** — after making code changes, always call `cm change-summary` and present the unified diff, worktree path, and review command to the user. Never summarize changes as before/after snippets — show the actual `git diff`
-11. **One issue at a time** — when the user reports multiple issues, bugs, or tasks in a single message, handle them **sequentially**: fully analyze and resolve the first issue before moving to the next. Explicitly state "Issue N complete, moving to Issue N+1" between each. Never interleave analysis of multiple issues in the same pass — this leads to context confusion and degenerate loops
+5. **Test before done** — `_cm_next(intent="test")` must pass before `complete` breakpoint
+6. **Use `_cm_next` as the loop** — call it repeatedly; it decides what step comes next
+7. **Trust the breakpoint** — when `_cm_next` says `write_code`, write code; don't run extra diagnostics first
+8. **`_cm_edit` for all writes** — never use bash/write tools to modify workspace files
+9. **Dispatcher for analysis** — review/analyze/debug modes use engine subprocess; do not read/grep code yourself
+10. **Report changes with diff** — after code changes, call `_cm_next` and present the unified diff from `context.diff` to the user
+11. **One issue at a time** — handle multiple issues sequentially; fully resolve one before starting the next
