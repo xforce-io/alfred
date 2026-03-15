@@ -7,6 +7,7 @@ from typing import List, Dict, Any
 from datetime import datetime
 import logging
 from dolphin.core.common.constants import KEY_HISTORY
+from ..models.constants import LIMIT_DETAIL
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +85,8 @@ class HistoryManager:
 
             for msg in messages:
                 role = "用户" if msg.get("role") == "user" else "助手"
-                content = msg.get("content", "")[:200]  # 截断
-                if len(msg.get("content", "")) > 200:
+                content = msg.get("content", "")[:LIMIT_DETAIL]  # 截断
+                if len(msg.get("content", "")) > LIMIT_DETAIL:
                     content += "..."
                 summary_lines.append(f"**{role}**: {content}")
                 summary_lines.append("")
