@@ -2180,6 +2180,7 @@ def cmd_submit(args) -> dict:
         cwd=wt, capture_output=True, text=True,
     )
     pr_url = None
+    pr_warning = None
     if existing_pr.returncode != 0:
         pr_body = _generate_pr_body(repo)
         pr_result = subprocess.run(
@@ -2188,6 +2189,14 @@ def cmd_submit(args) -> dict:
         )
         if pr_result.returncode == 0:
             pr_url = pr_result.stdout.strip()
+        else:
+            err = (pr_result.stderr or pr_result.stdout).strip()
+            pr_warning = (
+                f"Branch pushed but PR creation failed: {err}. "
+                "Run 'gh auth login' to re-authenticate, then create the PR manually with: "
+                f"gh pr create --title '{args.title}' --head {branch}"
+            )
+            logger.warning("gh pr create failed: %s", err)
     else:
         try:
             pr_url = json.loads(existing_pr.stdout).get("url")
@@ -2266,7 +2275,10 @@ def cmd_submit(args) -> dict:
     }
     if change_summary:
         result_data["change_summary"] = change_summary
-    return {"ok": True, "data": result_data}
+    response: dict = {"ok": True, "data": result_data}
+    if pr_warning:
+        response["warning"] = pr_warning
+    return response
 
 
 def cmd_scope(args) -> dict:
