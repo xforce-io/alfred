@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.everbot.core.runtime.heartbeat import HeartbeatRunner
+from src.everbot.core.runtime.inspector import InspectionResult
 from src.everbot.core.tasks.task_manager import (
     ParseStatus,
 )
@@ -328,6 +329,7 @@ async def test_execute_once_runs_reflection_when_no_due_structured_task(
 
     monkeypatch.setattr(runner, "_get_or_create_agent", AsyncMock(return_value=fake_agent))
     monkeypatch.setattr(runner, "_run_agent", AsyncMock(return_value="HEARTBEAT_OK"))
+    monkeypatch.setattr(runner._inspector, "inspect", AsyncMock(return_value=InspectionResult(output="HEARTBEAT_OK")))
     monkeypatch.setattr(runner, "_save_session_atomic", AsyncMock())
     monkeypatch.setattr(runner, "_record_timeline_event", MagicMock())
     monkeypatch.setattr(runner, "_record_runtime_metric", MagicMock())

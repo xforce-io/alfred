@@ -182,8 +182,6 @@ class EverBotDaemon:
             inspector = getattr(runner, "_inspector", None)
             if inspector is None:
                 return
-            # Inspector needs an agent for LLM calls — reuse heartbeat's
-            agent = await runner._get_or_create_agent()
             heartbeat_content = ""
             hb_path = runner.workspace_path / "HEARTBEAT.md"
             if hb_path.exists():
@@ -193,9 +191,6 @@ class EverBotDaemon:
                     pass
             run_id = f"inspect_{uuid.uuid4().hex[:8]}"
             inspection = await inspector.inspect(
-                run_agent=runner._run_agent,
-                inject_context=runner._inject_heartbeat_context,
-                agent=agent,
                 heartbeat_content=heartbeat_content,
                 run_id=run_id,
                 session_manager=runner.session_manager,
@@ -217,15 +212,29 @@ class EverBotDaemon:
         for agent_name, runner in self.heartbeat_runners.items():
             active_hours = tuple(getattr(runner, "active_hours", (8, 22)))
             _night = getattr(runner, "night_interval_minutes", None)
+            if _night is not None and int(_night) <= 0:
+                logger.warning(
+                    "[%s] night_interval_minutes=%s is invalid (must be > 0); treating as None (skip at night)",
+                    agent_name, _night,
+                )
+                _night = None
             agent_schedules[agent_name] = AgentSchedule(
                 agent_name=agent_name,
                 interval_minutes=max(1, int(getattr(runner, "interval_minutes", 30) or 30)),
                 night_interval_minutes=max(1, int(_night)) if _night is not None else None,
                 active_hours=active_hours,
             )
+            _inspect_night = getattr(runner, "inspect_night_interval_minutes", None)
+            if _inspect_night is not None and int(_inspect_night) <= 0:
+                logger.warning(
+                    "[%s] inspect_night_interval_minutes=%s is invalid (must be > 0); treating as None (skip at night)",
+                    agent_name, _inspect_night,
+                )
+                _inspect_night = None
             inspector_schedules[agent_name] = InspectorSchedule(
                 agent_name=agent_name,
-                interval_minutes=30,  # default 30min for inspector
+                interval_minutes=getattr(runner, "inspect_interval_minutes", 30),
+                night_interval_minutes=max(1, int(_inspect_night)) if _inspect_night is not None else None,
                 active_hours=active_hours,
             )
 
@@ -338,6 +347,8 @@ class EverBotDaemon:
                 "agent_factory": self.agent_factory.create_agent,
                 "interval_minutes": heartbeat_config.get("interval", 30),
                 "night_interval_minutes": heartbeat_config.get("night_interval"),
+                "inspect_interval_minutes": heartbeat_config.get("inspect_interval", 30),
+                "inspect_night_interval_minutes": heartbeat_config.get("inspect_night_interval"),
                 "active_hours": tuple(heartbeat_config.get("active_hours", [8, 22])),
                 "max_retries": heartbeat_config.get("max_retries", 3),
                 "ack_max_chars": heartbeat_config.get("ack_max_chars", 300),

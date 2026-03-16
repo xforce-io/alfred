@@ -140,6 +140,8 @@ If not, reply with `HEARTBEAT_OK`.
         agent_factory: Callable,
         interval_minutes: int = 30,
         night_interval_minutes: Optional[int] = None,
+        inspect_interval_minutes: int = 30,
+        inspect_night_interval_minutes: Optional[int] = None,
         active_hours: tuple = (8, 22),
         max_retries: int = 3,
         ack_max_chars: int = 300,
@@ -178,6 +180,8 @@ If not, reply with `HEARTBEAT_OK`.
         self.agent_factory = agent_factory
         self.interval_minutes = interval_minutes
         self.night_interval_minutes = int(night_interval_minutes) if night_interval_minutes is not None else None
+        self.inspect_interval_minutes = max(1, int(inspect_interval_minutes or 30))
+        self.inspect_night_interval_minutes = int(inspect_night_interval_minutes) if inspect_night_interval_minutes is not None else None
         self.active_hours = active_hours
         self.max_retries = max_retries
         self.ack_max_chars = max(0, int(ack_max_chars or 0))
@@ -233,6 +237,7 @@ If not, reply with `HEARTBEAT_OK`.
             agent_name=agent_name,
             workspace_path=workspace_path,
             routine_manager=self._routine_manager,
+            agent_factory=agent_factory,
             reflection_manager=self._reflection,
             auto_register_routines=self.auto_register_routines,
             reflect_force_interval_hours=max(1, int(reflect_force_interval_hours or 24)),
@@ -729,9 +734,6 @@ If not, reply with `HEARTBEAT_OK`.
                         self._pending_delivery_details.append(result)
                 elif self._file_mgr.heartbeat_mode == "structured_reflect":
                     inspection = await self._inspector.inspect(
-                        run_agent=self._run_agent,
-                        inject_context=self._inject_heartbeat_context,
-                        agent=agent,
                         heartbeat_content=heartbeat_content,
                         run_id=run_id,
                         session_manager=self.session_manager,

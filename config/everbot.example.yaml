@@ -29,6 +29,9 @@ everbot:
       heartbeat:
         enabled: true
         interval: 30          # 心跳间隔（分钟）
+        night_interval: 120   # 夜间（active_hours 以外）心跳间隔（分钟）；不设或<=0则夜间不运行
+        inspect_interval: 30  # Inspector 巡查间隔（分钟）；仅在 active_hours 内运行
+        # inspect_night_interval: 120  # Inspector 夜间间隔（分钟）；不设则夜间不运行
         active_hours: [8, 22] # 活跃时段 8:00-22:00
         max_retries: 3        # 最大重试次数
         ack_max_chars: 300    # HEARTBEAT_OK suppress 阈值

@@ -8,6 +8,7 @@ Wraps ReflectionManager internally and exposes a clean ``inspect()`` method
 that the Scheduler / HeartbeatRunner can call on a reflection tick.
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -17,6 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from ...infra.dolphin_compat import ensure_continue_chat_compatibility
 from ...infra.user_data import get_user_data_manager
 from ..models.system_event import build_system_event
 from .reflection import ReflectionManager
@@ -27,6 +29,28 @@ SUMMARY_MAX_CHARS = 500
 
 # State file for tracking inspection context changes
 INSPECTOR_STATE_FILE = ".inspector_state.json"
+
+# System prompt used when running the reflection LLM call.
+# Overrides the default heartbeat system prompt so the LLM responds in JSON
+# instead of plain "HEARTBEAT_OK".
+_REFLECT_SYSTEM_PROMPT = """你是用户的私人助理，正在执行定期检查（reflection）。
+
+请严格用以下 JSON 格式回复，不要输出任何其他内容：
+
+```json
+{
+  "heartbeat_ok": true,
+  "push_message": null,
+  "routines": []
+}
+```
+
+字段说明：
+- heartbeat_ok: 系统是否正常，false 表示有需要关注的问题
+- push_message: 你想主动发给用户的消息（字符串），null 表示无需打扰用户
+- routines: 你建议新增的定时任务列表（通常为空数组）
+
+只输出 JSON，禁止输出 JSON 以外的任何内容。"""
 
 
 # ── Result types ─────────────────────────────────────────────
@@ -125,6 +149,7 @@ class Inspector:
         agent_name: str,
         workspace_path: Path,
         routine_manager: Any,
+        agent_factory: Optional[Callable] = None,
         reflection_manager: Optional[ReflectionManager] = None,
         auto_register_routines: bool = False,
         reflect_force_interval_hours: float = 24,
@@ -132,6 +157,7 @@ class Inspector:
         self.agent_name = agent_name
         self.workspace_path = Path(workspace_path)
         self.routine_manager = routine_manager
+        self.agent_factory = agent_factory
         self.auto_register_routines = auto_register_routines
         self._force_interval = timedelta(hours=reflect_force_interval_hours)
 
@@ -219,6 +245,8 @@ class Inspector:
         primary_session_id: Optional[str] = None,
     ) -> InspectionContext:
         """Gather enriched context for reflection prompt."""
+        gather_errors: list[str] = []
+
         memory_path = self.workspace_path / "MEMORY.md"
         memory_content = None
         if memory_path.exists():
@@ -226,6 +254,7 @@ class Inspector:
                 memory_content = memory_path.read_text(encoding="utf-8")
             except Exception as exc:
                 logger.debug("Failed to read MEMORY.md: %s", exc)
+                gather_errors.append(f"MEMORY.md: {exc}")
 
         # Get session summary from primary session
         session_summary = None
@@ -238,6 +267,7 @@ class Inspector:
                     session_summary = summary
             except Exception as exc:
                 logger.debug("Failed to get session summary: %s", exc)
+                gather_errors.append(f"session_summary: {exc}")
 
         # Get task execution stats
         task_stats = self._gather_task_stats()
@@ -252,6 +282,7 @@ class Inspector:
                 existing_routines = list(self.routine_manager.list_routines())
             except Exception as exc:
                 logger.debug("Failed to list routines: %s", exc)
+                gather_errors.append(f"routines: {exc}")
 
         # System health snapshot (process resources + disk)
         system_health = None
@@ -267,6 +298,7 @@ class Inspector:
             system_health = "; ".join(parts)
         except Exception as exc:
             logger.debug("Failed to gather system health: %s", exc)
+            gather_errors.append(f"system_health: {exc}")
 
         # Compute idle hours since last user interaction
         idle_hours = None
@@ -277,6 +309,15 @@ class Inspector:
                     idle_hours = round((time.time() - last_activity) / 3600, 1)
             except Exception as exc:
                 logger.debug("Failed to get last activity time: %s", exc)
+                gather_errors.append(f"idle_hours: {exc}")
+
+        if gather_errors:
+            logger.warning(
+                "[%s] _gather_context: %d source(s) unavailable, reflection runs on partial data: %s",
+                self.agent_name,
+                len(gather_errors),
+                "; ".join(gather_errors),
+            )
 
         return InspectionContext(
             memory_content=memory_content,
@@ -480,14 +521,70 @@ class Inspector:
         }
         self._persist_state(state)
 
+    async def _run_llm(self, prompt: str, timeout_seconds: float = 120.0) -> str:
+        """Create an independent agent and run the reflection LLM call.
+
+        Uses ``self.agent_factory`` to create a fresh agent with no heartbeat
+        system-prompt contamination, then sends the reflection prompt directly.
+        """
+        ensure_continue_chat_compatibility()
+        agent = await self.agent_factory(self.agent_name, self.workspace_path)
+        answer = ""
+        deltas: list[str] = []
+        seen_progress: set[str] = set()
+
+        async def _stream() -> None:
+            nonlocal answer
+            async for event in agent.continue_chat(
+                message=prompt,
+                stream_mode="delta",
+                system_prompt=_REFLECT_SYSTEM_PROMPT,
+            ):
+                if not isinstance(event, dict):
+                    continue
+                progress_list = event.get("_progress")
+                if not isinstance(progress_list, list):
+                    continue
+                for progress in progress_list:
+                    if not isinstance(progress, dict):
+                        continue
+                    if progress.get("stage") != "llm":
+                        continue
+                    fp = json.dumps(progress, sort_keys=True, ensure_ascii=False)
+                    if fp in seen_progress:
+                        continue
+                    seen_progress.add(fp)
+                    delta = progress.get("delta")
+                    if isinstance(delta, str) and delta:
+                        deltas.append(delta)
+                    full = progress.get("answer")
+                    if isinstance(full, str) and full:
+                        answer = full
+
+        try:
+            await asyncio.wait_for(_stream(), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[%s] _run_llm timed out after %.0fs", self.agent_name, timeout_seconds
+            )
+
+        result = answer or "".join(deltas)
+        if not result:
+            logger.warning(
+                "[%s] _run_llm returned empty string, prompt=%s...",
+                self.agent_name,
+                prompt[:100],
+            )
+        return result
+
     async def inspect(
         self,
         *,
-        run_agent: Callable[..., Any],
-        inject_context: Callable[..., Any],
-        agent: Any,
         heartbeat_content: str,
         run_id: str,
+        run_agent: Optional[Callable[..., Any]] = None,
+        inject_context: Optional[Callable[..., Any]] = None,
+        agent: Optional[Any] = None,
         session_manager: Optional[Any] = None,
         primary_session_id: Optional[str] = None,
     ) -> InspectionResult:
@@ -508,18 +605,36 @@ class Inspector:
                 output="HEARTBEAT_OK",
             )
 
-        # Build enriched prompt and inject into agent
+        # Build enriched reflection prompt
         reflect_prompt = self._build_reflect_prompt(ctx)
-        user_message = await inject_context(agent, reflect_prompt, mode="reflect_json")
 
-        # Run LLM
+        # Run LLM reflection via independent agent (方案C) or legacy path.
         try:
-            response = await run_agent(agent, user_message)
+            if self.agent_factory is not None:
+                # Independent agent: fresh agent with _REFLECT_SYSTEM_PROMPT,
+                # no heartbeat system-prompt contamination.
+                response = await self._run_llm(reflect_prompt)
+            else:
+                # Legacy fallback: reuse caller-provided agent and run_agent/inject_context.
+                if inject_context is None or run_agent is None or agent is None:
+                    raise RuntimeError(
+                        "agent_factory is not set but legacy callbacks (run_agent, inject_context, agent) "
+                        "were not provided to inspect()"
+                    )
+                user_message = await inject_context(agent, reflect_prompt, mode="reflect_json")
+                response = await run_agent(agent, user_message, system_prompt_override=_REFLECT_SYSTEM_PROMPT)
         except Exception as exc:
             logger.warning("LLM reflection failed: %s", exc)
             return InspectionResult(
                 heartbeat_ok=False,
                 output=f"LLM_ERROR: {exc}",
+            )
+
+        if not isinstance(response, str) or not response.strip():
+            logger.warning("LLM reflection returned empty response")
+            return InspectionResult(
+                heartbeat_ok=False,
+                output="LLM_ERROR: empty response",
             )
 
         # Parse response (unified format)

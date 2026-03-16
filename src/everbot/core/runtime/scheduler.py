@@ -47,10 +47,15 @@ class AgentSchedule:
 
 @dataclass
 class InspectorSchedule:
-    """Per-agent inspector scheduling state."""
+    """Per-agent inspector scheduling state.
+
+    night_interval_minutes: interval used outside active_hours.
+    None (default) means inspector does NOT run outside active_hours.
+    """
 
     agent_name: str
     interval_minutes: int = 30  # default 30min
+    night_interval_minutes: Optional[int] = None
     next_inspect_at: Optional[datetime] = None
     active_hours: tuple[int, int] = (8, 22)
     consecutive_failures: int = 0
@@ -129,7 +134,7 @@ class Scheduler:
             self._state_file.parent.mkdir(parents=True, exist_ok=True)
             self._state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
         except Exception:
-            logger.debug("Failed to save scheduler state", exc_info=True)
+            logger.warning("Failed to save scheduler state", exc_info=True)
 
     def _restore_state(self) -> None:
         """Restore next_heartbeat_at and consecutive_failures from disk.
@@ -279,11 +284,15 @@ class Scheduler:
         if self._run_inspector is None:
             return
         for schedule in list(self._inspector_schedules.values()):
-            if not self._is_active_time_inspector(schedule, ts):
-                continue
+            is_active = self._is_active_time(schedule, ts)
+            if not is_active:
+                if schedule.night_interval_minutes is None:
+                    continue
+                base_interval = max(1, schedule.night_interval_minutes)
+            else:
+                base_interval = max(1, schedule.interval_minutes)
             if schedule.next_inspect_at is not None and ts < schedule.next_inspect_at:
                 continue
-            base_interval = max(1, schedule.interval_minutes)
             try:
                 await self._run_inspector(schedule.agent_name, ts)
                 schedule.consecutive_failures = 0
@@ -325,13 +334,7 @@ class Scheduler:
     # -- Helpers ------------------------------------------------------------
 
     @staticmethod
-    def _is_active_time(schedule: AgentSchedule, ts: datetime) -> bool:
-        hour = ts.hour
-        start, end = schedule.active_hours
-        return start <= hour < end
-
-    @staticmethod
-    def _is_active_time_inspector(schedule: InspectorSchedule, ts: datetime) -> bool:
+    def _is_active_time(schedule: Any, ts: datetime) -> bool:
         hour = ts.hour
         start, end = schedule.active_hours
         return start <= hour < end

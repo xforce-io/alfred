@@ -1,6 +1,6 @@
 # EverBot 运行时架构设计（Runtime Architecture Design）
 
-最后更新：2026-03-09
+最后更新：2026-03-16
 
 ## 1. 文档目标
 
@@ -43,37 +43,23 @@
 9. 事件 pub-sub + `heartbeat_deliver` 事件类型已存在。
 10. 确定性任务（如 `time_reminder`）可跳过 LLM，直接生成结果。
 
-### 2.2 关键缺口
+### 2.2 已解决缺口（历史记录）
 
-**运行时模型（本文档核心新增）：**
+以下问题在 2026-03-09 之前已全部解决，此处仅保留历史记录：
 
-1. **缺少 Job Session 概念**：所有后台逻辑都压在心跳一个机制里。30 分钟跑一次的巡检和"每天 9 点发日报"本质不同，前者适合心跳，后者应该是独立 cron job，拥有隔离 session。
-2. **桥接过于简单**：isolated 模式下结果桥接到主 session 是直接 `update_atomic` 追加消息，而非结构化事件注入。主 session 收到的应该是"你有一条后台通知"，而非伪造的 assistant message。
-3. **调度未分层**：`HeartbeatRunner` 同时承担了心跳巡检和 cron 任务执行，没有独立的调度器。
-4. **Context build 未按 session type 分支**：`workspace.py` 一把抓，所有 session type 看到相同的 system prompt。
-5. **Workspace 文件读取无快照保护**：心跳执行时如果修改了 MEMORY.md 或 HEARTBEAT.md，下次主 session 的 prompt 可能读到中间状态。
+- ~~Job Session 概念缺失~~ → `isolated` 任务通过独立 job session 执行（`job_{task_id}_{run_id}`）
+- ~~桥接伪造 assistant message~~ → mailbox-only 架构，通过 `deposit_mailbox_event` 注入 `## Background Updates`
+- ~~调度未分层~~ → `Scheduler` 独立接管心跳/cron/inspector 三维调度，HeartbeatRunner 退化为纯执行器
+- ~~HEARTBEAT.md 静态~~ → `RoutineManager` + `routine_cli.py` 实现 Agent 自主 CRUD
+- ~~心跳消息一刀切剥离~~ → suppress/deliver 机制（`HEARTBEAT_OK` token + `ack_max_chars`）
+- ~~Session 恢复覆盖新配置~~ → `_NON_RESTORABLE_VARS` 保护 `workspace_instructions`
+- ~~事件 envelope 未统一~~ → 统一 `scope/target_session_id/source_type` 路由协议
 
-**Routine 闭环：**
+### 2.3 当前已知待优化项
 
-6. **HEARTBEAT.md 是静态的**：任务只能由人手动编辑，Agent 在对话中无法自主创建/修改 routine。
-7. **Chat → Routine 没有桥**：用户在对话中说"以后每天帮我看看 XX"，Agent 无法将其持久化为 recurring task。
-8. **心跳 prompt 只执行不反思**：不引导 Agent 反思"还有哪些 routine 应该注册"。
-9. **MEMORY.md 与 HEARTBEAT.md 不连通**：用户 routine 意图可能记录在 MEMORY.md 中，但没有机制将其转化为可调度的 structured task。
-
-**心跳消息投递：**
-
-10. **心跳消息一刀切剥离**：`chat_service.py` 在聊天时 strip 所有心跳消息，导致 Agent 的主动推送也被吞掉。
-11. **缺少 suppress/deliver 区分机制**：没有机制判断一条心跳结果是"静默确认"还是"需要推送给用户"。
-
-**配置热更新：**
-
-12. **Session 恢复覆盖新配置**：`restore_to_agent()` 将 session 文件中保存的旧 `workspace_instructions` 覆盖新值。
-
-**基础设施：**
-
-13. 后台事件分发仍是 `session_id → websocket` 的单点映射，缺少 `agent_name` 维度广播。
-14. `HEARTBEAT.md` 任务状态写回仍是非原子写入。
-15. 事件 envelope 尚未统一 schema/版本。
+1. **heartbeat.py 规模**：1600+ 行，Inspector+Cron 拆分已完成但 HeartbeatRunner 本体仍承担较多协调职责，可进一步瘦身。
+2. **Cron job 独立投递残留**：`_execute_isolated_task` 中的 `emit()` 是独立投递路径，理论上 Inspector 应是唯一投递门；当前作为降级保障保留，后续可移除。
+3. **Inspector 反思 session summary**：当前通过 `session_manager.get_session_summary()` 获取摘要，覆盖不全（不含近期 channel session）。
 
 ---
 
@@ -723,7 +709,15 @@ class AgentSchedule:
     """Per-agent heartbeat scheduling state."""
     agent_name: str
     interval_minutes: int = 30
+    night_interval_minutes: Optional[int] = None  # 非活跃时段间隔；None 表示夜间不运行
     next_heartbeat_at: Optional[datetime] = None
+    active_hours: tuple[int, int] = (8, 22)
+
+@dataclass
+class InspectorSchedule:
+    """Per-agent Inspector tick scheduling state."""
+    agent_name: str
+    interval_minutes: int = 30          # Inspector 独立调度间隔（默认 30min）
     active_hours: tuple[int, int] = (8, 22)
 
 class Scheduler:
@@ -1135,10 +1129,85 @@ def _should_deliver(self, response: str) -> bool:
 ```yaml
 heartbeat:
   ack_max_chars: 300          # suppress 阈值，默认 300
-  realtime_status_hint: true  # 是否广播“有后台更新”的状态提示
+  realtime_status_hint: true  # 是否广播”有后台更新”的状态提示
+  interval: 10                # active_hours 内心跳间隔（分钟）
+  night_interval: 120         # active_hours 外夜间间隔（分钟）；不设则夜间不运行
+  active_hours: [8, 22]       # 活跃时段（24h）
 ```
 
-### 6.2 Session 恢复与 workspace_instructions 热更新
+### 6.2 Inspector 独立 Agent（方案C）
+
+**背景问题**：Inspector 的反思阶段曾复用 HeartbeatRunner 的心跳 agent（共享同一个 heartbeat session），导致心跳的系统 prompt（`HEARTBEAT_SYSTEM_INSTRUCTION`）污染反思调用——LLM 收到的是"你是心跳执行器，遇事回复 HEARTBEAT_OK"的指令，因此反思 LLM 调用几乎总是返回 `HEARTBEAT_OK`，`push_message` 始终为 null，Inspector 的主动通知功能完全失效（回归提交 `862ebf7`，2026-03-07）。
+
+**根因**：Inspector 调用 LLM 时，所用 agent 的系统 prompt 来自 heartbeat session，不是反思专用 prompt。
+
+**解决方案（方案C）**：Inspector 拥有独立的 `agent_factory`，每次反思时创建一个新鲜 agent，使用 `_REFLECT_SYSTEM_PROMPT` 作为系统 prompt，与 heartbeat agent 完全解耦。
+
+```python
+# inspector.py
+
+_REFLECT_SYSTEM_PROMPT = """你是用户的私人助理，正在执行定期检查（reflection）。
+
+请严格用以下 JSON 格式回复，不要输出任何其他内容：
+
+```json
+{
+  "heartbeat_ok": true,
+  "push_message": null,
+  "routines": []
+}
+```
+
+只输出 JSON，禁止输出 JSON 以外的任何内容。"""
+
+
+class Inspector:
+    def __init__(self, *, ..., agent_factory: Optional[Callable] = None, ...):
+        self.agent_factory = agent_factory  # 独立 agent 工厂
+
+    async def _run_llm(self, prompt: str) -> str:
+        """创建独立 agent，使用 _REFLECT_SYSTEM_PROMPT 执行反思 LLM 调用。"""
+        agent = await self.agent_factory(self.agent_name, self.workspace_path)
+        result = ""
+        async for event in agent.continue_chat(
+            message=prompt,
+            stream_mode="delta",
+            system_prompt=_REFLECT_SYSTEM_PROMPT,
+        ):
+            if "_progress" in event:
+                for progress in event["_progress"]:
+                    if progress.get("stage") == "llm":
+                        answer = progress.get("answer", "")
+                        if answer:
+                            result = answer
+        return result
+
+    async def inspect(self, *, heartbeat_content: str, run_id: str, ...) -> InspectionResult:
+        ctx = self._gather_context(heartbeat_content, ...)
+        if not self._should_inspect(ctx):
+            return InspectionResult(skipped=True, ...)
+
+        reflect_prompt = self._build_reflect_prompt(ctx)
+
+        if self.agent_factory is not None:
+            # 方案C：独立 agent，无系统 prompt 污染
+            response = await self._run_llm(reflect_prompt)
+        else:
+            # 兼容旧调用路径（测试用）
+            user_message = await inject_context(agent, reflect_prompt, mode="reflect_json")
+            response = await run_agent(agent, user_message, system_prompt_override=_REFLECT_SYSTEM_PROMPT)
+        ...
+```
+
+**调用链变化**：
+
+- `HeartbeatRunner.__init__` 将 `agent_factory` 传给 Inspector；
+- `daemon.py` 的 `_run_inspector` 不再创建/传递 heartbeat agent，直接调用 `inspector.inspect(heartbeat_content=..., run_id=...)`；
+- Inspector 内部完全拥有反思 LLM 调用路径。
+
+**设计原则**：Inspector 是观察者，不是 heartbeat 的子任务，不应依赖 heartbeat 的运行时状态（session、agent、system prompt）。
+
+### 6.4 Session 恢复与 workspace_instructions 热更新
 
 **问题**：`restore_to_agent()` 在恢复 session 时，将 session 文件中保存的旧 `workspace_instructions` 覆盖了新值。
 
@@ -1165,7 +1234,7 @@ async def restore_to_agent(self, agent, session_data):
             context.set_variable(name, value)
 ```
 
-### 6.3 确定性心跳任务（Deterministic Tasks）
+### 6.5 确定性心跳任务（Deterministic Tasks）
 
 `time_reminder` 这类任务不应依赖 LLM 自由生成。
 

@@ -588,6 +588,39 @@ class TestInspect:
 
         assert inspector.should_skip() is True
 
+    @pytest.mark.asyncio
+    async def test_empty_llm_response_does_not_update_state(self, tmp_path):
+        """Empty reflection responses must not be persisted as successful inspections."""
+        inspector = _make_inspector(tmp_path)
+        (tmp_path / "MEMORY.md").write_text("content")
+        (tmp_path / "HEARTBEAT.md").write_text("hb")
+
+        run_agent = AsyncMock(side_effect=["", _make_reflection_response_no_proposals()])
+        inject_context = AsyncMock(return_value="prompt")
+
+        with patch.object(inspector, "_write_event"):
+            first = await inspector.inspect(
+                run_agent=run_agent,
+                inject_context=inject_context,
+                agent=MagicMock(),
+                heartbeat_content="hb",
+                run_id="run_empty_001",
+            )
+            second = await inspector.inspect(
+                run_agent=run_agent,
+                inject_context=inject_context,
+                agent=MagicMock(),
+                heartbeat_content="hb",
+                run_id="run_empty_002",
+            )
+
+        assert first.heartbeat_ok is False
+        assert first.output == "LLM_ERROR: empty response"
+        assert first.skipped is False
+        assert second.skipped is False
+        assert second.output == "HEARTBEAT_OK"
+        assert run_agent.await_count == 2
+
 
 # ── New output format {heartbeat_ok, push_message, routines} ──
 
@@ -1081,7 +1114,7 @@ class TestInspectionSelfPollutionBug:
 
         llm_call_count = 0
 
-        async def _run_agent(agent, msg):
+        async def _run_agent(agent, msg, **kwargs):
             nonlocal llm_call_count
             llm_call_count += 1
             return _make_reflection_response_v2_format(heartbeat_ok=True)
@@ -1141,7 +1174,7 @@ class TestInspectionSelfPollutionBug:
 
         llm_call_count = 0
 
-        async def _run_agent(agent, msg):
+        async def _run_agent(agent, msg, **kwargs):
             nonlocal llm_call_count
             llm_call_count += 1
             return _make_reflection_response_v2_format(heartbeat_ok=True)
