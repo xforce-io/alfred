@@ -351,6 +351,11 @@ class Inspector:
                     for line in f:
                         try:
                             event = json.loads(line.strip())
+                            # Filter out self-generated inspector events so they don't
+                            # change the events hash and cause the inspector to re-run
+                            # indefinitely (inspection_complete self-pollution bug).
+                            if event.get("source") == "inspector":
+                                continue
                             ts = event.get("timestamp")
                             if ts:
                                 event_time = datetime.fromisoformat(ts)

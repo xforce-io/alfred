@@ -14,8 +14,18 @@ def main():
     message = sys.stdin.read()
     
     if not message.strip():
-        print("Error: No message to output", file=sys.stderr)
-        sys.exit(1)
+        # 兜底：stdin 为空时自己调用 main.py 生成内容
+        import subprocess
+        from pathlib import Path
+        main_script = Path(__file__).parent / "main.py"
+        result = subprocess.run(
+            [sys.executable, str(main_script)],
+            capture_output=True, text=True
+        )
+        message = result.stdout
+        if not message.strip():
+            print("Error: No message to output", file=sys.stderr)
+            sys.exit(1)
     
     # 直接输出到 stdout，由系统的 TelegramChannel 统一推送
     print(message)

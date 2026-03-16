@@ -488,7 +488,7 @@ class TurnOrchestrator:
                 tool_names_executed=list(tool_names_executed),
                 failed_tool_outputs=failed_tool_outputs,
             )
-        if count == limit:
+        if count >= max(2, limit // 2):
             warned_intents.add(intent_sig)
         return None
 
@@ -542,6 +542,7 @@ class TurnOrchestrator:
         failed_tool_outputs = sum(self._prior_failures.values())
         failure_signatures: Dict[str, int] = dict(self._prior_failures)
         tool_intent_signatures: Dict[str, int] = {}
+        tool_intent_last_output: Dict[str, str] = {}
         warned_intents: set = set()
         pid_to_intent: Dict[str, str] = {}
         sent_progress: Dict[str, str] = {}
@@ -764,7 +765,25 @@ class TurnOrchestrator:
                         )
                     # Inject repeated-intent warning so LLM can self-correct
                     _pid_intent = pid_to_intent.get(pid)
-                    if _pid_intent and _pid_intent in warned_intents:
+                    if _pid_intent and not fail_sig:
+                        _out_hash = hashlib.sha256(s_output[:256].encode()).hexdigest()[:12]
+                        _prev_hash = tool_intent_last_output.get(_pid_intent)
+                        if _prev_hash == _out_hash:
+                            warned_intents.add(_pid_intent)
+                            warn_output += (
+                                f"\n[⚠ repeated_intent: This command returned the same result as"
+                                f" last time. You already have this output."
+                                f" Do NOT call it again — include it in your reply now.]"
+                            )
+                        elif _pid_intent in warned_intents:
+                            warn_output += (
+                                f"\n[⚠ repeated_intent: You have already run this"
+                                f" same command {tool_intent_signatures.get(_pid_intent, 0)} times."
+                                f" Do NOT call it again. Respond to the user based"
+                                f" on information you already have.]"
+                            )
+                        tool_intent_last_output[_pid_intent] = _out_hash
+                    elif _pid_intent and _pid_intent in warned_intents:
                         warn_output += (
                             f"\n[⚠ repeated_intent: You have already run this"
                             f" same command {tool_intent_signatures.get(_pid_intent, 0)} times."
@@ -897,7 +916,26 @@ class TurnOrchestrator:
                         )
                     # Inject repeated-intent warning so LLM can self-correct
                     _pid_intent = pid_to_intent.get(pid)
-                    if _pid_intent and _pid_intent in warned_intents:
+                    if _pid_intent and not fail_sig:
+                        _out_hash = hashlib.sha256(t_output_raw[:256].encode()).hexdigest()[:12]
+                        _prev_hash = tool_intent_last_output.get(_pid_intent)
+                        if _prev_hash == _out_hash:
+                            # Same successful output as last time — agent is stuck
+                            warned_intents.add(_pid_intent)
+                            out_preview += (
+                                f"\n[⚠ repeated_intent: This command returned the same result as"
+                                f" last time. You already have this output."
+                                f" Do NOT call it again — include it in your reply now.]"
+                            )
+                        elif _pid_intent in warned_intents:
+                            out_preview += (
+                                f"\n[⚠ repeated_intent: You have already run this"
+                                f" same command {tool_intent_signatures.get(_pid_intent, 0)} times."
+                                f" Do NOT call it again. Respond to the user based"
+                                f" on information you already have.]"
+                            )
+                        tool_intent_last_output[_pid_intent] = _out_hash
+                    elif _pid_intent and _pid_intent in warned_intents:
                         out_preview += (
                             f"\n[⚠ repeated_intent: You have already run this"
                             f" same command {tool_intent_signatures.get(_pid_intent, 0)} times."

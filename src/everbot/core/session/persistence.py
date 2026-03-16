@@ -496,6 +496,7 @@ class SessionPersistence:
         timeout: float = 10.0,
         blocking: bool = True,
         lock_already_held: bool = False,
+        bump_updated_at: bool = True,
     ) -> Optional[SessionData]:
         """Atomic read-modify-write for a session.
 
@@ -510,22 +511,26 @@ class SessionPersistence:
                 holds the cross-process file lock).  Without this flag, calling
                 update_atomic while holding a flock causes self-deadlock on
                 macOS where flock is per open-file-description.
+            bump_updated_at: If False, leave updated_at unchanged. Pass False for
+                background writes (mailbox deposit/ack, history injection) that
+                must not be treated as user activity by get_last_activity_time.
 
         Returns:
             Updated SessionData on success, None if lock was not acquired.
         """
         if lock_already_held:
-            return await self._update_atomic_inner(session_id, mutator)
+            return await self._update_atomic_inner(session_id, mutator, bump_updated_at=bump_updated_at)
 
         async with self.async_file_lock(session_id, timeout=timeout, blocking=blocking) as acquired:
             if not acquired:
                 return None
-            return await self._update_atomic_inner(session_id, mutator)
+            return await self._update_atomic_inner(session_id, mutator, bump_updated_at=bump_updated_at)
 
     async def _update_atomic_inner(
         self,
         session_id: str,
         mutator: Callable[[SessionData], None],
+        bump_updated_at: bool = True,
     ) -> SessionData:
         """Read-mutate-write without lock acquisition (caller must ensure exclusivity)."""
         current = await self.load(session_id)
@@ -546,9 +551,12 @@ class SessionPersistence:
             )
         # Apply mutation
         mutator(current)
-        # Bump revision and timestamp
+        # Bump revision; only bump updated_at for user-driven writes.
+        # Background writes (mailbox deposit/ack) must NOT update this field so
+        # that get_last_activity_time reflects real user interaction, not heartbeat noise.
         current.revision = (current.revision or 0) + 1
-        current.updated_at = datetime.now(timezone.utc).isoformat()
+        if bump_updated_at:
+            current.updated_at = datetime.now(timezone.utc).isoformat()
         # Atomic write
         session_path = self._get_session_path(session_id)
         serialized = self._serialize_session(current.to_dict())

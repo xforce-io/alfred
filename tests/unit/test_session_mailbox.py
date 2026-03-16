@@ -1,5 +1,6 @@
 """Unit tests for session mailbox atomic operations."""
 
+import json
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -200,3 +201,85 @@ async def test_ack_deadlocks_without_flag(tmp_path: Path):
         assert len(loaded.mailbox) == 1
     finally:
         lock.release()
+
+
+# ── Bug regression: mailbox deposit must not contaminate idle_hours ──────────
+
+
+@pytest.mark.asyncio
+async def test_deposit_mailbox_does_not_update_activity_time(tmp_path: Path):
+    """Mailbox deposit to primary session must not bump get_last_activity_time.
+
+    Previously, every update_atomic call unconditionally set updated_at = now().
+    Heartbeat deposits to the primary session mailbox caused idle_hours to always
+    be ~0, so the LLM never decided to proactively message the user.
+    """
+    manager = SessionManager(tmp_path)
+    session_id = SessionManager.get_primary_session_id("demo_agent")
+
+    # Persist a primary session with a known old timestamp (simulating real user activity)
+    old_activity_iso = "2024-03-01T10:00:00+00:00"
+    session_data = {
+        "session_id": session_id,
+        "agent_name": "demo_agent",
+        "model_name": "gpt-4",
+        "session_type": "primary",
+        "history_messages": [{"role": "user", "content": "hello"}],
+        "mailbox": [],
+        "variables": {},
+        "created_at": old_activity_iso,
+        "updated_at": old_activity_iso,
+        "state": "active",
+        "revision": 1,
+    }
+    session_path = tmp_path / f"{session_id}.json"
+    session_path.write_text(json.dumps(session_data))
+
+    # Confirm baseline activity time
+    before = manager.get_last_activity_time("demo_agent")
+    assert before is not None
+
+    # Simulate heartbeat mailbox deposit to the primary session
+    event = {"event_id": "hb_evt_1", "event_type": "inspector_push", "summary": "test push"}
+    await manager.deposit_mailbox_event(session_id, event)
+
+    # Activity time must NOT have changed — deposit is background activity, not user activity
+    after = manager.get_last_activity_time("demo_agent")
+    assert after == before, (
+        f"Mailbox deposit should not update activity time: {before!r} -> {after!r}. "
+        "This causes idle_hours to always be ~0, suppressing proactive messages."
+    )
+
+
+@pytest.mark.asyncio
+async def test_ack_mailbox_does_not_update_activity_time(tmp_path: Path):
+    """Acking mailbox events must not bump get_last_activity_time."""
+    manager = SessionManager(tmp_path)
+    session_id = SessionManager.get_primary_session_id("demo_agent")
+
+    old_activity_iso = "2024-03-01T10:00:00+00:00"
+    session_data = {
+        "session_id": session_id,
+        "agent_name": "demo_agent",
+        "model_name": "gpt-4",
+        "session_type": "primary",
+        "history_messages": [],
+        "mailbox": [{"event_id": "evt_x", "summary": "pending"}],
+        "variables": {},
+        "created_at": old_activity_iso,
+        "updated_at": old_activity_iso,
+        "state": "active",
+        "revision": 1,
+    }
+    session_path = tmp_path / f"{session_id}.json"
+    session_path.write_text(json.dumps(session_data))
+
+    before = manager.get_last_activity_time("demo_agent")
+    assert before is not None
+
+    await manager.ack_mailbox_events(session_id, ["evt_x"])
+
+    after = manager.get_last_activity_time("demo_agent")
+    assert after == before, (
+        f"Ack mailbox should not update activity time: {before!r} -> {after!r}."
+    )

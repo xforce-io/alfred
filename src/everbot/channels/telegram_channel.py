@@ -40,6 +40,8 @@ from ..core.models.constants import (
     MAX_RETRIES,
     TYPING_INDICATOR_INTERVAL,
     POLLING_ERROR_SLEEP,
+    POLLING_TIMEOUT,
+    POLLING_MAX_CONSECUTIVE_ERRORS,
 )
 from . import telegram_commands
 from . import telegram_media
@@ -283,14 +285,16 @@ class TelegramChannel:
         except Exception as exc:
             logger.warning("Failed to drain pending Telegram updates: %s", exc)
 
+        consecutive_errors = 0
         while self._running:
             try:
                 resp = await self._client.get(  # type: ignore[union-attr]
                     f"{self._base_url}/getUpdates",
-                    params={"offset": offset, "timeout": 30},
+                    params={"offset": offset, "timeout": POLLING_TIMEOUT},
                 )
                 result = resp.json()
                 updates = result.get("result", [])
+                consecutive_errors = 0
                 for update in updates:
                     offset = update["update_id"] + 1
                     try:
@@ -303,7 +307,21 @@ class TelegramChannel:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                consecutive_errors += 1
                 logger.error("Telegram polling error: %s", exc)
+                if consecutive_errors >= POLLING_MAX_CONSECUTIVE_ERRORS:
+                    logger.warning(
+                        "Telegram polling: %d consecutive errors, recreating httpx client",
+                        consecutive_errors,
+                    )
+                    try:
+                        await self._client.aclose()
+                    except Exception:
+                        pass
+                    self._client = httpx.AsyncClient(
+                        timeout=httpx.Timeout(POLLING_TIMEOUT + 5, connect=10.0)
+                    )
+                    consecutive_errors = 0
                 await asyncio.sleep(POLLING_ERROR_SLEEP)
 
     # ------------------------------------------------------------------

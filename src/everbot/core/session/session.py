@@ -318,6 +318,7 @@ class SessionManager:
         *,
         timeout: float = 10.0,
         blocking: bool = True,
+        bump_updated_at: bool = True,
     ) -> Optional[SessionData]:
         """Atomic read-modify-write with dual-layer locking.
 
@@ -341,6 +342,7 @@ class SessionManager:
         try:
             return await self.persistence.update_atomic(
                 session_id, mutator, timeout=timeout, blocking=blocking,
+                bump_updated_at=bump_updated_at,
             )
         finally:
             lock.release()

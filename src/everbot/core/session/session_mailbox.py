@@ -104,7 +104,10 @@ async def deposit_mailbox_event(
         session_data.mailbox = mailbox
         inserted["value"] = True
 
-    updated = await mgr.update_atomic(session_id, _mutator, timeout=timeout, blocking=blocking)
+    # bump_updated_at=False: mailbox deposits are background writes and must not
+    # be treated as user activity by get_last_activity_time (idle_hours fix).
+    updated = await mgr.update_atomic(session_id, _mutator, timeout=timeout, blocking=blocking,
+                                      bump_updated_at=False)
     if updated is None:
         return False
     if inserted["value"]:
@@ -200,7 +203,9 @@ async def inject_history_message(
         session_data.history_messages.append(msg_obj)
         session_data.history_messages = evict_oldest_heartbeat(session_data.history_messages)
 
-    updated = await mgr.update_atomic(session_id, _mutator, timeout=timeout, blocking=blocking)
+    # bump_updated_at=False: history injection from heartbeat is background activity.
+    updated = await mgr.update_atomic(session_id, _mutator, timeout=timeout, blocking=blocking,
+                                      bump_updated_at=False)
     if updated is not None:
         mgr.record_metric("history_inject_count")
     return updated is not None
@@ -228,13 +233,15 @@ async def ack_mailbox_events(
             if not isinstance(e, dict) or str(e.get("event_id") or "").strip() not in ids
         ]
 
+    # bump_updated_at=False: mailbox ack is background activity.
     if lock_already_held:
         updated = await mgr.persistence.update_atomic(
             session_id, _mutator, timeout=timeout, blocking=blocking,
-            lock_already_held=True,
+            lock_already_held=True, bump_updated_at=False,
         )
     else:
-        updated = await mgr.update_atomic(session_id, _mutator, timeout=timeout, blocking=blocking)
+        updated = await mgr.update_atomic(session_id, _mutator, timeout=timeout, blocking=blocking,
+                                          bump_updated_at=False)
     if updated is not None:
         mgr.record_metric("mailbox_drain_count", float(len(ids)))
     return updated is not None

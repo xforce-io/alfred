@@ -43,4 +43,6 @@ LIMIT_MAX = 2000            # Maximum safe display
 MAX_DISPLAY_ITEMS = 10      # Max items to show in lists
 TYPING_INDICATOR_INTERVAL = 4.0  # Seconds between typing indicators
 POLLING_ERROR_SLEEP = 5.0   # Sleep after polling error
+POLLING_TIMEOUT = 10        # Telegram server-side long-poll timeout (s); shorter = less gvisor idle-drop risk
+POLLING_MAX_CONSECUTIVE_ERRORS = 3  # Recreate httpx client after this many consecutive errors
 DAEMON_IDLE_SLEEP = 60.0    # Daemon idle loop sleep

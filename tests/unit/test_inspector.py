@@ -27,6 +27,10 @@ class _StubUserDataManager:
     def get_agent_tmp_dir(self, agent_name: str) -> Path:
         return self._base_dir / agent_name / "tmp"
 
+    @property
+    def heartbeat_events_file(self) -> Path:
+        return self._base_dir / "logs" / "heartbeat_events.jsonl"
+
 
 def _make_inspector(tmp_path: Path, **overrides) -> Inspector:
     """Create an Inspector with sensible defaults for testing."""
@@ -1039,3 +1043,125 @@ class TestIdleAwareInspection:
         ctx = InspectionContext(idle_hours=None)
         prompt = inspector._build_reflect_prompt(ctx)
         assert "用户活跃状态" not in prompt
+
+
+# ── Bug regression: inspection_complete must not cause self-reinspect ─────────
+
+
+class TestInspectionSelfPollutionBug:
+    """Regression tests for the inspection_complete event self-pollution bug.
+
+    Previously, update_state(ctx) was called BEFORE _write_event("inspection_complete").
+    The saved events hash didn't include the new event, so the next cycle would see
+    a different hash and re-run the LLM indefinitely.
+    """
+
+    @pytest.mark.asyncio
+    async def test_second_inspect_skips_when_context_unchanged(self, tmp_path):
+        """After inspect(), a second call with same context must skip LLM.
+
+        Uses real event file writing (no mock on _write_event) to expose the bug.
+        """
+        stub_udm = _StubUserDataManager(tmp_path / ".alfred")
+
+        with patch(
+            "src.everbot.core.runtime.inspector.get_user_data_manager",
+            return_value=stub_udm,
+        ):
+            inspector = Inspector(
+                agent_name="test_agent",
+                workspace_path=tmp_path,
+                routine_manager=RoutineManager(tmp_path),
+                auto_register_routines=False,
+                reflect_force_interval_hours=24,
+            )
+
+        (tmp_path / "MEMORY.md").write_text("memory content")
+        (tmp_path / "HEARTBEAT.md").write_text("heartbeat content")
+
+        llm_call_count = 0
+
+        async def _run_agent(agent, msg):
+            nonlocal llm_call_count
+            llm_call_count += 1
+            return _make_reflection_response_v2_format(heartbeat_ok=True)
+
+        inject_context = AsyncMock(return_value="prompt")
+
+        with patch(
+            "src.everbot.core.runtime.inspector.get_user_data_manager",
+            return_value=stub_udm,
+        ):
+            result1 = await inspector.inspect(
+                run_agent=_run_agent,
+                inject_context=inject_context,
+                agent=MagicMock(),
+                heartbeat_content="heartbeat content",
+                run_id="run_001",
+            )
+            assert result1.skipped is False, "First inspect should run LLM"
+            assert llm_call_count == 1
+
+            result2 = await inspector.inspect(
+                run_agent=_run_agent,
+                inject_context=inject_context,
+                agent=MagicMock(),
+                heartbeat_content="heartbeat content",
+                run_id="run_002",
+            )
+
+        assert result2.skipped is True, (
+            "Second inspect with unchanged context must skip, "
+            "but inspection_complete event caused re-trigger (LLM called again)."
+        )
+        assert llm_call_count == 1, (
+            f"LLM was called {llm_call_count} times but should only be called once. "
+            "inspection_complete event is self-polluting the events hash."
+        )
+
+    @pytest.mark.asyncio
+    async def test_many_consecutive_inspects_only_run_llm_once(self, tmp_path):
+        """Multiple inspect() calls with unchanged context run LLM exactly once."""
+        stub_udm = _StubUserDataManager(tmp_path / ".alfred")
+
+        with patch(
+            "src.everbot.core.runtime.inspector.get_user_data_manager",
+            return_value=stub_udm,
+        ):
+            inspector = Inspector(
+                agent_name="test_agent",
+                workspace_path=tmp_path,
+                routine_manager=RoutineManager(tmp_path),
+                auto_register_routines=False,
+                reflect_force_interval_hours=24,
+            )
+
+        (tmp_path / "MEMORY.md").write_text("stable content")
+        (tmp_path / "HEARTBEAT.md").write_text("stable heartbeat")
+
+        llm_call_count = 0
+
+        async def _run_agent(agent, msg):
+            nonlocal llm_call_count
+            llm_call_count += 1
+            return _make_reflection_response_v2_format(heartbeat_ok=True)
+
+        inject_context = AsyncMock(return_value="prompt")
+
+        with patch(
+            "src.everbot.core.runtime.inspector.get_user_data_manager",
+            return_value=stub_udm,
+        ):
+            for i in range(4):
+                await inspector.inspect(
+                    run_agent=_run_agent,
+                    inject_context=inject_context,
+                    agent=MagicMock(),
+                    heartbeat_content="stable heartbeat",
+                    run_id=f"run_{i:03d}",
+                )
+
+        assert llm_call_count == 1, (
+            f"LLM was called {llm_call_count} times across 4 inspect() cycles "
+            "with unchanged context. inspection_complete events are self-triggering."
+        )
