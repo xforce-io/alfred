@@ -38,6 +38,7 @@ class AgentSchedule:
 
     agent_name: str
     interval_minutes: int = 30
+    night_interval_minutes: Optional[int] = None
     next_heartbeat_at: Optional[datetime] = None
     active_hours: tuple[int, int] = (8, 22)
     consecutive_failures: int = 0
@@ -211,11 +212,15 @@ class Scheduler:
         if self._run_heartbeat is None:
             return
         for schedule in list(self._agent_schedules.values()):
-            if not self._is_active_time(schedule, ts):
-                continue
+            is_active = self._is_active_time(schedule, ts)
+            if not is_active:
+                if schedule.night_interval_minutes is None:
+                    continue
+                base_interval = max(1, schedule.night_interval_minutes)
+            else:
+                base_interval = max(1, schedule.interval_minutes)
             if schedule.next_heartbeat_at is not None and ts < schedule.next_heartbeat_at:
                 continue
-            base_interval = max(1, schedule.interval_minutes)
             try:
                 await self._run_heartbeat(schedule.agent_name, ts)
                 # Success: reset backoff, schedule at normal interval

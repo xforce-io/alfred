@@ -139,6 +139,7 @@ If not, reply with `HEARTBEAT_OK`.
         session_manager: HeartbeatSessionPort,
         agent_factory: Callable,
         interval_minutes: int = 30,
+        night_interval_minutes: Optional[int] = None,
         active_hours: tuple = (8, 22),
         max_retries: int = 3,
         ack_max_chars: int = 300,
@@ -176,6 +177,7 @@ If not, reply with `HEARTBEAT_OK`.
         self.session_manager = session_manager
         self.agent_factory = agent_factory
         self.interval_minutes = interval_minutes
+        self.night_interval_minutes = int(night_interval_minutes) if night_interval_minutes is not None else None
         self.active_hours = active_hours
         self.max_retries = max_retries
         self.ack_max_chars = max(0, int(ack_max_chars or 0))

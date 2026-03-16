@@ -216,9 +216,11 @@ class EverBotDaemon:
         inspector_schedules: Dict[str, InspectorSchedule] = {}
         for agent_name, runner in self.heartbeat_runners.items():
             active_hours = tuple(getattr(runner, "active_hours", (8, 22)))
+            _night = getattr(runner, "night_interval_minutes", None)
             agent_schedules[agent_name] = AgentSchedule(
                 agent_name=agent_name,
                 interval_minutes=max(1, int(getattr(runner, "interval_minutes", 30) or 30)),
+                night_interval_minutes=max(1, int(_night)) if _night is not None else None,
                 active_hours=active_hours,
             )
             inspector_schedules[agent_name] = InspectorSchedule(
@@ -335,6 +337,7 @@ class EverBotDaemon:
                 "session_manager": self.session_manager,
                 "agent_factory": self.agent_factory.create_agent,
                 "interval_minutes": heartbeat_config.get("interval", 30),
+                "night_interval_minutes": heartbeat_config.get("night_interval"),
                 "active_hours": tuple(heartbeat_config.get("active_hours", [8, 22])),
                 "max_retries": heartbeat_config.get("max_retries", 3),
                 "ack_max_chars": heartbeat_config.get("ack_max_chars", 300),
