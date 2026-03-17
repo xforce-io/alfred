@@ -179,11 +179,27 @@ def _extract_tool_intent_signature(tool_name: str, args) -> Optional[str]:
         cid_match = re.search(r'command_id["\'\s]*[=:]\s*["\'\s]*([a-f0-9]{6,})', args)
         if cid_match:
             return f"bash_wait:{cid_match.group(1)}"
-        # Detect web-search script calls — group all search queries under a
-        # single intent so that repeated searches with different keywords are
-        # caught by the intent-dedup guard.
-        if re.search(r'(?:web-search|web_search)[/\\].*?search\.py\b', args):
-            return "web_search"
+        # Detect skill script calls — group by skill + script + subcommand
+        # so repeated invocations with different free-text args (e.g. search
+        # with different keywords) are caught, while distinct subcommands
+        # (e.g. "tools.py scan" vs "tools.py report") remain separate intents.
+        # Search scripts (search.py) are exempt: return None so they skip
+        # intent dedup entirely and are only bounded by max_tool_calls.
+        skill_match = re.search(
+            r'skills[/\\]([\w-]+)[/\\](?:scripts[/\\])?(\w+)\.py\b(.*)', args,
+        )
+        if skill_match:
+            script_name = skill_match.group(2)
+            if script_name == "search":
+                return None
+            skill_name = skill_match.group(1)
+            remainder = skill_match.group(3).strip()
+            subcmd_match = re.match(r'\s*([a-zA-Z_]\w*)\b', remainder)
+            subcmd = subcmd_match.group(1) if subcmd_match else ""
+            sig = f"skill:{skill_name}:{script_name}"
+            if subcmd:
+                sig += f":{subcmd}"
+            return sig
         grep_match = re.search(r'(?:grep|rg)\s+(?:-\w+\s+)*["\']?([^"\'|\s]+)', args)
         if grep_match:
             return f"search_bash:{grep_match.group(1)}"

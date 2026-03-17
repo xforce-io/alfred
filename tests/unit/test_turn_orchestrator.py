@@ -324,22 +324,72 @@ def test_extract_tool_intent_signature():
     # _bash with grep/rg commands
     assert _extract_tool_intent_signature("_bash", 'grep -r "attractor" .') == "search_bash:attractor"
     assert _extract_tool_intent_signature("_bash", "rg -i 'TODO' src/") == "search_bash:TODO"
+    # Skill script calls get classified as skill intents (flags only → no subcommand)
     assert _extract_tool_intent_signature(
         "_bash",
         "python skills/trajectory-reviewer/scripts/review_recent.py --limit-files 2",
-    ).startswith("bash_exec:")
+    ) == "skill:trajectory-reviewer:review_recent"
+    # Skill script with subcommand
+    assert _extract_tool_intent_signature(
+        "_bash",
+        "python skills/trajectory-reviewer/scripts/review_recent.py check --limit-files 2",
+    ) == "skill:trajectory-reviewer:review_recent:check"
 
 
-def test_extract_tool_intent_web_search():
-    """Web search calls with different queries should share a single intent."""
+def test_extract_tool_intent_skill_script():
+    """Calls to the same skill script with different free-text args share intent;
+    different subcommands are separate intents.  Search scripts return None
+    (exempt from intent dedup, controlled by max_tool_calls instead)."""
+    # web search: returns None (exempt from intent dedup)
     cmd1 = 'python /path/to/skills/web-search/scripts/search.py "泡泡玛特 股价 大跌" --backend auto'
     cmd2 = 'python /path/to/skills/web-search/scripts/search.py "bitcoin price crash" --type news'
-    cmd3 = 'python skills/web_search/scripts/search.py "any query"'
-    assert _extract_tool_intent_signature("_bash", cmd1) == "web_search"
-    assert _extract_tool_intent_signature("_bash", cmd2) == "web_search"
-    assert _extract_tool_intent_signature("_bash", cmd3) == "web_search"
-    # Non-search bash commands should NOT match
-    assert _extract_tool_intent_signature("_bash", "python scripts/analyze.py") != "web_search"
+    cmd3 = 'python skills/web/scripts/search.py "any query"'
+    assert _extract_tool_intent_signature("_bash", cmd1) is None
+    assert _extract_tool_intent_signature("_bash", cmd2) is None
+    assert _extract_tool_intent_signature("_bash", cmd3) is None
+    # invest skill: different subcommands → different intents
+    cmd4 = 'python skills/invest/scripts/tools.py scan --modules macro'
+    cmd5 = 'python skills/invest/scripts/tools.py report'
+    assert _extract_tool_intent_signature("_bash", cmd4) == "skill:invest:tools:scan"
+    assert _extract_tool_intent_signature("_bash", cmd5) == "skill:invest:tools:report"
+    # invest: same subcommand, different flags → same intent
+    cmd6 = 'python skills/invest/scripts/tools.py scan --modules china'
+    assert _extract_tool_intent_signature("_bash", cmd6) == "skill:invest:tools:scan"
+    # Non-skill bash commands should NOT match
+    assert "skill:" not in (_extract_tool_intent_signature("_bash", "python scripts/analyze.py") or "")
+
+
+@pytest.mark.asyncio
+async def test_search_skill_exempt_from_intent_dedup():
+    """Search skill scripts should be exempt from intent dedup entirely.
+    They return None from _extract_tool_intent_signature, so repeated
+    searches with different keywords are only bounded by max_tool_calls.
+    This prevents premature circuit-breaking when the agent retries searches
+    (e.g. querying A-share market data with varying Chinese keywords)."""
+    search_cmd = 'python skills/web/scripts/search.py "A股 今天 行情"'
+    # 8 search calls: would exceed max_same_tool_intent=6 if not exempt
+    script = []
+    for i in range(8):
+        script.append(_progress_event(_llm_delta(f"Searching attempt {i}...", pid=f"llm{i}")))
+        script.append(_progress_event(_tool_call("_bash", search_cmd, pid=f"tc{i}")))
+        script.append(_progress_event(_tool_output("_bash", f"search result {i}", pid=f"to{i}")))
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(TurnPolicy(
+        max_attempts=1,
+        max_same_tool_intent=6,
+        max_tool_calls=20,
+        max_consecutive_empty_llm_rounds=99,
+    ))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "今天A股发生了啥"):
+        events.append(te)
+
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert len(errors) == 0, (
+        f"Search skill calls should not trigger REPEATED_TOOL_INTENT; "
+        f"got error: {errors[0].error if errors else 'none'}"
+    )
+    assert any(e.type == TurnEventType.TURN_COMPLETE for e in events)
 
 
 def test_orchestrator_prior_failures_preseed():
