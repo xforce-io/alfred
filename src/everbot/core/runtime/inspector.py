@@ -152,14 +152,14 @@ class Inspector:
         agent_factory: Optional[Callable] = None,
         reflection_manager: Optional[ReflectionManager] = None,
         auto_register_routines: bool = False,
-        reflect_force_interval_hours: float = 24,
+        inspect_force_interval_hours: float = 2,
     ):
         self.agent_name = agent_name
         self.workspace_path = Path(workspace_path)
         self.routine_manager = routine_manager
         self.agent_factory = agent_factory
         self.auto_register_routines = auto_register_routines
-        self._force_interval = timedelta(hours=reflect_force_interval_hours)
+        self._force_interval = timedelta(hours=inspect_force_interval_hours)
 
         self._reflection = reflection_manager or ReflectionManager(
             workspace_path=self.workspace_path,

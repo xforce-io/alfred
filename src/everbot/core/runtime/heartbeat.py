@@ -256,7 +256,7 @@ If not, reply with `HEARTBEAT_OK`.
             agent_factory=agent_factory,
             reflection_manager=self._reflection,
             auto_register_routines=self.auto_register_routines,
-            reflect_force_interval_hours=max(1, int(reflect_force_interval_hours or 24)),
+            inspect_force_interval_hours=2,
         )
 
     def _event_scope_kwargs(self) -> dict[str, Optional[str]]:

@@ -39,7 +39,7 @@ def _make_inspector(tmp_path: Path, **overrides) -> Inspector:
         workspace_path=tmp_path,
         routine_manager=RoutineManager(tmp_path),
         auto_register_routines=False,
-        reflect_force_interval_hours=24,
+        inspect_force_interval_hours=24,
     )
     defaults.update(overrides)
     with patch(
@@ -96,7 +96,7 @@ class TestShouldSkip:
         (tmp_path / "MEMORY.md").write_text("content")
         (tmp_path / "HEARTBEAT.md").write_text("content")
 
-        inspector = _make_inspector(tmp_path, reflect_force_interval_hours=1)
+        inspector = _make_inspector(tmp_path, inspect_force_interval_hours=1)
         inspector.update_state()
 
         inspector._reflection.last_reflect_at = datetime.now() - timedelta(hours=2)
@@ -274,7 +274,7 @@ class TestShouldInspect:
 
     def test_respects_force_interval(self, tmp_path):
         """_should_inspect returns True when force interval elapsed even if context unchanged."""
-        inspector = _make_inspector(tmp_path, reflect_force_interval_hours=1)
+        inspector = _make_inspector(tmp_path, inspect_force_interval_hours=1)
         (tmp_path / "MEMORY.md").write_text("memory")
         (tmp_path / "HEARTBEAT.md").write_text("heartbeat")
 
@@ -1110,7 +1110,7 @@ class TestInspectionSelfPollutionBug:
                 workspace_path=tmp_path,
                 routine_manager=RoutineManager(tmp_path),
                 auto_register_routines=False,
-                reflect_force_interval_hours=24,
+                inspect_force_interval_hours=24,
             )
 
         (tmp_path / "MEMORY.md").write_text("memory content")
@@ -1170,7 +1170,7 @@ class TestInspectionSelfPollutionBug:
                 workspace_path=tmp_path,
                 routine_manager=RoutineManager(tmp_path),
                 auto_register_routines=False,
-                reflect_force_interval_hours=24,
+                inspect_force_interval_hours=24,
             )
 
         (tmp_path / "MEMORY.md").write_text("stable content")
