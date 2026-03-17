@@ -115,7 +115,7 @@ class ParseResult:
 
 # ── JSON block markers ────────────────────────────────────────────
 _JSON_BLOCK_RE = re.compile(
-    r"```json[ \t]*\n?(.*?)\n\s*```",
+    r"```json\s*(.*?)\s*```",
     re.DOTALL,
 )
 
