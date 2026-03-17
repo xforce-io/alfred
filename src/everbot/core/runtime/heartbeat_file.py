@@ -58,7 +58,9 @@ class HeartbeatFileManager:
                 self.heartbeat_mode = "corrupted"
                 return content
 
-            # No structured JSON block found — treat as idle
+            # No structured JSON block found — truly idle (no fence at all).
+            # Note: if a ```json fence exists but was unparseable, parse_heartbeat_md
+            # already returned CORRUPTED above, so this branch means no fence at all.
             self.task_list = None
             self.heartbeat_mode = "idle"
             return None

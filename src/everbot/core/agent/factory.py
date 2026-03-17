@@ -173,6 +173,7 @@ class AgentFactory:
         workspace_path: Path,
         model_name: Optional[str] = None,
         extra_variables: Optional[Dict[str, Any]] = None,
+        tools_override: Optional[list[str]] = None,
     ) -> DolphinAgent:
         """
         创建 Dolphin Agent
@@ -217,6 +218,24 @@ class AgentFactory:
             model_name=actual_model,
             workspace_instructions=workspace_instructions,
         )
+
+        # 3.2 如果调用方指定了 tools_override，写一份临时 DPH（限制可用工具）。
+        #     心跳 agent 用此机制移除 _bash/_python，强制路过 routine_manager 接口。
+        _tmp_dph: Optional[Path] = None
+        if tools_override is not None:
+            tools_expr = ", ".join(tools_override)
+            original_dph_content = agent_dph_path.read_text(encoding="utf-8")
+            patched = re.sub(
+                r"tools=\[[^\]]*\]",
+                f"tools=[{tools_expr}]",
+                original_dph_content,
+            )
+            _tmp_dph = workspace_path / ".heartbeat_agent.dph"
+            _tmp_dph.write_text(patched, encoding="utf-8")
+            agent_dph_path = _tmp_dph
+            logger.info(
+                "[%s] Heartbeat agent using restricted tools: %s", agent_name, tools_override
+            )
 
         # 4. 准备变量
         variables = {
@@ -292,6 +311,13 @@ class AgentFactory:
         if dph_skills and hasattr(context, "set_last_skills"):
             context.set_last_skills(dph_skills)
             logger.info("Pre-seeded last_skills from DPH: %s", dph_skills)
+
+        # Clean up temporary heartbeat DPH after agent initialisation.
+        if _tmp_dph is not None and _tmp_dph.exists():
+            try:
+                _tmp_dph.unlink()
+            except OSError:
+                pass
 
         return agent
 

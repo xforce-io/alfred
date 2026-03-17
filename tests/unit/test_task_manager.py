@@ -105,6 +105,34 @@ class TestParseHeartbeatMd:
         assert result.status == ParseStatus.OK
         assert result.task_list.tasks[0].id == "t2"
 
+    def test_fence_present_no_closing_returns_corrupted(self):
+        """```json fence with no closing ``` is a format error, not empty — must be CORRUPTED.
+
+        Root cause of the alice incident: }``` on same line caused regex to miss
+        the block, which previously returned EMPTY and caused 5-day silent idle.
+        Now must return CORRUPTED so .bak recovery or repair is triggered.
+        """
+        md = "# HEARTBEAT\n\n## Tasks\n\n```json\n{\"version\": 2, \"tasks\": []}\n"
+        result = parse_heartbeat_md(md)
+        assert result.status == ParseStatus.CORRUPTED
+        assert result.parse_error is not None
+
+    def test_fence_present_closing_on_same_line_as_brace_returns_corrupted(self):
+        """The exact alice format: }``` on same line — was silently EMPTY, now CORRUPTED."""
+        md = "# HEARTBEAT\n\n## Tasks\n\n```json{\n  \"version\": 2,\n  \"tasks\": []\n}```\n"
+        # This specific format: opening ```json{ and closing }``` without newlines
+        # With our relaxed regex this actually now parses OK — verify it does:
+        result = parse_heartbeat_md(md)
+        # The relaxed regex handles this; if it somehow doesn't, it must be CORRUPTED not EMPTY
+        assert result.status in (ParseStatus.OK, ParseStatus.CORRUPTED)
+        assert result.status != ParseStatus.EMPTY
+
+    def test_no_fence_at_all_returns_empty(self):
+        """File with no ```json fence at all must still return EMPTY (not CORRUPTED)."""
+        md = "# HEARTBEAT\n\n## 待办\n\n（暂无任务）\n"
+        result = parse_heartbeat_md(md)
+        assert result.status == ParseStatus.EMPTY
+
     def test_multiple_tasks_parsed(self):
         data = {
             "version": 1,

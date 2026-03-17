@@ -226,7 +226,7 @@ class UserDataManager:
 
 系统支持后台心跳执行机制，允许你定时执行任务。
 
-1. **管理任务**：你可以通过修改工作区内的 `HEARTBEAT.md` 来设定、更新或完成定时任务。
+1. **管理任务**：通过 `routine_cli.py` 管理定时任务（add/list/update/remove）。**禁止直接编辑 `HEARTBEAT.md`**，文件格式由系统维护，手动修改会导致解析失败。
 2. **执行规则**：系统会定期按照 `HEARTBEAT.md` 唤醒你。如果你在心跳模式下工作，请直接行动并更新任务记录。
 3. **推送逻辑**：你的心跳执行过程可能会被推送到 UI（场景：用户长时间闲置）。
 
@@ -236,10 +236,14 @@ class UserDataManager:
 """,
             "HEARTBEAT.md": """# 心跳任务
 
-## 待办
-（暂无任务）
+## Tasks
 
-## 已完成
+```json
+{
+  "version": 2,
+  "tasks": []
+}
+```
 
 ## 执行记录
 <!-- 由 EverBot 自动追加 -->

@@ -204,6 +204,22 @@ If not, reply with `HEARTBEAT_OK`.
         self._file_mgr = HeartbeatFileManager(workspace_path)
         self._current_run_id: Optional[str] = None
         self._runtime_workspace_instructions: str = ""
+
+        # Wrap agent_factory to restrict tools available in the heartbeat session.
+        # _bash and _python are removed so the LLM cannot directly write HEARTBEAT.md;
+        # routine management must go through routine_cli.py / RoutineManager instead.
+        # Isolated job agents are created separately and retain full tool access.
+        _HEARTBEAT_TOOLS = ["_date", "_read_file", "_read_folder"]
+
+        async def _restricted_agent_factory(name: str, workspace: Any) -> Any:
+            try:
+                return await agent_factory(name, workspace, tools_override=_HEARTBEAT_TOOLS)
+            except TypeError:
+                # Fallback: factory doesn't support tools_override yet
+                return await agent_factory(name, workspace)
+
+        self._restricted_agent_factory = _restricted_agent_factory
+
         self._turn_executor = TurnExecutor(
             RuntimeDeps(
                 load_workspace_instructions=self._runtime_load_workspace_instructions,
@@ -1243,14 +1259,14 @@ If not, reply with `HEARTBEAT_OK`.
             self._init_session_trajectory(agent, overwrite=False)
             return agent
 
-        # 尝试从持久化恢复
+        # 尝试从持久化恢复（使用受限工具集的 heartbeat 专用 factory）
         if session_data:
             logger.info("从持久化恢复 Agent: %s", self.session_id)
-            agent = await self.agent_factory(self.agent_name, self.workspace_path)
+            agent = await self._restricted_agent_factory(self.agent_name, self.workspace_path)
             await self.session_manager.persistence.restore_to_agent(agent, session_data)
         else:
             logger.info("创建新 Agent: %s", self.session_id)
-            agent = await self.agent_factory(self.agent_name, self.workspace_path)
+            agent = await self._restricted_agent_factory(self.agent_name, self.workspace_path)
 
         self._bind_session_id_to_context(agent)
 

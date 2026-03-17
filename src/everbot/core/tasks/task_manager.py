@@ -120,16 +120,32 @@ _JSON_BLOCK_RE = re.compile(
 )
 
 
+_JSON_FENCE_RE = re.compile(r"```json", re.IGNORECASE)
+
+
 def parse_heartbeat_md(content: str) -> ParseResult:
     """Parse structured JSON block from HEARTBEAT.md.
 
     Returns a ParseResult with one of:
     - ok: valid JSON block with task payload
     - corrupted: JSON block exists but cannot be parsed/validated
-    - empty: no JSON block found
+    - empty: no JSON block found at all
     """
     match = _JSON_BLOCK_RE.search(content)
     if not match:
+        # Distinguish "fence present but unparseable format" from "no fence at all".
+        # The former must be CORRUPTED so the runtime triggers .bak recovery or
+        # repair instead of silently treating the file as having no tasks (idle).
+        if _JSON_FENCE_RE.search(content):
+            logger.warning(
+                "HEARTBEAT.md has a ```json fence but regex failed to match "
+                "(non-standard format, e.g. missing closing fence or newline). "
+                "Treating as CORRUPTED to trigger recovery."
+            )
+            return ParseResult(
+                status=ParseStatus.CORRUPTED,
+                parse_error="json fence found but block format is unrecognizable",
+            )
         return ParseResult(status=ParseStatus.EMPTY)
 
     raw_json = match.group(1)
