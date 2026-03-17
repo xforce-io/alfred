@@ -219,15 +219,15 @@ class Inspector:
 
     def _compute_context_hashes(self, ctx: InspectionContext) -> Dict[str, str]:
         """Compute hashes for all context components to detect changes."""
+        # recent_events intentionally excluded: routine cron completions change events
+        # every cycle and would cause inspection to run on every heartbeat tick.
+        # Events are still passed to the LLM for context — just not used as a trigger.
         hashes: Dict[str, str] = {
             "session_summary": hashlib.sha256(
                 str(ctx.session_summary or "").encode("utf-8")
             ).hexdigest(),
             "task_stats": hashlib.sha256(
                 json.dumps(ctx.task_execution_stats, sort_keys=True).encode("utf-8")
-            ).hexdigest(),
-            "events": hashlib.sha256(
-                json.dumps(ctx.recent_events, sort_keys=True).encode("utf-8")
             ).hexdigest(),
             "memory": hashlib.sha256(str(ctx.memory_content or "").encode("utf-8")).hexdigest(),
             "heartbeat": hashlib.sha256(
@@ -731,7 +731,7 @@ class Inspector:
 你是用户的私人助理。根据上述上下文，做出以下判断：
 
 1. **系统健康**：上述上下文是否显示系统存在需要用户关注的问题？(heartbeat_ok)
-2. **主动沟通**：综合考虑用户的兴趣、习惯、当前任务状态和空闲时长，判断现在是否值得主动给用户发一条消息。可以是任务执行情况的总结、基于用户兴趣的洞察、对近期工作的回顾、或任何你认为用户会感兴趣的话题。没什么值得说的就保持沉默。(push_message)
+2. **主动沟通**：判断现在是否值得主动给用户发一条消息。**默认沉默**——只有存在异常、需要用户决策、或有实质性新内容时才发。定时任务按计划完成、系统状态无变化，不构成发消息的理由。(push_message)
 3. **Routine 提议**：是否需要提议新的定时任务？(routines)
 
 以如下 JSON 格式回复：
@@ -750,7 +750,6 @@ class Inspector:
 ## push_message 语气要求
 push_message 是直接发送给用户的消息。请用**自然的助手口吻**书写，就像你在和用户聊天一样。
 - 用关心的语气，比如："我注意到最近 kimi 的接口不太稳定，连着失败了好几次，我先用备选模型顶上了，你看需要我做什么调整吗？"
-- 如果一切正常想主动聊聊，就像朋友随口说一句，比如："今天跑了几个任务都挺顺利的，没什么需要操心的。"
 - 用大白话，不要写成系统报告的格式"""
         )
 

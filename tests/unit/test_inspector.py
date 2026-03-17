@@ -241,8 +241,12 @@ class TestShouldInspect:
         )
         assert inspector._should_inspect(context2) is True
 
-    def test_detects_events_change(self, tmp_path):
-        """_should_inspect returns True when recent_events changes."""
+    def test_events_change_does_not_trigger(self, tmp_path):
+        """_should_inspect returns False when only recent_events changes.
+
+        Events are excluded from context hashes because routine cron completions
+        would otherwise trigger inspection on every heartbeat tick.
+        """
         inspector = _make_inspector(tmp_path)
         (tmp_path / "MEMORY.md").write_text("memory")
         (tmp_path / "HEARTBEAT.md").write_text("heartbeat")
@@ -265,7 +269,8 @@ class TestShouldInspect:
                 {"type": "error", "msg": "Timeout"},
             ],
         )
-        assert inspector._should_inspect(context2) is True
+        # Events changed but other context didn't — should NOT trigger
+        assert inspector._should_inspect(context2) is False
 
     def test_respects_force_interval(self, tmp_path):
         """_should_inspect returns True when force interval elapsed even if context unchanged."""
@@ -929,7 +934,6 @@ class TestStatePersistence:
                 "heartbeat": "def456",
                 "session_summary": "session_hash",
                 "task_stats": "task_hash",
-                "events": "events_hash",
             },
         }
         state_file = tmp_path / ".alfred" / "test_agent" / "tmp" / INSPECTOR_STATE_FILE
