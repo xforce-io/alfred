@@ -21,6 +21,15 @@ def _has_aliyun_key() -> bool:
     return bool(os.environ.get("ALIYUN_API_KEY"))
 
 
+def _has_litellm() -> bool:
+    try:
+        import litellm  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
 class _RealLLMClient:
     """Thin wrapper calling Aliyun DashScope qwen-turbo."""
 
@@ -64,6 +73,7 @@ You are an advanced coding assistant with deeper analysis.
 
 @pytest.mark.slow
 @pytest.mark.skipif(not _has_aliyun_key(), reason="ALIYUN_API_KEY not set")
+@pytest.mark.skipif(not _has_litellm(), reason="litellm not installed")
 class TestSLMRealLLMLifecycle:
     """Full lifecycle with real LLM Judge scoring."""
 
