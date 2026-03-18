@@ -883,4 +883,6 @@ class CodingMasterSkillkit(Skillkit):
             # 状态与诊断
             SkillFunction(self._cm_status),
             SkillFunction(self._cm_doctor),
+            # 配置管理
+            SkillFunction(self._cm_repo),
         ]
