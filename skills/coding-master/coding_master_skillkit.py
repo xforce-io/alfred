@@ -144,9 +144,19 @@ class CodingMasterSkillkit(Skillkit):
         super().__init__()
         self._agent_id = agent_id
         self._overlay_mode: str | None = None  # set when read-only overlay on deliver session
+        self._session_completed = False  # hard stop after complete breakpoint
 
     def getName(self) -> str:
         return "coding_master"
+
+    def _guard_completed(self) -> str | None:
+        """Return error JSON if session is completed, None otherwise."""
+        if self._session_completed:
+            return _result_to_str({
+                "ok": False,
+                "error": "SESSION_COMPLETE: 会话已结束，不要再调用任何工具。直接把结果展示给用户。",
+            })
+        return None
 
     # ──────────────────────────────────────────────────────────
     #  Session lifecycle
@@ -539,6 +549,8 @@ class CodingMasterSkillkit(Skillkit):
         Returns:
             str: JSON — 诊断结果和修复记录
         """
+        if (g := self._guard_completed()):
+            return g
         tools = _get_tools()
         args = _make_args(repo=repo or None, fix=fix, agent=self._agent_id)
         return _safe_cmd(tools.cmd_doctor, args)
@@ -562,6 +574,8 @@ class CodingMasterSkillkit(Skillkit):
         Returns:
             str: JSON — 包含带行号的文件内容
         """
+        if (g := self._guard_completed()):
+            return g
         tools = _get_tools()
         args = _make_args(
             repo=repo or None, file=file,
@@ -585,6 +599,8 @@ class CodingMasterSkillkit(Skillkit):
         Returns:
             str: JSON — 匹配的文件路径列表
         """
+        if (g := self._guard_completed()):
+            return g
         tools = _get_tools()
         args = _make_args(
             repo=repo or None, pattern=pattern,
@@ -610,6 +626,8 @@ class CodingMasterSkillkit(Skillkit):
         Returns:
             str: JSON — 匹配行及上下文
         """
+        if (g := self._guard_completed()):
+            return g
         tools = _get_tools()
         args = _make_args(
             repo=repo or None, pattern=pattern,
@@ -819,15 +837,20 @@ class CodingMasterSkillkit(Skillkit):
         Returns:
             str: JSON — {ok, breakpoint, instruction, context}
         """
+        if (g := self._guard_completed()):
+            return g
         t = _get_tools()
-        return json.dumps(t.cmd_next(_make_args(
+        result = t.cmd_next(_make_args(
             repo=repo, mode=mode or "deliver",
             intent=intent or None,
             diff=diff or None, files=files or None,
             title=title or None,
             force=force,
             _depth=0,
-        )), ensure_ascii=False, indent=2)
+        ))
+        if isinstance(result, dict) and result.get("breakpoint") == "complete":
+            self._session_completed = True
+        return json.dumps(result, ensure_ascii=False, indent=2)
 
     def _cm_edit(self, repo: str = "", file: str = "",
                  old_text: str = "", new_text: str = "",
@@ -848,6 +871,8 @@ class CodingMasterSkillkit(Skillkit):
         Returns:
             str: JSON — {ok, data: {file, replacements}}
         """
+        if (g := self._guard_completed()):
+            return g
         t = _get_tools()
         return json.dumps(t.cmd_edit(_make_args(
             repo=repo, file=file, old_text=old_text, new_text=new_text,
@@ -863,6 +888,8 @@ class CodingMasterSkillkit(Skillkit):
         Returns:
             str: JSON — 仓库列表或 session/feature 进度详情
         """
+        if (g := self._guard_completed()):
+            return g
         t = _get_tools()
         return json.dumps(t.cmd_combined_status(_make_args(repo=repo)),
                           ensure_ascii=False, indent=2)

@@ -4577,8 +4577,8 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
                 "breakpoint": "complete",
                 "pr_url": "",
                 "instruction": (
-                    f"STOP — do NOT call _cm_next again. Session aborted. No PR created. "
-                    f"Your integrated work is preserved on branch '{branch}'."
+                    f"STOP — 不要再调用任何工具（包括 _cm_status）。直接把结果展示给用户。"
+                    f"Session aborted. No PR created. Work preserved on branch '{branch}'."
                 ),
             }
 
@@ -4642,7 +4642,7 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
             "ok": True,
             "breakpoint": "complete",
             "pr_url": submit_result.get("data", {}).get("pr_url", ""),
-            "instruction": "STOP — do NOT call _cm_next again. Session submitted and PR created. Present the result to the user.",
+            "instruction": "STOP — 不要再调用任何工具（包括 _cm_status）。直接把结果展示给用户。Session submitted and PR created.",
         }
 
     return {
