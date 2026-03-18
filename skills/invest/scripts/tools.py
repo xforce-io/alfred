@@ -336,14 +336,14 @@ def _discover_chains(
 
 
 def _load_macro_result(lookback_days: int) -> Dict[str, Any]:
-    path = _repo_root() / "skills" / "investment-signal" / "scripts" / "macro_liquidity.py"
+    path = Path(__file__).resolve().parent / "signals" / "macro_liquidity.py"
     module = _load_module("invest_macro_liquidity", path)
     analyzer = module.MacroLiquidityAnalyzer()
     return module._serialize_result(analyzer.analyze(lookback_days=lookback_days))
 
 
 def _load_china_result(lookback_days: int) -> Dict[str, Any]:
-    path = _repo_root() / "skills" / "investment-signal" / "scripts" / "china_market_signal.py"
+    path = Path(__file__).resolve().parent / "signals" / "china_market_signal.py"
     module = _load_module("invest_china_market_signal", path)
     analyzer = module.ChinaMarketSignalAnalyzer()
     return module._serialize_result(analyzer.analyze(lookback_days=lookback_days))

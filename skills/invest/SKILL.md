@@ -49,6 +49,29 @@ $INV report
 $INV status
 ```
 
+## Signal Scripts
+
+Lower-level signal modules live in `scripts/signals/` and are called internally by `scan`:
+
+- `signals/macro_liquidity.py` — Net liquidity, SOFR, MOVE, JPY carry (needs `FRED_API_KEY`)
+- `signals/china_market_signal.py` — Northbound flow, volume, margin (needs `TUSHARE_TOKEN`)
+- `signals/value_investing.py` — US stock fundamentals (ROE, debt, FCF, moat, valuation)
+- `signals/box_breakout.py` — Donchian channel breakout detection
+- `signals/signal_report.py` — Aggregated signal report
+
+These can also be run standalone for debugging:
+
+```bash
+python $SKILL_DIR/scripts/signals/macro_liquidity.py --format text
+python $SKILL_DIR/scripts/signals/china_market_signal.py --format text
+python $SKILL_DIR/scripts/signals/value_investing.py AAPL --format text
+python $SKILL_DIR/scripts/signals/box_breakout.py AAPL --format text
+```
+
+## Tushare Reference
+
+Tushare API documentation is available in `references/tushare/` for A-share, HK, futures, options, fund, and macro data interfaces.
+
 ## Notes
 
 - `scan` writes observable states only. Analyst states from `node` take precedence.

@@ -82,6 +82,11 @@ class UserDataManager:
         return self.alfred_home / "skills"
 
     @property
+    def skill_logs_dir(self) -> Path:
+        """SLM evaluation segment logs"""
+        return self.alfred_home / "skill_logs"
+
+    @property
     def trajectories_dir(self) -> Path:
         """执行轨迹目录"""
         return self.alfred_home / "trajectories"
