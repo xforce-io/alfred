@@ -304,7 +304,11 @@ class TestE2ESingleFeature:
             lock = tools._atomic_json_read(repo / tools.CM_DIR / "lock.json")
             assert lock["session_phase"] == "integrating"
 
-            # 11. Submit (mock gh)
+            # 11. Submit (mock gh) — set user_confirmed_at for preflight gate
+            lock_path = repo / tools.CM_DIR / "lock.json"
+            lock = json.loads(lock_path.read_text())
+            lock["user_confirmed_at"] = "2026-03-18T22:00:00+00:00"
+            lock_path.write_text(json.dumps(lock))
             with mock.patch("subprocess.run") as mock_run:
                 # Mock git and gh commands
                 mock_run.return_value = mock.MagicMock(
@@ -435,7 +439,8 @@ class TestIdempotency:
         with _mock_repo(repo):
             r = tools.cmd_done(make_args(repo=repo.name, feature=1))
             assert not r["ok"]
-            assert "test" in r["error"].lower()
+            # Rejected by commit_count gate or test gate
+            assert "commit" in r["error"].lower() or "test" in r["error"].lower()
 
     def test_claim_before_plan_ready_rejected(self, git_repo):
         repo = _setup_locked(git_repo)

@@ -1,8 +1,8 @@
 # Coding Master: 公约驱动 + 两层工具架构
 
-> **版本**: v5.1（v4.6 → 两层工具架构 / `_cm_next` 自动推进 / Agent 工具面 25→7 / 断点模式 / Engine 接管代码工作 / review_changes 断点）
+> **版本**: v5.2（v5.1 + 结束清点门禁 / review_changes 硬停 / submit preflight / `_cm_read` 白名单）
 > **创建时间**: 2026-03-08
-> **最后更新**: 2026-03-15
+> **最后更新**: 2026-03-18
 > **状态**: Active
 
 ---
@@ -187,8 +187,9 @@ _cm_next()
   │       └─ 仍失败 → breakpoint: engine_failed
   │
   └─ all done → auto integrate
-      → breakpoint: review_changes (附 diff_summary)
-          ├─ _cm_next(intent="confirm") → auto submit → breakpoint: complete (附 PR URL)
+      → breakpoint: review_changes (附 diff_summary, hard_stop=true)
+          ── turn 强制结束，等待用户消息 ──
+          ├─ _cm_next(intent="confirm") → submit preflight 清点 → auto submit → breakpoint: complete (附 PR URL)
           ├─ _cm_next(intent="fix", feedback="...") → ENGINE fix in session wt → re-test → review_changes
           └─ _cm_next(intent="abort") → unlock (work 保留在 branch) → breakpoint: complete (pr_url="")
 ```
@@ -331,8 +332,9 @@ cm lock        cm plan-ready          cm claim      cm integrate(pass)  cm submi
 | `locked` | workspace 锁定，尚未规划 | `cm start` | PLAN.md 不存在："用 _cm_edit 创建 PLAN.md"；PLAN.md 已存在："运行 _cm_start 验证并推进" |
 | `reviewed` | PLAN.md 已审核通过，可以开始开发 | `cm start`（内部调 plan-ready）检查通过 | "认领 feature 开始开发" |
 | `working` | 有 feature 在进行中 | 第一个 `cm claim` | 显示各 feature 状态 |
-| `integrating` | 所有 feature done，集成验证通过 | `cm integrate` 成功 | "运行 cm submit 提交" |
-| `done` | 已提交并解锁 | `cm submit` 成功 | — |
+| `reviewing` | 集成测试通过，等待用户确认 diff | `cm integrate` 成功（硬停断点） | "review diff, confirm/fix/abort" |
+| `integrating` | 用户已确认 diff，准备提交 | `_cm_next(intent='confirm')` + 新 turn | "运行 cm submit 提交" |
+| `done` | 已提交并解锁 | `cm submit` 成功（preflight 全部通过） | — |
 
 ```json
 {
@@ -996,14 +998,14 @@ Agent B: "Feature 3 解锁了"
                           Session 状态机
                           ═════════════
 
-cm start        cm start(+PLAN)     cm claim(首次)    cm integrate      cm submit
-   │                │                    │                │                │
-   ▼                ▼                    ▼                ▼                ▼
-┌────────┐    ┌──────────┐        ┌──────────┐    ┌─────────────┐    ┌──────┐
-│ locked │───►│ reviewed │───────►│ working  │───►│ integrating │───►│ done │
-└────────┘    └──────────┘        └──────────┘    └─────────────┘    └──────┘
-                                        ▲                │
-                                        └────────────────┘
+cm start        cm start(+PLAN)     cm claim(首次)    cm integrate     user confirm    cm submit
+   │                │                    │                │                │               │
+   ▼                ▼                    ▼                ▼                ▼               ▼
+┌────────┐    ┌──────────┐        ┌──────────┐    ┌───────────┐    ┌─────────────┐    ┌──────┐
+│ locked │───►│ reviewed │───────►│ working  │───►│ reviewing │───►│ integrating │───►│ done │
+└────────┘    └──────────┘        └──────────┘    └───────────┘    └─────────────┘    └──────┘
+                                        ▲               │                │
+                                        └───────────────┴────────────────┘
                                        cm reopen + 修复后重试
 
 
@@ -1050,9 +1052,11 @@ cm claim           cm dev          cm test    cm review      cm done
 | 4 | `cm dev --feature N` | `_cm_dev` | — | → `developing` | `analyzing.completed_at`, `developing.started_at` | Analysis + Plan 段落非空 |
 | 5 | `cm test --feature N` | `_cm_test` | — | — (子状态更新) | `test_status`, `test_commit`, `test_output` | phase=developing，无未提交变更 |
 | 6 | `cm review --feature N` | — | — | — (子状态更新) | `review_status`, `review_commit`, `review_output` | test 通过且 test_commit=HEAD |
-| 7 | `cm done --feature N` | `_cm_done` | — | → `done` | `completed_at`, `diff_url` | test 通过 + review approved，均不 stale |
-| 8 | `cm integrate` | `_cm_integrate` | → `integrating` | — | `integration_passed_at` | 所有 feature done |
-| 9 | `cm submit` | `_cm_submit` | → `done` | — | PR URL | 集成测试通过 |
+| 7 | `cm done --feature N` | `_cm_done` | — | → `done` | `completed_at`, `diff_url` | **Feature 结束清点**（见 §5.8） |
+| 8 | `cm integrate` | `_cm_integrate` | → `reviewing` | — | `integration_passed_at` | 所有 feature done |
+| 9 | review_changes | 硬停断点 | `reviewing` | — | `_review_shown_at` | integrate 成功（硬停，结束当前 turn） |
+| 10 | `_cm_next(intent='confirm')` | — | → `integrating` | — | `user_confirmed_at` | 必须在新 turn 中（用户消息后） |
+| 11 | `cm submit` | `_cm_submit` | → `done` | — | PR URL | **Session 结束清点**（见 §5.8） |
 
 > **注意**：`cm plan-ready` 不作为独立工具暴露给 agent（无 `_cm_plan_ready`）。`_cm_start` 内部自动调用 plan-ready。Agent 的操作路径是：`_cm_edit` 创建 PLAN.md → `_cm_start` 验证并推进到 reviewed。
 
@@ -1208,13 +1212,15 @@ cm lock          cm scope     cm read/grep/find    cm report
 
 | 字段 | 说明 | 写入时机 |
 |------|------|---------|
-| `session_phase` | `locked`→`reviewed`→`working`→`integrating`→`done` | 各阶段指令 |
+| `session_phase` | `locked`→`reviewed`→`working`→`reviewing`→`integrating`→`done` | 各阶段指令 |
 | `mode` | `deliver`/`review`/`debug`/`analyze` | `cm lock` |
 | `branch` | dev 分支名 | `cm lock` |
 | `session_worktree` | session worktree 路径 | `cm lock`（写模式） |
 | `read_only` | 是否只读 | `cm lock` |
 | `lease_expires_at` | Lease 到期时间 | `cm lock`，写命令自动续约 |
 | `session_agents` | 参与的 agent 列表 | `cm lock`（join），`cm claim` |
+| `_review_shown_at` | diff 展示时间戳 | `review_changes` 断点返回时 |
+| `user_confirmed_at` | 用户确认 diff 时间戳 | `_cm_next(intent='confirm')` 在新 turn 中 |
 
 **Feature 级（claims.json）**：
 
@@ -1242,6 +1248,96 @@ cm lock          cm scope     cm read/grep/find    cm report
 | `lint.passed` | lint 是否通过 | `cm test` |
 | `typecheck.passed` | 类型检查是否通过 | `cm test` |
 | `test.passed` | 单元测试是否通过 | `cm test` |
+
+### 5.8 结束清点门禁（v5.2）
+
+**设计原则**：Feature 和 Session 结束时，在代码层面硬检查所有前置条件。不依赖 prompt 指令或 LLM 行为。Gate 失败返回明确的恢复路径，agent 可以自主修复后重试。
+
+#### 5.8.1 Feature 结束清点（`cmd_done`）
+
+`cmd_done` 在标记 feature 为 `done` 前，清点以下条件：
+
+| Gate | 数据源 | 检查内容 | 失败时恢复路径 |
+|------|--------|---------|---------------|
+| evidence 存在 | `evidence/{fid}-verify.json` | 文件必须存在 | `cm test --feature N` |
+| evidence 通过 | `evidence.overall` | 必须为 `"passed"` | 修代码 → `cm test` |
+| evidence 不过期 | `evidence.commit` vs `HEAD` | 必须与当前 HEAD 一致 | `cm test`（代码变更后重新测试） |
+| evidence 非全跳过 | `evidence.overall` | 不能为 `"skipped"` | 配置 lint/test 命令 |
+| 有实际代码变更 | `claims.json` `developing.commit_count` | 必须 > 0 | 写代码 → commit |
+| feature markdown 非空 | `features/{fid}.md` | Analysis + Plan 段落必须非空 | `_cm_edit` 写 feature markdown |
+
+所有检查在现有数据文件上计算，**不新增持久化文件**。失败时 feature 停留在 `developing` 阶段，agent 可无限重试。
+
+#### 5.8.2 Session 结束清点（`cmd_submit` preflight）
+
+`cmd_submit` 在 commit/push/PR 前，执行 `_submit_preflight` 清点：
+
+| Gate | 数据源 | 检查内容 | 失败时恢复路径 |
+|------|--------|---------|---------------|
+| 所有 feature done | `claims.json` 各 feature `phase` | 全部为 `"done"` | `cm reopen` → fix → test → done → integrate |
+| 所有 feature evidence 通过 | `evidence/{fid}-verify.json` | 每个 feature 的 `overall` 为 `"passed"` | 同上 |
+| integration report 通过 | `evidence/integration-report.json` | 文件存在且 `overall` 为 `"passed"` | 重跑 `cm integrate` |
+| 用户已确认 diff | `lock.json` `user_confirmed_at` | 字段存在且非空 | 自动回退到 `reviewing`（见下） |
+
+**`user_confirmed_at` 回退机制**：当 preflight 发现用户未确认时，不是返回死锁错误，而是主动将 `session_phase` 设回 `reviewing` 并清除 `_review_diff_shown`，使 agent 在下一轮 `_cm_next` 中重新展示 diff 给用户。
+
+```python
+# cmd_submit preflight 中的回退逻辑
+if not lock.get("user_confirmed_at"):
+    _atomic_json_update(lock_path, lambda d: (
+        d.update({"session_phase": "reviewing", "_review_diff_shown": False}),
+        {"ok": True},
+    )[1])
+    return {"ok": False,
+            "error": "user has not reviewed changes",
+            "hint": "call _cm_next to show diff to user, wait for user confirm"}
+```
+
+#### 5.8.3 `review_changes` 硬停机制
+
+**问题**：`review_changes` 断点靠 prompt instruction 让 LLM 停下来等用户确认，但 LLM 可能在同一 turn 内直接调 `_cm_next(intent='confirm')` 跳过用户确认。
+
+**解决方案**：代码层面强制结束当前 turn。
+
+1. `review_changes` 断点返回值带 `"hard_stop": true` 标记
+2. Orchestrator 收到 `hard_stop` 后强制结束当前 turn（与 `complete` 断点同等处理）
+3. 下一轮用户消息触发新 turn，LLM 才能调 `_cm_next(intent='confirm')`
+4. `confirm` 处理时在 `lock.json` 写入 `user_confirmed_at` 时间戳
+
+```
+_cm_next() 返回:
+{
+  "ok": true,
+  "breakpoint": "review_changes",
+  "hard_stop": true,              ← 新增：orchestrator 强制结束 turn
+  "instruction": "...",
+  "diff_summary": {...}
+}
+```
+
+**持久化**：`lock.json` 新增两个字段
+
+| 字段 | 写入时机 | 说明 |
+|------|---------|------|
+| `_review_shown_at` | `review_changes` 断点返回时 | ISO 时间戳，标记 diff 已展示 |
+| `user_confirmed_at` | `intent='confirm'` 在新 turn 中处理时 | ISO 时间戳，`cmd_submit` preflight 检查此字段 |
+
+`cm integrate` 和 `cm reopen` 会清除这两个字段（回到 working 状态重新来过）。
+
+#### 5.8.4 恢复路径推演
+
+**所有 gate 失败场景均可恢复**：
+
+| 场景 | 当前 phase | gate 失败 | 恢复动作 | 恢复后 phase |
+|------|-----------|----------|---------|-------------|
+| Feature done: evidence 缺失 | developing | `cmd_done` 拒绝 | `cm test` → `cm done` | developing（不变） |
+| Feature done: evidence 过期 | developing | `cmd_done` 拒绝 | `cm test` → `cm done` | developing（不变） |
+| Feature done: 无代码变更 | developing | `cmd_done` 拒绝 | 写代码 commit → `cm test` → `cm done` | developing（不变） |
+| Submit: evidence 缺失/失败 | integrating | `cmd_submit` 拒绝 | `cm reopen` → fix → test → done → integrate | working |
+| Submit: integration report 缺失 | integrating | `cmd_submit` 拒绝 | 重跑 `cm integrate` | working → reviewing |
+| Submit: 用户未确认 | integrating | `cmd_submit` 自动回退 | `_cm_next` 展示 diff → 用户确认 | reviewing |
+| review_changes 硬停 | reviewing | turn 被强制结束 | 用户发消息 → `_cm_next(intent='confirm')` | reviewing → integrating |
+| Engine 超时 / turn timeout | 任意 | turn 中断 | 用户发消息 → `_cm_next` 从当前 phase 继续 | 不变（幂等） |
 
 ---
 
@@ -2785,7 +2881,9 @@ def cmd_read(args) -> dict:
         target = cwd / target
     target = target.resolve()
 
-    # 安全检查：禁止读取 repo 外的文件
+    # 安全检查：禁止读取 repo 外的文件（白名单除外）
+    # _READ_WHITELIST = [Path.home() / ".alfred" / "agents"] 允许读取 agent 运行时状态
+    # ~ 开头的路径通过 expanduser() 展开为绝对路径
     if not _is_within_repo(target, repo):
         return {"ok": False, "error": f"path {target} is outside repo"}
 
@@ -3821,7 +3919,7 @@ Agent 消化 engine 结果，生成人类可读的 review 报告。
 | feature 不是 developing | phase=done | 拒绝 |
 | 连续两次测试 | 第一次 fail，改代码 commit，第二次 pass | test_status 从 failed → passed，test_commit 更新为新 HEAD |
 
-#### 10.2.8 `cmd_done` 测试状态检查
+#### 10.2.8 `cmd_done` 结束清点（v5.2 扩展）
 
 | 用例 | 输入 | 预期 |
 |------|------|------|
@@ -3830,6 +3928,8 @@ Agent 消化 engine 结果，生成人类可读的 review 报告。
 | 测试失败 | test_status=failed | 拒绝，"last test failed" |
 | 测试通过但代码已变更 | test_status=passed, test_commit ≠ HEAD | 拒绝，"code changed after last test" |
 | 不是 developing | phase=done 或 pending | 拒绝 |
+| **无代码变更** | commit_count=0 | 拒绝，"no code changes committed" |
+| **feature markdown 为空** | features/01-xxx.md 不存在或无 Analysis/Plan | 拒绝，"feature markdown incomplete" |
 
 #### 10.2.9 `_resolve_agent`
 
@@ -3858,13 +3958,25 @@ Agent 消化 engine 结果，生成人类可读的 review 报告。
 
 | 用例 | 输入 | 预期 |
 |------|------|------|
-| 全部 done + 测试通过 | 4 features all done | session_phase → integrating |
+| 全部 done + 测试通过 | 4 features all done | session_phase → reviewing（非 integrating） |
 | 有 feature 未完成 | Feature 2 is developing | 拒绝，"Feature 2 is developing" |
 | merge 冲突 | Feature 2 和 3 有冲突 | 拒绝，merge --abort，返回冲突详情 |
 | 集成测试失败 | merge 成功但测试 fail | 拒绝，回滚 merge，返回测试输出 |
 | 幂等：已经 integrating | session_phase=integrating | 成功（重新 merge+测试） |
 
-#### 10.2.12 `cmd_reopen`
+#### 10.2.12 `cmd_submit` preflight 清点（v5.2 新增）
+
+| 用例 | 输入 | 预期 |
+|------|------|------|
+| 全部通过 | all evidence passed + integration passed + user confirmed | 成功提交 |
+| feature evidence 缺失 | evidence/1-verify.json 不存在 | 拒绝，"feature 1: no evidence file" |
+| feature evidence 失败 | evidence.overall = "failed" | 拒绝，"feature 1: evidence=failed" |
+| integration report 缺失 | integration-report.json 不存在 | 拒绝，"no integration report" |
+| integration report 失败 | report.overall = "failed" | 拒绝，"integration: failed" |
+| 用户未确认 diff | lock.json 无 user_confirmed_at | 拒绝 + 自动回退到 reviewing |
+| preflight 失败后恢复 | reopen → fix → test → done → integrate → confirm | 成功提交 |
+
+#### 10.2.13 `cmd_reopen`
 
 | 用例 | 输入 | 预期 |
 |------|------|------|

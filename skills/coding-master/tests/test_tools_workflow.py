@@ -596,6 +596,12 @@ class TestExtendedSubmit:
             tools.cmd_done(make_args(repo=repo.name, feature=1))
             tools.cmd_integrate(make_args(repo=repo.name))
 
+        # Set user_confirmed_at for preflight gate
+        lock_path = repo / tools.CM_DIR / "lock.json"
+        lock = json.loads(lock_path.read_text())
+        lock["user_confirmed_at"] = "2026-03-18T22:00:00+00:00"
+        lock_path.write_text(json.dumps(lock))
+
         with mock.patch("subprocess.run") as mock_run:
             mock_run.return_value = mock.MagicMock(returncode=0, stdout="", stderr="")
             with mock.patch.object(tools, "_repo_path", return_value=repo):
@@ -1403,3 +1409,200 @@ class TestReviewChangesBreakpoint:
         assert "deletions" in summary
         assert "diff_stat" in summary
         assert "diff_text" in summary
+
+
+# ══════════════════════════════════════════════════════════
+#  v5.2: Completion gates — cmd_done & cmd_submit preflight
+# ══════════════════════════════════════════════════════════
+
+
+class TestDoneCompletionGate:
+    """cmd_done must reject when commit_count=0 or feature md is empty."""
+
+    def test_done_rejects_zero_commits(self, git_repo):
+        """Feature with no code changes (commit_count=0) cannot be marked done."""
+        repo, data = _setup_developing(git_repo)
+        wt = Path(data["worktree"])
+        # Write evidence file directly (bypassing cmd_test which would set commit_count)
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=wt, capture_output=True, text=True
+        ).stdout.strip()
+        evidence = {
+            "feature_id": "1", "commit": head, "overall": "passed",
+            "lint": {"passed": True, "skipped": True},
+            "typecheck": {"passed": True, "skipped": True},
+            "test": {"passed": True, "skipped": False},
+        }
+        evidence_dir = repo / tools.CM_DIR / tools.EVIDENCE_DIR
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        (evidence_dir / "1-verify.json").write_text(json.dumps(evidence))
+        # Ensure commit_count is 0 in claims
+        claims_path = repo / tools.CM_DIR / "claims.json"
+        claims = json.loads(claims_path.read_text())
+        claims["features"]["1"]["developing"]["commit_count"] = 0
+        claims_path.write_text(json.dumps(claims))
+
+        with _mock_repo(repo):
+            r = tools.cmd_done(make_args(repo=repo.name, feature=1))
+        assert not r["ok"]
+        assert "commit" in r["error"].lower() or "change" in r["error"].lower()
+
+    def test_done_rejects_empty_feature_md(self, git_repo):
+        """Feature with empty Analysis/Plan in markdown cannot be marked done."""
+        repo, data = _setup_developing(git_repo)
+        wt = Path(data["worktree"])
+        _write_and_commit(wt)
+        # Clear the feature md Analysis+Plan sections
+        feature_md = tools._find_feature_md(repo, "1")
+        assert feature_md is not None
+        content = feature_md.read_text()
+        # Wipe analysis and plan content but keep headers
+        import re
+        content = re.sub(r'(## Analysis\n).*?(## Plan)', r'\1\n\2', content, flags=re.DOTALL)
+        content = re.sub(r'(## Plan\n).*?(## |$)', r'\1\n', content, flags=re.DOTALL)
+        feature_md.write_text(content)
+
+        with _mock_repo(repo):
+            tools.cmd_test(make_args(repo=repo.name, feature=1))
+            r = tools.cmd_done(make_args(repo=repo.name, feature=1))
+        assert not r["ok"]
+        assert "markdown" in r["error"].lower() or "analysis" in r["error"].lower()
+
+    def test_done_succeeds_with_commits_and_md(self, git_repo):
+        """Normal flow: commits + filled md + passed evidence → done succeeds."""
+        repo, data = _setup_developing(git_repo)
+        with _mock_repo(repo):
+            _write_and_commit(data["worktree"])
+            tools.cmd_test(make_args(repo=repo.name, feature=1))
+            r = tools.cmd_done(make_args(repo=repo.name, feature=1))
+        assert r["ok"]
+
+
+class TestSubmitPreflight:
+    """cmd_submit must verify all evidence + integration report + user confirmation."""
+
+    def _setup_integrating(self, git_repo, with_user_confirm=True):
+        """Helper: set up a repo in integrating phase with all evidence."""
+        repo, data = _setup_developing(git_repo)
+        with _mock_repo(repo):
+            _write_and_commit(data["worktree"])
+            tools.cmd_test(make_args(repo=repo.name, feature=1))
+            tools.cmd_done(make_args(repo=repo.name, feature=1))
+            tools.cmd_integrate(make_args(repo=repo.name))
+        # Set phase to integrating (as if confirm happened)
+        lock_path = repo / tools.CM_DIR / "lock.json"
+        lock = json.loads(lock_path.read_text())
+        lock["session_phase"] = "integrating"
+        if with_user_confirm:
+            lock["user_confirmed_at"] = "2026-03-18T22:00:00+00:00"
+        lock_path.write_text(json.dumps(lock))
+        return repo, data
+
+    def test_submit_rejects_missing_evidence(self, git_repo):
+        """Submit must fail if feature evidence file is missing."""
+        repo, _ = self._setup_integrating(git_repo)
+        # Delete evidence
+        evidence_path = repo / tools.CM_DIR / tools.EVIDENCE_DIR / "1-verify.json"
+        evidence_path.unlink()
+        with mock.patch.object(tools, "_repo_path", return_value=repo):
+            r = tools.cmd_submit(make_args(repo=repo.name, title="feat: test"))
+        assert not r["ok"]
+        assert "evidence" in r["error"].lower() or "preflight" in r["error"].lower()
+
+    def test_submit_rejects_failed_evidence(self, git_repo):
+        """Submit must fail if feature evidence overall != passed."""
+        repo, _ = self._setup_integrating(git_repo)
+        evidence_path = repo / tools.CM_DIR / tools.EVIDENCE_DIR / "1-verify.json"
+        evidence = json.loads(evidence_path.read_text())
+        evidence["overall"] = "failed"
+        evidence_path.write_text(json.dumps(evidence))
+        with mock.patch.object(tools, "_repo_path", return_value=repo):
+            r = tools.cmd_submit(make_args(repo=repo.name, title="feat: test"))
+        assert not r["ok"]
+        assert "evidence" in r["error"].lower() or "preflight" in r["error"].lower()
+
+    def test_submit_rejects_missing_integration_report(self, git_repo):
+        """Submit must fail if integration report is missing."""
+        repo, _ = self._setup_integrating(git_repo)
+        report_path = repo / tools.CM_DIR / tools.EVIDENCE_DIR / "integration-report.json"
+        if report_path.exists():
+            report_path.unlink()
+        with mock.patch.object(tools, "_repo_path", return_value=repo):
+            r = tools.cmd_submit(make_args(repo=repo.name, title="feat: test"))
+        assert not r["ok"]
+        assert "integration" in r["error"].lower() or "preflight" in r["error"].lower()
+
+    def test_submit_rejects_no_user_confirm(self, git_repo):
+        """Submit must fail if user has not confirmed diff, and auto-revert to reviewing."""
+        repo, _ = self._setup_integrating(git_repo, with_user_confirm=False)
+        with mock.patch.object(tools, "_repo_path", return_value=repo):
+            r = tools.cmd_submit(make_args(repo=repo.name, title="feat: test"))
+        assert not r["ok"]
+        assert "review" in r["error"].lower() or "confirm" in r["error"].lower()
+        # Should auto-revert phase to reviewing
+        lock = json.loads((repo / tools.CM_DIR / "lock.json").read_text())
+        assert lock["session_phase"] == "reviewing"
+
+    def test_submit_succeeds_with_all_gates(self, git_repo):
+        """Submit succeeds when all preflight gates pass."""
+        repo, _ = self._setup_integrating(git_repo)
+        with mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = mock.MagicMock(
+                returncode=0, stdout="https://github.com/test/pr/1", stderr=""
+            )
+            with mock.patch.object(tools, "_repo_path", return_value=repo):
+                r = tools.cmd_submit(make_args(repo=repo.name, title="feat: test"))
+        assert r["ok"]
+
+
+class TestReviewChangesHardStop:
+    """review_changes breakpoint must include hard_stop=true and manage timestamps."""
+
+    def test_review_changes_has_hard_stop(self, git_repo):
+        """review_changes breakpoint must return hard_stop=true."""
+        repo, _ = _setup_reviewing(git_repo)
+        lock_path = repo / tools.CM_DIR / "lock.json"
+        # Reset diff_shown so it shows fresh diff
+        lock = json.loads(lock_path.read_text())
+        lock["_review_diff_shown"] = False
+        lock_path.write_text(json.dumps(lock))
+
+        with mock.patch.object(tools, "_repo_path", return_value=repo):
+            r = tools.cmd_next(make_args(repo=repo.name))
+        assert r["ok"]
+        assert r["breakpoint"] == "review_changes"
+        assert r.get("hard_stop") is True
+
+    def test_review_changes_sets_review_shown_at(self, git_repo):
+        """review_changes must set _review_shown_at in lock.json."""
+        repo, _ = _setup_reviewing(git_repo)
+        lock_path = repo / tools.CM_DIR / "lock.json"
+        lock = json.loads(lock_path.read_text())
+        lock["_review_diff_shown"] = False
+        lock_path.write_text(json.dumps(lock))
+
+        with mock.patch.object(tools, "_repo_path", return_value=repo):
+            tools.cmd_next(make_args(repo=repo.name))
+        lock = json.loads(lock_path.read_text())
+        assert "_review_shown_at" in lock
+
+    def test_confirm_sets_user_confirmed_at(self, git_repo):
+        """intent='confirm' must set user_confirmed_at in lock.json before submit runs."""
+        repo, _ = _setup_reviewing(git_repo)
+        lock_path = repo / tools.CM_DIR / "lock.json"
+        captured_lock = {}
+
+        orig_submit = tools.cmd_submit
+
+        def spy_submit(args):
+            # Capture lock state at the moment submit is called
+            captured_lock.update(json.loads(lock_path.read_text()))
+            return orig_submit(args)
+
+        with mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = mock.MagicMock(returncode=0, stdout="", stderr="")
+            with mock.patch.object(tools, "_repo_path", return_value=repo), \
+                 mock.patch.object(tools, "cmd_submit", side_effect=spy_submit):
+                tools.cmd_next(make_args(repo=repo.name, intent="confirm"))
+        # user_confirmed_at must be set when submit is called
+        assert captured_lock.get("user_confirmed_at") is not None

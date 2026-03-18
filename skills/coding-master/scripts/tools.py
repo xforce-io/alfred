@@ -1298,7 +1298,20 @@ def cmd_status(args) -> dict:
     repo = _repo_path(args.repo)
     lock = _atomic_json_read(repo / CM_DIR / "lock.json")
     if not lock:
-        return {"ok": True, "data": {"locked": False}}
+        # v5.2: include last_session info so LLM knows about recently completed work
+        data: dict = {"locked": False}
+        last_session_path = repo / CM_DIR / "last_session.json"
+        if last_session_path.exists():
+            try:
+                last = json.loads(last_session_path.read_text())
+                data["last_session"] = last
+                data["hint"] = (
+                    "No active session. To review/test the last session's changes, "
+                    "use _cm_next(mode='review')."
+                )
+            except (json.JSONDecodeError, OSError):
+                pass
+        return {"ok": True, "data": data}
 
     data = {
         "locked": True, "expired": _is_expired(lock),
@@ -1845,6 +1858,21 @@ def cmd_done(args) -> dict:
         if phase != "developing":
             return {"ok": False, "error": f"Feature {feature_id} is {phase}, expected developing"}
 
+        # v5.2: completion gate — commit_count and feature markdown checks
+        dev = feat.get("developing", {})
+        if dev.get("commit_count", 0) <= 0:
+            return {"ok": False, "error": "No code changes committed. Write code and commit before marking done."}
+        feature_md = _find_feature_md(repo, feature_id)
+        has_analysis, has_plan = _check_feature_md_sections(feature_md)
+        if not has_analysis or not has_plan:
+            missing = []
+            if not has_analysis:
+                missing.append("Analysis")
+            if not has_plan:
+                missing.append("Plan")
+            return {"ok": False, "error": f"Feature markdown incomplete: {', '.join(missing)} section(s) empty. "
+                    f"Use _cm_edit to fill in the feature markdown before marking done."}
+
         if evidence:
             # v4 evidence-based verification
             if evidence.get("commit") != current_head:
@@ -1942,12 +1970,16 @@ def cmd_reopen(args) -> dict:
     if not result.get("ok"):
         return result
 
-    # Session phase back to working
+    # Session phase back to working, clear review/confirm timestamps
     lock_path = repo / CM_DIR / "lock.json"
     _atomic_json_update(lock_path, lambda d: (
-        d.update({"session_phase": "working"}) if d.get("session_phase") == "integrating" else None,
+        d.update({"session_phase": "working"})
+        if d.get("session_phase") in ("integrating", "reviewing") else None,
+        d.pop("user_confirmed_at", None),
+        d.pop("_review_shown_at", None),
+        d.update({"_review_diff_shown": False}),
         {"ok": True},
-    )[1])
+    )[-1])
 
     worktree = _get_feature_worktree(claims_path, feature_id)
     response = {"ok": True, "data": {
@@ -2139,6 +2171,63 @@ def _write_integration_report(repo: Path, report: dict):
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False))
 
 
+def _read_integration_report(repo: Path) -> dict | None:
+    """Read integration report JSON. Returns None if not found."""
+    report_path = repo / CM_DIR / EVIDENCE_DIR / "integration-report.json"
+    if not report_path.exists():
+        return None
+    try:
+        return json.loads(report_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _submit_preflight(repo: Path) -> dict | None:
+    """Verify all gates before submit. Returns error dict if any gate fails, None if all clear."""
+    plan = _parse_plan_md(repo / CM_DIR / "PLAN.md")
+    claims = _atomic_json_read(repo / CM_DIR / "claims.json")
+    lock_path = repo / CM_DIR / "lock.json"
+    lock = _atomic_json_read(lock_path)
+    errors = []
+
+    # Gate 1: all features done
+    for fid in plan:
+        phase = claims.get("features", {}).get(fid, {}).get("phase")
+        if phase != "done":
+            errors.append(f"feature {fid}: phase={phase}, expected done")
+
+    # Gate 2: all feature evidence passed
+    for fid in plan:
+        evidence = _read_evidence(repo, fid)
+        if not evidence:
+            errors.append(f"feature {fid}: no evidence file")
+        elif evidence.get("overall") != "passed":
+            errors.append(f"feature {fid}: evidence={evidence.get('overall')}")
+
+    # Gate 3: integration report passed
+    report = _read_integration_report(repo)
+    if not report:
+        errors.append("no integration report")
+    elif report.get("overall") != "passed":
+        errors.append(f"integration: {report.get('overall')}")
+
+    # Gate 4: user confirmed diff review
+    if not lock.get("user_confirmed_at"):
+        # Auto-revert to reviewing so agent can show diff to user
+        _atomic_json_update(lock_path, lambda d: (
+            d.update({"session_phase": "reviewing", "_review_diff_shown": False}),
+            {"ok": True},
+        )[1])
+        return {"ok": False, "error": "user has not reviewed changes",
+                "hint": "call _cm_next to show diff to user, wait for user confirm",
+                "data": {"auto_reverted_to": "reviewing"}}
+
+    if errors:
+        return {"ok": False, "error": "submit preflight failed",
+                "data": {"failed_gates": errors}}
+    return None
+
+
 def cmd_submit(args) -> dict:
     """Idempotent submit: commit → push → PR → cleanup → unlock."""
     repo = _resolve_locked_repo(args)
@@ -2150,6 +2239,11 @@ def cmd_submit(args) -> dict:
                 "call _cm_next(intent='confirm') to approve and submit"}
     if phase != "integrating":
         return {"ok": False, "error": f"session is {phase}, run cm integrate first"}
+
+    # v5.2: preflight checks before any destructive git operations
+    preflight_err = _submit_preflight(repo)
+    if preflight_err:
+        return preflight_err
 
     branch = lock.get("branch", "dev/unknown")
 
@@ -2256,7 +2350,7 @@ def cmd_submit(args) -> dict:
         return {"ok": True, "data": {"branch": branch, "pr_url": pr_url},
                 "warning": f"PR created but unlock failed: {exc}. Run cm doctor to fix."}
 
-    # Build extended contract response
+    # Build extended contract response (read before cleanup)
     plan = _parse_plan_md(repo / CM_DIR / "PLAN.md")
     claims = _atomic_json_read(repo / CM_DIR / "claims.json")
     features_total = len(plan)
@@ -2275,6 +2369,11 @@ def cmd_submit(args) -> dict:
     }
     if change_summary:
         result_data["change_summary"] = change_summary
+    # v5.2: clean up stale per-session files after submit
+    # Prevents LLM from reading stale feature MDs and looping on wrong file paths
+    # last_session.json already has the summary; JOURNAL.md is cross-session
+    _reset_plan_layer(repo)
+
     response: dict = {"ok": True, "data": result_data}
     if pr_warning:
         response["warning"] = pr_warning
@@ -3664,6 +3763,11 @@ def _resolve_working_dir(repo: Path, args) -> Path:
     return repo
 
 
+_READ_WHITELIST = [
+    Path.home() / ".alfred" / "agents",
+]
+
+
 def _is_within_repo(target: Path, repo: Path) -> bool:
     """Check if target path is within repo or any of its worktrees."""
     resolved = target.resolve()
@@ -3680,6 +3784,10 @@ def _is_within_repo(target: Path, repo: Path) -> bool:
         first_part = str(rel.parts[0]) if rel.parts else ""
         if (first_part == f"{repo_name}-session"
                 or first_part.startswith(f"{repo_name}-feature-")):
+            return True
+    # Allow whitelisted paths (read-only access to agent state)
+    for allowed in _READ_WHITELIST:
+        if resolved.is_relative_to(allowed.resolve()):
             return True
     return False
 
@@ -3731,6 +3839,31 @@ def cmd_find(args) -> dict:
     cwd = _resolve_working_dir(repo, args)
     pattern = args.pattern
     max_results = getattr(args, "max_results", 50) or 50
+
+    # Handle ~ (home directory) patterns — glob directly on expanded path
+    if pattern.startswith("~/"):
+        expanded = str(Path(pattern).expanduser())
+        import glob as glob_mod
+        try:
+            matches = sorted(glob_mod.glob(expanded))
+        except ValueError as e:
+            return {"ok": False, "error": f"Invalid glob pattern '{pattern}': {e}"}
+        # Validate all matches are within whitelist or repo
+        repo_resolved = repo.resolve()
+        valid = []
+        for m in matches:
+            mp = Path(m).resolve()
+            if mp.is_relative_to(repo_resolved):
+                valid.append(m)
+            elif any(mp.is_relative_to(w.resolve()) for w in _READ_WHITELIST):
+                valid.append(m)
+        files = [f for f in valid if Path(f).is_file()]
+        truncated = len(files) > max_results
+        files = files[:max_results]
+        return {"ok": True, "data": {
+            "pattern": pattern, "cwd": str(cwd),
+            "files": files, "count": len(files), "truncated": truncated,
+        }}
 
     # Normalize absolute patterns to relative (Path.glob requires relative patterns)
     if pattern.startswith("/"):
@@ -3815,6 +3948,8 @@ def _resolve_edit_target(repo: Path, raw_file: Path, args) -> Path:
        CM metadata always lives in repo root, never in worktrees.
     2. Otherwise, resolve relative to the feature/session worktree via _resolve_working_dir.
     """
+    # Expand ~ to home directory before any resolution
+    raw_file = raw_file.expanduser()
     cm_dir = (repo / CM_DIR).resolve()
 
     # Rule 1: anything referencing CM_DIR → resolve against repo root
@@ -4177,6 +4312,17 @@ def cmd_next(args) -> dict:
 
     # ── No active session → auto lock ────────────────────────────────────────
     if not lock or not session_phase or session_phase == "done":
+        # v5.2: if review mode and last_session has a branch, auto-scope to that diff
+        if mode in ("review", "analyze") and not getattr(args, "diff", None):
+            last_session_path = repo / CM_DIR / "last_session.json"
+            if last_session_path.exists():
+                try:
+                    last = json.loads(last_session_path.read_text())
+                    branch = last.get("branch", "")
+                    if branch:
+                        args.diff = f"main...{branch}"
+                except (json.JSONDecodeError, OSError):
+                    pass
         lock_args = copy.copy(args)
         lock_args.mode = mode
         lock_result = cmd_lock(lock_args)
@@ -4517,9 +4663,12 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
         session_wt_str = lock.get("session_worktree", "")
 
         if intent == "confirm":
-            # User approved → transition to "integrating" → recurse → auto submit
+            # User approved → record confirmation + transition to "integrating" → recurse → auto submit
             _atomic_json_update(repo / CM_DIR / "lock.json", lambda d: (
-                d.update({"session_phase": "integrating"}), {"ok": True},
+                d.update({
+                    "session_phase": "integrating",
+                    "user_confirmed_at": datetime.now(timezone.utc).isoformat(),
+                }), {"ok": True},
             )[1])
             return _recurse()
 
@@ -4589,6 +4738,7 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
             return {
                 "ok": True,
                 "breakpoint": "review_changes",
+                "hard_stop": True,
                 "instruction": (
                     "⚠️ Diff already presented. You MUST pass intent — do NOT call _cm_next without it:\n"
                     "• _cm_next(intent='confirm')               — user approved\n"
@@ -4598,11 +4748,17 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
             }
         session_wt = Path(session_wt_str) if session_wt_str else repo
         diff_summary = _get_diff_summary(session_wt)
-        _atomic_json_update(repo / CM_DIR / "lock.json",
-                            lambda d: (d.update({"_review_diff_shown": True}), {"ok": True})[1])
+        # v5.2: record review timestamp + hard_stop to force turn end
+        _atomic_json_update(repo / CM_DIR / "lock.json", lambda d: (
+            d.update({
+                "_review_diff_shown": True,
+                "_review_shown_at": datetime.now(timezone.utc).isoformat(),
+            }), {"ok": True},
+        )[1])
         return {
             "ok": True,
             "breakpoint": "review_changes",
+            "hard_stop": True,
             "instruction": (
                 "Integration complete. Review the diff below, then:\n"
                 "• Approve: _cm_next(intent='confirm')\n"
