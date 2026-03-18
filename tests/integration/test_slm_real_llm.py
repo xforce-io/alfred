@@ -71,7 +71,10 @@ You are an advanced coding assistant with deeper analysis.
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not _has_aliyun_key(), reason="ALIYUN_API_KEY not set")
+@pytest.mark.skipif(
+    not _has_aliyun_key() or not _has_litellm(),
+    reason="ALIYUN_API_KEY not set or litellm not installed",
+)
 class TestSLMRealLLMLifecycle:
     """Full lifecycle with real LLM Judge scoring."""
 
