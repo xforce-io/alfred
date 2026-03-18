@@ -514,8 +514,11 @@ class Inspector:
                     pass
             ctx = self._gather_context(heartbeat_content)
 
+        # Preserve last_push_at from previous state
+        prev_state = self._load_state()
         state = {
             "last_run_at": datetime.now().isoformat(),
+            "last_push_at": prev_state.get("last_push_at"),
             "context_hashes": self._compute_context_hashes(ctx),
             "last_idle_hours": ctx.idle_hours,
         }
@@ -640,12 +643,24 @@ class Inspector:
         # Parse response (unified format)
         parsed = self._reflection.extract_unified_response(response)
 
+        # Force-push fallback: if directive was set but LLM returned no message
+        push_msg = parsed.push_message
+        if not push_msg and getattr(self, '_force_push_pending', False):
+            push_msg = "定期状态汇报：系统运行中，暂无异常。"
+        self._force_push_pending = False
+
         # Update state after successful LLM call
         self.update_state(ctx)
 
+        # Update last_push_at if we have a push_message
+        if push_msg:
+            state = self._load_state()
+            state["last_push_at"] = datetime.now().isoformat()
+            self._persist_state(state)
+
         result = InspectionResult(
             heartbeat_ok=parsed.heartbeat_ok,
-            push_message=parsed.push_message,
+            push_message=push_msg,
             output="HEARTBEAT_OK" if parsed.heartbeat_ok else "HEARTBEAT_ERROR",
         )
 
@@ -723,6 +738,33 @@ class Inspector:
                 for r in ctx.existing_routines[:10]
             )
             sections.append(f"# Existing Routines\n{routines_text}")
+
+        # Force-push check: if no push_message has been sent for too long
+        force_push = False
+        state = self._load_state()
+        last_push_at = state.get("last_push_at")
+        if last_push_at:
+            try:
+                elapsed = datetime.now() - datetime.fromisoformat(last_push_at)
+                if elapsed >= self._force_interval:
+                    force_push = True
+                    hours_since = elapsed.total_seconds() / 3600
+                    sections.append(
+                        f"# ⚠️ 强制汇报\n"
+                        f"距离上次向用户发送消息已过去 {hours_since:.1f} 小时，"
+                        f"超过了 {self._force_interval.total_seconds() / 3600:.0f} 小时的最低汇报频率。"
+                        f"你**必须**在 push_message 中生成一条简短的状态汇报。"
+                    )
+            except (ValueError, TypeError):
+                pass
+        elif state.get("last_run_at"):
+            # Never pushed before — force first push
+            force_push = True
+            sections.append(
+                "# ⚠️ 强制汇报\n"
+                "这是首次检查，你**必须**在 push_message 中生成一条简短的状态汇报。"
+            )
+        self._force_push_pending = force_push
 
         # Instructions
         sections.append(

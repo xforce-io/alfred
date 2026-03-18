@@ -1202,3 +1202,139 @@ class TestInspectionSelfPollutionBug:
             f"LLM was called {llm_call_count} times across 4 inspect() cycles "
             "with unchanged context. inspection_complete events are self-triggering."
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests: force_push_interval — minimum push frequency
+# ---------------------------------------------------------------------------
+
+class TestForcePushInterval:
+    """Inspector should force a push_message if none has been sent for too long."""
+
+    @pytest.mark.asyncio
+    async def test_prompt_includes_force_push_directive_when_overdue(self, tmp_path):
+        """When last_push_at is > force_push_interval ago, the reflection prompt
+        should include a directive telling the LLM it MUST generate a push_message."""
+        inspector = _make_inspector(tmp_path, inspect_force_interval_hours=3)
+
+        # Seed state: last push was 4 hours ago
+        state_path = inspector._state_path
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state = {
+            "last_run_at": (datetime.now() - timedelta(hours=1)).isoformat(),
+            "last_push_at": (datetime.now() - timedelta(hours=4)).isoformat(),
+            "context_hashes": {},
+            "last_idle_hours": 0,
+        }
+        state_path.write_text(json.dumps(state))
+
+        ctx = InspectionContext(
+            heartbeat_content="test",
+            idle_hours=0.5,
+        )
+        prompt = inspector._build_reflect_prompt(ctx)
+        assert "必须" in prompt or "MUST" in prompt, (
+            "Prompt should contain a force-push directive when overdue"
+        )
+        assert "push_message" in prompt
+
+    @pytest.mark.asyncio
+    async def test_no_force_directive_when_recently_pushed(self, tmp_path):
+        """When last_push_at is recent, no force directive should appear."""
+        inspector = _make_inspector(tmp_path, inspect_force_interval_hours=3)
+
+        state_path = inspector._state_path
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state = {
+            "last_run_at": (datetime.now() - timedelta(minutes=30)).isoformat(),
+            "last_push_at": (datetime.now() - timedelta(hours=1)).isoformat(),
+            "context_hashes": {},
+            "last_idle_hours": 0,
+        }
+        state_path.write_text(json.dumps(state))
+
+        ctx = InspectionContext(
+            heartbeat_content="test",
+            idle_hours=0.5,
+        )
+        prompt = inspector._build_reflect_prompt(ctx)
+        assert "必须" not in prompt and "MUST" not in prompt, (
+            "Prompt should NOT contain a force-push directive when recently pushed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_last_push_at_updated_on_push(self, tmp_path):
+        """After a successful push_message, last_push_at should be updated in state."""
+        inspector = _make_inspector(
+            tmp_path,
+            inspect_force_interval_hours=3,
+            agent_factory=AsyncMock(),
+        )
+
+        state_path = inspector._state_path
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        old_push_time = (datetime.now() - timedelta(hours=5)).isoformat()
+        state = {
+            "last_run_at": (datetime.now() - timedelta(hours=3)).isoformat(),
+            "last_push_at": old_push_time,
+            "context_hashes": {},
+            "last_idle_hours": 0,
+        }
+        state_path.write_text(json.dumps(state))
+
+        # Mock LLM to return a response with push_message
+        llm_response = json.dumps({
+            "heartbeat_ok": True,
+            "push_message": "一切正常，这是定期汇报。",
+            "routines": [],
+        })
+        inspector._run_llm = AsyncMock(return_value=llm_response)
+
+        result = await inspector.inspect(
+            heartbeat_content="test",
+            run_id="test_run",
+        )
+
+        assert result.push_message is not None
+
+        # Check state was updated
+        new_state = json.loads(state_path.read_text())
+        assert "last_push_at" in new_state
+        assert new_state["last_push_at"] != old_push_time
+
+    @pytest.mark.asyncio
+    async def test_fallback_push_when_llm_ignores_force(self, tmp_path):
+        """If LLM returns push_message=null despite force directive,
+        inspector should generate a default status message."""
+        inspector = _make_inspector(
+            tmp_path,
+            inspect_force_interval_hours=3,
+            agent_factory=AsyncMock(),
+        )
+
+        state_path = inspector._state_path
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state = {
+            "last_run_at": (datetime.now() - timedelta(hours=4)).isoformat(),
+            "last_push_at": (datetime.now() - timedelta(hours=4)).isoformat(),
+            "context_hashes": {},
+            "last_idle_hours": 0,
+        }
+        state_path.write_text(json.dumps(state))
+
+        # LLM ignores the force directive
+        llm_response = json.dumps({
+            "heartbeat_ok": True,
+            "push_message": None,
+            "routines": [],
+        })
+        inspector._run_llm = AsyncMock(return_value=llm_response)
+
+        result = await inspector.inspect(
+            heartbeat_content="test",
+            run_id="test_run",
+        )
+
+        assert result.push_message is not None, (
+            "Should generate fallback push_message when LLM ignores force directive"
+        )
