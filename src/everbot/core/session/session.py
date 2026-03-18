@@ -85,6 +85,55 @@ class SessionManager:
         self._metrics: Dict[str, float] = {}
         self._metrics_lock = threading.Lock()
 
+    def get_session_summary(
+        self, session_id: str, max_chars: int = 500
+    ) -> Optional[str]:
+        """Return a plain-text summary of recent conversation in a session.
+
+        Extracts the last few user/assistant messages from persisted history
+        and concatenates them into a compact string for Inspector reflection.
+        Synchronous — reads the session file directly to avoid async overhead
+        since this is called from sync ``_gather_context``.
+        """
+        session_path = self.persistence._get_session_path(session_id)
+        if not session_path.exists():
+            return None
+
+        try:
+            raw = json.loads(session_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+        history = raw.get("history_messages") or []
+        if not history:
+            return None
+
+        # Collect recent user/assistant messages (skip system/tool)
+        relevant: List[str] = []
+        for msg in reversed(history):
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role", "")
+            if role not in ("user", "assistant"):
+                continue
+            content = msg.get("content", "")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            label = "U" if role == "user" else "A"
+            relevant.append(f"[{label}] {content.strip()}")
+            if len(relevant) >= 6:
+                break
+
+        if not relevant:
+            return None
+
+        # Reverse back to chronological order and truncate
+        relevant.reverse()
+        summary = "\n".join(relevant)
+        if len(summary) > max_chars:
+            summary = summary[-max_chars:]
+        return summary
+
     def get_last_activity_time(self, agent_name: str) -> Optional[float]:
         """Return Unix timestamp of the latest user activity across agent chat sessions.
 

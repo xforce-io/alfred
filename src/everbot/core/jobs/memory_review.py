@@ -1,7 +1,7 @@
 """Memory review skill — consolidate and optimize agent memory.
 
 Silent execution, no user notification.
-Strategy: supplement first (re-extract missed sessions), then consolidate.
+Strategy: consolidate existing entries, then compress to USER.md profile.
 """
 
 import logging
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 async def run(context: SkillContext) -> str:
-    """Execute memory review: supplement missed extractions, then consolidate."""
+    """Execute memory review: consolidate entries and compress to profile."""
     scanner = SessionScanner(context.sessions_dir)
     state = ReflectionState.load(context.workspace_path)
 
@@ -44,29 +44,11 @@ async def run(context: SkillContext) -> str:
     if not digests:
         return "All sessions failed to extract"
 
-    # 3. Detect missed sessions (lightweight LLM call)
-    reextract_count = 0
+    # 3. Consolidation analysis (single LLM call)
     existing = context.memory_manager.load_entries()
-    missed = await _detect_missed_sessions(context.llm, digests, digest_session_ids, existing)
-    # Only allow session IDs that were actually scanned (guard against LLM hallucination)
-    valid_sids = set(digest_session_ids)
-    missed = [sid for sid in missed if sid in valid_sids]
-    for sid in missed[:2]:  # Re-extract limit: 2
-        try:
-            msgs = scanner.load_session_messages(sid)
-            # process_session_end needs context (LLM) — create a temporary manager
-            from ..memory.manager import MemoryManager
-            mm = MemoryManager(context.workspace_path / "MEMORY.md", context=context.llm)
-            await mm.process_session_end(msgs, sid)
-            reextract_count += 1
-        except Exception as e:
-            logger.warning("Re-extract failed for %s: %s, skipping", sid, e)
-
-    # 4. Consolidation analysis (single LLM call)
-    existing = context.memory_manager.load_entries()  # Reload after re-extraction
     review = await _analyze_memory_consolidation(context.llm, digests, existing)
 
-    # 5. Apply consolidation + post-validation
+    # 4. Apply consolidation + post-validation
     entries_before = len(existing)
     from ..memory.manager import IntegrityError
     try:
@@ -84,60 +66,15 @@ async def run(context: SkillContext) -> str:
             entries_before, entries_after,
         )
 
-    # 6. Compress memories → USER.md
+    # 5. Compress memories → USER.md
     compress_result = await _compress_to_user_profile(context)
 
-    # 7. Advance watermark
+    # 6. Advance watermark
     if last_successful_session:
         state.set_watermark("memory-review", last_successful_session.updated_at)
         state.save(context.workspace_path)
 
-    return f"Memory review: {review_stats}, re-extracted: {reextract_count}, profile: {compress_result}"
-
-
-async def _detect_missed_sessions(
-    llm, digests: List[str], session_ids: List[str], existing_entries
-) -> List[str]:
-    """Detect sessions that may have missed memory extraction.
-
-    Returns list of session_ids that should be re-extracted.
-    """
-    if not digests or not existing_entries:
-        return []
-
-    existing_summary = "\n".join(
-        f"- [{e.category}] {e.content}" for e in existing_entries[:30]
-    )
-    sessions_text = ""
-    for sid, digest in zip(session_ids, digests):
-        sessions_text += f"\n--- Session {sid} ---\n{digest[:1000]}\n"
-
-    prompt = f"""Analyze these conversation sessions and existing memories.
-Identify sessions where important user information was mentioned but NOT captured in existing memories.
-
-## Existing Memories
-{existing_summary}
-
-## Recent Sessions
-{sessions_text}
-
-## Task
-Return a JSON object with session_ids that should be re-processed for memory extraction.
-Only include sessions where significant user preferences, facts, or decisions were missed.
-Be conservative — only flag truly missed information.
-
-Output format:
-```json
-{{"session_ids": ["session_id_1", "session_id_2"]}}
-```"""
-
-    try:
-        response = await llm.complete(prompt, system="You are a memory analysis engine. Output valid JSON only.")
-        result = parse_json_response(response)
-        return result.get("session_ids", [])
-    except Exception as e:
-        logger.warning("Missed session detection failed: %s", e)
-        return []
+    return f"Memory review: {review_stats}, profile: {compress_result}"
 
 
 async def _analyze_memory_consolidation(llm, digests: List[str], existing_entries) -> dict:
