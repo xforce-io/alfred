@@ -21,6 +21,14 @@ def _has_aliyun_key() -> bool:
     return bool(os.environ.get("ALIYUN_API_KEY"))
 
 
+def _has_litellm() -> bool:
+    try:
+        import litellm  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 class _RealLLMClient:
     """Thin wrapper calling Aliyun DashScope qwen-turbo."""
 
