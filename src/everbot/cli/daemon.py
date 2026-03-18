@@ -9,7 +9,7 @@ import signal
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import uuid
 
@@ -120,6 +120,8 @@ class EverBotDaemon:
     def _build_scheduler(self) -> Scheduler:
         """Build the unified scheduler with all callbacks wired."""
         isolated_lookup: Dict[str, tuple[Any, Dict[str, Any]]] = {}
+        _SKILL_EVAL_INTERVAL = 3600
+        _next_skill_eval_at: list[Optional[datetime]] = [None]
 
         def _collect_due_tasks(ts: datetime) -> list[SchedulerTask]:
             isolated_lookup.clear()
@@ -144,9 +146,19 @@ class EverBotDaemon:
                             execution_mode=exec_mode,
                             timeout_seconds=int(snapshot.get("timeout_seconds", 120) or 120),
                         ))
+            # Inject synthetic skill_evaluate task on interval
+            if _next_skill_eval_at[0] is None or ts >= _next_skill_eval_at[0]:
+                due.append(SchedulerTask(
+                    id="__skill_evaluate__",
+                    agent_name="__daemon__",
+                    execution_mode="isolated",
+                    timeout_seconds=300,
+                ))
             return due
 
         async def _claim_task(task_key: str) -> bool:
+            if task_key == "__skill_evaluate__":
+                return True
             target = isolated_lookup.get(task_key)
             if target is None:
                 return False
@@ -164,6 +176,16 @@ class EverBotDaemon:
             await self._run_runner_with_options(runner, include_inline=True, include_isolated=False)
 
         async def _run_isolated(task: SchedulerTask, ts: datetime) -> None:
+            if task.id == "__skill_evaluate__":
+                runner = next(iter(self.heartbeat_runners.values()), None)
+                if runner is None:
+                    return
+                context = runner._build_skill_context()
+                from ..core.jobs import skill_evaluate
+                result = await skill_evaluate.run(context)
+                _next_skill_eval_at[0] = ts + timedelta(seconds=_SKILL_EVAL_INTERVAL)
+                logger.info("Skill evaluation completed: %s", result)
+                return
             target = isolated_lookup.get(task.id)
             if target is None:
                 return
