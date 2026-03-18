@@ -161,6 +161,46 @@ class CodingMasterSkillkit(Skillkit):
         tools = _get_tools()
         return _safe_cmd(tools.cmd_repos, _make_args())
 
+    def _cm_repo(self, action: str, name: str, path: str = "", **kwargs) -> str:
+        """管理代码仓库配置：增删改。
+
+        Args:
+            action (str): 操作类型 — add, remove, update
+            name (str): 仓库名称（如 kweaver-sdk）
+            path (str): 仓库本地路径（add/update 时必填，如 ~/dev/github/kweaver-sdk）
+
+        Returns:
+            str: JSON — 操作结果
+        """
+        scripts_dir = str(_SCRIPTS_DIR)
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        from config_manager import ConfigManager
+        cfg = ConfigManager()
+        if action == "add":
+            if not path:
+                return _result_to_str({"ok": False, "error": "path is required for add"})
+            expanded = str(Path(path).expanduser().resolve())
+            if not Path(expanded).is_dir():
+                return _result_to_str({"ok": False, "error": f"path does not exist: {expanded}"})
+            return _result_to_str(cfg.add("repo", name, expanded))
+        elif action == "remove":
+            return _result_to_str(cfg.remove("repo", name))
+        elif action == "update":
+            if not path:
+                return _result_to_str({"ok": False, "error": "path is required for update"})
+            expanded = str(Path(path).expanduser().resolve())
+            if not Path(expanded).is_dir():
+                return _result_to_str({"ok": False, "error": f"path does not exist: {expanded}"})
+            # Direct overwrite — no remove+add dance
+            section = cfg._section()
+            repos = section.setdefault("repos", {})
+            repos[name] = expanded
+            cfg._save()
+            return _result_to_str({"ok": True, "data": {"repo": name, "value": expanded}})
+        else:
+            return _result_to_str({"ok": False, "error": f"unknown action: {action}. Use add, remove, or update"})
+
     def _cm_session_start(self, repo: str, mode: str = "deliver",
                   branch: str = "", plan_file: str = "", **kwargs) -> str:
         """一键启动会话：lock + 复制 plan + plan-ready。失败时自动回滚。

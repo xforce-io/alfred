@@ -130,9 +130,13 @@ async def test_cumulative_progress_does_not_duplicate_llm_deltas():
         events.append(te)
 
     complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
-    assert complete.answer == "Hello world"
+    # After round-reset fix: only the last round's text survives
+    assert complete.answer == "world"
     deltas = [e.content for e in events if e.type == TurnEventType.LLM_DELTA]
     assert deltas == ["Hello ", "world"]
+    # A round reset should have been emitted between rounds
+    resets = [e for e in events if e.type == TurnEventType.LLM_ROUND_RESET]
+    assert len(resets) == 1
 
 
 @pytest.mark.asyncio
@@ -2375,3 +2379,131 @@ class TestBuildPolicyFunctions:
         config = {"everbot": {"runtime": {"turn_timeout": {"workflow": 600}}}}
         policy = build_workflow_policy(config)
         assert policy.timeout_seconds == 600
+
+
+# ---------------------------------------------------------------------------
+# Tests: intermediate round text should not leak to final response
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_multi_round_intermediate_text_not_in_final_deltas():
+    """When the LLM does multiple agentic rounds (text + tool + text + tool + final text),
+    only the LAST round's text should appear in the accumulated LLM_DELTA events.
+
+    This reproduces the 'stuttering' bug where intermediate round text like
+    '我来添加这个新仓库。' gets concatenated with the final answer.
+    """
+    # Simulate 3 rounds:
+    #   Round 1: LLM says "Looking at config..." → calls _cm_read
+    #   Round 2: LLM says "Let me try again..." → calls _cm_find
+    #   Round 3: LLM says "The config file is at ~/.alfred/config.yaml" (final answer)
+    script = [
+        # Round 1: intermediate text + tool call
+        _progress_event(_llm_delta("Looking at config...", pid="llm1")),
+        _progress_event(_skill_call("_cm_read", "/some/file", pid="sk1")),
+        _progress_event(_skill_output("_cm_read", '{"ok": true, "data": "..."}', pid="so1")),
+        # Round 2: intermediate text + tool call
+        _progress_event(_llm_delta("Let me try again...", pid="llm2")),
+        _progress_event(_skill_call("_cm_find", "config*", pid="sk2")),
+        _progress_event(_skill_output("_cm_find", '{"ok": true, "data": "found"}', pid="so2")),
+        # Round 3: final answer only
+        _progress_event(_llm_delta("The config file is at ~/.alfred/config.yaml", pid="llm3")),
+    ]
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(TurnPolicy(
+        max_attempts=1, max_tool_calls=10,
+        max_consecutive_empty_llm_rounds=99,
+    ))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "add repo"):
+        events.append(te)
+
+    # The final accumulated response should be ONLY the last round's text
+    complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
+    assert complete.answer == "The config file is at ~/.alfred/config.yaml", (
+        f"Expected only final round text, got: {complete.answer!r}"
+    )
+
+    # LLM_DELTA events visible to channel should reconstruct only the final text.
+    # Intermediate deltas should be cancelled out by LLM_ROUND_RESET events.
+    deltas = [e for e in events if e.type == TurnEventType.LLM_DELTA]
+    resets = [e for e in events if e.type == TurnEventType.LLM_ROUND_RESET]
+    # There should be reset events before rounds 2 and 3
+    assert len(resets) == 2, f"Expected 2 resets, got {len(resets)}"
+
+
+@pytest.mark.asyncio
+async def test_single_round_no_reset():
+    """Single-round turn (no tool calls) should produce no reset events."""
+    script = [
+        _progress_event(_llm_delta("Hello ", pid="llm1")),
+        _progress_event(_llm_delta("world", pid="llm2")),
+    ]
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(TurnPolicy(max_attempts=1))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "hi"):
+        events.append(te)
+
+    resets = [e for e in events if e.type == TurnEventType.LLM_ROUND_RESET]
+    assert len(resets) == 0, "No resets expected for single-round turn"
+    complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
+    assert complete.answer == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_multi_round_final_answer_uses_last_round_text():
+    """TURN_COMPLETE.answer should contain only the last round's text,
+    not a concatenation of all rounds' text."""
+    script = [
+        # Round 1
+        _progress_event(_llm_delta("Round 1 text", pid="r1")),
+        _progress_event(_skill_call("tool_a", "", pid="s1")),
+        _progress_event(_skill_output("tool_a", "result_a", pid="s1o")),
+        # Round 2 (final)
+        _progress_event(_llm_delta("Round 2 final answer", pid="r2")),
+    ]
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(TurnPolicy(
+        max_attempts=1, max_tool_calls=10,
+        max_consecutive_empty_llm_rounds=99,
+    ))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "do something"):
+        events.append(te)
+
+    complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
+    assert "Round 1 text" not in complete.answer
+    assert complete.answer == "Round 2 final answer"
+
+
+@pytest.mark.asyncio
+async def test_channel_accumulated_text_reset_on_new_round():
+    """Simulate channel-level accumulation: after applying resets,
+    the final text should only contain the last round's output."""
+    script = [
+        _progress_event(_llm_delta("Intermediate A. ", pid="r1")),
+        _progress_event(_skill_call("read", "", pid="s1")),
+        _progress_event(_skill_output("read", "data", pid="s1o")),
+        _progress_event(_llm_delta("Intermediate B. ", pid="r2")),
+        _progress_event(_skill_call("grep", "", pid="s2")),
+        _progress_event(_skill_output("grep", "data", pid="s2o")),
+        _progress_event(_llm_delta("Final answer.", pid="r3")),
+    ]
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(TurnPolicy(
+        max_attempts=1, max_tool_calls=10,
+        max_consecutive_empty_llm_rounds=99,
+    ))
+
+    # Simulate channel accumulation logic
+    accumulated_text = ""
+    async for te in orch.run_turn(agent, "query"):
+        if te.type == TurnEventType.LLM_DELTA:
+            accumulated_text += te.content
+        elif te.type == TurnEventType.LLM_ROUND_RESET:
+            accumulated_text = ""
+
+    assert accumulated_text == "Final answer.", (
+        f"Channel should show only final round text, got: {accumulated_text!r}"
+    )

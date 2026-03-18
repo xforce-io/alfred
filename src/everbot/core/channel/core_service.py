@@ -313,6 +313,11 @@ class ChannelCoreService:
                     await on_event(OutboundMessage(session_id, te.content, msg_type="delta"))
                     response += te.content
 
+                elif te.type == TurnEventType.LLM_ROUND_RESET:
+                    # New agentic round starting — discard intermediate text
+                    await on_event(OutboundMessage(session_id, "", msg_type="round_reset"))
+                    response = ""
+
                 elif te.type == TurnEventType.SKILL:
                     self._record_timeline_event(session_id, "skill", skill_name=te.skill_name, status=te.status, **event_meta)
                     norm_status = (te.status or "").lower()

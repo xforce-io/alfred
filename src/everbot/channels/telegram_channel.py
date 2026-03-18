@@ -591,6 +591,10 @@ class TelegramChannel:
                 chunks.append(out.content)
                 accumulated_text += out.content
                 await flush_streaming()
+            elif out.msg_type == "round_reset":
+                # New agentic round — discard intermediate text
+                chunks.clear()
+                accumulated_text = ""
             elif out.msg_type == "skill":
                 meta = out.metadata or {}
                 status = (meta.get("status") or "").lower()

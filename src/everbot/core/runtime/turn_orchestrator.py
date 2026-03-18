@@ -575,6 +575,7 @@ class TurnOrchestrator:
         consecutive_think_only_rounds = 0
         last_successful_tool_output = ""  # fallback when LLM returns empty
         output_chars = 0  # approximate output token tracking (chars produced by LLM)
+        _last_round_response = ""  # text from current round only (reset on each tool call)
         # Repeated-text loop detection: track LLM text fingerprints across
         # a sliding window to catch both consecutive and alternating loops.
         _round_text = ""
@@ -607,7 +608,7 @@ class TurnOrchestrator:
                 estimated_tokens = max(1, output_chars // 4) if output_chars > 0 else 0
                 yield TurnEvent(
                     type=TurnEventType.TURN_COMPLETE,
-                    answer=response or last_successful_tool_output,
+                    answer=_last_round_response or response or last_successful_tool_output,
                     tool_call_count=tool_call_count,
                     tool_execution_count=tool_execution_count,
                     tool_names_executed=list(tool_names_executed),
@@ -649,6 +650,7 @@ class TurnOrchestrator:
                         consecutive_empty_llm_rounds = 0
                         consecutive_think_only_rounds = 0
                         response += delta
+                        _last_round_response += delta
                         _round_text += delta
                         yield TurnEvent(type=TurnEventType.LLM_DELTA, content=delta)
                     if answer and not response:
@@ -704,6 +706,11 @@ class TurnOrchestrator:
                                 consecutive_think_only_rounds += 1
                             else:
                                 consecutive_empty_llm_rounds += 1
+                        # Emit round reset when a new tool call follows LLM output,
+                        # so channel consumers can discard intermediate text.
+                        if llm_had_output_this_round and _last_round_response:
+                            yield TurnEvent(type=TurnEventType.LLM_ROUND_RESET)
+                            _last_round_response = ""
                         llm_had_output_this_round = False
                         llm_had_think_this_round = False
 
@@ -845,6 +852,9 @@ class TurnOrchestrator:
                             consecutive_think_only_rounds += 1
                         else:
                             consecutive_empty_llm_rounds += 1
+                    if llm_had_output_this_round and _last_round_response:
+                        yield TurnEvent(type=TurnEventType.LLM_ROUND_RESET)
+                        _last_round_response = ""
                     llm_had_output_this_round = False
                     llm_had_think_this_round = False
 
@@ -997,7 +1007,7 @@ class TurnOrchestrator:
         estimated_tokens = max(1, output_chars // 4) if output_chars > 0 else 0
         yield TurnEvent(
             type=TurnEventType.TURN_COMPLETE,
-            answer=response,
+            answer=_last_round_response or response,
             tool_call_count=tool_call_count,
             tool_execution_count=tool_execution_count,
             tool_names_executed=list(tool_names_executed),

@@ -122,6 +122,8 @@ class TurnExecutor:
         progress: Dict[str, Any] = {}
         if event.type == TurnEventType.LLM_DELTA:
             progress = {"stage": "llm", "delta": event.content, "answer": ""}
+        elif event.type == TurnEventType.LLM_ROUND_RESET:
+            progress = {"stage": "round_reset"}
         elif event.type == TurnEventType.TOOL_CALL:
             progress = {"stage": "tool_call", "tool_name": event.tool_name, "args": event.tool_args,
                         "id": event.pid, "status": event.status}

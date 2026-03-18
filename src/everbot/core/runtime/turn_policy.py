@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 
 class TurnEventType(str, Enum):
     LLM_DELTA = "llm_delta"
+    LLM_ROUND_RESET = "llm_round_reset"
     TOOL_CALL = "tool_call"
     TOOL_OUTPUT = "tool_output"
     SKILL = "skill"
