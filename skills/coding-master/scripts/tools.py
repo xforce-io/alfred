@@ -3705,23 +3705,42 @@ def _build_change_summary(worktree: Path, base_ref: str = "HEAD~1") -> dict:
 
 
 def _generate_pr_body(repo: Path) -> str:
-    """Generate PR body from JOURNAL.md milestones + PLAN.md features."""
+    """Generate PR body from PLAN.md features + feature markdown summaries."""
     plan = _parse_plan_md(repo / CM_DIR / "PLAN.md")
-    journal_path = repo / CM_DIR / "JOURNAL.md"
 
-    lines = ["## Features\n"]
+    # Summary from PLAN.md origin task
+    plan_path = repo / CM_DIR / "PLAN.md"
+    summary = ""
+    if plan_path.exists():
+        for line in plan_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and not line.startswith(">"):
+                summary = line
+                break
+
+    lines = []
+    if summary:
+        lines.append(f"## Summary\n\n{summary}\n")
+
+    lines.append("## Changes\n")
     for fid in _topo_sort(plan):
-        lines.append(f"- **Feature {fid}**: {plan[fid]['title']}")
-    lines.append("")
-
-    if journal_path.exists():
-        lines.append("## Timeline\n")
-        for line in journal_path.read_text().splitlines():
-            if re.match(
-                r"^## \d{4}-\d{2}-\d{2}T\d{2}:\d{2} \[.*?\] (done|submit|plan-ready|integrate)",
-                line,
-            ):
-                lines.append(line)
+        spec = plan[fid]
+        lines.append(f"### Feature {fid}: {spec['title']}\n")
+        # Include task description from PLAN.md
+        task = spec.get("task", "")
+        if task:
+            lines.append(f"{task}\n")
+        # Include evidence summary
+        evidence = _read_evidence(repo, fid)
+        if evidence:
+            overall = evidence.get("overall", "?")
+            lines.append(f"- Test: {overall}")
+            test_output = evidence.get("test", {}).get("output", "")
+            if test_output:
+                # First line of test output (e.g. "1343 passed, 0 failed")
+                first_line = test_output.strip().splitlines()[0] if test_output.strip() else ""
+                if first_line:
+                    lines.append(f"- Result: `{first_line[:80]}`")
         lines.append("")
 
     return "\n".join(lines)
