@@ -583,6 +583,36 @@ class TurnOrchestrator:
         _LOOP_WINDOW = max(4, policy.max_consecutive_similar_llm_rounds)
         seen_progress_fingerprints: set[str] = set()
 
+        def _flush_trajectory() -> None:
+            """Save trajectory before early return (loop/error abort).
+
+            When turn_orchestrator aborts mid-turn (REPEATED_TEXT_LOOP, etc.),
+            dolphin's explore_block.finally will call finalize_stage, but by
+            then intermediate messages have moved to the history bucket and
+            get filtered by dedup — losing the loop evidence.  Flushing here
+            captures the full conversation while messages are still fresh.
+            """
+            try:
+                ctx = getattr(agent, "executor", None)
+                ctx = getattr(ctx, "context", None) if ctx else None
+                traj = getattr(ctx, "trajectory", None) if ctx else None
+                cm = getattr(ctx, "context_manager", None) if ctx else None
+                if traj and cm and traj.is_enabled():
+                    tools_schema = ctx.skillkit.getSkillsSchema() if ctx.skillkit else []
+                    status = ctx.get_var_value("_status") or {}
+                    stage_index = status.get("explore_time", 0)
+                    model = ctx.get_last_model_name() if hasattr(ctx, "get_last_model_name") else None
+                    traj.finalize_stage(
+                        stage_name="explore",
+                        stage_index=stage_index,
+                        context_manager=cm,
+                        tools=tools_schema,
+                        user_id=ctx.user_id or "",
+                        model=model,
+                    )
+            except Exception as exc:
+                logger.debug("_flush_trajectory failed (non-fatal): %s", exc)
+
         def _check_round_text_loop() -> bool:
             """Detect degenerate loops: consecutive repeats OR alternating patterns.
 
@@ -688,10 +718,12 @@ class TurnOrchestrator:
                             tool_call_count, tool_names_executed, failed_tool_outputs,
                         )
                         if err:
+                            _flush_trajectory()
                             yield err
                             return
                         # Repeated-text loop detection
                         if tool_execution_count > 0 and _check_round_text_loop():
+                            _flush_trajectory()
                             yield TurnEvent(
                                 type=TurnEventType.TURN_ERROR,
                                 error=f"REPEATED_TEXT_LOOP: {len(_recent_fps)} rounds with {len(set(_recent_fps[-_LOOP_WINDOW:]))} distinct outputs in last {_LOOP_WINDOW}",
@@ -834,10 +866,12 @@ class TurnOrchestrator:
                         tool_call_count, tool_names_executed, failed_tool_outputs,
                     )
                     if err:
+                        _flush_trajectory()
                         yield err
                         return
                     # Repeated-text loop detection
                     if tool_execution_count > 0 and _check_round_text_loop():
+                        _flush_trajectory()
                         yield TurnEvent(
                             type=TurnEventType.TURN_ERROR,
                             error=f"REPEATED_TEXT_LOOP: {len(_recent_fps)} rounds with {len(set(_recent_fps[-_LOOP_WINDOW:]))} distinct outputs in last {_LOOP_WINDOW}",
