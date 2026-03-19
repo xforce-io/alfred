@@ -2320,7 +2320,9 @@ def cmd_submit(args) -> dict:
             _remove_worktree(repo, feat_wt)
         feat_branch = feat.get("branch")
         if feat_branch:
-            _run_git(repo, ["branch", "-d", feat_branch], check=False)
+            # Force delete: feature branches are merged into session worktree (not main),
+            # so git branch -d refuses to delete them. Use -D to force cleanup.
+            _run_git(repo, ["branch", "-D", feat_branch], check=False)
 
     # Cleanup session worktree (best effort)
     _remove_worktree(repo, str(session_wt))
@@ -3569,7 +3571,7 @@ def cmd_doctor(args) -> dict:
 
     branch_output = _run_git(repo, ["branch", "--list", "dev/*", "feat/*"], check=False).stdout
     for line in branch_output.splitlines():
-        branch_name = line.strip().lstrip("* ")
+        branch_name = line.strip().lstrip("*+ ")
         if not branch_name:
             continue
         if branch_name == active_branch or branch_name in active_feat_branches:
@@ -3582,6 +3584,10 @@ def cmd_doctor(args) -> dict:
         elif not lock:
             # No active session at all → all dev/feat branches are orphaned
             issues.append(f"orphaned branch (no session): {branch_name}")
+            fixes.append(f"cm doctor --fix (will delete {branch_name})")
+        elif branch_name != active_branch and branch_name not in active_feat_branches:
+            # Active session exists but this branch doesn't belong to it
+            issues.append(f"orphaned branch (stale): {branch_name}")
             fixes.append(f"cm doctor --fix (will delete {branch_name})")
 
     # Auto-fix
