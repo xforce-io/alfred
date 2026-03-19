@@ -2360,6 +2360,9 @@ def cmd_submit(args) -> dict:
     features_skipped = sum(1 for f in claims.get("features", {}).values() if f.get("phase") == "skipped")
     evidence_dir = str(repo / CM_DIR / EVIDENCE_DIR)
 
+    # Read integration report before cleanup
+    integration_report = _read_integration_report(repo)
+
     result_data = {
         "branch": branch, "pr_url": pr_url,
         "evidence_dir": evidence_dir,
@@ -2371,6 +2374,11 @@ def cmd_submit(args) -> dict:
     }
     if change_summary:
         result_data["change_summary"] = change_summary
+    if integration_report:
+        result_data["test_result"] = {
+            "overall": integration_report.get("overall"),
+            "output": integration_report.get("test", {}).get("output", ""),
+        }
     # v5.2: clean up stale per-session files after submit
     # Prevents LLM from reading stale feature MDs and looping on wrong file paths
     # last_session.json already has the summary; JOURNAL.md is cross-session
@@ -4819,12 +4827,22 @@ def _cmd_next_deliver(repo: Path, lock: dict, args, intent, _recurse) -> dict:
         submit_result = cmd_submit(submit_args)
         if not submit_result.get("ok"):
             return submit_result
-        return {
+        submit_data = submit_result.get("data", {})
+        # Build completion summary with test/review evidence
+        completion = {
             "ok": True,
             "breakpoint": "complete",
-            "pr_url": submit_result.get("data", {}).get("pr_url", ""),
-            "instruction": "STOP — 不要再调用任何工具（包括 _cm_status）。直接把结果展示给用户。Session submitted and PR created.",
+            "pr_url": submit_data.get("pr_url", ""),
+            "instruction": "STOP — 不要再调用任何工具（包括 _cm_status）。直接把结果展示给用户，包含测试结果和变更摘要。",
         }
+        if submit_data.get("change_summary"):
+            completion["change_summary"] = submit_data["change_summary"]
+        if submit_data.get("features_completed") is not None:
+            completion["features_completed"] = submit_data["features_completed"]
+            completion["features_total"] = submit_data.get("features_total", 0)
+        if submit_data.get("test_result"):
+            completion["test_result"] = submit_data["test_result"]
+        return completion
 
     return {
         "ok": False,
