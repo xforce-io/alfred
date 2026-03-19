@@ -104,30 +104,7 @@ def _parse_judge_response(response: str) -> dict:
     """Extract JSON from LLM response (handles markdown code blocks)."""
     import re
 
-    # Try markdown code block first (flexible: newline before closing ``` optional)
-    match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", response, re.DOTALL)
+    match = re.search(r"```(?:json)?\s*\n(.*?)\n\s*```", response, re.DOTALL)
     if match:
-        try:
-            return json.loads(match.group(1).strip())
-        except json.JSONDecodeError:
-            pass
-
-    # Try bare JSON parse
-    try:
-        return json.loads(response.strip())
-    except json.JSONDecodeError:
-        pass
-
-    # Fallback: extract first JSON object from response text
-    start = response.find("{")
-    if start != -1:
-        depth = 0
-        for i in range(start, len(response)):
-            if response[i] == "{":
-                depth += 1
-            elif response[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    return json.loads(response[start : i + 1])
-
-    raise json.JSONDecodeError("No JSON found in response", response, 0)
+        return json.loads(match.group(1))
+    return json.loads(response.strip())
