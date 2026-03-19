@@ -187,6 +187,15 @@ class RhinoAnalyzer:
             token_pattern=r'(?u)\b\w+\b',  # include CJK chars
         )
         tfidf_matrix = vectorizer.fit_transform(titles)
+        dense = tfidf_matrix.toarray()
+
+        # Filter out zero vectors (cause cosine affinity to fail)
+        import numpy as np
+        norms = np.linalg.norm(dense, axis=1)
+        nonzero_mask = norms > 0
+        if nonzero_mask.sum() < 2:
+            # Not enough non-zero vectors for clustering
+            return [[t] for t in titles]
 
         # Use distance_threshold instead of fixed n_clusters
         # This avoids lumping unrelated items into one mega-cluster
@@ -196,7 +205,16 @@ class RhinoAnalyzer:
             metric="cosine",
             linkage="average",
         )
-        labels = clustering.fit_predict(tfidf_matrix.toarray())
+        labels_nonzero = clustering.fit_predict(dense[nonzero_mask])
+
+        # Re-assign labels: zero-vector items each get their own cluster
+        labels = np.full(len(titles), -1, dtype=int)
+        labels[nonzero_mask] = labels_nonzero
+        next_label = labels_nonzero.max() + 1 if len(labels_nonzero) > 0 else 0
+        for i in range(len(labels)):
+            if labels[i] == -1:
+                labels[i] = next_label
+                next_label += 1
 
         groups: Dict[int, List[str]] = defaultdict(list)
         for title, label in zip(titles, labels):
