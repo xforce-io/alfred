@@ -74,7 +74,18 @@ async def run(context: SkillContext) -> str:
         state.set_watermark("memory-review", last_successful_session.updated_at)
         state.save(context.workspace_path)
 
-    return f"Memory review: {review_stats}, profile: {compress_result}"
+    parts = []
+    if review_stats.get("merged"):
+        parts.append(f"{review_stats['merged']} merged")
+    if review_stats.get("refined"):
+        parts.append(f"{review_stats['refined']} refined")
+    if review_stats.get("deprecated"):
+        parts.append(f"{review_stats['deprecated']} deprecated")
+    if review_stats.get("reinforced"):
+        parts.append(f"{review_stats['reinforced']} reinforced")
+    review_summary = ", ".join(parts) if parts else "no changes"
+
+    return f"Memory review: {review_summary}; profile: {compress_result}"
 
 
 async def _analyze_memory_consolidation(llm, digests: List[str], existing_entries) -> dict:
@@ -109,8 +120,9 @@ async def _analyze_memory_consolidation(llm, digests: List[str], existing_entrie
 - merge: creates 1 new entry, removes 2 → net -1
 - deprecate: reduces score (accelerates natural decay)
 - reinforce: boosts score of existing entry
-- refine: updates content in-place, no score change
+- refine: updates content in-place, no score change, does NOT count toward entropy
 - Total effect must be entropy-reducing: merge_count + deprecate_count >= reinforce_count
+- Refine freely — it improves clarity without affecting entry count or entropy balance
 
 Output format:
 ```json

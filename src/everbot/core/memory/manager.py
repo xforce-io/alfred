@@ -193,14 +193,23 @@ class MemoryManager:
                     stats["reinforced"] += 1
 
                 # 4. Refine (in-place content update)
+                refine_details: list[str] = []
                 for item in review.get("refined_entries", []):
                     eid = item.get("id", "")
                     content = item.get("content", "")
                     if eid not in entry_map:
                         logger.warning("Refine references missing ID: %s", eid)
                         continue
+                    before_len = len(entry_map[eid].content)
                     entry_map[eid].content = content
+                    after_len = len(content)
+                    refine_details.append(f"{eid}(len:{before_len}→{after_len})")
                     stats["refined"] += 1
+
+                if refine_details:
+                    preview = ", ".join(refine_details[:3])
+                    suffix = f" (+{len(refine_details) - 3} more)" if len(refine_details) > 3 else ""
+                    logger.info("Refined %d entries: %s%s", len(refine_details), preview, suffix)
 
                 result_entries = list(entry_map.values())
 
