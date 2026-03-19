@@ -145,16 +145,22 @@ class CodingMasterSkillkit(Skillkit):
         self._agent_id = agent_id
         self._overlay_mode: str | None = None  # set when read-only overlay on deliver session
         self._session_completed = False  # hard stop after complete breakpoint
+        self._hard_stopped = False  # turn-level stop (reset on next _cm_next call)
 
     def getName(self) -> str:
         return "coding_master"
 
     def _guard_completed(self) -> str | None:
-        """Return error JSON if session is completed, None otherwise."""
+        """Return error JSON if session is completed or hard-stopped, None otherwise."""
         if self._session_completed:
             return _result_to_str({
                 "ok": False,
                 "error": "SESSION_COMPLETE: 会话已结束，不要再调用任何工具。直接把结果展示给用户。",
+            })
+        if self._hard_stopped:
+            return _result_to_str({
+                "ok": False,
+                "error": "HARD_STOP: 当前断点要求停止。把结果展示给用户，等待用户回复后再继续。",
             })
         return None
 
@@ -837,8 +843,11 @@ class CodingMasterSkillkit(Skillkit):
         Returns:
             str: JSON — {ok, breakpoint, instruction, context}
         """
-        if (g := self._guard_completed()):
-            return g
+        if self._session_completed:
+            return self._guard_completed()
+        # _cm_next is the only entry point for workflow — reset turn-level hard_stop
+        # so that a new user message can continue the workflow
+        self._hard_stopped = False
         t = _get_tools()
         result = t.cmd_next(_make_args(
             repo=repo, mode=mode or "deliver",
@@ -848,8 +857,11 @@ class CodingMasterSkillkit(Skillkit):
             force=force,
             _depth=0,
         ))
-        if isinstance(result, dict) and result.get("breakpoint") == "complete":
-            self._session_completed = True
+        if isinstance(result, dict):
+            if result.get("breakpoint") == "complete":
+                self._session_completed = True
+            elif result.get("hard_stop"):
+                self._hard_stopped = True
         return json.dumps(result, ensure_ascii=False, indent=2)
 
     def _cm_edit(self, repo: str = "", file: str = "",
