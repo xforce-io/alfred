@@ -7,11 +7,12 @@ tags: [papers, research, ai, ml, arxiv, huggingface, analysis]
 
 # Paper Discovery Skill
 
-Discover trending AI/ML papers and generate structured analysis reports.
+Discover trending AI/ML papers and generate structured analysis reports. Also use this skill when a user asks about a specific paper from a previous push (e.g. "这篇详细说说", "深度解读", "原文") — use --paper-id to fetch full details.
 
 ## When to Use
 
 - User wants to discover recent AI/ML papers
+- **User asks about a specific paper from a previous push** (follow-up questions, deep dive requests)
 - Need to analyze or summarize academic papers
 - Looking for trending research in specific domains
 - Scheduled daily paper digest routines
@@ -58,6 +59,14 @@ python skills/paper-discovery/scripts/fetch_papers.py --source both --limit 5 --
 python skills/paper-discovery/scripts/fetch_papers.py --source both --limit 5 --format report --with-summary
 ```
 
+### Fetch a single paper by arXiv ID
+
+```bash
+python skills/paper-discovery/scripts/fetch_papers.py --paper-id 2501.12345 --format json
+```
+
+This fetches full metadata (including complete abstract) for a specific paper. Use this when a user asks about a particular paper from a previous push.
+
 ### Human-readable output
 
 ```bash
@@ -73,6 +82,7 @@ python skills/paper-discovery/scripts/fetch_papers.py --source huggingface --lim
 | `--format`  | `text`, `json`, `report`          | `text`        | Output format              |
 | `--sort`    | `heat`, `date`, `upvotes`         | `heat`        | Sort order                 |
 | `--category`| arXiv category string             | `cs.AI`       | arXiv category (arXiv only)|
+| `--paper-id`| arXiv ID string                   | none          | Fetch single paper by ID   |
 | `--with-summary`| flag                          | off           | Generate one-line Chinese summary via LLM |
 
 ## JSON Output Fields
@@ -136,6 +146,29 @@ Format the report for the user with:
 2. 🔥🔥🔥🔥 Another Paper Title
    ...
 ```
+
+## Responding to Follow-up Questions About a Paper
+
+When a user asks about a specific paper from a previous push (e.g. "memo 这篇", "第二篇论文详细说说"):
+
+1. **Use `--paper-id` to fetch full details**: Extract the paper_id from the previous push data and run:
+   ```
+   _bash("python skills/paper-discovery/scripts/fetch_papers.py --paper-id <arxiv_id> --format json")
+   ```
+2. **Present the full abstract** and any available ai_summary, ai_keywords, github_repo
+3. **Provide direct links** (arXiv, PDF, HuggingFace)
+4. **Do NOT say you cannot access the internet** — you have _bash and can fetch paper metadata via the script
+
+## Push Format Requirements
+
+When pushing paper digests (daily routine or on-demand), you MUST include for each paper:
+- Title with heat emoji
+- Upvotes / GitHub stars
+- **Abstract excerpt or AI summary** (at least 1-2 sentences — do NOT omit this)
+- **arXiv/PDF links** (do NOT omit these)
+- Keywords if available
+
+**Do NOT reduce papers to just a title + heat score in a table.** The abstract and links are critical — without them, users cannot follow up on papers they're interested in.
 
 ## Error Handling
 

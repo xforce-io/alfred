@@ -59,6 +59,68 @@ def generate_one_line_summary(abstract: str) -> str:
         return ""
 
 
+def fetch_paper_by_id(paper_id: str) -> Dict[str, Any]:
+    """Fetch a single paper by arXiv ID from HuggingFace API (with arXiv fallback)."""
+    # Try HuggingFace first (richer metadata)
+    hf_url = f"https://huggingface.co/api/papers/{paper_id}"
+    try:
+        resp = requests.get(hf_url, timeout=30)
+        if resp.status_code == 200:
+            paper = resp.json()
+            entry = {
+                "paper_id": paper.get("id", paper_id),
+                "title": paper.get("title", "").strip().replace("\n", " "),
+                "authors": [a.get("name", "").strip() for a in paper.get("authors", []) if a.get("name")],
+                "abstract": paper.get("summary", "").strip(),
+                "upvotes": paper.get("upvotes", 0),
+                "hf_url": f"https://huggingface.co/papers/{paper_id}",
+                "arxiv_url": f"https://arxiv.org/abs/{paper_id}",
+                "pdf_url": f"https://arxiv.org/pdf/{paper_id}",
+                "source": "huggingface",
+                "published_date": (paper.get("publishedAt") or "")[:10],
+                "fetched_at": datetime.now().isoformat(),
+            }
+            if paper.get("ai_summary"):
+                entry["ai_summary"] = paper["ai_summary"]
+            if paper.get("ai_keywords"):
+                entry["ai_keywords"] = paper["ai_keywords"]
+            return entry
+    except requests.exceptions.RequestException:
+        pass
+
+    # Fallback: arXiv API
+    arxiv_url = f"https://export.arxiv.org/api/query?id_list={paper_id}"
+    try:
+        resp = requests.get(arxiv_url, timeout=30)
+        resp.raise_for_status()
+        # Simple XML parsing without BeautifulSoup
+        text = resp.text
+        title_match = re.search(r"<title>(.*?)</title>", text, re.DOTALL)
+        summary_match = re.search(r"<summary>(.*?)</summary>", text, re.DOTALL)
+        # Skip the feed-level title
+        titles = re.findall(r"<title>(.*?)</title>", text, re.DOTALL)
+        title = titles[1].strip().replace("\n", " ") if len(titles) > 1 else ""
+        abstract = summary_match.group(1).strip() if summary_match else ""
+        author_names = re.findall(r"<name>(.*?)</name>", text)
+        published_match = re.search(r"<published>(.*?)</published>", text)
+        published_date = published_match.group(1)[:10] if published_match else ""
+
+        return {
+            "paper_id": paper_id,
+            "title": title,
+            "authors": author_names,
+            "abstract": abstract,
+            "arxiv_url": f"https://arxiv.org/abs/{paper_id}",
+            "pdf_url": f"https://arxiv.org/pdf/{paper_id}",
+            "source": "arxiv",
+            "published_date": published_date,
+            "fetched_at": datetime.now().isoformat(),
+        }
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching paper {paper_id}: {e}", file=sys.stderr)
+        return {}
+
+
 def fetch_huggingface_papers(limit: int = 10) -> List[Dict[str, Any]]:
     """Fetch trending papers from HuggingFace Daily Papers JSON API."""
     url = f"https://huggingface.co/api/daily_papers?limit={limit}"
@@ -367,10 +429,27 @@ def main():
                         help="Sort order (default: heat)")
     parser.add_argument("--keywords", nargs="+", default=None,
                         help="Filter papers whose title or abstract contains ANY of these keywords (case-insensitive)")
+    parser.add_argument("--paper-id", default=None,
+                        help="Fetch a single paper by arXiv ID (e.g. 2501.12345)")
     parser.add_argument("--with-summary", action="store_true", default=False,
                         help="Generate one-line Chinese summary for each paper using LLM")
 
     args = parser.parse_args()
+
+    # Single paper lookup mode
+    if args.paper_id:
+        paper = fetch_paper_by_id(args.paper_id)
+        if not paper:
+            print(f"Paper not found: {args.paper_id}", file=sys.stderr)
+            sys.exit(1)
+        paper["heat_index"] = calculate_heat_index(paper)
+        paper["heat_level"] = calculate_heat_level(paper["heat_index"])
+        if args.with_summary and paper.get("abstract"):
+            summary = generate_one_line_summary(paper["abstract"])
+            if summary:
+                paper["one_line_summary"] = summary
+        display_papers([paper], fmt=args.format)
+        return
 
     papers = []
 
