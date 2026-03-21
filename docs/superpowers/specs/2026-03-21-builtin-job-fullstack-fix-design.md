@@ -80,7 +80,15 @@ _BUILTIN_JOB_DEFAULTS = {
 
 **Why Python logic, not prompt**: Zero token overhead. Deterministic. The inspector prompt stays unchanged.
 
-Call site: invoke `_ensure_builtin_jobs()` early in the `inspect()` method, before reflection prompt construction. This ensures the jobs exist before the LLM even runs.
+**Matching logic**: `_ensure_builtin_jobs()` checks existing tasks by the `job` field value, NOT by title+schedule. This avoids false negatives when a user renames a job task's title. Pseudocode:
+
+```python
+existing_jobs = {t.job for t in task_list.tasks if t.job and t.enabled is not False}
+```
+
+**Disabled job policy**: If a user intentionally disables a built-in job, it is re-created. Built-in jobs are considered essential system routines — they should always exist. Users who want to suppress a job can set its schedule to a very long interval instead.
+
+Call site: invoke `_ensure_builtin_jobs()` early in the `inspect()` method, before context gathering. This ensures the jobs exist before the LLM even runs.
 
 ### Change 3: Defensive import error in cron.py
 
@@ -113,7 +121,9 @@ This plan has been fully executed (all tasks completed, verified by code inspect
    - Already-registered jobs are not duplicated
    - Disabled jobs are re-registered
 
-3. **cron.py import error**: Add test verifying the RuntimeError message when module import fails.
+3. **cron.py import error**: Add test verifying the RuntimeError message and exception chaining (`__cause__`) when module import fails.
+
+Note: the new `RuntimeError` will be caught by the existing broad `except Exception` at line 568, which is the intended behavior — better error message flows through the existing logging path.
 
 ## Scope exclusions
 
@@ -122,3 +132,5 @@ This plan has been fully executed (all tasks completed, verified by code inspect
 - No changes to daemon startup mechanism or PYTHONPATH
 - No changes to routine_cli.py (already correct)
 - No changes to AGENTS.md (agent knowledge gap is addressed by self-healing, not documentation)
+- `health_check` excluded from `_BUILTIN_JOB_DEFAULTS` — stateless check, no scanner gate needed
+- `skill_evaluate` excluded — experimental module, not a recurring system job
