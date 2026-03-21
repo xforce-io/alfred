@@ -400,6 +400,9 @@ class TestInspect:
         (tmp_path / "HEARTBEAT.md").write_text("content")
 
         inspector = _make_inspector(tmp_path)
+        # Pre-register built-in jobs so inspect() won't mutate HEARTBEAT.md
+        inspector._ensure_builtin_jobs()
+        hb_content = (tmp_path / "HEARTBEAT.md").read_text(encoding="utf-8")
         inspector.update_state()
 
         run_agent = AsyncMock()
@@ -410,7 +413,7 @@ class TestInspect:
                 run_agent=run_agent,
                 inject_context=inject_context,
                 agent=MagicMock(),
-                heartbeat_content="content",
+                heartbeat_content=hb_content,
                 run_id="run_001",
             )
 
@@ -575,9 +578,12 @@ class TestInspect:
     @pytest.mark.asyncio
     async def test_update_state_called_after_llm(self, tmp_path):
         """update_state is called after LLM call to record file hashes."""
-        inspector = _make_inspector(tmp_path)
+        routine_mgr = RoutineManager(tmp_path)
+        inspector = _make_inspector(tmp_path, routine_manager=routine_mgr)
+        # Pre-register built-in jobs so inspect() won't mutate HEARTBEAT.md
+        inspector._ensure_builtin_jobs()
         (tmp_path / "MEMORY.md").write_text("content")
-        (tmp_path / "HEARTBEAT.md").write_text("hb")
+        hb_content = (tmp_path / "HEARTBEAT.md").read_text(encoding="utf-8")
 
         run_agent = AsyncMock(return_value=_make_reflection_response_no_proposals())
         inject_context = AsyncMock(return_value="prompt")
@@ -587,7 +593,7 @@ class TestInspect:
                 run_agent=run_agent,
                 inject_context=inject_context,
                 agent=MagicMock(),
-                heartbeat_content="hb",
+                heartbeat_content=hb_content,
                 run_id="run_008",
             )
 
@@ -1373,3 +1379,58 @@ class TestNormalizeRoutine:
         assert result["job"] == "memory-review"
         assert result["scanner"] == "session"
         assert result["min_execution_interval"] == "2h"
+
+
+class TestEnsureBuiltinJobs:
+    def test_registers_missing_jobs(self, tmp_path):
+        routine_mgr = RoutineManager(tmp_path)
+        inspector = _make_inspector(tmp_path, routine_manager=routine_mgr)
+
+        registered = inspector._ensure_builtin_jobs()
+
+        assert registered >= 2  # memory-review + task-discover
+        task_list = routine_mgr.load_task_list()
+        job_names = {t.job for t in task_list.tasks if t.job}
+        assert "memory-review" in job_names
+        assert "task-discover" in job_names
+
+    def test_skips_already_registered_jobs(self, tmp_path):
+        routine_mgr = RoutineManager(tmp_path)
+        inspector = _make_inspector(tmp_path, routine_manager=routine_mgr)
+
+        first = inspector._ensure_builtin_jobs()
+        second = inspector._ensure_builtin_jobs()
+
+        assert first >= 2
+        assert second == 0
+
+    def test_re_registers_disabled_jobs(self, tmp_path):
+        routine_mgr = RoutineManager(tmp_path)
+        inspector = _make_inspector(tmp_path, routine_manager=routine_mgr)
+
+        inspector._ensure_builtin_jobs()
+        task_list = routine_mgr.load_task_list()
+        for t in task_list.tasks:
+            if t.job == "memory-review":
+                t.enabled = False
+        routine_mgr.flush(task_list)
+
+        registered = inspector._ensure_builtin_jobs()
+        assert registered == 1
+
+    def test_matches_by_job_field_not_title(self, tmp_path):
+        routine_mgr = RoutineManager(tmp_path)
+        routine_mgr.add_routine(
+            title="Custom Memory Job Name",
+            schedule="4h",
+            job="memory-review",
+            scanner="session",
+        )
+        inspector = _make_inspector(tmp_path, routine_manager=routine_mgr)
+
+        registered = inspector._ensure_builtin_jobs()
+
+        assert registered == 1  # only task-discover
+        task_list = routine_mgr.load_task_list()
+        job_names = [t.job for t in task_list.tasks if t.job]
+        assert job_names.count("memory-review") == 1
