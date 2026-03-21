@@ -238,7 +238,7 @@ class ReflectionManager:
             timeout_seconds = max(1, int(timeout_seconds))
         except Exception:
             timeout_seconds = 120
-        return {
+        result = {
             "title": title,
             "description": description,
             "schedule": schedule,
@@ -248,6 +248,17 @@ class ReflectionManager:
             "source": "heartbeat_reflect",
             "allow_duplicate": False,
         }
+        # Conditionally add job fields (avoid passing None to add_routine)
+        job = item.get("job")
+        if job:
+            result["job"] = str(job).strip()
+        scanner = item.get("scanner")
+        if scanner:
+            result["scanner"] = str(scanner).strip()
+        min_exec = item.get("min_execution_interval")
+        if min_exec:
+            result["min_execution_interval"] = str(min_exec).strip()
+        return result
 
     def apply_routine_proposals(
         self,

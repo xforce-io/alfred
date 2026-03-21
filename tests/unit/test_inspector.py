@@ -1338,3 +1338,38 @@ class TestForcePushInterval:
         assert result.push_message is not None, (
             "Should generate fallback push_message when LLM ignores force directive"
         )
+
+
+class TestNormalizeRoutine:
+    def test_passes_through_job_fields(self):
+        item = {
+            "title": "Memory Review",
+            "schedule": "2h",
+            "job": "memory-review",
+            "scanner": "session",
+            "min_execution_interval": "2h",
+        }
+        result = ReflectionManager.normalize_routine(item)
+        assert result["job"] == "memory-review"
+        assert result["scanner"] == "session"
+        assert result["min_execution_interval"] == "2h"
+
+    def test_omits_job_fields_when_absent(self):
+        item = {"title": "Normal task", "schedule": "1d"}
+        result = ReflectionManager.normalize_routine(item)
+        assert "job" not in result
+        assert "scanner" not in result
+        assert "min_execution_interval" not in result
+
+    def test_strips_whitespace_on_job_fields(self):
+        item = {
+            "title": "Test",
+            "schedule": "1h",
+            "job": " memory-review ",
+            "scanner": " session ",
+            "min_execution_interval": " 2h ",
+        }
+        result = ReflectionManager.normalize_routine(item)
+        assert result["job"] == "memory-review"
+        assert result["scanner"] == "session"
+        assert result["min_execution_interval"] == "2h"
