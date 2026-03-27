@@ -28,6 +28,13 @@ from .heartbeat_utils import (
 from .cron import ALLOWED_SKILLS, CronExecutor
 from .cron_delivery import CronDelivery
 from .inspector import Inspector
+
+# SLM: imported at module level to keep consistent with core_service.py pattern
+# and avoid redundant module lookup on every heartbeat turn.
+try:
+    from ..slm.skill_log_recorder import record_skills_from_raw_events as _slm_record_raw
+except Exception:  # pragma: no cover
+    _slm_record_raw = None  # type: ignore[assignment]
 from .ports import HeartbeatSessionPort
 from ..tasks.routine_manager import RoutineManager
 from ..tasks.task_manager import (
@@ -227,6 +234,19 @@ If not, reply with `HEARTBEAT_OK`.
                 heartbeat_instructions=self.HEARTBEAT_SYSTEM_INSTRUCTION.strip(),
             )
         )
+        # SLM: record skill invocations from heartbeat turns for evaluation
+        # skills_dir: workspace-local skills (workspace_path/skills/)
+        # skill_logs_dir: workspace-local logs  (workspace_path/skill_logs/)
+        # NOTE: If the architecture moves to multi-process, add fcntl.flock in SkillLogRecorder.
+        try:
+            from ..slm.skill_log_recorder import SkillLogRecorder as _SkillLogRecorder
+            self._skill_log_recorder = _SkillLogRecorder(
+                skill_logs_dir=self.workspace_path / "skill_logs",
+                skills_dir=self.workspace_path / "skills",
+            )
+        except Exception as _slm_err:  # pragma: no cover
+            logger.warning("Failed to init SkillLogRecorder for heartbeat: %s", _slm_err)
+            self._skill_log_recorder = None
         # CronExecutor: delegates structured_due task execution
         self._routine_manager = RoutineManager(workspace_path)
         self._delivery = CronDelivery(
@@ -1456,6 +1476,16 @@ If not, reply with `HEARTBEAT_OK`.
                 )
             finally:
                 await emit(self.primary_session_id, {"type": "status", "content": ""}, **_emit_kw)
+
+            # SLM: record skill invocations from this heartbeat turn for evaluation.
+            # turn_result is always defined here (execute_turn succeeded; exceptions
+            # propagate before reaching this line). The is-not-None check is defensive.
+            if self._skill_log_recorder is not None and turn_result is not None and _slm_record_raw is not None:
+                _slm_record_raw(
+                    turn_result.events, self._skill_log_recorder,
+                    session_id=self.session_id,
+                    context_before=message or "",
+                )
 
             return self._extract_llm_result(turn_result.events)
         except Exception as e:

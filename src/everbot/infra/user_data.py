@@ -147,6 +147,27 @@ class UserDataManager:
 
         return files
 
+    def get_skill_log_recorder(self) -> "Optional[Any]":
+        """Return a SkillLogRecorder backed by this user's skill_logs_dir / skills_dir.
+
+        Returns None if the SLM module is unavailable (import error or construction
+        failure). Callers can inject the result directly into ChannelCoreService:
+
+            core = ChannelCoreService(..., skill_log_recorder=user_data.get_skill_log_recorder())
+
+        The recorder is constructed fresh on each call (stateless — SegmentLogger
+        uses open/write/close per append). Call once at init time and reuse.
+        """
+        try:
+            from ..core.slm.skill_log_recorder import SkillLogRecorder
+            return SkillLogRecorder(
+                skill_logs_dir=self.skill_logs_dir,
+                skills_dir=self.skills_dir,
+            )
+        except Exception as _err:
+            logger.warning("Failed to create SkillLogRecorder: %s", _err)
+            return None
+
     # --- 初始化 ---
 
     def ensure_directories(self):

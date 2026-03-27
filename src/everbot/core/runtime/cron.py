@@ -33,6 +33,17 @@ ALLOWED_JOBS: frozenset[str] = frozenset({
     "health_check",
     "memory_review",
     "task_discover",
+    "skill_evaluate",
+})
+
+# Whitelist for HeartbeatRunner._run_isolated_skill().
+# Intentionally excludes "skill_evaluate" — that is a cron job, not an
+# isolated skill; running it through _run_isolated_skill() would bypass
+# the normal cron scheduling and concurrency controls.
+ALLOWED_SKILLS: frozenset[str] = frozenset({
+    "health_check",
+    "memory_review",
+    "task_discover",
 })
 
 logger = logging.getLogger(__name__)
