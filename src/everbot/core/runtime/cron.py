@@ -28,7 +28,18 @@ from .heartbeat_utils import (
     try_deterministic_task,
 )
 
-# Whitelist of allowed skill module names for dynamic import
+# Whitelist of allowed job module names for dynamic import
+ALLOWED_JOBS: frozenset[str] = frozenset({
+    "health_check",
+    "memory_review",
+    "task_discover",
+    "skill_evaluate",
+})
+
+# Whitelist for HeartbeatRunner._run_isolated_skill().
+# Intentionally excludes "skill_evaluate" — that is a cron job, not an
+# isolated skill; running it through _run_isolated_skill() would bypass
+# the normal cron scheduling and concurrency controls.
 ALLOWED_SKILLS: frozenset[str] = frozenset({
     "health_check",
     "memory_review",
@@ -273,20 +284,20 @@ class CronExecutor:
             task = Task.from_dict(task_snapshot_dict)
             task.execution_mode = "isolated"
 
-            # Gate check for skill tasks
+            # Gate check for job tasks
             verdict = None
-            if task.skill:
+            if task.job:
                 gate = TaskExecutionGate(self.workspace_path, self.agent_name, self._get_scanner)
                 verdict = gate.check(task)
                 if not verdict.allowed:
-                    self._write_event("skill_skipped", skill=task.skill, reason=verdict.skip_reason)
+                    self._write_event("job_skipped", skill=task.job, reason=verdict.skip_reason)
                     await self._update_isolated_task_state(task_id, TaskState.DONE, now=now)
                     return
 
             active_run_id = run_id or f"heartbeat_isolated_{uuid.uuid4().hex[:12]}"
             await self._run_isolated_task(task, active_run_id, run_agent=run_agent)
 
-            if task.skill and verdict and verdict.scan_result:
+            if task.job and verdict and verdict.scan_result:
                 gate.commit(task, verdict)
 
             await self._update_isolated_task_state(task_id, TaskState.DONE, now=now)
@@ -317,9 +328,9 @@ class CronExecutor:
         self._write_event("task_start", task_id=task.id, title=task.title, execution_mode="inline")
 
         try:
-            # 1. Skill tasks: gate check + skill module, no LLM
-            if task.skill:
-                return await self._execute_skill_task(task, task_list, run_id)
+            # 1. Job tasks: gate check + job module, no LLM
+            if task.job:
+                return await self._execute_job_task(task, task_list, run_id)
 
             # 2. Deterministic tasks: programmatic output
             deterministic_result = try_deterministic_task(task)
@@ -358,8 +369,8 @@ class CronExecutor:
             self.routine_manager.flush(task_list)
             return TaskResult(task_id=task.id, status="failed", error=str(exc))
 
-    async def _execute_skill_task(self, task: Task, task_list: TaskList, run_id: str) -> TaskResult:
-        """Execute a skill task with gate check."""
+    async def _execute_job_task(self, task: Task, task_list: TaskList, run_id: str) -> TaskResult:
+        """Execute a job task with gate check."""
         gate = TaskExecutionGate(self.workspace_path, self.agent_name, self._get_scanner)
         verdict = gate.check(task)
 
@@ -374,8 +385,8 @@ class CronExecutor:
             if verdict.skip_reason == "scanner_error":
                 self._write_event("scanner_error", scanner=task.scanner, error="gate check failed")
             else:
-                self._write_event("skill_skipped", skill=task.skill, reason=verdict.skip_reason)
-            self._rearm_skill_task(task)
+                self._write_event("job_skipped", skill=task.job, reason=verdict.skip_reason)
+            self._rearm_job_task(task)
             self.routine_manager.flush(task_list)
             return TaskResult(
                 task_id=task.id, status="skipped",
@@ -384,12 +395,12 @@ class CronExecutor:
             )
 
         result = await asyncio.wait_for(
-            self._invoke_skill(task, verdict.scan_result, run_id),
+            self._invoke_job(task, verdict.scan_result, run_id),
             timeout=task.timeout_seconds,
         )
         if verdict.scan_result:
             gate.commit(task, verdict)
-        self._rearm_skill_task(task)
+        self._rearm_job_task(task)
         self._write_event("task_done", task_id=task.id, title=task.title)
         self.routine_manager.flush(task_list)
         return TaskResult(
@@ -411,9 +422,9 @@ class CronExecutor:
         if not self.routine_manager.claim_task(task):
             return TaskResult(task_id=task.id, status="skipped", execution_path="claim_failed")
 
-        # Gate check for skill tasks before dispatching
+        # Gate check for job tasks before dispatching
         verdict = None
-        if task.skill:
+        if task.job:
             gate = TaskExecutionGate(self.workspace_path, self.agent_name, self._get_scanner)
             verdict = gate.check(task)
             if verdict.scan_result is not None:
@@ -426,8 +437,8 @@ class CronExecutor:
                 if verdict.skip_reason == "scanner_error":
                     self._write_event("scanner_error", scanner=task.scanner, error="gate check failed")
                 else:
-                    self._write_event("skill_skipped", skill=task.skill, reason=verdict.skip_reason)
-                self._rearm_skill_task(task)
+                    self._write_event("job_skipped", skill=task.job, reason=verdict.skip_reason)
+                self._rearm_job_task(task)
                 self.routine_manager.flush(task_list)
                 return TaskResult(
                     task_id=task.id, status="skipped",
@@ -538,43 +549,50 @@ class CronExecutor:
             return task_description
         return f"{base}\n\n{task_description}"
 
-    # ── Skill execution ───────────────────────────────────────
+    # ── Job execution ──────────────────────────────────────────
 
-    async def _invoke_skill(self, task: Task, scan_result: Any, run_id: str) -> str:
-        """Execute a reflection skill task."""
-        skill_name = task.skill
+    async def _invoke_job(self, task: Task, scan_result: Any, run_id: str) -> str:
+        """Execute a cron job task."""
+        job_name = task.job
         start_ms = int(_time.time() * 1000)
 
         self._write_event(
-            "skill_started", skill=skill_name,
+            "job_started", skill=job_name,
             scan_summary=scan_result.change_summary if scan_result else "",
         )
 
         try:
-            context = self._build_skill_context(scan_result)
-            module_name = skill_name.replace("-", "_")
-            if module_name not in ALLOWED_SKILLS:
-                raise ValueError(f"Skill {skill_name!r} is not in the allowed skills whitelist")
-            skill_module = importlib.import_module(f"everbot.core.jobs.{module_name}")
-            result = await skill_module.run(context)
+            context = self._build_job_context(scan_result)
+            module_name = job_name.replace("-", "_")
+            if module_name not in ALLOWED_JOBS:
+                raise ValueError(f"Job {job_name!r} is not in the allowed jobs whitelist")
+            _pkg = __name__.rsplit(".", 2)[0]  # e.g. "src.everbot.core"
+            try:
+                job_module = importlib.import_module(f"{_pkg}.jobs.{module_name}")
+            except ModuleNotFoundError as e:
+                raise RuntimeError(
+                    f"Cannot import job module '{module_name}': {e}. "
+                    f"Ensure daemon runs from project root or package is installed."
+                ) from e
+            result = await job_module.run(context)
 
             duration_ms = int(_time.time() * 1000) - start_ms
             self._write_event(
-                "skill_completed", skill=skill_name,
+                "job_completed", skill=job_name,
                 duration_ms=duration_ms, result=str(result)[:200],
             )
             return str(result)
         except Exception as exc:
             duration_ms = int(_time.time() * 1000) - start_ms
             self._write_event(
-                "skill_failed", skill=skill_name,
+                "job_failed", skill=job_name,
                 duration_ms=duration_ms, error=str(exc)[:200],
             )
-            logger.error("Skill %s failed: %s", skill_name, exc, exc_info=True)
+            logger.error("Job %s failed: %s", job_name, exc, exc_info=True)
             raise
 
-    def _build_skill_context(self, scan_result=None):
-        """Build SkillContext for reflection skill execution."""
+    def _build_job_context(self, scan_result=None):
+        """Build SkillContext for job execution."""
         from .skill_context import SkillContext, MailboxAdapter
         from ..memory.manager import MemoryManager
         from ...infra.user_data import get_user_data_manager
@@ -605,8 +623,8 @@ class CronExecutor:
         return None
 
     @staticmethod
-    def _rearm_skill_task(task: Task) -> None:
-        """Re-arm a skill task to PENDING for next scan cycle."""
+    def _rearm_job_task(task: Task) -> None:
+        """Re-arm a job task to PENDING for next scan cycle."""
         from ..tasks.task_manager import update_task_state, TaskState
         update_task_state(task, TaskState.DONE)
 

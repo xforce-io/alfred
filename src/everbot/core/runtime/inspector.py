@@ -30,6 +30,26 @@ SUMMARY_MAX_CHARS = 500
 # State file for tracking inspection context changes
 INSPECTOR_STATE_FILE = ".inspector_state.json"
 
+# Default definitions for built-in jobs that must always exist in HEARTBEAT.md.
+_BUILTIN_JOB_DEFAULTS: dict[str, dict] = {
+    "memory-review": {
+        "title": "Memory Review",
+        "schedule": "2h",
+        "scanner": "session",
+        "min_execution_interval": "2h",
+        "execution_mode": "inline",
+        "timeout_seconds": 120,
+    },
+    "task-discover": {
+        "title": "Task Discover",
+        "schedule": "2h",
+        "scanner": "session",
+        "min_execution_interval": "2h",
+        "execution_mode": "inline",
+        "timeout_seconds": 120,
+    },
+}
+
 # System prompt used when running the reflection LLM call.
 # Overrides the default heartbeat system prompt so the LLM responds in JSON
 # instead of plain "HEARTBEAT_OK".
@@ -235,6 +255,26 @@ class Inspector:
             ).hexdigest(),
         }
         return hashes
+
+    # ── Built-in Job Self-Healing ─────────────────────────────
+
+    def _ensure_builtin_jobs(self) -> int:
+        """Register any missing built-in jobs in HEARTBEAT.md."""
+        task_list = self.routine_manager.load_task_list()
+        if task_list is None:
+            return 0
+        existing_jobs = {t.job for t in task_list.tasks if t.job and t.enabled is not False}
+        registered = 0
+        for job_name, defaults in _BUILTIN_JOB_DEFAULTS.items():
+            if job_name in existing_jobs:
+                continue
+            try:
+                self.routine_manager.add_routine(job=job_name, **defaults)
+                registered += 1
+                logger.info("Auto-registered built-in job: %s", job_name)
+            except ValueError as exc:
+                logger.debug("Skipping built-in job %s: %s", job_name, exc)
+        return registered
 
     # ── Context Gathering ──────────────────────────────────────
 
@@ -596,6 +636,9 @@ class Inspector:
         If ``auto_register_routines`` is True, new routines are auto-registered.
         Otherwise, proposals are deposited to the primary session mailbox.
         """
+        # Ensure built-in jobs are registered before gathering context
+        self._ensure_builtin_jobs()
+
         # Gather enriched context once
         ctx = self._gather_context(heartbeat_content, session_manager, primary_session_id)
 

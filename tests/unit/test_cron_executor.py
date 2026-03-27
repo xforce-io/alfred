@@ -9,6 +9,7 @@ import pytest
 
 from src.everbot.core.runtime.cron import CronExecutor, CronTickResult, TaskResult
 from src.everbot.core.runtime.cron_delivery import CronDelivery
+from src.everbot.core.tasks.execution_gate import GateVerdict
 from src.everbot.core.tasks.routine_manager import RoutineManager
 from src.everbot.core.tasks.task_manager import TaskState
 
@@ -98,7 +99,7 @@ class TestSkillExecution:
         mgr = _seed_task(
             tmp_path,
             title="Skill task",
-            skill="memory-review",
+            job="memory-review",
             scanner="session",
         )
         executor = _make_executor(tmp_path, routine_manager=mgr)
@@ -227,3 +228,34 @@ class TestStateFlush:
         task = fresh.tasks[0]
         assert task.state == TaskState.PENDING.value
         assert task.last_run_at is not None
+
+
+class TestJobImportError:
+    @pytest.mark.asyncio
+    async def test_import_failure_gives_actionable_error(self, tmp_path):
+        mgr = _seed_task(
+            tmp_path,
+            title="Bad import job",
+            job="health-check",
+            scanner="session",
+        )
+        executor = _make_executor(tmp_path, routine_manager=mgr)
+        task_list = mgr.load_task_list()
+
+        with patch(
+            "src.everbot.core.runtime.cron.TaskExecutionGate.check",
+            return_value=GateVerdict(allowed=True),
+        ), patch(
+            "importlib.import_module",
+            side_effect=ModuleNotFoundError("No module named 'everbot'"),
+        ):
+            result = await executor.tick(
+                task_list,
+                run_agent=AsyncMock(),
+                inject_context=AsyncMock(),
+                include_isolated=False,
+            )
+
+        assert result.failed == 1
+        assert "Cannot import job module" in result.results[0].error
+        assert "project root" in result.results[0].error

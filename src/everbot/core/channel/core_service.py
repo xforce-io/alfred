@@ -38,6 +38,13 @@ from ...infra.user_data import UserDataManager
 from ...infra.workspace import WorkspaceLoader
 from ...infra.dolphin_compat import ensure_continue_chat_compatibility
 
+# SLM: imported at module level to avoid per-event attribute lookup overhead.
+# handle_skill_event is called in the SKILL-completed hot path.
+try:
+    from ...core.slm.skill_log_recorder import handle_skill_event as _slm_handle_skill_event
+except Exception:  # pragma: no cover
+    _slm_handle_skill_event = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,6 +112,8 @@ class ChannelCoreService:
         session_manager: SessionManager,
         agent_service: Any,
         user_data: UserDataManager,
+        *,
+        skill_log_recorder: Optional[Any] = None,
     ) -> None:
         self.session_manager = session_manager
         self.agent_service = agent_service
@@ -120,6 +129,8 @@ class ChannelCoreService:
         # Allows circuit breakers to fire earlier when the same tool keeps
         # failing across consecutive user messages.
         self._session_failure_memory: Dict[str, Dict[str, int]] = {}
+        # SLM skill log recorder — optional, injected by callers that provide workspace paths.
+        self._skill_log_recorder = skill_log_recorder
 
     # ------------------------------------------------------------------
     # Public API
@@ -342,6 +353,13 @@ class ChannelCoreService:
                             status="failed" if norm_status in {"failed", "error"} else "success",
                             source="skill_fallback", **event_meta,
                         )
+                        # SLM: record successful skill invocations for evaluation
+                        if norm_status == "completed" and self._skill_log_recorder is not None and _slm_handle_skill_event is not None:
+                            _slm_handle_skill_event(
+                                te, self._skill_log_recorder,
+                                session_id=session_id,
+                                context_before=message_text or "",
+                            )
                     await on_event(OutboundMessage(session_id, "", msg_type="skill", metadata={
                         "id": te.pid or "noid-skill",
                         "status": te.status, "skill_name": te.skill_name,

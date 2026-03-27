@@ -288,7 +288,7 @@ def _is_read_only_intent(intent_sig: str) -> bool:
     return False
 
 
-_FINGERPRINT_CHARS = 120  # chars of LLM text to fingerprint per round
+_FINGERPRINT_CHARS = 300  # chars of LLM text to fingerprint per round
 
 
 def _truncate_preview(text: str, max_chars: int) -> tuple[str, bool, int]:
@@ -580,7 +580,7 @@ class TurnOrchestrator:
         # a sliding window to catch both consecutive and alternating loops.
         _round_text = ""
         _recent_fps: list[str] = []  # sliding window of recent fingerprints
-        _LOOP_WINDOW = max(4, policy.max_consecutive_similar_llm_rounds)
+        _LOOP_WINDOW = max(8, policy.max_consecutive_similar_llm_rounds)
         seen_progress_fingerprints: set[str] = set()
 
         def _flush_trajectory() -> None:
@@ -616,8 +616,9 @@ class TurnOrchestrator:
         def _check_round_text_loop() -> bool:
             """Detect degenerate loops: consecutive repeats OR alternating patterns.
 
-            Fires when recent ``_LOOP_WINDOW`` rounds contain ≤2 distinct
-            fingerprints — catches both "AAAA" and "ABAB" patterns.
+            Fires when recent ``_LOOP_WINDOW`` rounds contain ≤3 distinct
+            fingerprints — catches both "AAAA" and "ABAB" patterns while
+            tolerating multi-step tool workflows with similar status text.
             """
             nonlocal _round_text
             text = _round_text
@@ -629,7 +630,7 @@ class TurnOrchestrator:
             if len(_recent_fps) < _LOOP_WINDOW:
                 return False
             window = _recent_fps[-_LOOP_WINDOW:]
-            return len(set(window)) <= 2
+            return len(set(window)) <= 3
 
         async for event in event_stream:
             # External cancellation — emit partial results instead of

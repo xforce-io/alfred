@@ -46,7 +46,11 @@ class ChatService:
         self.agent_service = AgentService()
         self.user_data = get_user_data_manager()
         self.session_manager = SessionManager(self.user_data.sessions_dir)
-        self._core = ChannelCoreService(self.session_manager, self.agent_service, self.user_data)
+        self._skill_log_recorder = self.user_data.get_skill_log_recorder()
+        self._core = ChannelCoreService(
+            self.session_manager, self.agent_service, self.user_data,
+            skill_log_recorder=self._skill_log_recorder,
+        )
         self._setup_event_listener()
 
     def _setup_event_listener(self):
@@ -465,6 +469,7 @@ class ChatService:
                 self.session_manager,
                 getattr(self, "agent_service", None),
                 self.user_data,
+                skill_log_recorder=getattr(self, "_skill_log_recorder", None),
             )
         return self._core
 

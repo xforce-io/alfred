@@ -19,11 +19,18 @@ from .models import CurrentPointer, EvalReport, VersionMetadata, VersionStatus
 logger = logging.getLogger(__name__)
 
 
-def _read_frontmatter_version(skill_md_path: Path) -> str:
-    """Extract version from SKILL.md frontmatter. Returns 'baseline' if absent."""
+def read_frontmatter_version(skill_md_path: Path) -> str:
+    """Extract version from SKILL.md frontmatter. Returns 'baseline' if absent.
+
+    Handles binary/non-UTF8 SKILL.md gracefully by falling back to 'baseline'
+    instead of propagating UnicodeDecodeError.
+    """
     if not skill_md_path.exists():
         return "baseline"
-    text = skill_md_path.read_text(encoding="utf-8")
+    try:
+        text = skill_md_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return "baseline"
     match = re.search(r"^---\s*\n(.*?)\n---", text, re.DOTALL)
     if not match:
         return "baseline"
@@ -125,7 +132,7 @@ class VersionManager:
 
     def get_active_version(self, skill_id: str) -> str:
         """Get the version currently in SKILL.md (from frontmatter)."""
-        return _read_frontmatter_version(self._skill_md(skill_id))
+        return read_frontmatter_version(self._skill_md(skill_id))
 
     # ------------------------------------------------------------------
     # Write

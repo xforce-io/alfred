@@ -10,7 +10,7 @@ from src.everbot.core.slm.models import (
     VersionMetadata,
     VersionStatus,
 )
-from src.everbot.core.slm.version_manager import VersionManager, _read_frontmatter_version
+from src.everbot.core.slm.version_manager import VersionManager, read_frontmatter_version
 
 
 SKILL_CONTENT_V1 = """\
@@ -36,20 +36,20 @@ class TestReadFrontmatterVersion:
     def test_with_version(self, tmp_path):
         p = tmp_path / "SKILL.md"
         p.write_text(SKILL_CONTENT_V1)
-        assert _read_frontmatter_version(p) == "1.0"
+        assert read_frontmatter_version(p) == "1.0"
 
     def test_without_version(self, tmp_path):
         p = tmp_path / "SKILL.md"
         p.write_text("---\nname: foo\n---\ncontent")
-        assert _read_frontmatter_version(p) == "baseline"
+        assert read_frontmatter_version(p) == "baseline"
 
     def test_no_frontmatter(self, tmp_path):
         p = tmp_path / "SKILL.md"
         p.write_text("just content")
-        assert _read_frontmatter_version(p) == "baseline"
+        assert read_frontmatter_version(p) == "baseline"
 
     def test_nonexistent(self, tmp_path):
-        assert _read_frontmatter_version(tmp_path / "nope.md") == "baseline"
+        assert read_frontmatter_version(tmp_path / "nope.md") == "baseline"
 
 
 class TestVersionManager:

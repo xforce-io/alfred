@@ -101,6 +101,7 @@ class TelegramChannel:
             session_manager=self._session_manager,
             agent_service=self._agent_service,
             user_data=self._user_data,
+            skill_log_recorder=self._user_data.get_skill_log_recorder(),
         )
 
         # chat_id -> agent_name
