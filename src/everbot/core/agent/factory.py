@@ -167,6 +167,22 @@ class AgentFactory:
 
         return agent_config
 
+    @staticmethod
+    def _resolve_agent_model(agent_name: str) -> str:
+        """Resolve the model for an agent from config.yaml (no instance needed).
+
+        Priority: per-agent model > global default_model > empty string.
+        """
+        app_config = get_config()
+        agent_section = app_config.get("everbot", {}).get("agents", {}).get(agent_name, {})
+        per_agent = agent_section.get("model")
+        if per_agent:
+            return per_agent
+        global_default = app_config.get("everbot", {}).get("default_model")
+        if global_default:
+            return global_default
+        return ""
+
     def _resolve_model(self, agent_name: str, model_name: Optional[str], agent_config: GlobalConfig) -> str:
         """Resolve the model to use for an agent.
 

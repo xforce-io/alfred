@@ -1103,7 +1103,9 @@ If not, reply with `HEARTBEAT_OK`.
 
     def _create_skill_llm_client(self):
         """Create a lightweight LLM client for skill usage."""
-        return _SkillLLMClient()
+        from ..agent.factory import AgentFactory
+        model = AgentFactory._resolve_agent_model(self.agent_name)
+        return _SkillLLMClient(model=model)
 
     def _check_min_execution_interval(self, task: Any) -> bool:
         """Check if minimum execution interval has elapsed since last run."""

@@ -139,6 +139,7 @@ class CronExecutor:
         self.agent_factory = agent_factory
         self.routine_manager = routine_manager
         self.delivery = delivery
+        scope = str(broadcast_scope or "agent").strip().lower()
         self.broadcast_scope = broadcast_scope
 
         # SLM: record skill invocations for evaluation (per-agent isolation)
@@ -218,6 +219,11 @@ class CronExecutor:
                     result.failed += 1
 
         return result
+
+    def _resolve_skill_model(self) -> str:
+        """Resolve the model for skill LLM calls from agent config."""
+        from ..agent.factory import AgentFactory
+        return AgentFactory._resolve_agent_model(self.agent_name)
 
     # ── Scheduler-facing task listing ─────────────────────────
 
@@ -622,7 +628,7 @@ class CronExecutor:
             agent_name=self.agent_name,
             memory_manager=MemoryManager(memory_path),
             mailbox=MailboxAdapter(self.session_manager, primary_session_id, self.agent_name),
-            llm=_SkillLLMClient(),
+            llm=_SkillLLMClient(model=self._resolve_skill_model()),
             scan_result=scan_result,
             skill_logs_dir=user_data.get_agent_skill_logs_dir(self.agent_name),
             skill_eval_dir=user_data.get_agent_skill_eval_dir(self.agent_name),
