@@ -628,11 +628,24 @@ class SessionPersistence:
             # 1. Build portable state, filtering non-restorable variables.
             #    workspace_instructions is re-injected at runtime; _history is
             #    already captured in history_messages above.
-            _NON_RESTORABLE_VARS = {"workspace_instructions", "_history"}
+            #    model_name is a runtime parameter always determined by factory/config —
+            #    we save its current value before restore and re-inject it after, because
+            #    import_portable_session replaces the entire variable set.
+            _NON_RESTORABLE_VARS = {"workspace_instructions", "_history", "model_name", "intervention_explore_block_vars"}
             restore_variables = {
                 k: v for k, v in (session_data.variables or {}).items()
                 if k not in _NON_RESTORABLE_VARS and v is not None
             }
+
+            # Snapshot runtime-only variable values before restore so we can re-inject
+            # them after import_portable_session (which replaces the full variable set).
+            ctx = agent.executor.context
+            _runtime_var_snapshot = {}
+            for var in _NON_RESTORABLE_VARS:
+                if hasattr(ctx, "get_var_value"):
+                    val = ctx.get_var_value(var)
+                    if val is not None:
+                        _runtime_var_snapshot[var] = val
 
             portable_state = {
                 "schema_version": "portable_session.v1",
@@ -645,6 +658,17 @@ class SessionPersistence:
             #    repair=True lets Dolphin fix structural issues (orphaned tool_calls,
             #    role-order violations) before the first LLM call.
             report = agent.snapshot.import_portable_session(portable_state, repair=True)
+
+            # Re-inject runtime variables that must not be overridden by stale session data.
+            if _runtime_var_snapshot and hasattr(ctx, "set_variable"):
+                for var, val in _runtime_var_snapshot.items():
+                    ctx.set_variable(var, val)
+
+            # Re-seed last_model_name from the factory-set model_name so that
+            # continue_exploration uses the correct model after restore.
+            factory_model = _runtime_var_snapshot.get("model_name")
+            if factory_model and hasattr(ctx, "set_last_model_name"):
+                ctx.set_last_model_name(factory_model)
 
             if report and report.get("issues_after"):
                 logger.warning(

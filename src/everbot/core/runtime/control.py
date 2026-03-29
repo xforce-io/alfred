@@ -69,11 +69,9 @@ async def run_heartbeat_once(
     if not workspace_path.exists():
         user_data.init_agent_workspace(agent_name)
 
-    model_name = agent_config.get("model") or config.get("everbot", {}).get("default_model") or model
-
     agent_factory = get_agent_factory(
         global_config_path=dolphin_config_path,
-        default_model=model_name,
+        default_model=model,  # CLI --model override only; per-agent config resolved in factory
     )
 
     session_manager = SessionManager(user_data.sessions_dir)

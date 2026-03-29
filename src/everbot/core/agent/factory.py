@@ -14,7 +14,7 @@ import threading
 
 from dolphin.sdk import DolphinAgent, GlobalSkills
 from dolphin.core.config.global_config import GlobalConfig
-from dolphin.core.common.constants import (
+from ...infra.dolphin_compat import (
     KEY_HISTORY_COMPACT_ON_PERSIST,
     KEY_HISTORY_COMPACT_RECENT_TURNS,
 )
@@ -167,6 +167,30 @@ class AgentFactory:
 
         return agent_config
 
+    def _resolve_model(self, agent_name: str, model_name: Optional[str], agent_config: GlobalConfig) -> str:
+        """Resolve the model to use for an agent.
+
+        Priority (highest to lowest):
+        1. Explicit model_name argument (passed to create_agent, e.g. CLI override)
+        2. Per-agent model in config.yaml (everbot.agents.<name>.model)
+        3. Factory-level default_model (explicit factory override, e.g. CLI --model flag)
+        4. Global default model in config.yaml (everbot.default_model)
+        5. dolphin.yaml default LLM
+        """
+        if model_name:
+            return model_name
+        app_config = get_config()
+        agent_section = app_config.get("everbot", {}).get("agents", {}).get(agent_name, {})
+        per_agent = agent_section.get("model")
+        if per_agent:
+            return per_agent
+        if self.default_model:
+            return self.default_model
+        global_default = app_config.get("everbot", {}).get("default_model")
+        if global_default:
+            return global_default
+        return agent_config.default_llm
+
     async def create_agent(
         self,
         agent_name: str,
@@ -181,7 +205,7 @@ class AgentFactory:
         Args:
             agent_name: Agent 名称
             workspace_path: Agent 工作区路径
-            model_name: 模型名称
+            model_name: 模型名称（可选，覆盖 config.yaml 配置）
             extra_variables: 额外的变量
 
         Returns:
@@ -191,7 +215,7 @@ class AgentFactory:
 
         # 1. 为此 agent 创建专属配置（包含专属 skills 目录）
         agent_config = self._create_agent_config(workspace_path, agent_name)
-        actual_model = model_name or self.default_model or agent_config.default_llm
+        actual_model = self._resolve_model(agent_name, model_name, agent_config)
 
         # 2. 加载工作区指令
         logger.info("创建 Agent: %s, 使用模型: %s", agent_name, actual_model)
@@ -304,6 +328,13 @@ class AgentFactory:
         # turn's full tool chain lives in SCRATCHPAD, not in history.
         context.set_variable(KEY_HISTORY_COMPACT_ON_PERSIST, True)
         context.set_variable(KEY_HISTORY_COMPACT_RECENT_TURNS, 0)
+
+        # Pre-seed last_model_name so that continue_exploration (which bypasses DPH
+        # execution) inherits the correct model instead of falling back to the
+        # dolphin.yaml default.
+        if hasattr(context, "set_last_model_name"):
+            context.set_last_model_name(actual_model)
+            logger.info("Pre-seeded last_model_name: %s", actual_model)
 
         # Pre-seed last_skills from DPH tools= so that continue_exploration
         # (which bypasses DPH execution) inherits the tools filter.
@@ -877,7 +908,7 @@ async def create_agent(agent_name: str, workspace_path: Path) -> DolphinAgent:
     """
     便捷函数：创建 Agent
 
-    使用全局单例工厂创建 Agent。
+    使用全局单例工厂创建 Agent。模型由工厂从 config.yaml 自动解析。
 
     Args:
         agent_name: Agent 名称
