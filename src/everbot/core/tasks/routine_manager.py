@@ -198,7 +198,7 @@ class RoutineManager:
         allow_duplicate: bool = False,
         now: Optional[datetime] = None,
         next_run_at: Optional[str] = None,
-        skill: Optional[str] = None,
+        job: Optional[str] = None,
         scanner: Optional[str] = None,
         min_execution_interval: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -261,10 +261,10 @@ class RoutineManager:
                 _amount = int(_freq_match.group(1))
                 _unit = _freq_match.group(2)
                 _total_minutes = {"m": _amount, "h": _amount * 60, "d": _amount * 1440}[_unit]
-                if _total_minutes < 30 and not (skill and scanner):
+                if _total_minutes < 30 and not (job and scanner):
                     raise ValueError(
                         f"High-frequency schedule '{schedule}' (< 30m) requires "
-                        "--skill and --scanner to prevent uncontrolled execution."
+                        "--job and --scanner to prevent uncontrolled execution."
                     )
 
         if next_run_at is not None:
@@ -286,7 +286,7 @@ class RoutineManager:
             next_run_at=computed_next_run,
             timeout_seconds=timeout_value,
             created_at=now_dt.isoformat(),
-            skill=skill,
+            job=job,
             scanner=scanner,
             min_execution_interval=min_execution_interval,
         )

@@ -387,6 +387,19 @@ def _map_macro(result: Dict[str, Any]) -> List[Dict[str, Any]]:
     base_conf = _confidence(result.get("risk_score", 50) / 100)
     sofr_conf = _confidence(dims.get("sofr", {}).get("risk_score", 50) / 100)
 
+    # Gold anomaly mapping
+    gold_dim = dims.get("gold", {})
+    gold_risk = gold_dim.get("risk_score", 0)
+    if gold_risk >= 75:
+        gold_state = "crisis"
+    elif gold_risk >= 50:
+        gold_state = "confirmed"
+    elif gold_risk >= 25:
+        gold_state = "early_warning"
+    else:
+        gold_state = "stable"
+    gold_conf = _confidence(gold_risk / 100) if not gold_dim.get("error") else 0.50
+
     return [
         {
             "id": "fed_liquidity",
@@ -403,6 +416,14 @@ def _map_macro(result: Dict[str, Any]) -> List[Dict[str, Any]]:
             "freshness": "live",
             "source": "macro",
             "raw": dims.get("sofr", {}),
+        },
+        {
+            "id": "gold_anomaly",
+            "state": gold_state,
+            "confidence": gold_conf,
+            "freshness": "live",
+            "source": "macro",
+            "raw": gold_dim,
         },
     ]
 

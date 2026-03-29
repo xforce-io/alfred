@@ -92,6 +92,13 @@
       "origin": "predefined",
       "states": ["cheap", "fair", "rich"]
     },
+    "gold_anomaly": {
+      "id": "gold_anomaly",
+      "label": "Gold Anomaly",
+      "type": "macro",
+      "origin": "predefined",
+      "states": ["stable", "early_warning", "confirmed", "crisis"]
+    },
     "breakout_signal": {
       "id": "breakout_signal",
       "label": "Breakout Signal",
@@ -350,6 +357,30 @@
       },
       "method": "default_prior",
       "reason": "Default trade-risk prior"
+    },
+    "gold_anomaly->gold": {
+      "from": "gold_anomaly",
+      "to": "gold",
+      "probabilities": {
+        "stable->neutral": 0.55,
+        "early_warning->bearish": 0.55,
+        "confirmed->bearish": 0.75,
+        "crisis->bearish": 0.90
+      },
+      "method": "default_prior",
+      "reason": "Gold anomaly signals liquidity stress or forced selling, bearish for gold price"
+    },
+    "gold_anomaly->us_equity": {
+      "from": "gold_anomaly",
+      "to": "us_equity",
+      "probabilities": {
+        "stable->neutral": 0.55,
+        "early_warning->neutral": 0.50,
+        "confirmed->bearish": 0.60,
+        "crisis->bearish": 0.75
+      },
+      "method": "default_prior",
+      "reason": "Severe gold liquidation often signals broader risk-off and cross-asset margin calls"
     }
   },
   "chains": [
@@ -400,6 +431,18 @@
       "path": ["china_stimulus", "southbound_flow", "hk_equity"],
       "label": "China stimulus to HK equity",
       "reasoning": "More domestic support can improve flow expectations into Hong Kong equities."
+    },
+    {
+      "id": 9,
+      "path": ["gold_anomaly", "gold"],
+      "label": "Gold anomaly to gold price",
+      "reasoning": "Gold price anomalies (consecutive drops, MA20 breach, RSI weakness) can signal liquidity stress or forced selling."
+    },
+    {
+      "id": 10,
+      "path": ["gold_anomaly", "us_equity"],
+      "label": "Gold anomaly to US equity",
+      "reasoning": "Severe gold liquidation often accompanies broader risk-off moves and cross-asset margin calls."
     }
   ]
 }

@@ -48,6 +48,14 @@ _BUILTIN_JOB_DEFAULTS: dict[str, dict] = {
         "execution_mode": "inline",
         "timeout_seconds": 120,
     },
+    "skill-evaluate": {
+        "title": "Skill Evaluate",
+        "schedule": "2h",
+        "scanner": None,
+        "min_execution_interval": "2h",
+        "execution_mode": "isolated",
+        "timeout_seconds": 180,
+    },
 }
 
 # System prompt used when running the reflection LLM call.

@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, Optional, Union
 
 from dolphin.core.agent.agent_state import AgentState
-from dolphin.core.common.constants import KEY_HISTORY
+from ...infra.dolphin_compat import KEY_HISTORY
 
 from .models import OutboundMessage
 from .session_resolver import ChannelSessionResolver
@@ -114,6 +114,7 @@ class ChannelCoreService:
         user_data: UserDataManager,
         *,
         skill_log_recorder: Optional[Any] = None,
+        skill_log_recorder_factory: Optional[Callable[[str], Any]] = None,
     ) -> None:
         self.session_manager = session_manager
         self.agent_service = agent_service
@@ -129,8 +130,28 @@ class ChannelCoreService:
         # Allows circuit breakers to fire earlier when the same tool keeps
         # failing across consecutive user messages.
         self._session_failure_memory: Dict[str, Dict[str, int]] = {}
-        # SLM skill log recorder — optional, injected by callers that provide workspace paths.
-        self._skill_log_recorder = skill_log_recorder
+        # SLM skill log recorder — per-agent, lazily created via factory.
+        # Legacy: if skill_log_recorder is provided directly, use it as fallback.
+        self._skill_log_recorder_factory = skill_log_recorder_factory
+        self._skill_log_recorders: Dict[str, Any] = {}
+        self._skill_log_recorder_fallback = skill_log_recorder
+
+    def _get_recorder(self, agent_name: str) -> Optional[Any]:
+        """Get per-agent SkillLogRecorder, lazily created."""
+        recorders = getattr(self, "_skill_log_recorders", None)
+        if recorders is None:
+            return getattr(self, "_skill_log_recorder_fallback", None)
+        if not agent_name:
+            return getattr(self, "_skill_log_recorder_fallback", None)
+        if agent_name not in self._skill_log_recorders:
+            if self._skill_log_recorder_factory:
+                try:
+                    self._skill_log_recorders[agent_name] = self._skill_log_recorder_factory(agent_name)
+                except Exception:
+                    self._skill_log_recorders[agent_name] = None
+            else:
+                self._skill_log_recorders[agent_name] = self._skill_log_recorder_fallback
+        return self._skill_log_recorders[agent_name]
 
     # ------------------------------------------------------------------
     # Public API
@@ -354,9 +375,10 @@ class ChannelCoreService:
                             source="skill_fallback", **event_meta,
                         )
                         # SLM: record successful skill invocations for evaluation
-                        if norm_status == "completed" and self._skill_log_recorder is not None and _slm_handle_skill_event is not None:
+                        _recorder = self._get_recorder(agent_name)
+                        if norm_status == "completed" and _recorder is not None and _slm_handle_skill_event is not None:
                             _slm_handle_skill_event(
-                                te, self._skill_log_recorder,
+                                te, _recorder,
                                 session_id=session_id,
                                 context_before=message_text or "",
                             )

@@ -83,8 +83,16 @@ class UserDataManager:
 
     @property
     def skill_logs_dir(self) -> Path:
-        """SLM evaluation segment logs"""
+        """SLM evaluation segment logs (global, legacy — prefer agent-scoped)"""
         return self.alfred_home / "skill_logs"
+
+    def get_agent_skill_logs_dir(self, agent_name: str) -> Path:
+        """Per-agent SLM skill usage log directory."""
+        return self.get_agent_dir(agent_name) / "skill_logs"
+
+    def get_agent_skill_eval_dir(self, agent_name: str) -> Path:
+        """Per-agent SLM evaluation data directory (version pointers + reports)."""
+        return self.get_agent_dir(agent_name) / "skill_eval"
 
     @property
     def trajectories_dir(self) -> Path:
@@ -147,23 +155,30 @@ class UserDataManager:
 
         return files
 
-    def get_skill_log_recorder(self) -> "Optional[Any]":
-        """Return a SkillLogRecorder backed by this user's skill_logs_dir / skills_dir.
+    def get_skill_log_recorder(
+        self,
+        agent_name: str = "",
+        workspace_path: Optional[Path] = None,
+    ) -> "Optional[Any]":
+        """Return a SkillLogRecorder with per-agent log isolation.
 
-        Returns None if the SLM module is unavailable (import error or construction
-        failure). Callers can inject the result directly into ChannelCoreService:
-
-            core = ChannelCoreService(..., skill_log_recorder=user_data.get_skill_log_recorder())
-
-        The recorder is constructed fresh on each call (stateless — SegmentLogger
-        uses open/write/close per append). Call once at init time and reuse.
+        Args:
+            agent_name: Agent name — logs go to ``agents/{name}/skill_logs/``.
+                        When empty, falls back to the global ``skill_logs/``.
+            workspace_path: Agent workspace for private skills lookup.
         """
         try:
             from ..core.slm.skill_log_recorder import SkillLogRecorder
-            return SkillLogRecorder(
-                skill_logs_dir=self.skill_logs_dir,
-                skills_dir=self.skills_dir,
-            )
+            logs_dir = self.get_agent_skill_logs_dir(agent_name) if agent_name else self.skill_logs_dir
+            # Build 3-tier skill dirs for version lookup
+            skill_dirs: list[Path] = []
+            if workspace_path:
+                skill_dirs.append(Path(workspace_path) / "skills")
+            skill_dirs.append(self.skills_dir)
+            bundled = Path(__file__).resolve().parents[3] / "skills"
+            if bundled.exists():
+                skill_dirs.append(bundled)
+            return SkillLogRecorder(skill_logs_dir=logs_dir, skill_dirs=skill_dirs)
         except Exception as _err:
             logger.warning("Failed to create SkillLogRecorder: %s", _err)
             return None

@@ -42,32 +42,39 @@ def read_frontmatter_version(skill_md_path: Path) -> str:
 
 
 class VersionManager:
-    """Manage skill versions under ``~/.alfred/skills/{skill_id}/``.
+    """Manage skill versions and per-agent evaluation data.
 
-    Directory layout::
+    Directory layout (per-agent eval)::
 
-        ~/.alfred/skills/{skill_id}/
-          SKILL.md                 <- loader reads this (runtime truth)
-          .eval/
-            current.json           <- pointer: current + stable version
-            versions/
-              v1.0/
-                skill.md           <- snapshot
-                metadata.json
-                eval_report.json   <- optional
+        ~/.alfred/agents/{agent}/skill_eval/{skill_id}/
+          current.json           <- pointer: current + stable version
+          versions/
+            v1.0/
+              skill.md           <- snapshot
+              metadata.json
+              eval_report.json   <- optional
+
+    When *eval_base_dir* is ``None``, falls back to the legacy layout
+    ``skills_dir/{skill_id}/.eval/`` for backward compatibility.
     """
 
-    def __init__(self, skills_dir: Path) -> None:
+    def __init__(self, skills_dir: Path, eval_base_dir: Optional[Path] = None) -> None:
         """
         Args:
-            skills_dir: ``~/.alfred/skills/`` — the global user skill directory.
+            skills_dir: Global skill directory (for reading/writing SKILL.md).
+            eval_base_dir: Per-agent eval directory. Each skill gets a
+                subdirectory ``eval_base_dir/{skill_id}/``.
+                When ``None``, uses legacy ``skills_dir/{id}/.eval/``.
         """
         self._skills_dir = skills_dir
+        self._eval_base_dir = eval_base_dir
 
     def _skill_dir(self, skill_id: str) -> Path:
         return self._skills_dir / skill_id
 
     def _eval_dir(self, skill_id: str) -> Path:
+        if self._eval_base_dir is not None:
+            return self._eval_base_dir / skill_id
         return self._skill_dir(skill_id) / ".eval"
 
     def _versions_dir(self, skill_id: str) -> Path:

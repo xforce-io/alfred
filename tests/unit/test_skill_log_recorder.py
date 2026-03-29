@@ -33,7 +33,7 @@ def _make_recorder(tmp_path: Path) -> SkillLogRecorder:
     """Create a SkillLogRecorder backed by tmp_path."""
     return SkillLogRecorder(
         skill_logs_dir=tmp_path / "skill_logs",
-        skills_dir=tmp_path / "skills",
+        skill_dirs=[tmp_path / "skills"],
     )
 
 
@@ -145,7 +145,7 @@ class TestSkillVersionFromFrontmatter:
 
         recorder = SkillLogRecorder(
             skill_logs_dir=tmp_path / "skill_logs",
-            skills_dir=skills_dir,
+            skill_dirs=[skills_dir],
         )
         recorder.maybe_record("web-search", session_id="s1", context_before="test")
 
@@ -172,7 +172,7 @@ class TestSkillVersionFromFrontmatter:
 
         recorder = SkillLogRecorder(
             skill_logs_dir=tmp_path / "skill_logs",
-            skills_dir=skills_dir,
+            skill_dirs=[skills_dir],
         )
         recorder.maybe_record("my-skill", session_id="s1")
 
@@ -214,7 +214,7 @@ class TestEvaluateReadsNewlyWrittenLogs:
 
         recorder = SkillLogRecorder(
             skill_logs_dir=tmp_path / "skill_logs",
-            skills_dir=skills_dir,
+            skill_dirs=[skills_dir],
         )
         recorder.maybe_record("web-search", session_id="s1")
 
@@ -485,7 +485,7 @@ class TestMaybeRecordWithBinarySkillMd:
 
         recorder = SkillLogRecorder(
             skill_logs_dir=tmp_path / "skill_logs",
-            skills_dir=skills_dir,
+            skill_dirs=[skills_dir],
         )
         # Must not raise — either falls back to "baseline" or returns False on error.
         # Either outcome is acceptable; what is NOT acceptable is propagating UnicodeDecodeError.
@@ -564,7 +564,7 @@ class TestCoreServicePathRecorderInjection:
 
         recorder = _make_recorder(tmp_path)
 
-        # Build a minimal ChannelCoreService with the recorder injected
+        # Build a minimal ChannelCoreService with the recorder injected (legacy path)
         session_mgr = MagicMock()
         agent_svc = MagicMock()
         user_data = MagicMock()
@@ -573,8 +573,8 @@ class TestCoreServicePathRecorderInjection:
             session_mgr, agent_svc, user_data,
             skill_log_recorder=recorder,
         )
-        # Verify the recorder is stored
-        assert core._skill_log_recorder is recorder
+        # Legacy recorder is stored as fallback
+        assert core._skill_log_recorder_fallback is recorder
 
     def test_core_service_skill_log_recorder_writes_on_completed(self, tmp_path: Path):
         """When _skill_log_recorder is set, SKILL completed events write to log."""
@@ -638,7 +638,7 @@ class TestBinarySkillMdStillWritesLogWithBaselineVersion:
 
         recorder = SkillLogRecorder(
             skill_logs_dir=tmp_path / "skill_logs",
-            skills_dir=skills_dir,
+            skill_dirs=[skills_dir],
         )
         # Must return True (log written with baseline version), not False or exception
         result = recorder.maybe_record("web-search", session_id="s1")
@@ -680,7 +680,7 @@ class TestSkillEvaluateCanConsumeRecorderLogs:
         )
 
         # Write a segment via SkillLogRecorder
-        recorder = SkillLogRecorder(skill_logs_dir=skill_logs_dir, skills_dir=skills_dir)
+        recorder = SkillLogRecorder(skill_logs_dir=skill_logs_dir, skill_dirs=[skills_dir])
         recorder.maybe_record(
             "web-search",
             session_id="sess-eval-job-001",
@@ -689,7 +689,8 @@ class TestSkillEvaluateCanConsumeRecorderLogs:
         )
 
         seg_logger = SegmentLogger(skill_logs_dir)
-        ver_mgr = VersionManager(skills_dir)
+        eval_dir = tmp_path / "skill_eval"
+        ver_mgr = VersionManager(skills_dir, eval_base_dir=eval_dir)
 
         # skill_evaluate._evaluate_one calls evaluate_skill(context.llm, ...)
         # Mock it so the job runs without a real LLM, return a real EvalReport
@@ -712,7 +713,7 @@ class TestSkillEvaluateCanConsumeRecorderLogs:
         ) as mock_evaluate:
             mock_context = MagicMock()
             mock_context.llm = MagicMock()
-            result = await _evaluate_one(mock_context, seg_logger, ver_mgr, "web-search")
+            result = await _evaluate_one(mock_context, seg_logger, ver_mgr, "web-search", tmp_path / "sessions")
 
         # _evaluate_one should have found the segment and called evaluate_skill
         assert mock_evaluate.called, "evaluate_skill was never called — segment not found by _evaluate_one"
@@ -751,23 +752,23 @@ class TestUserDataManagerFactory:
         from src.everbot.infra.user_data import UserDataManager
 
         udm = UserDataManager(alfred_home=tmp_path)
-        recorder = udm.get_skill_log_recorder()
+        recorder = udm.get_skill_log_recorder(agent_name="test-agent")
 
         assert recorder is not None
         assert isinstance(recorder, SkillLogRecorder)
 
     def test_get_skill_log_recorder_uses_correct_paths(self, tmp_path: Path):
-        """Factory uses skill_logs_dir and skills_dir from UserDataManager."""
+        """Factory uses agent-scoped skill_logs_dir."""
         from src.everbot.infra.user_data import UserDataManager
 
         udm = UserDataManager(alfred_home=tmp_path)
-        recorder = udm.get_skill_log_recorder()
+        recorder = udm.get_skill_log_recorder(agent_name="test-agent")
 
         # Write a log via the factory-created recorder
         recorder.maybe_record("web-search", session_id="sess-factory-001")
 
-        # Should appear in the UserDataManager's skill_logs_dir
-        seg_logger = SegmentLogger(udm.skill_logs_dir)
+        # Should appear in the agent's skill_logs_dir
+        seg_logger = SegmentLogger(udm.get_agent_skill_logs_dir("test-agent"))
         assert "web-search" in seg_logger.list_skills()
 
     def test_get_skill_log_recorder_with_skill_md(self, tmp_path: Path):
@@ -781,10 +782,10 @@ class TestUserDataManagerFactory:
             "---\nname: web-search\nversion: 3.0.0\n---\n", encoding="utf-8"
         )
 
-        recorder = udm.get_skill_log_recorder()
+        recorder = udm.get_skill_log_recorder(agent_name="test-agent")
         recorder.maybe_record("web-search", session_id="s1")
 
-        segments = SegmentLogger(udm.skill_logs_dir).load("web-search")
+        segments = SegmentLogger(udm.get_agent_skill_logs_dir("test-agent")).load("web-search")
         assert segments[0].skill_version == "3.0.0"
 
 
@@ -818,23 +819,23 @@ class TestEnsureCorePathHasRecorder:
     """_ensure_core() passes skill_log_recorder from __init__ to ChannelCoreService."""
 
     def test_ensure_core_uses_init_recorder(self, tmp_path: Path):
-        """ChatService._ensure_core() propagates _skill_log_recorder from __init__."""
+        """ChannelCoreService accepts both legacy recorder and factory pattern."""
         from unittest.mock import MagicMock
         from src.everbot.core.channel.core_service import ChannelCoreService
 
         recorder = _make_recorder(tmp_path)
 
-        # Simulate _ensure_core: if _core exists already, return it.
-        # If not, create with getattr(self, "_skill_log_recorder", None)
-        # Here we directly verify ChannelCoreService accepts None gracefully too.
+        # Legacy: single recorder as fallback
         core_with_none = ChannelCoreService(
             MagicMock(), MagicMock(), MagicMock(),
             skill_log_recorder=None,
         )
-        assert core_with_none._skill_log_recorder is None
+        assert core_with_none._skill_log_recorder_fallback is None
 
         core_with_recorder = ChannelCoreService(
             MagicMock(), MagicMock(), MagicMock(),
             skill_log_recorder=recorder,
         )
-        assert core_with_recorder._skill_log_recorder is recorder
+        assert core_with_recorder._skill_log_recorder_fallback is recorder
+        # _get_recorder falls back to legacy recorder
+        assert core_with_recorder._get_recorder("any_agent") is recorder

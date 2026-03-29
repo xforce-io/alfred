@@ -11,7 +11,7 @@ from .base import BaseScanner, ScanResult
 logger = logging.getLogger(__name__)
 
 # Session types to scan (user conversations and jobs, not heartbeat/workflow internals)
-_SCANNABLE_PREFIXES = ("web_session_", "job_")
+_SCANNABLE_PREFIXES = ("web_session_", "tg_session_", "job_")
 _SKIP_PREFIXES = ("heartbeat_session_", "workflow_")
 
 
@@ -213,10 +213,11 @@ class SessionScanner(BaseScanner):
     @staticmethod
     def _matches_agent(session_id: str, agent_name: str) -> bool:
         """Check if session_id belongs to the given agent."""
-        # Patterns: web_session_{agent_name}, web_session_{agent_name}_{uuid}
+        # Patterns: web_session_{agent_name}, tg_session_{agent_name}_{chat_id}
         # job_{agent_name}_{...}
         return (
             session_id.startswith(f"web_session_{agent_name}")
+            or session_id.startswith(f"tg_session_{agent_name}")
             or session_id.startswith(f"job_{agent_name}")
         )
 

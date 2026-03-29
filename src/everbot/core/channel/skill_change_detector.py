@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Set
 
-from dolphin.core.common.constants import KEY_HISTORY
+from ...infra.dolphin_compat import KEY_HISTORY
 
 logger = logging.getLogger(__name__)
 

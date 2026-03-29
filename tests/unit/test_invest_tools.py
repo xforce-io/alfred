@@ -20,7 +20,7 @@ DESIGN_NODE_IDS = {
     "fed_liquidity", "sofr_level", "move_index", "yen_carry",
     "geo_risk", "trade_risk", "fed_policy_shift", "china_stimulus",
     "northbound_flow", "market_turnover", "margin_trading", "southbound_flow",
-    "valuation_regime", "breakout_signal",
+    "valuation_regime", "breakout_signal", "gold_anomaly",
     "us_equity", "a_share", "hk_equity", "gold", "crude_oil", "us_bond",
     "usd", "btc", "copper",
 }

@@ -57,7 +57,7 @@ class TaskExecutionGate:
         if scanner:
             from ..scanners.reflection_state import ReflectionState
 
-            skill_name = getattr(task, "skill", None) or ""
+            skill_name = getattr(task, "job", None) or ""
             state = ReflectionState.load(self._workspace_path)
             try:
                 scan_result = scanner.check(state.get_watermark(skill_name), self._agent_name)
@@ -82,11 +82,11 @@ class TaskExecutionGate:
         """
         from ..scanners.reflection_state import ReflectionState
 
-        skill_name = getattr(task, "skill", None) or ""
-        if not skill_name:
+        job_name = getattr(task, "job", None) or ""
+        if not job_name:
             return
         state = ReflectionState.load(self._workspace_path)
-        state.set_watermark(skill_name, datetime.now(timezone.utc).isoformat())
+        state.set_watermark(job_name, datetime.now(timezone.utc).isoformat())
         state.save(self._workspace_path)
 
     # ── internal helpers ──────────────────────────────────────

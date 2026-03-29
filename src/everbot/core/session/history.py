@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List, Dict, Any
 from datetime import datetime
 import logging
-from dolphin.core.common.constants import KEY_HISTORY
+from ...infra.dolphin_compat import KEY_HISTORY
 from ..models.constants import LIMIT_DETAIL
 
 logger = logging.getLogger(__name__)

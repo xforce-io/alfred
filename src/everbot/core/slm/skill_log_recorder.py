@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from .models import EvaluationSegment
 from .segment_logger import SegmentLogger
@@ -33,11 +33,37 @@ class SkillLogRecorder:
     If this invariant ever changes, update the filter rule in maybe_record().
     """
 
-    def __init__(self, skill_logs_dir: Path, skills_dir: Path) -> None:
+    def __init__(
+        self,
+        skill_logs_dir: Path,
+        skill_dirs: Union[Sequence[Path], Path, None] = None,
+        *,
+        skills_dir: Optional[Path] = None,
+    ) -> None:
         # SegmentLogger is stateless across calls (open/write/close each time)
         # so sharing one instance is safe.
         self._logger = SegmentLogger(skill_logs_dir)
-        self._skills_dir = skills_dir
+        # Accept both new multi-dir list and legacy single-dir parameter.
+        if skill_dirs is not None:
+            if isinstance(skill_dirs, Path):
+                self._skill_dirs: List[Path] = [skill_dirs]
+            else:
+                self._skill_dirs = [d for d in skill_dirs if d is not None]
+        elif skills_dir is not None:
+            self._skill_dirs = [skills_dir]
+        else:
+            self._skill_dirs = []
+
+    def _find_skill_md(self, skill_name: str) -> Path:
+        """Find SKILL.md using multi-dir lookup (agent private > global > bundled)."""
+        for d in self._skill_dirs:
+            candidate = d / skill_name / "SKILL.md"
+            if candidate.exists():
+                return candidate
+        # Fallback: first dir (read_frontmatter_version handles missing)
+        if self._skill_dirs:
+            return self._skill_dirs[0] / skill_name / "SKILL.md"
+        return Path("/dev/null")
 
     def maybe_record(
         self,
@@ -70,7 +96,7 @@ class SkillLogRecorder:
             return False
 
         try:
-            skill_md_path = self._skills_dir / skill_name / "SKILL.md"
+            skill_md_path = self._find_skill_md(skill_name)
             version = read_frontmatter_version(skill_md_path)
             segment = EvaluationSegment(
                 skill_id=skill_name,

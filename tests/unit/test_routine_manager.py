@@ -441,13 +441,13 @@ def test_min_execution_interval_validation(tmp_path: Path):
     created = manager.add_routine(
         title="Good interval",
         schedule="1h",
-        skill="memory-review",
+        job="memory-review",
         scanner="session",
         min_execution_interval="2h",
         now=datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc),
     )
     assert created["min_execution_interval"] == "2h"
-    assert created["skill"] == "memory-review"
+    assert created["job"] == "memory-review"
     assert created["scanner"] == "session"
 
 
@@ -470,10 +470,10 @@ class TestHighFrequencyConstraint:
         result = mgr.add_routine(
             title="test 2m with gate",
             schedule="2m",
-            skill="memory-review",
+            job="memory-review",
             scanner="session",
         )
-        assert result["skill"] == "memory-review"
+        assert result["job"] == "memory-review"
         assert result["scanner"] == "session"
 
     def test_allows_30m_boundary(self, tmp_path):
@@ -495,7 +495,7 @@ class TestHighFrequencyConstraint:
     def test_rejects_skill_without_scanner(self, tmp_path):
         mgr = RoutineManager(tmp_path)
         with pytest.raises(ValueError, match="High-frequency"):
-            mgr.add_routine(title="test", schedule="5m", skill="memory-review")
+            mgr.add_routine(title="test", schedule="5m", job="memory-review")
 
     def test_rejects_scanner_without_skill(self, tmp_path):
         mgr = RoutineManager(tmp_path)

@@ -7,14 +7,15 @@ tags: [papers, research, ai, ml, arxiv, huggingface, analysis]
 
 # Paper Discovery Skill
 
-Discover trending AI/ML papers and generate structured analysis reports. Also use this skill when a user asks about a specific paper from a previous push (e.g. "这篇详细说说", "深度解读", "原文") — use --paper-id to fetch full details.
+Discover, search, and analyze AI/ML papers. Use this skill whenever the user mentions a paper by name, asks to find/search a paper, asks about a paper from a previous push, or wants a deep dive on any paper. This skill provides CLI tools that can fetch paper metadata (abstract, authors, links) by arXiv ID or keyword — always prefer these over raw curl/wget.
 
 ## When to Use
 
-- User wants to discover recent AI/ML papers
-- **User asks about a specific paper from a previous push** (follow-up questions, deep dive requests)
+- **User mentions a paper by name** (e.g. "最近有个工作叫 SkillCraft", "看看 MEMO 这篇")
+- **User asks about a paper from a previous push** (e.g. "这篇详细说说", "深度解读")
+- **User wants to search/find papers** by keyword or topic
+- User wants to discover trending AI/ML papers
 - Need to analyze or summarize academic papers
-- Looking for trending research in specific domains
 - Scheduled daily paper digest routines
 
 ## IMPORTANT: Always Use the CLI Script
@@ -22,7 +23,7 @@ Discover trending AI/ML papers and generate structured analysis reports. Also us
 **Do NOT write inline Python code to fetch or parse papers.** Always use the provided CLI script:
 
 ```
-python skills/paper-discovery/scripts/fetch_papers.py [options]
+python3 skills/paper-discovery/scripts/fetch_papers.py [options]
 ```
 
 The script uses HuggingFace's official JSON API (with arXiv fallback) and handles all fetching, parsing, error handling, and formatting.
@@ -32,45 +33,53 @@ The script uses HuggingFace's official JSON API (with arXiv fallback) and handle
 ### Fetch papers as JSON (for programmatic use)
 
 ```bash
-python skills/paper-discovery/scripts/fetch_papers.py --source huggingface --limit 10 --format json
+python3 skills/paper-discovery/scripts/fetch_papers.py --source huggingface --limit 10 --format json
 ```
 
 ### Fetch from both sources
 
 ```bash
-python skills/paper-discovery/scripts/fetch_papers.py --source both --limit 5 --format json
+python3 skills/paper-discovery/scripts/fetch_papers.py --source both --limit 5 --format json
 ```
 
 ### Fetch with specific arXiv category
 
 ```bash
-python skills/paper-discovery/scripts/fetch_papers.py --source arxiv --category cs.CL --limit 5 --format json
+python3 skills/paper-discovery/scripts/fetch_papers.py --source arxiv --category cs.CL --limit 5 --format json
 ```
 
 ### Formatted report output (daily digest)
 
 ```bash
-python skills/paper-discovery/scripts/fetch_papers.py --source both --limit 5 --format report
+python3 skills/paper-discovery/scripts/fetch_papers.py --source both --limit 5 --format report
 ```
 
 ### With one-line Chinese summary (requires LLM)
 
 ```bash
-python skills/paper-discovery/scripts/fetch_papers.py --source both --limit 5 --format report --with-summary
+python3 skills/paper-discovery/scripts/fetch_papers.py --source both --limit 5 --format report --with-summary
 ```
+
+### Search papers by title keyword
+
+```bash
+python3 skills/paper-discovery/scripts/fetch_papers.py --search "SkillCraft" --format json
+```
+
+Use this when the user mentions a paper by name but you don't have the arXiv ID. Returns matching papers with full abstracts.
 
 ### Fetch a single paper by arXiv ID
 
 ```bash
-python skills/paper-discovery/scripts/fetch_papers.py --paper-id 2501.12345 --format json
+python3 skills/paper-discovery/scripts/fetch_papers.py --paper-id 2501.12345 --format json
 ```
 
-This fetches full metadata (including complete abstract) for a specific paper. Use this when a user asks about a particular paper from a previous push.
+This fetches full metadata (including complete abstract) for a specific paper.
 
 ### Human-readable output
 
 ```bash
-python skills/paper-discovery/scripts/fetch_papers.py --source huggingface --limit 5
+python3 skills/paper-discovery/scripts/fetch_papers.py --source huggingface --limit 5
 ```
 
 ### CLI Options
@@ -83,6 +92,7 @@ python skills/paper-discovery/scripts/fetch_papers.py --source huggingface --lim
 | `--sort`    | `heat`, `date`, `upvotes`         | `heat`        | Sort order                 |
 | `--category`| arXiv category string             | `cs.AI`       | arXiv category (arXiv only)|
 | `--paper-id`| arXiv ID string                   | none          | Fetch single paper by ID   |
+| `--search`  | title keyword string              | none          | Search arXiv by title      |
 | `--with-summary`| flag                          | off           | Generate one-line Chinese summary via LLM |
 
 ## JSON Output Fields
@@ -115,7 +125,7 @@ Each paper in JSON output includes:
 Use `_bash()` to call the script and capture JSON output:
 
 ```
-_bash("python skills/paper-discovery/scripts/fetch_papers.py --source both --limit 10 --format json")
+_bash("python3 skills/paper-discovery/scripts/fetch_papers.py --source both --limit 10 --format json")
 ```
 
 ### Step 2: Parse and Analyze
@@ -147,17 +157,13 @@ Format the report for the user with:
    ...
 ```
 
-## Responding to Follow-up Questions About a Paper
+## How to Look Up a Paper
 
-When a user asks about a specific paper from a previous push (e.g. "memo 这篇", "第二篇论文详细说说"):
+- **User gives a name** (e.g. "SkillCraft"): use `--search "SkillCraft" --format json`
+- **You have the arXiv ID**: use `--paper-id 2603.00718 --format json`
+- **User asks about a paper from a push**: extract paper_id from push data, use `--paper-id`
 
-1. **Use `--paper-id` to fetch full details**: Extract the paper_id from the previous push data and run:
-   ```
-   _bash("python skills/paper-discovery/scripts/fetch_papers.py --paper-id <arxiv_id> --format json")
-   ```
-2. **Present the full abstract** and any available ai_summary, ai_keywords, github_repo
-3. **Provide direct links** (arXiv, PDF, HuggingFace)
-4. **Do NOT say you cannot access the internet** — you have _bash and can fetch paper metadata via the script
+Always use the CLI script — do NOT curl/wget PDFs or scrape HTML manually.
 
 ## Push Format Requirements
 

@@ -11,6 +11,7 @@ import asyncio
 import importlib
 import json
 import logging
+import re
 import time as _time
 import uuid
 from dataclasses import dataclass, field
@@ -139,6 +140,17 @@ class CronExecutor:
         self.routine_manager = routine_manager
         self.delivery = delivery
         self.broadcast_scope = broadcast_scope
+
+        # SLM: record skill invocations for evaluation (per-agent isolation)
+        try:
+            from ...infra.user_data import get_user_data_manager as _get_udm
+            _udm = _get_udm()
+            self._skill_log_recorder: Any = _udm.get_skill_log_recorder(
+                agent_name=agent_name,
+                workspace_path=workspace_path,
+            )
+        except Exception:
+            self._skill_log_recorder = None
 
     # ── Public API ────────────────────────────────────────────
 
@@ -496,6 +508,10 @@ class CronExecutor:
             )
             await self.delivery.inject_to_history(result, run_id)
             await self.delivery._emit_realtime(result, run_id)
+
+            # SLM: record skill invocation for evaluation
+            self._record_skill_log(task, result, job_session_id)
+
             return result
         except Exception as exc:
             await self.session_manager.save_session(job_session_id, agent)
@@ -608,6 +624,8 @@ class CronExecutor:
             mailbox=MailboxAdapter(self.session_manager, primary_session_id, self.agent_name),
             llm=_SkillLLMClient(),
             scan_result=scan_result,
+            skill_logs_dir=user_data.get_agent_skill_logs_dir(self.agent_name),
+            skill_eval_dir=user_data.get_agent_skill_eval_dir(self.agent_name),
         )
 
     def _get_scanner(self, scanner_type: Optional[str]) -> Optional[Any]:
@@ -675,6 +693,59 @@ class CronExecutor:
     @staticmethod
     def _task_mode(task: Any) -> str:
         return str(getattr(task, "execution_mode", "inline") or "inline")
+
+    def _record_skill_log(self, task: Task, output: str, session_id: str) -> None:
+        """Record skill invocations to the SLM log after task completion.
+
+        Reads the trajectory file to find which skills the LLM actually
+        loaded via _load_resource_skill(). Each unique skill is recorded once.
+        """
+        if self._skill_log_recorder is None:
+            return
+        desc = str(getattr(task, "description", "") or "")
+        skill_names = self._extract_skills_from_trajectory(session_id)
+        for skill_name in skill_names:
+            try:
+                self._skill_log_recorder.maybe_record(
+                    skill_name,
+                    session_id=session_id,
+                    skill_output=output or "",
+                    context_before=desc,
+                )
+            except Exception as e:
+                logger.debug("Failed to record skill log for %s: %s", skill_name, e)
+
+    def _extract_skills_from_trajectory(self, session_id: str) -> list[str]:
+        """Extract skill names from trajectory tool_calls of _load_resource_skill."""
+        try:
+            from ...infra.user_data import get_user_data_manager
+            udm = get_user_data_manager()
+            traj_path = udm.get_session_trajectory_path(self.agent_name, session_id)
+            if not traj_path.exists():
+                return []
+            data = json.loads(traj_path.read_text(encoding="utf-8"))
+            traj = data.get("trajectory", []) if isinstance(data, dict) else []
+            seen: set[str] = set()
+            for entry in traj:
+                if not isinstance(entry, dict) or entry.get("role") != "assistant":
+                    continue
+                for tc in entry.get("tool_calls", []):
+                    fn = tc.get("function", {})
+                    if fn.get("name") != "_load_resource_skill":
+                        continue
+                    args = fn.get("arguments", "")
+                    if isinstance(args, str):
+                        m = re.search(r'"skill_name"\s*:\s*"([^"]+)"', args)
+                        if m:
+                            seen.add(m.group(1))
+                    elif isinstance(args, dict):
+                        name = args.get("skill_name", "")
+                        if name:
+                            seen.add(name)
+            return list(seen)
+        except Exception as e:
+            logger.debug("Failed to extract skills from trajectory %s: %s", session_id, e)
+            return []
 
     def _write_event(self, event_type: str, **kwargs: Any) -> None:
         """Write a structured event to the JSONL events file."""

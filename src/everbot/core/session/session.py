@@ -782,7 +782,7 @@ class SessionManager:
             ctx = getattr(getattr(agent, "executor", None), "context", None)
             if ctx is None:
                 return
-            from dolphin.core.common.constants import KEY_HISTORY
+            from ...infra.dolphin_compat import KEY_HISTORY
             if hasattr(ctx, "set_variable"):
                 ctx.set_variable(KEY_HISTORY, [])
             if hasattr(ctx, "_history"):

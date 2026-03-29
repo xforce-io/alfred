@@ -319,51 +319,62 @@ class TestMergeEntries:
 # ── Task Manager Extension Tests ───────────────────────────────
 
 
-class TestTaskSkillFields:
-    def test_skill_fields_default_none(self):
+class TestTaskJobFields:
+    def test_job_fields_default_none(self):
         from src.everbot.core.tasks.task_manager import Task
         t = Task(id="test", title="Test")
-        assert t.skill is None
+        assert t.job is None
         assert t.scanner is None
         assert t.min_execution_interval is None
 
-    def test_skill_only_no_scanner(self):
-        """Skill task without scanner — the default path."""
+    def test_job_only_no_scanner(self):
+        """Job task without scanner — the default path."""
         from src.everbot.core.tasks.task_manager import Task
         data = {
             "id": "reflection_memory_review",
             "title": "Memory Review",
-            "skill": "memory-review",
+            "job": "memory-review",
             "schedule": "2h",
             "execution_mode": "inline",
         }
         t = Task.from_dict(data)
-        assert t.skill == "memory-review"
+        assert t.job == "memory-review"
         assert t.scanner is None  # No scanner configured
 
-    def test_skill_with_optional_scanner(self):
-        """Skill task with optional scanner gate."""
+    def test_job_with_optional_scanner(self):
+        """Job task with optional scanner gate."""
         from src.everbot.core.tasks.task_manager import Task
         data = {
             "id": "reflection_memory_review",
             "title": "Memory Review",
-            "skill": "memory-review",
+            "job": "memory-review",
             "scanner": "session",
             "min_execution_interval": "2h",
             "execution_mode": "inline",
         }
         t = Task.from_dict(data)
-        assert t.skill == "memory-review"
+        assert t.job == "memory-review"
         assert t.scanner == "session"
         assert t.min_execution_interval == "2h"
 
-    def test_skill_fields_roundtrip(self):
+    def test_job_fields_roundtrip(self):
         from src.everbot.core.tasks.task_manager import Task
-        t = Task(id="test", title="Test", skill="memory-review", scanner="session")
+        t = Task(id="test", title="Test", job="memory-review", scanner="session")
         d = t.to_dict()
         t2 = Task.from_dict(d)
-        assert t2.skill == "memory-review"
+        assert t2.job == "memory-review"
         assert t2.scanner == "session"
+
+    def test_backward_compat_skill_key(self):
+        """Legacy data with 'skill' key should be read as 'job'."""
+        from src.everbot.core.tasks.task_manager import Task
+        data = {
+            "id": "legacy_task",
+            "title": "Legacy",
+            "skill": "memory-review",
+        }
+        t = Task.from_dict(data)
+        assert t.job == "memory-review"
 
 
 # ── SkillContext Tests ─────────────────────────────────────────

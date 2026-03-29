@@ -15,9 +15,9 @@ from src.everbot.core.tasks.execution_gate import GateVerdict, TaskExecutionGate
 
 def _make_task(**overrides):
     defaults = {
-        "id": "skill_1",
-        "title": "Skill Task",
-        "skill": "test-skill",
+        "id": "job_1",
+        "title": "Job Task",
+        "job": "test-skill",
         "scanner": "session",
         "min_execution_interval": None,
         "last_run_at": None,
@@ -142,9 +142,9 @@ class TestGateCommit:
         wm = state.get_watermark("test-skill")
         assert before <= wm <= after
 
-    def test_commit_no_skill_is_noop(self, tmp_path: Path):
-        """commit() with no skill name should not write anything."""
-        task = _make_task(skill=None)
+    def test_commit_no_job_is_noop(self, tmp_path: Path):
+        """commit() with no job name should not write anything."""
+        task = _make_task(job=None)
         verdict = GateVerdict(allowed=True)
         gate = TaskExecutionGate(tmp_path, "agent", lambda t: None)
 

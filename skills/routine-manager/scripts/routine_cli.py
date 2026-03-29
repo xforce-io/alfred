@@ -39,9 +39,9 @@ def _build_parser() -> argparse.ArgumentParser:
     add_p.add_argument("--allow-duplicate", action="store_true")
     add_p.add_argument("--next-run-at", default=None, help="ISO-8601 datetime for one-shot tasks")
     add_p.add_argument("--delay", default=None, help="Relative delay like '1m', '30s', '2h' (converted to --next-run-at)")
-    add_p.add_argument("--skill", default=None, help="Skill name to bind (e.g. 'memory-review')")
+    add_p.add_argument("--job", default=None, help="Job module name to bind (e.g. 'memory-review'). Refers to internal cron job modules in src/everbot/core/jobs/, NOT user-facing resource skills.")
     add_p.add_argument("--scanner", default=None, help="Scanner gate type (e.g. 'session')")
-    add_p.add_argument("--min-execution-interval", default=None, help="Min interval between skill executions (e.g. '2h')")
+    add_p.add_argument("--min-execution-interval", default=None, help="Min interval between job executions (e.g. '2h')")
 
     upd_p = sub.add_parser("update", help="Update routine")
     upd_p.add_argument("--id", required=True, dest="task_id")
@@ -84,8 +84,8 @@ def _print_error(message: str) -> int:
 
 def _format_table(routines: list[dict[str, Any]]) -> str:
     """Format routines as a fixed-width text table."""
-    headers = ["ID", "Title", "Schedule", "State", "Enabled", "Skill", "Next Run"]
-    keys = ["id", "title", "schedule", "state", "enabled", "skill", "next_run_at"]
+    headers = ["ID", "Title", "Schedule", "State", "Enabled", "Job", "Next Run"]
+    keys = ["id", "title", "schedule", "state", "enabled", "job", "next_run_at"]
     widths = [20, 24, 14, 10, 8, 16, 24]
 
     def _cell(value: Any, width: int) -> str:
@@ -137,7 +137,7 @@ def main() -> int:
                 timeout_seconds=args.timeout_seconds,
                 allow_duplicate=args.allow_duplicate,
                 next_run_at=next_run_at,
-                skill=args.skill,
+                job=args.job,
                 scanner=args.scanner,
                 min_execution_interval=args.min_execution_interval,
             )

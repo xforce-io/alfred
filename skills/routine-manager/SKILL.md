@@ -43,7 +43,7 @@ python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROO
 Table output example:
 
 ```
-ID                    Title                     Schedule        State       Enabled   Skill             Next Run
+ID                    Title                     Schedule        State       Enabled   Job               Next Run
 ────────────────────  ────────────────────────  ──────────────  ──────────  ────────  ────────────────  ────────────────────────
 routine_86e85e59      每日新闻简报               1d              pending     True      -                 2026-03-05T09:10:42
 ```
@@ -100,25 +100,25 @@ python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROO
   --next-run-at "2026-02-14T08:00:00+08:00"
 ```
 
-### add_routine (skill-bound with scanner gate)
+### add_routine (job-bound with scanner gate)
 
-For routines that trigger a skill and optionally gate execution on a scanner:
+For routines that trigger an internal cron job and optionally gate execution on a scanner:
 
 ```bash
 python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROOT" add \
   --title "会话变化分析" \
   --description "当会话发生变化时，分析潜在问题" \
   --schedule "30m" \
-  --skill "memory-review" \
+  --job "memory-review" \
   --scanner "session" \
   --min-execution-interval "2h" \
   --execution-mode "isolated" \
   --source "manual"
 ```
 
-- `--skill`: The skill to invoke when the routine fires.
+- `--job`: The internal cron job module to invoke when the routine fires. These are Python modules in `src/everbot/core/jobs/` (e.g. `memory-review`, `health-check`, `task-discover`), NOT user-facing resource skills in the `skills/` directory.
 - `--scanner`: Scanner gate type; the routine only executes if the scanner detects changes.
-- `--min-execution-interval`: Minimum interval between actual skill executions (e.g. `2h`), even if the scanner triggers more frequently.
+- `--min-execution-interval`: Minimum interval between actual job executions (e.g. `2h`), even if the scanner triggers more frequently.
 
 ### update_routine
 
@@ -145,9 +145,9 @@ python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROO
 
 ## Frequency Constraints
 
-- **Schedules under 30 minutes** (e.g. `2m`, `5m`, `15m`) **require** `--skill` and `--scanner` flags. Without a scanner gate, the routine executes a full LLM conversation on every cycle — expensive and produces duplicate messages.
+- **Schedules under 30 minutes** (e.g. `2m`, `5m`, `15m`) **require** `--job` and `--scanner` flags. Without a scanner gate, the routine executes a full LLM conversation on every cycle — expensive and produces duplicate messages.
 - Without `--scanner`, no deduplication occurs — the task runs unconditionally every cycle.
-- `--min-execution-interval` provides additional throttle: even if the scanner detects changes, the skill will not run more frequently than this interval.
+- `--min-execution-interval` provides additional throttle: even if the scanner detects changes, the job will not run more frequently than this interval.
 
 ## Safety Notes
 
@@ -155,4 +155,4 @@ python skills/routine-manager/scripts/routine_cli.py --workspace "$WORKSPACE_ROO
 - For destructive operations (`--hard`), confirm user intent first.
 - Keep `execution_mode` explicit: `inline` for short tasks, `isolated` for long/complex tasks.
 - `execution_mode=auto` is supported and will be inferred by framework heuristics.
-- High-frequency schedules (`< 30m`) without `--skill` and `--scanner` are rejected to prevent runaway LLM execution.
+- High-frequency schedules (`< 30m`) without `--job` and `--scanner` are rejected to prevent runaway LLM execution.

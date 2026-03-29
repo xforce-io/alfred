@@ -13,7 +13,6 @@ import pytest
 
 from src.everbot.core.slm.judge import evaluate_skill
 from src.everbot.core.slm.models import EvaluationSegment, VersionStatus
-from src.everbot.core.slm.segment_logger import SegmentLogger
 from src.everbot.core.slm.version_manager import VersionManager
 
 
@@ -175,36 +174,33 @@ class TestSLMRealLLMLifecycle:
     async def test_real_lifecycle_upgrade_and_rollback(self, tmp_path: Path):
         """Full lifecycle: publish → evaluate → upgrade → evaluate → decide."""
         skills_dir = tmp_path / "skills"
-        logs_dir = tmp_path / "skill_logs"
         skills_dir.mkdir()
-        logs_dir.mkdir()
 
         ver_mgr = VersionManager(skills_dir)
-        seg_logger = SegmentLogger(logs_dir)
         llm = _RealLLMClient()
 
-        # ── Publish v1.0 and log good interactions ──
+        # ── Publish v1.0 and evaluate good interactions ──
         ver_mgr.publish("coding-master", "1.0", SKILL_V1)
 
-        seg_logger.append(EvaluationSegment(
-            skill_id="coding-master", skill_version="1.0",
-            triggered_at="2026-03-17T10:00:00Z",
-            context_before="user: Write a function that reverses a string.",
-            skill_output="```python\ndef reverse(s): return s[::-1]\n```\nSimple and Pythonic.",
-            context_after="user: Nice and clean, exactly what I wanted.",
-            session_id="s1",
-        ))
-        seg_logger.append(EvaluationSegment(
-            skill_id="coding-master", skill_version="1.0",
-            triggered_at="2026-03-17T11:00:00Z",
-            context_before="user: How to read a CSV file?",
-            skill_output="```python\nimport csv\nwith open('data.csv') as f:\n    reader = csv.reader(f)\n    for row in reader:\n        print(row)\n```",
-            context_after="user: Works perfectly, thanks.",
-            session_id="s2",
-        ))
+        v1_segs = [
+            EvaluationSegment(
+                skill_id="coding-master", skill_version="1.0",
+                triggered_at="2026-03-17T10:00:00Z",
+                context_before="user: Write a function that reverses a string.",
+                skill_output="```python\ndef reverse(s): return s[::-1]\n```\nSimple and Pythonic.",
+                context_after="user: Nice and clean, exactly what I wanted.",
+                session_id="s1",
+            ),
+            EvaluationSegment(
+                skill_id="coding-master", skill_version="1.0",
+                triggered_at="2026-03-17T11:00:00Z",
+                context_before="user: How to read a CSV file?",
+                skill_output="```python\nimport csv\nwith open('data.csv') as f:\n    reader = csv.reader(f)\n    for row in reader:\n        print(row)\n```",
+                context_after="user: Works perfectly, thanks.",
+                session_id="s2",
+            ),
+        ]
 
-        # Real LLM evaluation of v1.0
-        v1_segs = seg_logger.load_by_version("coding-master", "1.0")
         report_v1 = await evaluate_skill(llm, "coding-master", "1.0", v1_segs)
         ver_mgr.save_eval_report("coding-master", "1.0", report_v1)
         ver_mgr.activate("coding-master", "1.0")
@@ -213,28 +209,28 @@ class TestSLMRealLLMLifecycle:
 
         assert report_v1.is_healthy, f"v1.0 should be healthy: {report_v1.mean_satisfaction:.2f}"
 
-        # ── Publish v2.0 and log bad interactions ──
+        # ── Publish v2.0 and evaluate bad interactions ──
         ver_mgr.publish("coding-master", "2.0", SKILL_V2)
 
-        seg_logger.append(EvaluationSegment(
-            skill_id="coding-master", skill_version="2.0",
-            triggered_at="2026-03-18T10:00:00Z",
-            context_before="user: Add error handling to my API endpoint.",
-            skill_output="I've rewritten your entire API from scratch using a different framework.",
-            context_after="user: I didn't ask you to rewrite everything! Just add try/except. Now nothing works. Revert all changes.",
-            session_id="s3",
-        ))
-        seg_logger.append(EvaluationSegment(
-            skill_id="coding-master", skill_version="2.0",
-            triggered_at="2026-03-18T11:00:00Z",
-            context_before="user: Fix the null pointer in line 42.",
-            skill_output="The issue is complex. Let me analyze... [500 words of analysis with no code fix]",
-            context_after="user: You wrote a wall of text but didn't actually fix anything. Just fix line 42.",
-            session_id="s4",
-        ))
+        v2_segs = [
+            EvaluationSegment(
+                skill_id="coding-master", skill_version="2.0",
+                triggered_at="2026-03-18T10:00:00Z",
+                context_before="user: Add error handling to my API endpoint.",
+                skill_output="I've rewritten your entire API from scratch using a different framework.",
+                context_after="user: I didn't ask you to rewrite everything! Just add try/except. Now nothing works. Revert all changes.",
+                session_id="s3",
+            ),
+            EvaluationSegment(
+                skill_id="coding-master", skill_version="2.0",
+                triggered_at="2026-03-18T11:00:00Z",
+                context_before="user: Fix the null pointer in line 42.",
+                skill_output="The issue is complex. Let me analyze... [500 words of analysis with no code fix]",
+                context_after="user: You wrote a wall of text but didn't actually fix anything. Just fix line 42.",
+                session_id="s4",
+            ),
+        ]
 
-        # Real LLM evaluation of v2.0
-        v2_segs = seg_logger.load_by_version("coding-master", "2.0")
         report_v2 = await evaluate_skill(llm, "coding-master", "2.0", v2_segs)
         ver_mgr.save_eval_report("coding-master", "2.0", report_v2)
 
@@ -267,54 +263,52 @@ class TestSLMRealLLMLifecycle:
         4. Verify v2.0 is the running version and both reports are comparable
         """
         skills_dir = tmp_path / "skills"
-        logs_dir = tmp_path / "skill_logs"
         skills_dir.mkdir()
-        logs_dir.mkdir()
 
         ver_mgr = VersionManager(skills_dir)
-        seg_logger = SegmentLogger(logs_dir)
         llm = _RealLLMClient()
 
         # ── Phase 1: v1.0 — functional but basic ──
         ver_mgr.publish("coding-master", "1.0", SKILL_V1)
 
         # v1.0 segments: correct answers, user accepts but wants more depth
-        seg_logger.append(EvaluationSegment(
-            skill_id="coding-master", skill_version="1.0",
-            triggered_at="2026-03-17T10:00:00Z",
-            context_before="user: How do I handle errors in async Python code?",
-            skill_output=(
-                "You can use try/except in async functions:\n"
-                "```python\nasync def fetch():\n    try:\n        result = await get_data()\n"
-                "    except Exception as e:\n        print(e)\n```"
+        v1_segs = [
+            EvaluationSegment(
+                skill_id="coding-master", skill_version="1.0",
+                triggered_at="2026-03-17T10:00:00Z",
+                context_before="user: How do I handle errors in async Python code?",
+                skill_output=(
+                    "You can use try/except in async functions:\n"
+                    "```python\nasync def fetch():\n    try:\n        result = await get_data()\n"
+                    "    except Exception as e:\n        print(e)\n```"
+                ),
+                context_after="user: That works, but could you also show timeout handling? I'll figure it out for now.",
+                session_id="v1-1",
             ),
-            context_after="user: That works, but could you also show timeout handling? I'll figure it out for now.",
-            session_id="v1-1",
-        ))
-        seg_logger.append(EvaluationSegment(
-            skill_id="coding-master", skill_version="1.0",
-            triggered_at="2026-03-17T11:00:00Z",
-            context_before="user: What's the best way to parse JSON in Python?",
-            skill_output="Use `json.loads(text)` to parse a JSON string into a dict.\n```python\nimport json\ndata = json.loads(raw_text)\n```",
-            context_after="user: Ok that's the basics. I'll look up nested access patterns myself.",
-            session_id="v1-2",
-        ))
-        seg_logger.append(EvaluationSegment(
-            skill_id="coding-master", skill_version="1.0",
-            triggered_at="2026-03-17T12:00:00Z",
-            context_before="user: Help me write a retry decorator.",
-            skill_output=(
-                "```python\nimport time\ndef retry(func, retries=3):\n"
-                "    def wrapper(*args):\n        for i in range(retries):\n"
-                "            try: return func(*args)\n"
-                "            except Exception: time.sleep(1)\n"
-                "        return func(*args)\n    return wrapper\n```"
+            EvaluationSegment(
+                skill_id="coding-master", skill_version="1.0",
+                triggered_at="2026-03-17T11:00:00Z",
+                context_before="user: What's the best way to parse JSON in Python?",
+                skill_output="Use `json.loads(text)` to parse a JSON string into a dict.\n```python\nimport json\ndata = json.loads(raw_text)\n```",
+                context_after="user: Ok that's the basics. I'll look up nested access patterns myself.",
+                session_id="v1-2",
             ),
-            context_after="user: This works for basic cases. Would be nicer with exponential backoff but it'll do for now.",
-            session_id="v1-3",
-        ))
+            EvaluationSegment(
+                skill_id="coding-master", skill_version="1.0",
+                triggered_at="2026-03-17T12:00:00Z",
+                context_before="user: Help me write a retry decorator.",
+                skill_output=(
+                    "```python\nimport time\ndef retry(func, retries=3):\n"
+                    "    def wrapper(*args):\n        for i in range(retries):\n"
+                    "            try: return func(*args)\n"
+                    "            except Exception: time.sleep(1)\n"
+                    "        return func(*args)\n    return wrapper\n```"
+                ),
+                context_after="user: This works for basic cases. Would be nicer with exponential backoff but it'll do for now.",
+                session_id="v1-3",
+            ),
+        ]
 
-        v1_segs = seg_logger.load_by_version("coding-master", "1.0")
         report_v1 = await evaluate_skill(llm, "coding-master", "1.0", v1_segs)
         ver_mgr.save_eval_report("coding-master", "1.0", report_v1)
         ver_mgr.activate("coding-master", "1.0")
@@ -336,71 +330,72 @@ class TestSLMRealLLMLifecycle:
         assert ver_mgr.get_metadata("coding-master", "2.0").status == VersionStatus.TESTING
 
         # v2.0 segments: skill gives complete, high-quality answers
-        seg_logger.append(EvaluationSegment(
-            skill_id="coding-master", skill_version="2.0",
-            triggered_at="2026-03-18T10:00:00Z",
-            context_before="user: How do I handle errors in async Python code?",
-            skill_output=(
-                "Here's a complete pattern for async error handling:\n\n"
-                "```python\nimport asyncio\n\nasync def fetch_data(url):\n"
-                "    try:\n        async with aiohttp.ClientSession() as session:\n"
-                "            async with session.get(url) as resp:\n"
-                "                return await resp.json()\n"
-                "    except aiohttp.ClientError as e:\n"
-                "        logger.error(f'Request failed: {e}')\n"
-                "        raise\n    except asyncio.TimeoutError:\n"
-                "        logger.warning(f'Timeout for {url}')\n"
-                "        return None\n```\n\n"
-                "Key points: catch specific exceptions, log before re-raising, "
-                "use `asyncio.TimeoutError` for timeout handling."
+        v2_segs = [
+            EvaluationSegment(
+                skill_id="coding-master", skill_version="2.0",
+                triggered_at="2026-03-18T10:00:00Z",
+                context_before="user: How do I handle errors in async Python code?",
+                skill_output=(
+                    "Here's a complete pattern for async error handling:\n\n"
+                    "```python\nimport asyncio\n\nasync def fetch_data(url):\n"
+                    "    try:\n        async with aiohttp.ClientSession() as session:\n"
+                    "            async with session.get(url) as resp:\n"
+                    "                return await resp.json()\n"
+                    "    except aiohttp.ClientError as e:\n"
+                    "        logger.error(f'Request failed: {e}')\n"
+                    "        raise\n    except asyncio.TimeoutError:\n"
+                    "        logger.warning(f'Timeout for {url}')\n"
+                    "        return None\n```\n\n"
+                    "Key points: catch specific exceptions, log before re-raising, "
+                    "use `asyncio.TimeoutError` for timeout handling."
+                ),
+                context_after="user: That's a great example, covers exactly what I needed. Moving on.",
+                session_id="v2-1",
             ),
-            context_after="user: That's a great example, covers exactly what I needed. Moving on.",
-            session_id="v2-1",
-        ))
-        seg_logger.append(EvaluationSegment(
-            skill_id="coding-master", skill_version="2.0",
-            triggered_at="2026-03-18T11:00:00Z",
-            context_before="user: What's the best way to parse JSON in Python?",
-            skill_output=(
-                "Use `json.loads()` with proper error handling:\n\n"
-                "```python\nimport json\n\ndef safe_parse(raw: str, default=None):\n"
-                "    try:\n        data = json.loads(raw)\n    except json.JSONDecodeError as e:\n"
-                "        logger.warning(f'Invalid JSON: {e}')\n        return default\n"
-                "    return data\n```\n\n"
-                "For nested access, use `dict.get()` chains or a helper:\n"
-                "```python\ndef get_nested(d, *keys, default=None):\n"
-                "    for k in keys:\n        if not isinstance(d, dict): return default\n"
-                "        d = d.get(k, default)\n    return d\n"
-                "# Usage: get_nested(data, 'user', 'address', 'city')\n```"
+            EvaluationSegment(
+                skill_id="coding-master", skill_version="2.0",
+                triggered_at="2026-03-18T11:00:00Z",
+                context_before="user: What's the best way to parse JSON in Python?",
+                skill_output=(
+                    "Use `json.loads()` with proper error handling:\n\n"
+                    "```python\nimport json\n\ndef safe_parse(raw: str, default=None):\n"
+                    "    try:\n        data = json.loads(raw)\n    except json.JSONDecodeError as e:\n"
+                    "        logger.warning(f'Invalid JSON: {e}')\n        return default\n"
+                    "    return data\n```\n\n"
+                    "For nested access, use `dict.get()` chains or a helper:\n"
+                    "```python\ndef get_nested(d, *keys, default=None):\n"
+                    "    for k in keys:\n        if not isinstance(d, dict): return default\n"
+                    "        d = d.get(k, default)\n    return d\n"
+                    "# Usage: get_nested(data, 'user', 'address', 'city')\n```"
+                ),
+                context_after="user: Perfect, the nested access helper is exactly the pattern I was looking for.",
+                session_id="v2-2",
             ),
-            context_after="user: Perfect, the nested access helper is exactly the pattern I was looking for.",
-            session_id="v2-2",
-        ))
-        seg_logger.append(EvaluationSegment(
-            skill_id="coding-master", skill_version="2.0",
-            triggered_at="2026-03-18T12:00:00Z",
-            context_before="user: Help me write a retry decorator.",
-            skill_output=(
-                "Here's a production-ready retry decorator with exponential backoff:\n\n"
-                "```python\nimport functools, time\n\n"
-                "def retry(max_attempts=3, backoff=1.0, exceptions=(Exception,)):\n"
-                "    def decorator(func):\n        @functools.wraps(func)\n"
-                "        def wrapper(*args, **kwargs):\n"
-                "            for attempt in range(max_attempts):\n"
-                "                try:\n                    return func(*args, **kwargs)\n"
-                "                except exceptions as e:\n"
-                "                    if attempt == max_attempts - 1:\n"
-                "                        raise\n"
-                "                    wait = backoff * (2 ** attempt)\n"
-                "                    time.sleep(wait)\n"
-                "            return wrapper\n    return decorator\n```\n\n"
-                "Usage: `@retry(max_attempts=5, backoff=0.5, exceptions=(IOError, TimeoutError))`"
+            EvaluationSegment(
+                skill_id="coding-master", skill_version="2.0",
+                triggered_at="2026-03-18T12:00:00Z",
+                context_before="user: Help me write a retry decorator.",
+                skill_output=(
+                    "Here's a production-ready retry decorator with exponential backoff:\n\n"
+                    "```python\nimport functools, time\n\n"
+                    "def retry(max_attempts=3, backoff=1.0, exceptions=(Exception,)):\n"
+                    "    def decorator(func):\n        @functools.wraps(func)\n"
+                    "        def wrapper(*args, **kwargs):\n"
+                    "            for attempt in range(max_attempts):\n"
+                    "                try:\n                    return func(*args, **kwargs)\n"
+                    "                except exceptions as e:\n"
+                    "                    if attempt == max_attempts - 1:\n"
+                    "                        raise\n"
+                    "                    wait = backoff * (2 ** attempt)\n"
+                    "                    time.sleep(wait)\n"
+                    "            return wrapper\n    return decorator\n```\n\n"
+                    "Usage: `@retry(max_attempts=5, backoff=0.5, exceptions=(IOError, TimeoutError))`"
+                ),
+                context_after="user: Excellent, this is production-ready. The configurable backoff and exception filtering are exactly right.",
+                session_id="v2-3",
             ),
-            context_after="user: Excellent, this is production-ready. The configurable backoff and exception filtering are exactly right.",
-            session_id="v2-3",
-        ))
+        ]
 
-        v2_segs = seg_logger.load_by_version("coding-master", "2.0")
         report_v2 = await evaluate_skill(llm, "coding-master", "2.0", v2_segs)
         ver_mgr.save_eval_report("coding-master", "2.0", report_v2)
 

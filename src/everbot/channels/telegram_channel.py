@@ -101,7 +101,10 @@ class TelegramChannel:
             session_manager=self._session_manager,
             agent_service=self._agent_service,
             user_data=self._user_data,
-            skill_log_recorder=self._user_data.get_skill_log_recorder(),
+            skill_log_recorder_factory=lambda agent_name: self._user_data.get_skill_log_recorder(
+                agent_name=agent_name,
+                workspace_path=self._user_data.get_agent_dir(agent_name),
+            ),
         )
 
         # chat_id -> agent_name

@@ -45,6 +45,8 @@ class SkillContext:
     mailbox: MailboxPort  # Message delivery to user
     llm: LLMClient  # LLM client (fast model)
     scan_result: Optional[ScanResult] = None  # Scanner gate pre-check result
+    skill_logs_dir: Optional[Path] = None  # Per-agent skill usage logs
+    skill_eval_dir: Optional[Path] = None  # Per-agent eval data (version pointers + reports)
 
 
 class MailboxAdapter:

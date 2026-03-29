@@ -282,6 +282,48 @@ class TestTaskStateTransitions:
         assert task.state == "pending"  # retryable
         assert task.retry == 1
 
+    def test_retry_next_run_at_always_tz_aware(self):
+        """next_run_at set by retry backoff must be tz-aware UTC.
+
+        Production bug: scheduler passed naive local time as `now`, producing
+        a naive next_run_at like '2026-03-20T15:05:00'.  claim_task then
+        defaults to datetime.now(timezone.utc) (real UTC), so for UTC+8 the
+        comparison '15:05 > 07:39' made the retry unclaim-able for 8 hours.
+
+        Root cause: update_task_state must normalise `now` to tz-aware UTC
+        so next_run_at is always comparable to real UTC.
+        """
+        # Simulate scheduler passing naive LOCAL time (15:00 CST = 07:00 UTC)
+        naive_local = datetime(2026, 3, 20, 15, 0, 0)  # no tzinfo
+        task = _sample_task(retry=0, max_retry=3)
+        update_task_state(task, TaskState.FAILED, error_message="err", now=naive_local)
+
+        next_dt = datetime.fromisoformat(task.next_run_at)
+        assert next_dt.tzinfo is not None, (
+            f"next_run_at must be tz-aware, got naive: {task.next_run_at}"
+        )
+
+    def test_claim_succeeds_after_retry_backoff_with_utc_now(self):
+        """claim_task(now=real_utc) must succeed when retry backoff has elapsed.
+
+        Production scenario: update_task_state was called with naive local
+        15:00, setting next_run_at to ~15:05 (naive).  Real UTC is 07:05.
+        claim_task defaults to real UTC → '15:05 > 07:05' → claim FAILS.
+        After fix, both times are in UTC so claim works correctly.
+        """
+        real_utc_fail_time = datetime(2026, 3, 20, 7, 0, tzinfo=timezone.utc)
+        task = _sample_task(retry=0, max_retry=3)
+        update_task_state(task, TaskState.FAILED, error_message="err",
+                          now=real_utc_fail_time)
+
+        # 6 minutes later in real UTC — past the 5-min backoff
+        claim_time = real_utc_fail_time + timedelta(minutes=6)
+        ok = claim_task(task, now=claim_time)
+        assert ok is True, (
+            f"claim should succeed 6 min after failure, "
+            f"next_run_at={task.next_run_at}, claim_time={claim_time.isoformat()}"
+        )
+
     def test_failed_retry_backoff_5min(self):
         """First retry should have 5min (300s) backoff."""
         now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)

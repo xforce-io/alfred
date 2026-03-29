@@ -121,6 +121,57 @@ def fetch_paper_by_id(paper_id: str) -> Dict[str, Any]:
         return {}
 
 
+def search_papers(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """Search papers by title/keyword on arXiv API."""
+    # URL-encode the query for arXiv search
+    search_query = f"ti:\"{query}\""
+    api_url = (
+        f"https://export.arxiv.org/api/query?search_query={requests.utils.quote(search_query)}"
+        f"&start=0&max_results={limit}&sortBy=submittedDate&sortOrder=descending"
+    )
+    try:
+        resp = requests.get(api_url, timeout=30)
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print(f"Error searching arXiv: {e}", file=sys.stderr)
+        return []
+
+    text = resp.text
+    papers = []
+    # Split by <entry> tags
+    entries = re.findall(r"<entry>(.*?)</entry>", text, re.DOTALL)
+    for entry_text in entries[:limit]:
+        id_match = re.search(r"<id>.*?/abs/(.*?)</id>", entry_text)
+        if not id_match:
+            continue
+        arxiv_id = re.sub(r"v\d+$", "", id_match.group(1))
+
+        titles = re.findall(r"<title>(.*?)</title>", entry_text, re.DOTALL)
+        title = titles[0].strip().replace("\n", " ") if titles else ""
+
+        summary_match = re.search(r"<summary>(.*?)</summary>", entry_text, re.DOTALL)
+        abstract = summary_match.group(1).strip() if summary_match else ""
+
+        author_names = re.findall(r"<name>(.*?)</name>", entry_text)
+
+        published_match = re.search(r"<published>(.*?)</published>", entry_text)
+        published_date = published_match.group(1)[:10] if published_match else ""
+
+        papers.append({
+            "paper_id": arxiv_id,
+            "title": title,
+            "authors": author_names,
+            "abstract": abstract,
+            "arxiv_url": f"https://arxiv.org/abs/{arxiv_id}",
+            "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}",
+            "source": "arxiv",
+            "published_date": published_date,
+            "fetched_at": datetime.now().isoformat(),
+        })
+
+    return papers
+
+
 def fetch_huggingface_papers(limit: int = 10) -> List[Dict[str, Any]]:
     """Fetch trending papers from HuggingFace Daily Papers JSON API."""
     url = f"https://huggingface.co/api/daily_papers?limit={limit}"
@@ -431,10 +482,24 @@ def main():
                         help="Filter papers whose title or abstract contains ANY of these keywords (case-insensitive)")
     parser.add_argument("--paper-id", default=None,
                         help="Fetch a single paper by arXiv ID (e.g. 2501.12345)")
+    parser.add_argument("--search", default=None,
+                        help="Search papers by title keyword on arXiv (e.g. 'SkillCraft')")
     parser.add_argument("--with-summary", action="store_true", default=False,
                         help="Generate one-line Chinese summary for each paper using LLM")
 
     args = parser.parse_args()
+
+    # Search mode
+    if args.search:
+        papers = search_papers(args.search, limit=args.limit)
+        if not papers:
+            print(f"No papers found for: {args.search}", file=sys.stderr)
+            sys.exit(1)
+        for paper in papers:
+            paper["heat_index"] = calculate_heat_index(paper)
+            paper["heat_level"] = calculate_heat_level(paper["heat_index"])
+        display_papers(papers, fmt=args.format)
+        return
 
     # Single paper lookup mode
     if args.paper_id:

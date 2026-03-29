@@ -230,16 +230,16 @@ class IsolatedTaskMixin:
             task = Task.from_dict(task_snapshot_dict)
             task.execution_mode = "isolated"
 
-            # Gate check for skill tasks — scanner + min_interval
+            # Gate check for job tasks — scanner + min_interval
             verdict = None
-            if task.skill:
+            if task.job:
                 gate = TaskExecutionGate(
                     self._get_workspace_path(), self.agent_name, self._get_scanner,
                 )
                 verdict = gate.check(task)
                 if not verdict.allowed:
                     self._write_heartbeat_event(
-                        "skill_skipped", skill=task.skill, reason=verdict.skip_reason,
+                        "job_skipped", skill=task.job, reason=verdict.skip_reason,
                     )
                     await self._update_isolated_task_state(task_id, TaskState.DONE, now=now)
                     return
@@ -247,8 +247,8 @@ class IsolatedTaskMixin:
             active_run_id = run_id or f"heartbeat_isolated_{uuid.uuid4().hex[:12]}"
             await self._execute_isolated_task(task, active_run_id)
 
-            # Advance watermark after successful skill execution
-            if task.skill and verdict and verdict.scan_result:
+            # Advance watermark after successful job execution
+            if task.job and verdict and verdict.scan_result:
                 gate.commit(task, verdict)
 
             await self._update_isolated_task_state(task_id, TaskState.DONE, now=now)

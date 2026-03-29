@@ -47,10 +47,10 @@ class Task:
     max_retry: int = 3
     error_message: Optional[str] = None
     created_at: Optional[str] = None
-    # Reflection skill fields
-    skill: Optional[str] = None  # Skill name (e.g., "memory-review")
+    # Job fields (internal cron job modules, e.g. memory_review, health_check)
+    job: Optional[str] = None  # Job name (e.g., "memory-review")
     scanner: Optional[str] = None  # Optional scanner gate type (e.g., "session")
-    min_execution_interval: Optional[str] = None  # Optional min interval between skill executions
+    min_execution_interval: Optional[str] = None  # Optional min interval between job executions
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -59,6 +59,11 @@ class Task:
     def from_dict(cls, data: Dict[str, Any]) -> "Task":
         known_fields = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in data.items() if k in known_fields}
+        # Backward compatibility: accept "skill" key as alias for "job"
+        if "job" not in filtered or filtered["job"] is None:
+            skill_val = data.get("skill")
+            if skill_val is not None:
+                filtered["job"] = skill_val
         # Backward compatibility for v1 blocks
         filtered.setdefault("description", "")
         filtered.setdefault("source", "manual")
@@ -318,6 +323,8 @@ def update_task_state(
     """Transition a task to a new state, updating metadata fields."""
     if now is None:
         now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
 
     task.state = new_state.value
 
@@ -330,8 +337,8 @@ def update_task_state(
         if task.schedule:
             task.state = TaskState.PENDING.value
             task.next_run_at = _compute_next_run(task.schedule, now, task.timezone)
-        elif task.skill:
-            # Skill tasks re-arm to PENDING; scheduling controlled by scan_interval
+        elif task.job:
+            # Job tasks re-arm to PENDING; scheduling controlled by scan_interval
             task.state = TaskState.PENDING.value
     elif new_state == TaskState.FAILED:
         task.error_message = error_message

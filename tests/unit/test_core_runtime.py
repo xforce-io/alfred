@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 import pytest
@@ -301,7 +301,10 @@ async def test_scheduler_triggers_heartbeat_on_due_interval():
     assert heartbeat_calls == ["alice"]
 
     # After alice fires, her next_heartbeat_at should be set
-    assert scheduler._agent_schedules["alice"].next_heartbeat_at == now + timedelta(minutes=30)
+    assert (
+        scheduler._agent_schedules["alice"].next_heartbeat_at
+        == (now + timedelta(minutes=30)).replace(tzinfo=timezone.utc)
+    )
 
 
 @pytest.mark.asyncio
@@ -365,3 +368,34 @@ async def test_scheduler_run_forever_stops():
     import asyncio
     await asyncio.gather(scheduler.run_forever(), _stop_soon())
     assert not scheduler._running
+
+
+@pytest.mark.asyncio
+async def test_scheduler_normalizes_tick_time_to_utc_for_isolated_tasks():
+    """Scheduler must pass tz-aware UTC timestamps into isolated task execution.
+
+    Regression: a naive local datetime reached update_task_state(..., now=ts),
+    which was then interpreted as UTC and pushed retry windows 8 hours later
+    on Asia/Shanghai machines.
+    """
+    seen_ts: list[datetime] = []
+
+    async def _claim(_task_id: str) -> bool:
+        return True
+
+    async def _run_isolated(_task: SchedulerTask, ts: datetime):
+        seen_ts.append(ts)
+
+    scheduler = Scheduler(
+        get_due_tasks=lambda _now: [
+            SchedulerTask(id="j1", agent_name="a1", execution_mode="isolated"),
+        ],
+        claim_task=_claim,
+        run_isolated=_run_isolated,
+    )
+
+    await scheduler.tick(datetime(2026, 3, 22, 7, 44, 32))
+
+    assert len(seen_ts) == 1
+    assert seen_ts[0].tzinfo == timezone.utc
+    assert seen_ts[0].isoformat() == "2026-03-22T07:44:32+00:00"

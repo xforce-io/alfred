@@ -785,7 +785,7 @@ class TestExecuteIsolatedClaimedTaskGate:
         assert update_calls[0] == ("skill_1", TaskState.DONE)
         # Event should record skip
         runner._cron._write_event.assert_called_once_with(
-            "skill_skipped", skill="test-skill", reason="no_changes",
+            "job_skipped", skill="test-skill", reason="no_changes",
         )
 
     @pytest.mark.asyncio
@@ -803,6 +803,7 @@ class TestExecuteIsolatedClaimedTaskGate:
             update_calls.append((task_id, state))
 
         monkeypatch.setattr(runner._cron, "_update_isolated_task_state", _tracking_update)
+        monkeypatch.setattr(runner._cron, "_invoke_job", AsyncMock(return_value="ok"))
         monkeypatch.setattr(runner._cron, "_run_isolated_task", AsyncMock(return_value="ok"))
 
         # Scanner returns has_changes
