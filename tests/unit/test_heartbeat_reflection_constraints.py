@@ -1,7 +1,7 @@
 """Unit tests for heartbeat reflection strong-constraint routine apply."""
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -272,7 +272,7 @@ class TestSchedulerBackoff:
             agent_schedules={"test_agent": schedule},
         )
 
-        ts = datetime(2026, 2, 15, 12, 0)
+        ts = datetime(2026, 2, 15, 12, 0, tzinfo=timezone.utc)
         asyncio.run(scheduler._tick_heartbeats(ts))
         # Next heartbeat should be at most max_backoff_minutes from ts
         assert schedule.next_heartbeat_at is not None

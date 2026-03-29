@@ -15,7 +15,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
@@ -202,7 +202,7 @@ class Scheduler:
 
     async def tick(self, now: Optional[datetime] = None) -> None:
         """Execute one scheduling tick (cron tasks + heartbeats + inspector)."""
-        ts = now or datetime.now()
+        ts = self._normalize_ts(now or datetime.now(timezone.utc))
 
         # Phase 1: Trigger due cron tasks (high frequency, per-minute)
         await self._tick_tasks(ts)
@@ -216,6 +216,7 @@ class Scheduler:
     async def _tick_heartbeats(self, ts: datetime) -> None:
         if self._run_heartbeat is None:
             return
+        ts = self._normalize_ts(ts)
         for schedule in list(self._agent_schedules.values()):
             is_active = self._is_active_time(schedule, ts)
             if not is_active:
@@ -224,7 +225,12 @@ class Scheduler:
                 base_interval = max(1, schedule.night_interval_minutes)
             else:
                 base_interval = max(1, schedule.interval_minutes)
-            if schedule.next_heartbeat_at is not None and ts < schedule.next_heartbeat_at:
+            next_at = (
+                self._normalize_ts(schedule.next_heartbeat_at)
+                if schedule.next_heartbeat_at is not None
+                else None
+            )
+            if next_at is not None and ts < next_at:
                 continue
             try:
                 await self._run_heartbeat(schedule.agent_name, ts)
@@ -291,7 +297,12 @@ class Scheduler:
                 base_interval = max(1, schedule.night_interval_minutes)
             else:
                 base_interval = max(1, schedule.interval_minutes)
-            if schedule.next_inspect_at is not None and ts < schedule.next_inspect_at:
+            next_at = (
+                self._normalize_ts(schedule.next_inspect_at)
+                if schedule.next_inspect_at is not None
+                else None
+            )
+            if next_at is not None and ts < next_at:
                 continue
             try:
                 await self._run_inspector(schedule.agent_name, ts)
@@ -332,6 +343,13 @@ class Scheduler:
         self._running = False
 
     # -- Helpers ------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_ts(ts: datetime) -> datetime:
+        """Normalize timestamps to tz-aware UTC for internal comparisons."""
+        if ts.tzinfo is None:
+            return ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc)
 
     @staticmethod
     def _is_active_time(schedule: Any, ts: datetime) -> bool:

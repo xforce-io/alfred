@@ -234,15 +234,13 @@ If not, reply with `HEARTBEAT_OK`.
                 heartbeat_instructions=self.HEARTBEAT_SYSTEM_INSTRUCTION.strip(),
             )
         )
-        # SLM: record skill invocations from heartbeat turns for evaluation
-        # skills_dir: workspace-local skills (workspace_path/skills/)
-        # skill_logs_dir: workspace-local logs  (workspace_path/skill_logs/)
-        # NOTE: If the architecture moves to multi-process, add fcntl.flock in SkillLogRecorder.
+        # SLM: record skill invocations for evaluation (per-agent isolation)
         try:
-            from ..slm.skill_log_recorder import SkillLogRecorder as _SkillLogRecorder
-            self._skill_log_recorder = _SkillLogRecorder(
-                skill_logs_dir=self.workspace_path / "skill_logs",
-                skills_dir=self.workspace_path / "skills",
+            from ...infra.user_data import get_user_data_manager as _get_udm
+            _udm = _get_udm()
+            self._skill_log_recorder = _udm.get_skill_log_recorder(
+                agent_name=agent_name,
+                workspace_path=workspace_path,
             )
         except Exception as _slm_err:  # pragma: no cover
             logger.warning("Failed to init SkillLogRecorder for heartbeat: %s", _slm_err)
@@ -1146,7 +1144,7 @@ If not, reply with `HEARTBEAT_OK`.
             # Import and run skill
             module_name = skill_name.replace("-", "_")
             if module_name not in ALLOWED_SKILLS:
-                raise ValueError(f"Skill {skill_name!r} is not in the allowed skills whitelist")
+                raise ValueError(f"Skill {skill_name!r} is not in the allowed jobs whitelist")
             skill_module = importlib.import_module(f"everbot.core.jobs.{module_name}")
             result = await skill_module.run(context)
 

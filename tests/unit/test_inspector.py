@@ -1430,7 +1430,7 @@ class TestEnsureBuiltinJobs:
 
         registered = inspector._ensure_builtin_jobs()
 
-        assert registered == 1  # only task-discover
+        assert registered == 2  # task-discover + skill-evaluate
         task_list = routine_mgr.load_task_list()
         job_names = [t.job for t in task_list.tasks if t.job]
         assert job_names.count("memory-review") == 1
