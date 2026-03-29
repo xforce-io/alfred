@@ -1,7 +1,6 @@
 """Session persistence and lifecycle management."""
 
 from .compressor import SessionCompressor
-from .history import HistoryManager
 from .session_data import SessionData
 from .persistence import SessionPersistence
 from .session import SessionManager
@@ -16,7 +15,6 @@ from .session_ids import (
 )
 
 __all__ = [
-    "HistoryManager",
     "SessionCompressor",
     "SessionData",
     "SessionManager",

@@ -7,7 +7,7 @@ Alfred EverBot - Ever Running Bot
 __version__ = "0.1.0"
 
 from .infra.user_data import UserDataManager
-from .infra.workspace import WorkspaceLoader, WorkspaceInstructions
+from .infra.workspace import WorkspaceLoader
 from .core.session.session import SessionManager, SessionData
 from .core.runtime.heartbeat import HeartbeatRunner
 from .cli.daemon import EverBotDaemon
@@ -17,7 +17,6 @@ from .core.tasks.routine_manager import RoutineManager
 __all__ = [
     "UserDataManager",
     "WorkspaceLoader",
-    "WorkspaceInstructions",
     "SessionManager",
     "SessionData",
     "HeartbeatRunner",
