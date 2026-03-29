@@ -244,7 +244,14 @@ class ChannelCoreService:
                     agent_name,
                 )
 
+
             logger.debug("Agent=%s, Message=%s", agent_name, message_text[:50])
+
+            # SLM: backfill the previous turn's context_after with this user message.
+            # Must run before new skills execute in this turn.
+            _recorder = self._get_recorder(agent_name)
+            if _recorder is not None and message_text and hasattr(_recorder, "backfill_context_after"):
+                _recorder.backfill_context_after(session_id, message_text)
 
             message_preview, _, _ = self._truncate_preview(message_text, 200)
             turn_start_time = datetime.now()

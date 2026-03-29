@@ -2,8 +2,8 @@
 
 Flow tested:
 1. Publish v1.0 skill
-2. Log evaluation segment pointers + session files
-3. Resolve pointers → LLM Judge scores → evaluation report
+2. Log inline evaluation segments
+3. LLM Judge scores → evaluation report
 4. Publish v2.0
 5. Log segments with critical issues for v2.0
 6. Evaluate v2.0 → report shows problems
@@ -12,7 +12,6 @@ Flow tested:
 9. Rollback to repo baseline (delete override)
 """
 
-import json
 import pytest
 from pathlib import Path
 
@@ -20,7 +19,6 @@ from src.everbot.core.slm.models import (
     EvalReport,
     EvaluationSegment,
     JudgeResult,
-    SkillLogEntry,
     VersionStatus,
 )
 from src.everbot.core.slm.segment_logger import SegmentLogger
@@ -68,52 +66,28 @@ def _bad_judge_response() -> str:
     return '{"has_critical_issue": true, "satisfaction": 0.1, "reason": "skill broke the code, user had to redo"}'
 
 
-def _log_entry_with_session(
+def _log_segment(
     seg_logger: SegmentLogger,
-    sessions_dir: Path,
     *,
     skill_id: str,
     version: str,
     session_id: str,
-    run_id: str,
     triggered_at: str,
     context_before: str = "user: help",
     skill_output: str = "assistant: done",
     context_after: str = "user: ok",
 ):
-    """Append a SkillLogEntry and create the corresponding session file."""
-    entry = SkillLogEntry(
+    """Append an inline EvaluationSegment to the logger."""
+    segment = EvaluationSegment(
         skill_id=skill_id,
         skill_version=version,
-        session_id=session_id,
-        run_id=run_id,
         triggered_at=triggered_at,
+        context_before=context_before,
+        skill_output=skill_output,
+        context_after=context_after,
+        session_id=session_id,
     )
-    seg_logger.append(entry)
-
-    # Create / update session file with timeline + messages
-    session_path = sessions_dir / f"web_session_{session_id}.json"
-    if session_path.exists():
-        session = json.loads(session_path.read_text(encoding="utf-8"))
-    else:
-        session = {
-            "session_id": session_id,
-            "timeline": [],
-            "history_messages": [],
-        }
-
-    session["timeline"].extend([
-        {"type": "turn_start", "run_id": run_id, "timestamp": triggered_at},
-        {"type": "skill", "run_id": run_id, "skill_name": skill_id, "status": "completed"},
-        {"type": "turn_end", "run_id": run_id},
-    ])
-    session["history_messages"].extend([
-        {"role": "user", "content": context_before},
-        {"role": "assistant", "content": skill_output},
-        {"role": "user", "content": context_after},
-    ])
-
-    session_path.write_text(json.dumps(session), encoding="utf-8")
+    seg_logger.append(segment)
 
 
 class TestSLMLifecycle:
@@ -123,10 +97,8 @@ class TestSLMLifecycle:
     async def test_full_lifecycle(self, tmp_path: Path):
         skills_dir = tmp_path / "skills"
         logs_dir = tmp_path / "skill_logs"
-        sessions_dir = tmp_path / "sessions"
         skills_dir.mkdir()
         logs_dir.mkdir()
-        sessions_dir.mkdir()
 
         ver_mgr = VersionManager(skills_dir)
         seg_logger = SegmentLogger(logs_dir)
@@ -143,12 +115,12 @@ class TestSLMLifecycle:
         assert ptr.current_version == "1.0"
         assert ptr.repo_baseline is True
 
-        # ── Step 2: Log good segment pointers for v1.0 ──
+        # ── Step 2: Log good segments for v1.0 ──
         for i in range(5):
-            _log_entry_with_session(
-                seg_logger, sessions_dir,
+            _log_segment(
+                seg_logger,
                 skill_id="coding-master", version="1.0",
-                session_id=f"sess-{i}", run_id=f"run-v1-{i}",
+                session_id=f"sess-{i}",
                 triggered_at=f"2026-03-17T1{i}:00:00Z",
                 context_before=f"user: help me with task {i}",
                 skill_output=f"here is the solution for task {i}",
@@ -157,10 +129,8 @@ class TestSLMLifecycle:
 
         assert seg_logger.count("coding-master") == 5
 
-        # ── Step 3: Resolve pointers and evaluate v1.0 ──
-        v1_entries = seg_logger.load_by_version("coding-master", "1.0")
-        assert len(v1_entries) == 5
-        v1_segments = seg_logger.resolve(v1_entries, sessions_dir)
+        # ── Step 3: Evaluate v1.0 ──
+        v1_segments = seg_logger.load_by_version("coding-master", "1.0")
         assert len(v1_segments) == 5
 
         llm_v1 = MockLLM([_good_judge_response(0.85)])
@@ -189,10 +159,10 @@ class TestSLMLifecycle:
 
         # ── Step 5: Log problematic segments for v2.0 ──
         for i in range(5):
-            _log_entry_with_session(
-                seg_logger, sessions_dir,
+            _log_segment(
+                seg_logger,
                 skill_id="coding-master", version="2.0",
-                session_id=f"sess-v2-{i}", run_id=f"run-v2-{i}",
+                session_id=f"sess-v2-{i}",
                 triggered_at=f"2026-03-18T1{i}:00:00Z",
                 context_before=f"user: review this code block {i}",
                 skill_output=f"analysis of block {i} with advanced reasoning",
@@ -200,9 +170,8 @@ class TestSLMLifecycle:
             )
 
         # ── Step 6: Evaluate v2.0 — 2/5 are critical ──
-        v2_entries = seg_logger.load_by_version("coding-master", "2.0")
-        assert len(v2_entries) == 5
-        v2_segments = seg_logger.resolve(v2_entries, sessions_dir)
+        v2_segments = seg_logger.load_by_version("coding-master", "2.0")
+        assert len(v2_segments) == 5
 
         llm_v2 = MockLLM([
             _bad_judge_response(),
@@ -258,9 +227,9 @@ class TestSLMLifecycle:
         assert loaded_report is not None
         assert loaded_report.mean_satisfaction == 0.85
 
-        # Pointer logs still accessible
-        all_entries = seg_logger.load("coding-master")
-        assert len(all_entries) == 10  # 5 v1.0 + 5 v2.0
+        # Segments still accessible
+        all_segments = seg_logger.load("coding-master")
+        assert len(all_segments) == 10  # 5 v1.0 + 5 v2.0
 
 
 class TestSLMSuccessfulUpgrade:
@@ -270,10 +239,8 @@ class TestSLMSuccessfulUpgrade:
     async def test_successful_upgrade(self, tmp_path: Path):
         skills_dir = tmp_path / "skills"
         logs_dir = tmp_path / "skill_logs"
-        sessions_dir = tmp_path / "sessions"
         skills_dir.mkdir()
         logs_dir.mkdir()
-        sessions_dir.mkdir()
 
         ver_mgr = VersionManager(skills_dir)
         seg_logger = SegmentLogger(logs_dir)
@@ -282,19 +249,17 @@ class TestSLMSuccessfulUpgrade:
         # ── Step 1: Publish and activate v1.0 ──
         ver_mgr.publish("coding-master", "1.0", SKILL_V1)
         for i in range(10):
-            _log_entry_with_session(
-                seg_logger, sessions_dir,
+            _log_segment(
+                seg_logger,
                 skill_id="coding-master", version="1.0",
-                session_id=f"v1-{i}", run_id=f"run-v1-{i}",
+                session_id=f"v1-{i}",
                 triggered_at=f"2026-03-17T{10+i}:00:00Z",
                 context_before=f"user: task {i}",
                 skill_output=f"solution {i}",
                 context_after="user: ok",
             )
 
-        v1_segments = seg_logger.resolve(
-            seg_logger.load_by_version("coding-master", "1.0"), sessions_dir,
-        )
+        v1_segments = seg_logger.load_by_version("coding-master", "1.0")
         llm_v1 = MockLLM([_good_judge_response(0.75)])
         report_v1 = await evaluate_skill(llm_v1, "coding-master", "1.0", v1_segments)
         ver_mgr.save_eval_report("coding-master", "1.0", report_v1)
@@ -313,10 +278,10 @@ class TestSLMSuccessfulUpgrade:
 
         # ── Step 3: Log segments for v2.0 — all good, higher satisfaction ──
         for i in range(20):
-            _log_entry_with_session(
-                seg_logger, sessions_dir,
+            _log_segment(
+                seg_logger,
                 skill_id="coding-master", version="2.0",
-                session_id=f"v2-{i}", run_id=f"run-v2-{i}",
+                session_id=f"v2-{i}",
                 triggered_at=f"2026-03-18T{10+i}:00:00Z",
                 context_before=f"user: complex task {i}",
                 skill_output=f"deep analysis and solution for {i}",
@@ -324,9 +289,8 @@ class TestSLMSuccessfulUpgrade:
             )
 
         # ── Step 4: Evaluate v2.0 — better than v1.0 ──
-        v2_entries = seg_logger.load_by_version("coding-master", "2.0")
-        assert len(v2_entries) == 20
-        v2_segments = seg_logger.resolve(v2_entries, sessions_dir)
+        v2_segments = seg_logger.load_by_version("coding-master", "2.0")
+        assert len(v2_segments) == 20
 
         llm_v2 = MockLLM([_good_judge_response(0.92)])
         report_v2 = await evaluate_skill(llm_v2, "coding-master", "2.0", v2_segments)

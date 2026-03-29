@@ -312,7 +312,12 @@ class TelegramChannel:
                 raise
             except Exception as exc:
                 consecutive_errors += 1
-                logger.error("Telegram polling error: %s", exc)
+                logger.error(
+                    "Telegram polling error (attempt %d, %s): %r",
+                    consecutive_errors,
+                    type(exc).__name__,
+                    exc,
+                )
                 if consecutive_errors >= POLLING_MAX_CONSECUTIVE_ERRORS:
                     logger.warning(
                         "Telegram polling: %d consecutive errors, recreating httpx client",

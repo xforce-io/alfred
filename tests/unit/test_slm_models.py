@@ -7,32 +7,11 @@ from src.everbot.core.slm.models import (
     EvalReport,
     EvaluationSegment,
     JudgeResult,
-    SkillLogEntry,
     VersionMetadata,
     VersionStatus,
 )
 
 
-class TestSkillLogEntry:
-    def test_roundtrip(self):
-        entry = SkillLogEntry(
-            skill_id="coding-master",
-            skill_version="1.0",
-            session_id="sess-123",
-            run_id="run_abc",
-            triggered_at="2026-03-17T10:00:00Z",
-        )
-        json_str = entry.to_json()
-        restored = SkillLogEntry.from_json(json_str)
-        assert restored.skill_id == "coding-master"
-        assert restored.run_id == "run_abc"
-        assert restored.session_id == "sess-123"
-
-    def test_from_dict_defaults(self):
-        entry = SkillLogEntry.from_dict({})
-        assert entry.skill_id == ""
-        assert entry.skill_version == "baseline"
-        assert entry.run_id == ""
 
 
 class TestEvaluationSegment:

@@ -53,6 +53,8 @@ class SkillLogRecorder:
             self._skill_dirs = [skills_dir]
         else:
             self._skill_dirs = []
+        # Track last recorded skill per session for backfill targeting
+        self._last_skill: Dict[str, str] = {}  # session_id -> skill_id
 
     def _find_skill_md(self, skill_name: str) -> Path:
         """Find SKILL.md using multi-dir lookup (agent private > global > bundled)."""
@@ -104,16 +106,38 @@ class SkillLogRecorder:
                 triggered_at=datetime.now(timezone.utc).isoformat(),
                 context_before=context_before or "",
                 skill_output=skill_output or "",
-                context_after="",  # v1: not available at write time; requires cross-turn state
+                context_after="",  # backfilled on next user message via backfill_context_after()
                 session_id=session_id,
             )
             self._logger.append(segment)
+            self._last_skill[session_id] = skill_name
             return True
         except Exception as e:
             # Catch all exceptions (OSError, UnicodeDecodeError, etc.) so that
             # log-write failures never crash the main session flow.
             logger.warning(
                 "SkillLogRecorder: failed to write log for skill '%s': %s", skill_name, e
+            )
+            return False
+
+    def backfill_context_after(self, session_id: str, context_after: str) -> bool:
+        """Backfill the user's reaction into the most recent segment for *session_id*.
+
+        Called at the start of the **next** user turn, before any new skills run.
+        Uses the tracked ``_last_skill`` to target the correct JSONL file.
+
+        Returns True if a segment was patched, False otherwise.
+        Failures are swallowed to avoid blocking the main session flow.
+        """
+        skill_id = self._last_skill.pop(session_id, None)
+        if not skill_id or not context_after:
+            return False
+        try:
+            return self._logger.backfill_context_after(skill_id, session_id, context_after)
+        except Exception as e:
+            logger.warning(
+                "SkillLogRecorder: failed to backfill context_after for '%s': %s",
+                skill_id, e,
             )
             return False
 

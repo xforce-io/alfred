@@ -17,40 +17,6 @@ class VersionStatus(str, Enum):
     DEPRECATED = "deprecated"
 
 
-@dataclass
-class SkillLogEntry:
-    """Lightweight pointer to a skill invocation in a session timeline.
-
-    Stored in ``skill_logs/{skill_id}.jsonl``.  Full content (context_before,
-    skill_output, context_after) is resolved lazily from the session file.
-    """
-
-    skill_id: str
-    skill_version: str  # from SKILL.md frontmatter, default "baseline"
-    session_id: str
-    run_id: str  # matches timeline entry run_id
-    triggered_at: str  # ISO 8601 timestamp
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict(), ensure_ascii=False)
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "SkillLogEntry":
-        return cls(
-            skill_id=str(data.get("skill_id", "")),
-            skill_version=str(data.get("skill_version", "baseline")),
-            session_id=str(data.get("session_id", "")),
-            run_id=str(data.get("run_id", "")),
-            triggered_at=str(data.get("triggered_at", "")),
-        )
-
-    @classmethod
-    def from_json(cls, line: str) -> "SkillLogEntry":
-        return cls.from_dict(json.loads(line))
-
 
 @dataclass
 class EvaluationSegment:

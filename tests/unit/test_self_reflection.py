@@ -584,3 +584,108 @@ class TestSkillWithoutScanner:
 
         result = await run(ctx)
         assert "No sessions to review" not in result
+
+    @pytest.mark.asyncio
+    async def test_memory_review_skips_when_skill_llm_unavailable(self, tmp_path, sessions_dir):
+        """memory_review should degrade gracefully when the optional skill LLM is unavailable."""
+        from src.everbot.core.jobs.memory_review import run
+        from src.everbot.core.runtime.skill_context import SkillContext
+        from src.everbot.core.memory.manager import MemoryManager
+        from src.everbot.core.memory.models import MemoryEntry
+
+        self._write_session(sessions_dir, "web_session_test-agent_001", _1D_AGO)
+
+        mm = MemoryManager(tmp_path / "MEMORY.md")
+        mm.store.save([
+            MemoryEntry(
+                id="mem001",
+                category="workflow",
+                content="User prefers concise answers",
+                score=0.8,
+                created_at="2026-03-01T00:00:00+00:00",
+                last_activated="2026-03-01T00:00:00+00:00",
+                activation_count=1,
+                source_session="web_session_test-agent_001",
+            )
+        ])
+        mock_llm = AsyncMock()
+        mock_llm.complete.side_effect = RuntimeError(
+            "litellm is required for skill LLM calls"
+        )
+
+        ctx = SkillContext(
+            sessions_dir=sessions_dir,
+            workspace_path=tmp_path,
+            agent_name="test-agent",
+            memory_manager=mm,
+            mailbox=AsyncMock(),
+            llm=mock_llm,
+            scan_result=None,
+        )
+
+        result = await run(ctx)
+        assert "skipped: skill llm unavailable" in result
+
+        # Watermark must NOT be advanced when LLM was unavailable.
+        # If it were, these sessions would be permanently skipped and never re-reviewed
+        # once the environment recovers.
+        from src.everbot.core.scanners.reflection_state import ReflectionState
+        state_after = ReflectionState.load(tmp_path)
+        assert not state_after.get_watermark("memory-review"), (
+            "watermark must not advance when skill LLM is unavailable"
+        )
+
+    @pytest.mark.asyncio
+    async def test_memory_review_dph_file_missing_does_not_advance_watermark(
+        self, tmp_path, sessions_dir
+    ):
+        """dph 文件缺失时（FileNotFoundError）应降级处理，不推进 watermark。"""
+        from unittest.mock import patch
+        from src.everbot.core.jobs.memory_review import run
+        from src.everbot.core.runtime.skill_context import SkillContext
+        from src.everbot.core.memory.manager import MemoryManager
+        from src.everbot.core.memory.models import MemoryEntry
+        from src.everbot.core.scanners.reflection_state import ReflectionState
+
+        self._write_session(sessions_dir, "web_session_test-agent_001", _1D_AGO)
+
+        mm = MemoryManager(tmp_path / "MEMORY.md")
+        mm.store.save([
+            MemoryEntry(
+                id="mem002",
+                category="workflow",
+                content="User likes TDD",
+                score=0.9,
+                created_at="2026-03-01T00:00:00+00:00",
+                last_activated="2026-03-01T00:00:00+00:00",
+                activation_count=1,
+                source_session="web_session_test-agent_001",
+            )
+        ])
+        mock_llm = AsyncMock()
+        mock_llm.complete.side_effect = FileNotFoundError("memory_review_consolidation.dph not found")
+
+        ctx = SkillContext(
+            sessions_dir=sessions_dir,
+            workspace_path=tmp_path,
+            agent_name="test-agent",
+            memory_manager=mm,
+            mailbox=AsyncMock(),
+            llm=mock_llm,
+            scan_result=None,
+        )
+
+        # patch parse_system_dph at its definition site to simulate missing .dph
+        with patch(
+            "src.everbot.core.jobs.llm_utils.parse_system_dph",
+            side_effect=FileNotFoundError("no such file"),
+        ):
+            result = await run(ctx)
+
+        # Should not crash, should return an error/skip result
+        assert result is not None
+        # Watermark must NOT advance when dph file is missing
+        state_after = ReflectionState.load(tmp_path)
+        assert not state_after.get_watermark("memory-review"), (
+            "watermark must not advance when dph file is missing"
+        )

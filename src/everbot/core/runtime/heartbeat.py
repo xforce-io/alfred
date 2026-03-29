@@ -1616,7 +1616,7 @@ class _SkillLLMClient:
     def __init__(self, model: str = ""):
         self._model = model
 
-    async def complete(self, prompt: str, system: str = "") -> str:
+    async def complete(self, prompt: str, system: str = "", model_override: str = "", **kwargs) -> str:
         """Single-turn LLM completion."""
         try:
             import litellm
@@ -1628,15 +1628,23 @@ class _SkillLLMClient:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
-        model = self._model
+        model = model_override or self._model
         if not model:
             import os
             model = os.environ.get("ALFRED_SKILL_MODEL", "deepseek/deepseek-chat")
 
+        # Set unified defaults while allowing DPH config overrides
+        call_kwargs = {
+            "temperature": kwargs.get("temperature", 0.3),
+            "max_tokens": kwargs.get("max_tokens", 2000),
+        }
+        
+        # Merge all DPH-extracted configs mapping natively accepted by litellm
+        for k, v in kwargs.items():
+            if k not in ["mode", "output_format", "system_prompt", "model"]: # skip custom fields
+                call_kwargs[k] = v
+
         response = await litellm.acompletion(
-            model=model,
-            messages=messages,
-            temperature=0.3,
-            max_tokens=2000,
+            model=model, messages=messages, **call_kwargs
         )
         return response.choices[0].message.content or ""

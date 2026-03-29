@@ -17,6 +17,7 @@ beautifulsoup4==4.14.3
 
 # Telegram (optional)
 telegramify-markdown==1.0.0rc4
+litellm>=1.75.0
 
 # Agent framework (install from source: pip install -e /path/to/dolphin)
 # dolphin

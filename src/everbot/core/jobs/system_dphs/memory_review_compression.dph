@@ -1,0 +1,21 @@
+/prompt/(mode="prompt", system_prompt="You are a profile compression engine. Output only the structured tags, nothing else.")
+Compress these user memory entries into a structured profile.
+
+## Memory Entries
+$entries_text
+
+## Task
+Deduplicate and compress into a structured tag format. Rules:
+- Group by dimension (技术能力, 偏好, 工作流, 投资, etc.)
+- Each dimension is one line with comma-separated tags
+- Merge redundant entries (e.g. 5 entries about "user knows code" → one tag)
+- Keep only actionable information that affects how to interact with the user
+- Use Chinese, keep each tag under 15 characters
+- Total output should be under 200 characters
+
+## Output Format (exact format, no extra text)
+- 技术能力: tag1, tag2, tag3
+- 偏好: tag1, tag2
+- 工作流: tag1, tag2
+- 投资: tag1, tag2
+-> answer

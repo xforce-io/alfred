@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from src.everbot.channels.telegram_channel import TelegramChannel, _extract_urls
@@ -577,6 +578,20 @@ class TestSendRetry:
 
         result = await channel._send_message("111", "hello")
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_send_message_logs_exception_type_and_recovers(self, channel, caplog):
+        ok_resp = MagicMock()
+        ok_resp.json.return_value = {"ok": True}
+        channel._client.post = AsyncMock(
+            side_effect=[httpx.ConnectError("boom"), ok_resp]
+        )
+
+        with caplog.at_level("WARNING"):
+            result = await channel._send_message("111", "hello")
+
+        assert result is True
+        assert "ConnectError" in caplog.text
 
     @pytest.mark.asyncio
     async def test_send_plain_message_success(self, channel):

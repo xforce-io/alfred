@@ -1,8 +1,8 @@
-"""Skill evaluation job — resolve pointers and score using LLM Judge.
+"""Skill evaluation job — score skill invocations using LLM Judge.
 
-Runs as a per-agent task, reads the agent's skill_logs/ pointers,
-resolves them against session files, and produces eval_report.json
-in the agent's skill_eval/ directory.
+Runs as a per-agent task, reads inline evaluation segments from the
+agent's skill_logs/ directory, and produces eval_report.json in the
+agent's skill_eval/ directory.
 """
 
 import logging
@@ -79,8 +79,7 @@ async def _evaluate_one(
     if existing and existing.segment_count >= len(target_entries):
         return None  # already evaluated
 
-    # Entries are EvaluationSegments with inline content (written by SkillLogRecorder).
-    # Filter out any entries that lack content (e.g. legacy pointer-only entries).
+    # Skip segments with no content (e.g. malformed or incomplete records)
     segments = [e for e in target_entries if e.skill_output or e.context_before]
     if not segments:
         logger.info("No segments with content for %s v%s", skill_id, target_version)

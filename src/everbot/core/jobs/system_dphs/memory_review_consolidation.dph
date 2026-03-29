@@ -1,0 +1,32 @@
+/prompt/(mode="prompt", output_format="json", system_prompt="You are a memory consolidation engine. Output valid JSON only.")
+Analyze these memory entries for consolidation.
+
+## Current Memory Entries
+$existing_text
+
+## Recent Conversation Context
+$context_text
+
+## Tasks
+1. Find pairs of entries that can be merged (similar or overlapping content)
+2. Find entries that are outdated or no longer relevant (deprecate)
+3. Find entries reinforced by recent conversations (reinforce)
+4. Find entries whose content can be refined for clarity (refine, in-place update only)
+
+## Constraints
+- merge: creates 1 new entry, removes 2 → net -1
+- deprecate: reduces score (accelerates natural decay)
+- reinforce: boosts score of existing entry
+- refine: updates content in-place, no score change
+- Total effect must be entropy-reducing: merge_count + deprecate_count >= reinforce_count
+
+Output format:
+```json
+{
+  "merge_pairs": [{"id_a": "...", "id_b": "...", "merged_content": "..."}],
+  "deprecate_ids": ["..."],
+  "reinforce_ids": ["..."],
+  "refined_entries": [{"id": "...", "content": "..."}]
+}
+```
+-> answer

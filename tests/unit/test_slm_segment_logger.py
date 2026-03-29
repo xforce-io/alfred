@@ -1,50 +1,30 @@
 """Tests for SLM SegmentLogger."""
 
-import json
 import tempfile
 from pathlib import Path
 
-from src.everbot.core.slm.models import SkillLogEntry
+from src.everbot.core.slm.models import EvaluationSegment
 from src.everbot.core.slm.segment_logger import SegmentLogger
 
 
-def _make_entry(skill_id="test-skill", version="1.0", session_id="s1", **kw):
-    return SkillLogEntry(
+def _make_segment(skill_id="test-skill", version="1.0", session_id="s1", **kw):
+    return EvaluationSegment(
         skill_id=skill_id,
         skill_version=version,
-        session_id=session_id,
-        run_id=kw.get("run_id", "run_001"),
         triggered_at=kw.get("triggered_at", "2026-03-17T10:00:00Z"),
+        context_before=kw.get("context_before", "user: help"),
+        skill_output=kw.get("skill_output", "assistant: done"),
+        context_after=kw.get("context_after", "user: thanks"),
+        session_id=session_id,
     )
-
-
-def _make_session_file(sessions_dir: Path, session_id: str, run_id: str):
-    """Create a minimal session JSON file for resolve tests."""
-    session = {
-        "session_id": session_id,
-        "timeline": [
-            {"type": "turn_start", "run_id": run_id, "timestamp": "2026-03-17T10:00:00"},
-            {"type": "skill", "run_id": run_id, "skill_name": "test-skill", "status": "completed"},
-            {"type": "turn_end", "run_id": run_id},
-        ],
-        "history_messages": [
-            {"role": "user", "content": "fix the bug"},
-            {"role": "assistant", "content": "here is the fix"},
-            {"role": "user", "content": "that worked"},
-        ],
-    }
-    path = sessions_dir / f"web_session_{session_id}.json"
-    path.write_text(json.dumps(session), encoding="utf-8")
-    return path
 
 
 class TestSegmentLogger:
     def test_append_and_load(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             logger = SegmentLogger(Path(tmpdir))
-            entry = _make_entry()
-            logger.append(entry)
-            logger.append(_make_entry(session_id="s2"))
+            logger.append(_make_segment())
+            logger.append(_make_segment(session_id="s2"))
 
             loaded = logger.load("test-skill")
             assert len(loaded) == 2
@@ -56,12 +36,25 @@ class TestSegmentLogger:
             logger = SegmentLogger(Path(tmpdir))
             assert logger.load("nonexistent") == []
 
+    def test_load_preserves_content(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger = SegmentLogger(Path(tmpdir))
+            logger.append(_make_segment(
+                context_before="user: fix bug",
+                skill_output="here is fix",
+                context_after="user: ok",
+            ))
+            loaded = logger.load("test-skill")
+            assert loaded[0].context_before == "user: fix bug"
+            assert loaded[0].skill_output == "here is fix"
+            assert loaded[0].context_after == "user: ok"
+
     def test_load_by_version(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             logger = SegmentLogger(Path(tmpdir))
-            logger.append(_make_entry(version="1.0"))
-            logger.append(_make_entry(version="2.0"))
-            logger.append(_make_entry(version="1.0"))
+            logger.append(_make_segment(version="1.0"))
+            logger.append(_make_segment(version="2.0"))
+            logger.append(_make_segment(version="1.0"))
 
             v1 = logger.load_by_version("test-skill", "1.0")
             assert len(v1) == 2
@@ -73,15 +66,15 @@ class TestSegmentLogger:
         with tempfile.TemporaryDirectory() as tmpdir:
             logger = SegmentLogger(Path(tmpdir))
             assert logger.count("test-skill") == 0
-            logger.append(_make_entry())
-            logger.append(_make_entry())
+            logger.append(_make_segment())
+            logger.append(_make_segment())
             assert logger.count("test-skill") == 2
 
     def test_list_skills(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             logger = SegmentLogger(Path(tmpdir))
-            logger.append(_make_entry(skill_id="alpha"))
-            logger.append(_make_entry(skill_id="beta"))
+            logger.append(_make_segment(skill_id="alpha"))
+            logger.append(_make_segment(skill_id="beta"))
             assert logger.list_skills() == ["alpha", "beta"]
 
     def test_cleanup_max_entries(self):
@@ -93,7 +86,7 @@ class TestSegmentLogger:
             try:
                 mod._MAX_ENTRIES = 3
                 for i in range(5):
-                    logger.append(_make_entry(session_id=f"s{i}"))
+                    logger.append(_make_segment(session_id=f"s{i}"))
 
                 removed = logger.cleanup("test-skill")
                 assert removed == 2
@@ -105,39 +98,65 @@ class TestSegmentLogger:
                 mod._MAX_ENTRIES = orig
 
 
-class TestSegmentLoggerResolve:
-    def test_resolve_basic(self):
+class TestBackfillContextAfter:
+    def test_backfill_basic(self):
+        """context_after is empty at write time and filled by backfill."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir) / "logs"
-            sessions_dir = Path(tmpdir) / "sessions"
-            sessions_dir.mkdir()
+            logger = SegmentLogger(Path(tmpdir))
+            logger.append(_make_segment(session_id="sess1", context_after=""))
 
-            logger = SegmentLogger(logs_dir)
-            entry = _make_entry(session_id="sess1", run_id="run_abc")
-            logger.append(entry)
+            patched = logger.backfill_context_after(
+                "test-skill", "sess1", "user: that worked",
+            )
+            assert patched is True
 
-            _make_session_file(sessions_dir, "sess1", "run_abc")
+            loaded = logger.load("test-skill")
+            assert loaded[0].context_after == "user: that worked"
 
-            entries = logger.load("test-skill")
-            segments = logger.resolve(entries, sessions_dir)
-
-            assert len(segments) == 1
-            seg = segments[0]
-            assert seg.skill_id == "test-skill"
-            assert seg.context_before == "fix the bug"
-            assert seg.skill_output == "here is the fix"
-            assert seg.context_after == "that worked"
-
-    def test_resolve_missing_session(self):
+    def test_backfill_no_match(self):
+        """backfill returns False when no matching session_id exists."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logs_dir = Path(tmpdir) / "logs"
-            sessions_dir = Path(tmpdir) / "sessions"
-            sessions_dir.mkdir()
+            logger = SegmentLogger(Path(tmpdir))
+            logger.append(_make_segment(session_id="other", context_after=""))
 
-            logger = SegmentLogger(logs_dir)
-            entry = _make_entry(session_id="gone", run_id="run_xyz")
-            logger.append(entry)
+            patched = logger.backfill_context_after(
+                "test-skill", "nonexistent", "user: hi",
+            )
+            assert patched is False
 
-            entries = logger.load("test-skill")
-            segments = logger.resolve(entries, sessions_dir)
-            assert len(segments) == 0
+    def test_backfill_skips_already_filled(self):
+        """backfill does not overwrite segments that already have context_after."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger = SegmentLogger(Path(tmpdir))
+            logger.append(_make_segment(session_id="s1", context_after="already set"))
+
+            patched = logger.backfill_context_after(
+                "test-skill", "s1", "new value",
+            )
+            assert patched is False
+
+            loaded = logger.load("test-skill")
+            assert loaded[0].context_after == "already set"
+
+    def test_backfill_targets_last_matching(self):
+        """Only the most recent empty segment for the session is patched."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger = SegmentLogger(Path(tmpdir))
+            logger.append(_make_segment(session_id="s1", context_after=""))
+            logger.append(_make_segment(session_id="s1", context_after=""))
+
+            patched = logger.backfill_context_after(
+                "test-skill", "s1", "user: thanks",
+            )
+            assert patched is True
+
+            loaded = logger.load("test-skill")
+            assert loaded[0].context_after == ""  # first untouched
+            assert loaded[1].context_after == "user: thanks"  # last patched
+
+    def test_backfill_nonexistent_file(self):
+        """backfill returns False for a skill with no log file."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger = SegmentLogger(Path(tmpdir))
+            assert logger.backfill_context_after("ghost", "s1", "hi") is False
+

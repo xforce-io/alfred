@@ -10,9 +10,27 @@ from typing import List
 from ..runtime.skill_context import SkillContext
 from ..scanners.session_scanner import SessionScanner
 from ..scanners.reflection_state import ReflectionState
-from .llm_utils import parse_json_response
+from .llm_utils import parse_json_response, parse_system_dph
 
 logger = logging.getLogger(__name__)
+
+
+def _is_missing_skill_llm(exc: Exception) -> bool:
+    """Return True when the runtime lacks the optional skill LLM dependency."""
+    return "litellm is required for skill LLM calls" in str(exc)
+
+
+class _SkipResult:
+    """Sentinel returned by helper functions when LLM/deps are unavailable.
+
+    Distinguishes a genuine "nothing to do" empty result from a "could not run"
+    skip, so the caller can decide whether to advance the watermark.
+    """
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+    def __str__(self) -> str:
+        return self.reason
 
 
 async def run(context: SkillContext) -> str:
@@ -48,6 +66,11 @@ async def run(context: SkillContext) -> str:
     existing = context.memory_manager.load_entries()
     review = await _analyze_memory_consolidation(context.llm, digests, existing)
 
+    # If LLM/deps were unavailable, do not apply changes or advance the watermark.
+    # The sessions remain eligible for re-review once the environment recovers.
+    if isinstance(review, _SkipResult):
+        return f"Memory review skipped: {review}, profile: skipped"
+
     # 4. Apply consolidation + post-validation
     entries_before = len(existing)
     from ..memory.manager import IntegrityError
@@ -69,12 +92,16 @@ async def run(context: SkillContext) -> str:
     # 5. Compress memories → USER.md
     compress_result = await _compress_to_user_profile(context)
 
-    # 6. Advance watermark
-    if last_successful_session:
+    # 6. Advance watermark only when both steps completed successfully.
+    # A _SkipResult means the LLM/deps were unavailable; keep sessions eligible
+    # for re-review so they are not permanently lost.
+    llm_unavailable = isinstance(compress_result, _SkipResult)
+    if last_successful_session and not llm_unavailable:
         state.set_watermark("memory-review", last_successful_session.updated_at)
         state.save(context.workspace_path)
 
-    return f"Memory review: {review_stats}, profile: {compress_result}"
+    compress_str = str(compress_result)
+    return f"Memory review: {review_stats}, profile: {compress_str}"
 
 
 async def _analyze_memory_consolidation(llm, digests: List[str], existing_entries) -> dict:
@@ -91,39 +118,23 @@ async def _analyze_memory_consolidation(llm, digests: List[str], existing_entrie
     )
     context_text = "\n".join(d[:500] for d in digests[:3])
 
-    prompt = f"""Analyze these memory entries for consolidation.
-
-## Current Memory Entries
-{existing_text}
-
-## Recent Conversation Context
-{context_text}
-
-## Tasks
-1. Find pairs of entries that can be merged (similar or overlapping content)
-2. Find entries that are outdated or no longer relevant (deprecate)
-3. Find entries reinforced by recent conversations (reinforce)
-4. Find entries whose content can be refined for clarity (refine, in-place update only)
-
-## Constraints
-- merge: creates 1 new entry, removes 2 → net -1
-- deprecate: reduces score (accelerates natural decay)
-- reinforce: boosts score of existing entry
-- refine: updates content in-place, no score change
-- Total effect must be entropy-reducing: merge_count + deprecate_count >= reinforce_count
-
-Output format:
-```json
-{{
-  "merge_pairs": [{{"id_a": "...", "id_b": "...", "merged_content": "..."}}],
-  "deprecate_ids": ["..."],
-  "reinforce_ids": ["..."],
-  "refined_entries": [{{"id": "...", "content": "..."}}]
-}}
-```"""
+    from pathlib import Path
 
     try:
-        response = await llm.complete(prompt, system="You are a memory consolidation engine. Output valid JSON only.")
+        dph_path = Path(__file__).parent / "system_dphs" / "memory_review_consolidation.dph"
+        dph_data = parse_system_dph(str(dph_path), {
+            "existing_text": existing_text,
+            "context_text": context_text,
+        })
+        sys_prompt = dph_data["config"].pop("system_prompt", "")
+        model_override = dph_data["config"].pop("model", "")
+
+        response = await llm.complete(
+            dph_data["prompt"],
+            system=sys_prompt,
+            model_override=model_override,
+            **dph_data["config"]
+        )
         result = parse_json_response(response)
 
         # Validate entropy constraint
@@ -140,6 +151,10 @@ Output format:
 
         return result
     except Exception as e:
+        if _is_missing_skill_llm(e) or isinstance(e, FileNotFoundError):
+            reason = "skill llm unavailable" if _is_missing_skill_llm(e) else f"dph missing: {e}"
+            logger.info("Memory consolidation skipped: %s", reason)
+            return _SkipResult(reason)
         logger.error("Memory consolidation analysis failed: %s", e)
         return {}
 
@@ -163,30 +178,21 @@ async def _compress_to_user_profile(context: SkillContext) -> str:
         f"- [{e.category}] {e.content}" for e in active
     )
 
-    prompt = f"""Compress these user memory entries into a structured profile.
-
-## Memory Entries
-{entries_text}
-
-## Task
-Deduplicate and compress into a structured tag format. Rules:
-- Group by dimension (技术能力, 偏好, 工作流, 投资, etc.)
-- Each dimension is one line with comma-separated tags
-- Merge redundant entries (e.g. 5 entries about "user knows code" → one tag)
-- Keep only actionable information that affects how to interact with the user
-- Use Chinese, keep each tag under 15 characters
-- Total output should be under 200 characters
-
-## Output Format (exact format, no extra text)
-- 技术能力: tag1, tag2, tag3
-- 偏好: tag1, tag2
-- 工作流: tag1, tag2
-- 投资: tag1, tag2"""
+    from pathlib import Path
 
     try:
+        dph_path = Path(__file__).parent / "system_dphs" / "memory_review_compression.dph"
+        dph_data = parse_system_dph(str(dph_path), {
+            "entries_text": entries_text,
+        })
+        sys_prompt = dph_data["config"].pop("system_prompt", "")
+        model_override = dph_data["config"].pop("model", "")
+
         response = await context.llm.complete(
-            prompt,
-            system="You are a profile compression engine. Output only the structured tags, nothing else.",
+            dph_data["prompt"],
+            system=sys_prompt,
+            model_override=model_override,
+            **dph_data["config"]
         )
         profile_content = response.strip()
 
@@ -199,6 +205,9 @@ Deduplicate and compress into a structured tag format. Rules:
         logger.info("Compressed %d memory entries to USER.md", len(active))
         return f"compressed {len(active)} entries"
     except Exception as e:
+        if _is_missing_skill_llm(e) or isinstance(e, FileNotFoundError):
+            reason = "skill llm unavailable" if _is_missing_skill_llm(e) else f"dph missing: {e}"
+            logger.info("Memory compression skipped: %s", reason)
+            return _SkipResult(reason)
         logger.error("Memory compression to USER.md failed: %s", e)
         return f"error: {e}"
-
