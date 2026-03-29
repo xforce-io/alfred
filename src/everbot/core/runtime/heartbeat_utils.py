@@ -41,7 +41,7 @@ def task_snapshot(task: Any) -> dict[str, Any]:
         "timeout_seconds": int(getattr(task, "timeout_seconds", 120) or 120),
         "schedule": getattr(task, "schedule", None),
         "timezone": getattr(task, "timezone", None),
-        "skill": getattr(task, "skill", None),
+        "job": getattr(task, "job", None),
         "scanner": getattr(task, "scanner", None),
         "min_execution_interval": getattr(task, "min_execution_interval", None),
         "retry": int(getattr(task, "retry", 0) or 0),

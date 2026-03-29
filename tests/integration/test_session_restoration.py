@@ -91,8 +91,8 @@ async def test_session_save_and_restore_workflow():
         assert portable_state["schema_version"] == "portable_session.v1"
         assert portable_state["session_id"] == session_id
         assert len(portable_state["history_messages"]) == 2
-        # workspace_instructions should be filtered out before import
+        # workspace_instructions and model_name are runtime vars filtered before import
         assert "workspace_instructions" not in portable_state["variables"]
-        assert portable_state["variables"]["model_name"] == "gpt-4"
+        assert "model_name" not in portable_state["variables"]
         assert portable_state["variables"]["current_time"] == "2024-01-01"
         assert call_args[1]["repair"] is True
