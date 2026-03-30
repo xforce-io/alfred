@@ -689,3 +689,97 @@ class TestSkillWithoutScanner:
         assert not state_after.get_watermark("memory-review"), (
             "watermark must not advance when dph file is missing"
         )
+
+
+# ── _SkillLLMClient Tests ────────────────────────────────────────
+
+
+class TestSkillLLMClient:
+    """Verify _SkillLLMClient uses Dolphin GlobalConfig, not litellm."""
+
+    @pytest.mark.asyncio
+    async def test_uses_dolphin_openai_not_litellm(self):
+        """_SkillLLMClient must resolve model via GlobalConfig and call
+        AsyncOpenAI, never importing litellm."""
+        from src.everbot.core.runtime.heartbeat import _SkillLLMClient
+
+        client = _SkillLLMClient(model="deepseek-volcengine")
+
+        # Should NOT depend on litellm at all
+        import importlib
+        import sys
+        litellm_was_imported = "litellm" in sys.modules
+
+        # Mock the Dolphin GlobalConfig path to avoid needing real config
+        fake_config = MagicMock()
+        fake_model_cfg = MagicMock()
+        fake_model_cfg.effective_api = "https://fake-volcengine.example.com/v1"
+        fake_model_cfg.api_key = "fake-key"
+        fake_model_cfg.model_name = "kimi-k2.5"
+        fake_model_cfg.max_tokens = 2000
+        fake_model_cfg.effective_headers = {}
+        fake_config.get_model_config.return_value = fake_model_cfg
+
+        # Patch GlobalConfig loading and AsyncOpenAI
+        import unittest.mock as um
+
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock()]
+        fake_response.choices[0].message.content = "test response"
+
+        with um.patch(
+            "src.everbot.core.runtime.heartbeat._get_skill_global_config",
+            return_value=fake_config,
+        ), um.patch(
+            "src.everbot.core.runtime.heartbeat.AsyncOpenAI",
+        ) as mock_openai_cls:
+            mock_client = AsyncMock()
+            mock_client.chat.completions.create.return_value = fake_response
+            mock_openai_cls.return_value = mock_client
+
+            result = await client.complete("hello", system="be helpful")
+
+        assert result == "test response"
+        # Verify it resolved model config from GlobalConfig
+        fake_config.get_model_config.assert_called_once_with("deepseek-volcengine")
+        # Verify it called OpenAI with the resolved model_name, not the instance name
+        call_kwargs = mock_client.chat.completions.create.call_args
+        assert call_kwargs[1]["model"] == "kimi-k2.5"
+
+    @pytest.mark.asyncio
+    async def test_fallback_model_from_env(self):
+        """When model is empty, fall back to ALFRED_SKILL_MODEL env var."""
+        from src.everbot.core.runtime.heartbeat import _SkillLLMClient
+        import unittest.mock as um
+        import os
+
+        client = _SkillLLMClient(model="")
+
+        fake_config = MagicMock()
+        fake_model_cfg = MagicMock()
+        fake_model_cfg.effective_api = "https://api.deepseek.com/v1"
+        fake_model_cfg.api_key = "sk-test"
+        fake_model_cfg.model_name = "deepseek-chat"
+        fake_model_cfg.max_tokens = 2000
+        fake_model_cfg.effective_headers = {}
+        fake_config.get_model_config.return_value = fake_model_cfg
+
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock()]
+        fake_response.choices[0].message.content = "ok"
+
+        with um.patch.dict(os.environ, {"ALFRED_SKILL_MODEL": "deepseek-chat"}), \
+             um.patch(
+                 "src.everbot.core.runtime.heartbeat._get_skill_global_config",
+                 return_value=fake_config,
+             ), um.patch(
+                 "src.everbot.core.runtime.heartbeat.AsyncOpenAI",
+             ) as mock_openai_cls:
+            mock_client = AsyncMock()
+            mock_client.chat.completions.create.return_value = fake_response
+            mock_openai_cls.return_value = mock_client
+
+            result = await client.complete("test")
+
+        assert result == "ok"
+        fake_config.get_model_config.assert_called_once_with("deepseek-chat")

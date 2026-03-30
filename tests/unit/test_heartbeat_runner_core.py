@@ -1070,6 +1070,20 @@ class TestIsPermanentError:
         exc = Exception("connection timeout")
         assert _is_permanent_error(exc) is False
 
+    def test_import_error_is_permanent(self):
+        """ImportError (e.g. missing module) is not retryable."""
+        exc = ImportError("No module named 'dolphin.lib.memory'")
+        assert _is_permanent_error(exc) is True
+
+    def test_module_not_found_is_permanent(self):
+        exc = ModuleNotFoundError("No module named 'litellm'")
+        assert _is_permanent_error(exc) is True
+
+    def test_init_failed_is_permanent(self):
+        """Agent init failures (e.g. bad config) should not be retried."""
+        exc = Exception("INIT_FAILED, Failed to initialize agent: No module named 'foo'")
+        assert _is_permanent_error(exc) is True
+
 
 # ============================================================
 # TestIdleCooldown

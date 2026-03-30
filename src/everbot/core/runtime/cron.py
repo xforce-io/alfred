@@ -466,6 +466,7 @@ class CronExecutor:
         self.routine_manager.flush(task_list)
         self._write_event("task_start", task_id=task.id, title=task.title, execution_mode="isolated")
 
+        exec_path = "job_isolated" if task.job else "llm_isolated"
         try:
             await self._run_isolated_task(task, run_id, run_agent=run_agent)
             if verdict and verdict.scan_result:
@@ -475,21 +476,73 @@ class CronExecutor:
             self.routine_manager.flush(task_list)
             return TaskResult(
                 task_id=task.id, status="done",
-                output=f"ISOLATED_DONE:{task.id}", execution_path="llm_isolated",
+                output=f"ISOLATED_DONE:{task.id}", execution_path=exec_path,
             )
         except asyncio.TimeoutError:
             self.routine_manager.update_task_state(task, TaskState.FAILED, error_message="timeout")
             self._write_event("task_failed", task_id=task.id, title=task.title, error="timeout")
             self.routine_manager.flush(task_list)
-            return TaskResult(task_id=task.id, status="timeout", error="timeout", execution_path="llm_isolated")
+            return TaskResult(task_id=task.id, status="timeout", error="timeout", execution_path=exec_path)
         except Exception as exc:
             self.routine_manager.update_task_state(task, TaskState.FAILED, error_message=str(exc))
             self._write_event("task_failed", task_id=task.id, title=task.title, error=str(exc)[:200])
             self.routine_manager.flush(task_list)
-            return TaskResult(task_id=task.id, status="failed", error=str(exc), execution_path="llm_isolated")
+            return TaskResult(task_id=task.id, status="failed", error=str(exc), execution_path=exec_path)
 
     async def _run_isolated_task(self, task: Task, run_id: str, *, run_agent: Callable) -> str:
-        """Execute one isolated task with a dedicated job session."""
+        """Execute one isolated task.
+
+        Routes by task type:
+        - job tasks (task.job set): call _invoke_job() → Python module
+        - agent tasks (no job): create agent session → LLM turn
+
+        Both paths use the delivery pipeline for result delivery.
+        """
+        if task.job:
+            return await self._run_isolated_job(task, run_id)
+        return await self._run_isolated_agent(task, run_id, run_agent=run_agent)
+
+    async def _run_isolated_job(self, task: Task, run_id: str) -> str:
+        """Execute an isolated job task via Python module, with delivery."""
+        task_title = str(task.title or "")
+        scan_result = None  # isolated jobs don't carry scan_result from gate
+        try:
+            result = await asyncio.wait_for(
+                self._invoke_job(task, scan_result, run_id),
+                timeout=task.timeout_seconds,
+            )
+
+            summary = f"{task_title or task.id} completed"
+            await self.delivery.deposit_job_event(
+                event_type="job_completed",
+                source_session_id=f"job_{task.id}",
+                summary=summary,
+                detail=result,
+                run_id=run_id,
+            )
+            await self.delivery.inject_to_history(result, run_id)
+            await self.delivery._emit_realtime(result, run_id)
+
+            return result
+        except Exception as exc:
+            summary = f"{task_title or task.id} failed"
+            await self.delivery.deposit_job_event(
+                event_type="job_failed",
+                source_session_id=f"job_{task.id}",
+                summary=summary,
+                detail=str(exc),
+                run_id=run_id,
+            )
+            from ..tasks.task_manager import format_retry_hint
+            retry_hint = format_retry_hint(task)
+            fail_msg = f"Task failed: {task_title or task.id}\n{exc}"
+            if retry_hint:
+                fail_msg += f"\n\n{retry_hint}"
+            await self.delivery._emit_realtime(fail_msg, run_id)
+            raise
+
+    async def _run_isolated_agent(self, task: Task, run_id: str, *, run_agent: Callable) -> str:
+        """Execute an isolated agent task with a dedicated LLM session."""
         job_session_id = build_job_session_id(task)
         task_title = str(task.title or "")
         prompt = build_isolated_task_prompt(task)
@@ -774,40 +827,14 @@ class CronExecutor:
 
 
 class _SkillLLMClient:
-    """Lightweight LLM client for reflection skills."""
+    """Lightweight LLM client for reflection skills.
+
+    Delegates to the shared implementation in heartbeat module.
+    """
 
     def __init__(self, model: str = ""):
-        self._model = model
+        from .heartbeat import _SkillLLMClient as _Impl
+        self._impl = _Impl(model=model)
 
     async def complete(self, prompt: str, system: str = "", model_override: str = "", **kwargs) -> str:
-        """Single-turn LLM completion."""
-        try:
-            import litellm
-        except ImportError as e:
-            raise RuntimeError("litellm is required for skill LLM calls") from e
-
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-
-        model = model_override or self._model
-        if not model:
-            import os
-            model = os.environ.get("ALFRED_SKILL_MODEL", "deepseek/deepseek-chat")
-
-        # Set unified defaults while allowing DPH config overrides
-        call_kwargs = {
-            "temperature": kwargs.get("temperature", 0.3),
-            "max_tokens": kwargs.get("max_tokens", 2000),
-        }
-        
-        # Merge all DPH-extracted configs mapping natively accepted by litellm
-        for k, v in kwargs.items():
-            if k not in ["mode", "output_format", "system_prompt", "model"]: # skip custom fields
-                call_kwargs[k] = v
-
-        response = await litellm.acompletion(
-            model=model, messages=messages, **call_kwargs
-        )
-        return response.choices[0].message.content or ""
+        return await self._impl.complete(prompt, system=system, model_override=model_override, **kwargs)

@@ -1,8 +1,8 @@
 # Alfred EverBot 设计方案
 
-> **版本**: v1.1
+> **版本**: v1.2
 > **创建时间**: 2026-02-01
-> **更新时间**: 2026-02-01
+> **更新时间**: 2026-03-30
 
 ---
 
@@ -781,6 +781,136 @@ class UserDataManager:
     ▼
 返回结果
 ```
+
+### 6.3 任务执行模型
+
+> **v1.2 新增**：v1.1 中所有任务统一通过 Agent turn 执行。随着系统演进，引入了
+> 结构化任务清单、Python Job 模块和 CronExecutor，需要重新定义任务分类和执行语义。
+
+#### 6.3.1 两个正交维度
+
+任务执行由两个独立维度决定：
+
+| 维度 | 选项 | 决定什么 |
+|------|------|----------|
+| **执行方式** | `job`（Python 模块）/ `agent`（LLM turn） | **怎么执行**：调 Python 还是调 LLM |
+| **上下文模式** | `inline` / `isolated` | **在哪执行**：主 session 分支内，还是独立分支 |
+
+这两个维度是**正交**的，不应耦合：
+
+|  | inline | isolated |
+|--|--------|----------|
+| **job** | Python 模块在 heartbeat 周期内同步执行 | Python 模块独立执行，结果通过 delivery pipeline 交付 |
+| **agent** | Agent turn 在主 session 上下文中执行 | Agent turn 在独立 session 分支中执行 |
+
+#### 6.3.2 执行方式：Job vs Agent
+
+**Job 任务**（`task.job` 非空）：
+
+- 有对应的 Python 模块（`everbot.core.jobs.<module_name>`）
+- 通过 `_invoke_job()` → `module.run(context: SkillContext)` 直接调用
+- 不参与 Agent 上下文体系，通过 `SkillContext` 获取所需资源
+- 适合：逻辑确定的系统任务，内部可按需调用 `context.llm`
+
+**Agent 任务**（`task.job` 为空）：
+
+- 通过 Dolphin Agent turn 执行，LLM 自主推理 + 调用工具
+- 需要 Agent 上下文（system prompt、对话历史、工具集）
+- 适合：开放性任务，需要 LLM 理解意图和自主执行
+
+**判定规则**：`task.job` 字段决定执行方式，与 `execution_mode` 无关。
+
+#### 6.3.3 上下文模式：Inline vs Isolated
+
+`execution_mode` 控制任务的**上下文分支和结果交付方式**：
+
+**Inline**：
+
+- 在主 heartbeat session 的上下文中执行
+- Agent 任务：共享主 session 对话历史，执行过程留在主 session
+- Job 任务：在 heartbeat 周期内同步执行，结果作为 `TaskResult` 返回
+- 适合：轻量任务、需要感知主 session 上下文的任务
+
+**Isolated**：
+
+- 创建独立的执行上下文，与主 session 分离
+- Agent 任务：fork 独立 agent session（干净 system prompt + 对话历史）
+- Job 任务：独立执行，不阻塞 heartbeat 主流程
+- 结果通过 delivery pipeline 回流（mailbox → inject_to_history → realtime push）
+- 中间过程不污染主 session
+- 适合：耗时任务、多轮交互任务、产生大量中间上下文的任务
+
+#### 6.3.4 执行流程
+
+```
+Heartbeat Cycle
+│
+├── Due Tasks
+│   │
+│   ├── Inline (按序执行，在主 session 内)
+│   │   ├── job  → _invoke_job() → Python module.run(context)
+│   │   ├── deterministic → programmatic output (e.g. 报时)
+│   │   └── agent → inject context → run_agent() in primary session
+│   │
+│   └── Isolated (逐个执行，独立上下文)
+│       ├── job  → _invoke_job() → Python module.run(context) → delivery
+│       └── agent → create session → run_agent() → delivery
+│
+└── Inspector / Reflection (主 session 上下文)
+```
+
+#### 6.3.5 内置 Job
+
+Inspector 自动注册到 HEARTBEAT.md 的系统 Job：
+
+| Job | 模块 | execution_mode | scanner | 说明 |
+|-----|------|----------------|---------|------|
+| memory-review | `jobs/memory_review.py` | inline | session | 检查近期对话，更新 MEMORY.md |
+| task-discover | `jobs/task_discover.py` | inline | session | 从对话中发现新的定时任务意图 |
+| skill-evaluate | `jobs/skill_evaluate.py` | **isolated** | — | 评估技能执行效果（内部调 LLM Judge） |
+
+> **注**：memory-review 和 task-discover 为轻量 inline Job，在 heartbeat 周期内同步完成。
+> skill-evaluate 内部通过 `context.llm` 调用 LLM Judge，耗时较长，使用 isolated
+> 避免阻塞 heartbeat 主循环。isolated + job 走 `_invoke_job()` 执行 Python 模块，
+> 不创建 Agent session。
+
+#### 6.3.6 HEARTBEAT.md 任务格式
+
+> v1.1 中 HEARTBEAT.md 为纯 Markdown checklist。v1.2 改为 JSON 结构化格式。
+
+```json
+{
+  "version": 2,
+  "tasks": [
+    {
+      "id": "routine_<hash>",
+      "title": "任务标题",
+      "description": "任务描述",
+      "enabled": true,
+      "schedule": "2h",
+      "timezone": "Asia/Shanghai",
+      "execution_mode": "inline|isolated",
+      "job": "module-name|null",
+      "scanner": "session|null",
+      "state": "pending|running|done|failed",
+      "last_run_at": "ISO8601",
+      "next_run_at": "ISO8601",
+      "timeout_seconds": 180,
+      "retry": 0,
+      "max_retry": 3
+    }
+  ]
+}
+```
+
+关键字段语义：
+
+| 字段 | 说明 |
+|------|------|
+| `execution_mode` | 上下文模式，控制分支策略和结果交付 |
+| `job` | Python 模块名。非空时走 `_invoke_job()`，为空时走 Agent turn |
+| `scanner` | 前置扫描器（如 `session`），检查是否有新数据需要处理 |
+| `schedule` | 调度表达式（`2h` / `1d` / cron 表达式） |
 
 ---
 

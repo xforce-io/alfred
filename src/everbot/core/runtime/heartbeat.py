@@ -70,6 +70,8 @@ _PERMANENT_ERROR_MARKERS: list[str] = [
     "billing",
     "account deactivated",
     "access denied",
+    "no module named",     # wrapped ImportError (e.g. agent init failure)
+    "init_failed",         # agent lifecycle init failure
 ]
 
 
@@ -87,7 +89,10 @@ def _llm_progress_fingerprint(progress: dict[str, Any]) -> str:
 
 def _is_permanent_error(exc: BaseException) -> bool:
     """Return True if *exc* looks like a non-retryable error."""
-    # 1. Check HTTP status_code attribute (httpx/aiohttp/requests exceptions)
+    # 1. ImportError / ModuleNotFoundError — missing dependency, won't fix itself
+    if isinstance(exc, (ImportError, ModuleNotFoundError)):
+        return True
+    # 2. Check HTTP status_code attribute (httpx/aiohttp/requests exceptions)
     status = (
         getattr(exc, "status_code", None)
         or getattr(exc, "status", None)
@@ -95,7 +100,7 @@ def _is_permanent_error(exc: BaseException) -> bool:
     )
     if isinstance(status, int) and status in {401, 402, 403}:
         return True
-    # 2. String matching fallback
+    # 3. String matching fallback
     text = str(exc).lower()
     return any(marker in text for marker in _PERMANENT_ERROR_MARKERS)
 
@@ -1609,22 +1614,34 @@ If not, reply with `HEARTBEAT_OK`.
         logger.info("[%s] 心跳已停止", self.agent_name)
 
 
+def _get_skill_global_config():
+    """Load Dolphin GlobalConfig for skill LLM calls.
+
+    Reuses the same config discovery logic as AgentFactory so that skill LLM
+    calls route through the same cloud/model definitions (base_url, api_key,
+    model_name) instead of requiring litellm.
+    """
+    from ..agent.factory import AgentFactory
+    factory = AgentFactory()
+    return factory._get_global_config()
+
+
+# Re-export for patching in tests; actual import deferred to complete().
+from openai import AsyncOpenAI
+
+
 class _SkillLLMClient:
     """Lightweight LLM client for reflection skills.
 
-    Uses litellm for direct completion calls without full agent setup.
+    Uses Dolphin GlobalConfig to resolve model endpoint/credentials,
+    then calls AsyncOpenAI directly.  No litellm dependency.
     """
 
     def __init__(self, model: str = ""):
         self._model = model
 
     async def complete(self, prompt: str, system: str = "", model_override: str = "", **kwargs) -> str:
-        """Single-turn LLM completion."""
-        try:
-            import litellm
-        except ImportError as e:
-            raise RuntimeError("litellm is required for skill LLM calls") from e
-
+        """Single-turn LLM completion via Dolphin-configured OpenAI endpoint."""
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -1633,20 +1650,37 @@ class _SkillLLMClient:
         model = model_override or self._model
         if not model:
             import os
-            model = os.environ.get("ALFRED_SKILL_MODEL", "deepseek/deepseek-chat")
+            model = os.environ.get("ALFRED_SKILL_MODEL", "deepseek-chat")
 
-        # Set unified defaults while allowing DPH config overrides
+        # Resolve model config from Dolphin GlobalConfig (base_url, api_key, model_name)
+        global_config = _get_skill_global_config()
+        model_cfg = global_config.get_model_config(model)
+
+        base_url = model_cfg.effective_api
+        # AsyncOpenAI appends /chat/completions; strip it if already present
+        if base_url.endswith("/chat/completions"):
+            base_url = base_url.replace("/chat/completions", "")
+        elif base_url.endswith("/v1/chat/completions"):
+            base_url = base_url.replace("/v1/chat/completions", "/v1")
+
+        client = AsyncOpenAI(
+            base_url=base_url,
+            api_key=model_cfg.api_key or "dummy",
+            default_headers=model_cfg.effective_headers or None,
+        )
+
         call_kwargs = {
             "temperature": kwargs.get("temperature", 0.3),
-            "max_tokens": kwargs.get("max_tokens", 2000),
+            "max_tokens": kwargs.get("max_tokens", model_cfg.max_tokens or 2000),
         }
-        
-        # Merge all DPH-extracted configs mapping natively accepted by litellm
+        # Pass through DPH-extracted params accepted by the OpenAI API
         for k, v in kwargs.items():
-            if k not in ["mode", "output_format", "system_prompt", "model"]: # skip custom fields
+            if k not in ("mode", "output_format", "system_prompt", "model"):
                 call_kwargs[k] = v
 
-        response = await litellm.acompletion(
-            model=model, messages=messages, **call_kwargs
+        response = await client.chat.completions.create(
+            model=model_cfg.model_name,
+            messages=messages,
+            **call_kwargs,
         )
         return response.choices[0].message.content or ""

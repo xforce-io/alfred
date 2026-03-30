@@ -17,7 +17,12 @@ logger = logging.getLogger(__name__)
 
 def _is_missing_skill_llm(exc: Exception) -> bool:
     """Return True when the runtime lacks the optional skill LLM dependency."""
-    return "litellm is required for skill LLM calls" in str(exc)
+    msg = str(exc).lower()
+    return any(marker in msg for marker in (
+        "litellm is required",  # legacy check
+        "not found in configuration",  # Dolphin GlobalConfig model not found
+        "no module named 'openai'",  # openai package missing
+    ))
 
 
 class _SkipResult:

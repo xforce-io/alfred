@@ -230,6 +230,193 @@ class TestStateFlush:
         assert task.last_run_at is not None
 
 
+class TestIsolatedJobExecution:
+    """Isolated + job tasks should call _invoke_job, not create an agent turn."""
+
+    @pytest.mark.asyncio
+    async def test_isolated_job_calls_invoke_job_not_agent(self, tmp_path):
+        """When an isolated task has task.job set, it should run the Python
+        module via _invoke_job instead of creating an LLM agent turn."""
+        mgr = _seed_task(
+            tmp_path,
+            title="Skill Evaluate",
+            execution_mode="isolated",
+            job="skill-evaluate",
+            timeout_seconds=180,
+        )
+        executor = _make_executor(tmp_path, routine_manager=mgr)
+        task_list = mgr.load_task_list()
+        run_agent = AsyncMock(return_value="agent result")
+
+        with patch.object(
+            executor, '_invoke_job',
+            new_callable=AsyncMock,
+            return_value="Evaluated 3/3 skills",
+        ) as mock_invoke_job, patch.object(
+            executor, '_create_job_agent',
+            new_callable=AsyncMock,
+        ) as mock_create_agent:
+            result = await executor.tick(
+                task_list,
+                run_agent=run_agent,
+                inject_context=AsyncMock(),
+                run_id="test_run",
+                include_inline=False,
+            )
+
+        # Job module should be called
+        mock_invoke_job.assert_called_once()
+        # Agent should NOT be created
+        mock_create_agent.assert_not_called()
+        # run_agent should NOT be called for this task
+        run_agent.assert_not_called()
+        assert result.executed == 1
+        assert result.results[0].status == "done"
+
+    @pytest.mark.asyncio
+    async def test_isolated_job_uses_delivery_pipeline(self, tmp_path):
+        """Isolated job results should go through the delivery pipeline
+        (deposit_job_event, inject_to_history, emit_realtime)."""
+        mgr = _seed_task(
+            tmp_path,
+            title="Skill Evaluate",
+            execution_mode="isolated",
+            job="skill-evaluate",
+            timeout_seconds=180,
+        )
+        sm = AsyncMock()
+        sm.get_primary_session_id.return_value = "web_session_test"
+        sm.get_heartbeat_session_id.return_value = "heartbeat_session_test"
+        delivery = CronDelivery(
+            session_manager=sm,
+            primary_session_id="web_session_test",
+            heartbeat_session_id="heartbeat_session_test",
+            agent_name="test_agent",
+            realtime_push=False,
+        )
+        executor = _make_executor(
+            tmp_path, routine_manager=mgr,
+            session_manager=sm, delivery=delivery,
+        )
+        task_list = mgr.load_task_list()
+
+        with patch.object(
+            executor, '_invoke_job',
+            new_callable=AsyncMock,
+            return_value="Evaluated 3/3 skills",
+        ), patch.object(
+            delivery, 'deposit_job_event',
+            new_callable=AsyncMock,
+        ) as mock_deposit, patch.object(
+            delivery, 'inject_to_history',
+            new_callable=AsyncMock,
+        ) as mock_inject, patch.object(
+            delivery, '_emit_realtime',
+            new_callable=AsyncMock,
+        ) as mock_realtime:
+            result = await executor.tick(
+                task_list,
+                run_agent=AsyncMock(),
+                inject_context=AsyncMock(),
+                run_id="test_run",
+                include_inline=False,
+            )
+
+        assert result.executed == 1
+        mock_deposit.assert_called_once()
+        mock_inject.assert_called_once()
+        mock_realtime.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_isolated_agent_task_still_creates_agent(self, tmp_path):
+        """Isolated tasks WITHOUT job should still create an agent session."""
+        mgr = _seed_task(
+            tmp_path,
+            title="Daily News",
+            execution_mode="isolated",
+            description="Generate news",
+            timeout_seconds=300,
+        )
+        executor = _make_executor(tmp_path, routine_manager=mgr)
+        task_list = mgr.load_task_list()
+        run_agent = AsyncMock(return_value="News report")
+
+        with patch.object(
+            executor, '_create_job_agent',
+            new_callable=AsyncMock,
+        ) as mock_create_agent, patch.object(
+            executor, '_invoke_job',
+            new_callable=AsyncMock,
+        ) as mock_invoke_job:
+            mock_agent = MagicMock()
+            mock_create_agent.return_value = mock_agent
+            result = await executor.tick(
+                task_list,
+                run_agent=run_agent,
+                inject_context=AsyncMock(),
+                run_id="test_run",
+                include_inline=False,
+            )
+
+        # Agent SHOULD be created for non-job isolated tasks
+        mock_create_agent.assert_called_once()
+        # _invoke_job should NOT be called
+        mock_invoke_job.assert_not_called()
+        run_agent.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_isolated_job_failure_reports_via_delivery(self, tmp_path):
+        """When an isolated job fails, error should go through delivery pipeline."""
+        mgr = _seed_task(
+            tmp_path,
+            title="Skill Evaluate",
+            execution_mode="isolated",
+            job="skill-evaluate",
+            timeout_seconds=180,
+        )
+        sm = AsyncMock()
+        sm.get_primary_session_id.return_value = "web_session_test"
+        sm.get_heartbeat_session_id.return_value = "heartbeat_session_test"
+        delivery = CronDelivery(
+            session_manager=sm,
+            primary_session_id="web_session_test",
+            heartbeat_session_id="heartbeat_session_test",
+            agent_name="test_agent",
+            realtime_push=False,
+        )
+        executor = _make_executor(
+            tmp_path, routine_manager=mgr,
+            session_manager=sm, delivery=delivery,
+        )
+        task_list = mgr.load_task_list()
+
+        with patch.object(
+            executor, '_invoke_job',
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("LLM judge failed"),
+        ), patch.object(
+            delivery, 'deposit_job_event',
+            new_callable=AsyncMock,
+        ) as mock_deposit, patch.object(
+            delivery, '_emit_realtime',
+            new_callable=AsyncMock,
+        ) as mock_realtime:
+            result = await executor.tick(
+                task_list,
+                run_agent=AsyncMock(),
+                inject_context=AsyncMock(),
+                run_id="test_run",
+                include_inline=False,
+            )
+
+        assert result.failed == 1
+        assert "LLM judge failed" in result.results[0].error
+        # Failure should be reported via delivery
+        mock_deposit.assert_called_once()
+        assert mock_deposit.call_args[1]["event_type"] == "job_failed"
+        mock_realtime.assert_called_once()
+
+
 class TestJobImportError:
     @pytest.mark.asyncio
     async def test_import_failure_gives_actionable_error(self, tmp_path):
