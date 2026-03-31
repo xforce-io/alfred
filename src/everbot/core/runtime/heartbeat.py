@@ -270,6 +270,7 @@ If not, reply with `HEARTBEAT_OK`.
             routine_manager=self._routine_manager,
             delivery=self._delivery,
             broadcast_scope=self.broadcast_scope,
+            active_hours=active_hours,
         )
         # Inspector: delegates structured_reflect observation
         self._inspector = Inspector(

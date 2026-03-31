@@ -132,6 +132,7 @@ class CronExecutor:
         routine_manager: Any,  # RoutineManager
         delivery: CronDelivery,
         broadcast_scope: str = "agent",
+        active_hours: tuple[int, int] = (0, 24),
     ):
         self.agent_name = agent_name
         self.workspace_path = Path(workspace_path)
@@ -141,6 +142,7 @@ class CronExecutor:
         self.delivery = delivery
         scope = str(broadcast_scope or "agent").strip().lower()
         self.broadcast_scope = broadcast_scope
+        self.active_hours = active_hours
 
         # SLM: record skill invocations for evaluation (per-agent isolation)
         try:
@@ -302,6 +304,12 @@ class CronExecutor:
             task = Task.from_dict(task_snapshot_dict)
             task.execution_mode = "isolated"
 
+            # Skip isolated job tasks outside active hours
+            if task.job and not self._is_active_hour():
+                self._write_event("job_skipped", skill=task.job, reason="outside_active_hours")
+                await self._update_isolated_task_state(task_id, TaskState.DONE, now=now)
+                return
+
             # Gate check for job tasks
             verdict = None
             if task.job:
@@ -439,6 +447,16 @@ class CronExecutor:
         """Execute one isolated task from the due list."""
         if not self.routine_manager.claim_task(task):
             return TaskResult(task_id=task.id, status="skipped", execution_path="claim_failed")
+
+        # Skip isolated job tasks outside active hours
+        if task.job and not self._is_active_hour():
+            self._write_event("job_skipped", skill=task.job, reason="outside_active_hours")
+            self._rearm_job_task(task)
+            self.routine_manager.flush(task_list)
+            return TaskResult(
+                task_id=task.id, status="skipped",
+                execution_path="skill", error="outside_active_hours",
+            )
 
         # Gate check for job tasks before dispatching
         verdict = None
@@ -686,6 +704,13 @@ class CronExecutor:
             skill_logs_dir=user_data.get_agent_skill_logs_dir(self.agent_name),
             skill_eval_dir=user_data.get_agent_skill_eval_dir(self.agent_name),
         )
+
+    def _is_active_hour(self) -> bool:
+        """Return True if the current local hour is within active_hours."""
+        from datetime import datetime as _dt
+        start, end = self.active_hours
+        hour = _dt.now().hour
+        return start <= hour < end
 
     def _get_scanner(self, scanner_type: Optional[str]) -> Optional[Any]:
         """Get scanner instance by type name."""
