@@ -1668,6 +1668,7 @@ class _SkillLLMClient:
             base_url=base_url,
             api_key=model_cfg.api_key or "dummy",
             default_headers=model_cfg.effective_headers or None,
+            timeout=60.0,
         )
 
         call_kwargs = {

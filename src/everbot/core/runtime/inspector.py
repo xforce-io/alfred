@@ -54,7 +54,7 @@ _BUILTIN_JOB_DEFAULTS: dict[str, dict] = {
         "scanner": None,
         "min_execution_interval": "2h",
         "execution_mode": "isolated",
-        "timeout_seconds": 180,
+        "timeout_seconds": 600,
     },
 }
 
