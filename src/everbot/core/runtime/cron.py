@@ -539,7 +539,9 @@ class CronExecutor:
                 run_id=run_id,
             )
             await self.delivery.inject_to_history(result, run_id)
-            await self.delivery._emit_realtime(result, run_id)
+            # Suppress realtime push for no-op results (e.g. "Evaluated 0/7 skills")
+            if not result.startswith("Evaluated 0/"):
+                await self.delivery._emit_realtime(result, run_id)
 
             return result
         except Exception as exc:
