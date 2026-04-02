@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
-from ..tasks.execution_gate import TaskExecutionGate
+from ..tasks.execution_gate import GateVerdict, TaskExecutionGate
 from ..tasks.task_manager import Task, TaskList, TaskState, get_due_tasks
 from .cron_delivery import CronDelivery
 from .heartbeat_utils import (
@@ -347,6 +347,19 @@ class CronExecutor:
         run_id: str,
     ) -> TaskResult:
         """Execute one inline task (skill, deterministic, or LLM)."""
+        # Gate check BEFORE claim: claim_task sets last_run_at=now (RUNNING
+        # state), which would make the gate's min_execution_interval check
+        # always fail.  Running the gate first sees the real previous run time.
+        if task.job:
+            verdict = self._check_job_gate(task)
+            self._emit_gate_events(task, verdict)
+            if not verdict.allowed:
+                return TaskResult(
+                    task_id=task.id, status="skipped",
+                    execution_path="skill",
+                    error=verdict.skip_reason,
+                )
+
         if not self.routine_manager.claim_task(task):
             return TaskResult(task_id=task.id, status="skipped", execution_path="claim_failed")
 
@@ -354,9 +367,9 @@ class CronExecutor:
         self._write_event("task_start", task_id=task.id, title=task.title, execution_mode="inline")
 
         try:
-            # 1. Job tasks: gate check + job module, no LLM
+            # 1. Job tasks: already passed gate check above
             if task.job:
-                return await self._execute_job_task(task, task_list, run_id)
+                return await self._execute_job_task(task, task_list, run_id, verdict=verdict)
 
             # 2. Deterministic tasks: programmatic output
             deterministic_result = try_deterministic_task(task)
@@ -395,37 +408,42 @@ class CronExecutor:
             self.routine_manager.flush(task_list)
             return TaskResult(task_id=task.id, status="failed", error=str(exc))
 
-    async def _execute_job_task(self, task: Task, task_list: TaskList, run_id: str) -> TaskResult:
-        """Execute a job task with gate check."""
+    def _check_job_gate(self, task: Task) -> GateVerdict:
+        """Run gate check for a job task (scanner + min_execution_interval)."""
         gate = TaskExecutionGate(self.workspace_path, self.agent_name, self._get_scanner)
-        verdict = gate.check(task)
+        return gate.check(task)
 
+    def _emit_gate_events(self, task: Task, verdict: GateVerdict) -> None:
+        """Write heartbeat events for gate check results."""
         if verdict.scan_result is not None:
             self._write_event(
                 "scanner_check", scanner=task.scanner,
                 has_changes=verdict.scan_result.has_changes,
                 change_summary=verdict.scan_result.change_summary,
             )
-
         if not verdict.allowed:
             if verdict.skip_reason == "scanner_error":
                 self._write_event("scanner_error", scanner=task.scanner, error="gate check failed")
             else:
                 self._write_event("job_skipped", skill=task.job, reason=verdict.skip_reason)
-            self._rearm_job_task(task)
-            self.routine_manager.flush(task_list)
-            return TaskResult(
-                task_id=task.id, status="skipped",
-                execution_path="skill",
-                error=verdict.skip_reason,
-            )
 
+    async def _execute_job_task(
+        self,
+        task: Task,
+        task_list: TaskList,
+        run_id: str,
+        *,
+        verdict: GateVerdict,
+    ) -> TaskResult:
+        """Execute a job task whose gate check already passed."""
         result = await asyncio.wait_for(
             self._invoke_job(task, verdict.scan_result, run_id),
             timeout=task.timeout_seconds,
         )
         if verdict.scan_result:
-            gate.commit(task, verdict)
+            TaskExecutionGate(
+                self.workspace_path, self.agent_name, self._get_scanner,
+            ).commit(task, verdict)
         self._rearm_job_task(task)
         self._write_event("task_done", task_id=task.id, title=task.title)
         self.routine_manager.flush(task_list)
@@ -445,41 +463,25 @@ class CronExecutor:
         run_id: str,
     ) -> TaskResult:
         """Execute one isolated task from the due list."""
-        if not self.routine_manager.claim_task(task):
-            return TaskResult(task_id=task.id, status="skipped", execution_path="claim_failed")
-
-        # Skip isolated job tasks outside active hours
-        if task.job and not self._is_active_hour():
-            self._write_event("job_skipped", skill=task.job, reason="outside_active_hours")
-            self._rearm_job_task(task)
-            self.routine_manager.flush(task_list)
-            return TaskResult(
-                task_id=task.id, status="skipped",
-                execution_path="skill", error="outside_active_hours",
-            )
-
-        # Gate check for job tasks before dispatching
+        # Gate check BEFORE claim (same rationale as inline path)
         verdict = None
         if task.job:
-            gate = TaskExecutionGate(self.workspace_path, self.agent_name, self._get_scanner)
-            verdict = gate.check(task)
-            if verdict.scan_result is not None:
-                self._write_event(
-                    "scanner_check", scanner=task.scanner,
-                    has_changes=verdict.scan_result.has_changes,
-                    change_summary=verdict.scan_result.change_summary,
+            if not self._is_active_hour():
+                self._write_event("job_skipped", skill=task.job, reason="outside_active_hours")
+                return TaskResult(
+                    task_id=task.id, status="skipped",
+                    execution_path="skill", error="outside_active_hours",
                 )
+            verdict = self._check_job_gate(task)
+            self._emit_gate_events(task, verdict)
             if not verdict.allowed:
-                if verdict.skip_reason == "scanner_error":
-                    self._write_event("scanner_error", scanner=task.scanner, error="gate check failed")
-                else:
-                    self._write_event("job_skipped", skill=task.job, reason=verdict.skip_reason)
-                self._rearm_job_task(task)
-                self.routine_manager.flush(task_list)
                 return TaskResult(
                     task_id=task.id, status="skipped",
                     execution_path="skill", error=verdict.skip_reason,
                 )
+
+        if not self.routine_manager.claim_task(task):
+            return TaskResult(task_id=task.id, status="skipped", execution_path="claim_failed")
 
         self.routine_manager.flush(task_list)
         self._write_event("task_start", task_id=task.id, title=task.title, execution_mode="isolated")
@@ -488,7 +490,9 @@ class CronExecutor:
         try:
             await self._run_isolated_task(task, run_id, run_agent=run_agent)
             if verdict and verdict.scan_result:
-                gate.commit(task, verdict)
+                TaskExecutionGate(
+                    self.workspace_path, self.agent_name, self._get_scanner,
+                ).commit(task, verdict)
             self.routine_manager.update_task_state(task, TaskState.DONE)
             self._write_event("task_done", task_id=task.id, title=task.title)
             self.routine_manager.flush(task_list)

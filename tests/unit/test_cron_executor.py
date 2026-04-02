@@ -1,7 +1,7 @@
 """Unit tests for CronExecutor task execution engine."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -125,6 +125,89 @@ class TestSkillExecution:
         assert result.skipped == 1
         assert result.results[0].status == "skipped"
         assert result.results[0].error == "no_changes"
+
+
+class TestJobGateAfterClaim:
+    """Regression: claim_task sets last_run_at=now BEFORE gate check runs.
+
+    When a job task has min_execution_interval, the gate check reads
+    task.last_run_at. If claim_task already set it to now, the interval
+    check sees now >= now + interval → always False → perpetual skip.
+    """
+
+    @pytest.mark.asyncio
+    async def test_inline_job_with_interval_executes_when_due(self, tmp_path):
+        """A due inline job task with min_execution_interval should execute,
+        not be skipped by interval_not_met after claim sets last_run_at."""
+        mgr = _seed_task(
+            tmp_path,
+            title="Skill Evaluate",
+            job="skill-evaluate",
+            scanner=None,
+            min_execution_interval="2h",
+            next_run_at="2026-03-01T10:00:00+00:00",
+            now=datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc),
+        )
+        # Set last_run_at to 4 hours ago (well past the 2h interval)
+        task_list = mgr.load_task_list()
+        task_list.tasks[0].last_run_at = datetime(
+            2026, 3, 1, 8, 0, tzinfo=timezone.utc,
+        ).isoformat()
+        mgr.flush(task_list)
+
+        executor = _make_executor(tmp_path, routine_manager=mgr)
+        task_list = mgr.load_task_list()
+
+        with patch.object(
+            executor, '_invoke_job',
+            new_callable=AsyncMock,
+            return_value="Evaluated 3/3 skills",
+        ):
+            result = await executor.tick(
+                task_list,
+                run_agent=AsyncMock(),
+                inject_context=AsyncMock(),
+                run_id="test_run",
+            )
+
+        # The job should have executed, NOT been skipped
+        assert result.executed == 1
+        assert result.results[0].status == "done"
+        assert result.results[0].execution_path == "skill"
+
+    @pytest.mark.asyncio
+    async def test_inline_job_with_interval_skips_when_recent(self, tmp_path):
+        """A job whose last_run_at is recent should be skipped by the gate."""
+        now = datetime.now(timezone.utc)
+        recent_run = (now - timedelta(minutes=30)).isoformat()
+        mgr = _seed_task(
+            tmp_path,
+            title="Skill Evaluate",
+            job="skill-evaluate",
+            scanner=None,
+            min_execution_interval="2h",
+            # next_run_at in the past so it's due
+            next_run_at=(now - timedelta(hours=1)).isoformat(),
+            now=now,
+        )
+        # Set last_run_at to 30 min ago (within the 2h interval)
+        task_list = mgr.load_task_list()
+        task_list.tasks[0].last_run_at = recent_run
+        mgr.flush(task_list)
+
+        executor = _make_executor(tmp_path, routine_manager=mgr)
+        task_list = mgr.load_task_list()
+
+        result = await executor.tick(
+            task_list,
+            run_agent=AsyncMock(),
+            inject_context=AsyncMock(),
+            run_id="test_run",
+        )
+
+        assert result.skipped == 1
+        assert result.results[0].status == "skipped"
+        assert result.results[0].error == "interval_not_met"
 
 
 class TestLLMInlineExecution:
