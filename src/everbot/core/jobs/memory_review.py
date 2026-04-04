@@ -15,29 +15,6 @@ from .llm_utils import parse_json_response, parse_system_dph
 logger = logging.getLogger(__name__)
 
 
-def _is_missing_skill_llm(exc: Exception) -> bool:
-    """Return True when the runtime lacks the optional skill LLM dependency."""
-    msg = str(exc).lower()
-    return any(marker in msg for marker in (
-        "litellm is required",  # legacy check
-        "not found in configuration",  # Dolphin GlobalConfig model not found
-        "no module named 'openai'",  # openai package missing
-    ))
-
-
-class _SkipResult:
-    """Sentinel returned by helper functions when LLM/deps are unavailable.
-
-    Distinguishes a genuine "nothing to do" empty result from a "could not run"
-    skip, so the caller can decide whether to advance the watermark.
-    """
-    def __init__(self, reason: str) -> None:
-        self.reason = reason
-
-    def __str__(self) -> str:
-        return self.reason
-
-
 async def run(context: SkillContext) -> str:
     """Execute memory review: consolidate entries and compress to profile."""
     scanner = SessionScanner(context.sessions_dir)
@@ -71,11 +48,6 @@ async def run(context: SkillContext) -> str:
     existing = context.memory_manager.load_entries()
     review = await _analyze_memory_consolidation(context.llm, digests, existing)
 
-    # If LLM/deps were unavailable, do not apply changes or advance the watermark.
-    # The sessions remain eligible for re-review once the environment recovers.
-    if isinstance(review, _SkipResult):
-        return f"Memory review skipped: {review}, profile: skipped"
-
     # 4. Apply consolidation + post-validation
     entries_before = len(existing)
     from ..memory.manager import IntegrityError
@@ -97,16 +69,11 @@ async def run(context: SkillContext) -> str:
     # 5. Compress memories → USER.md
     compress_result = await _compress_to_user_profile(context)
 
-    # 6. Advance watermark only when both steps completed successfully.
-    # A _SkipResult means the LLM/deps were unavailable; keep sessions eligible
-    # for re-review so they are not permanently lost.
-    llm_unavailable = isinstance(compress_result, _SkipResult)
-    if last_successful_session and not llm_unavailable:
+    # Advance watermark — if we got here, both LLM calls succeeded.
+    if last_successful_session:
         state.set_watermark("memory-review", last_successful_session.updated_at)
         state.save(context.workspace_path)
-
-    compress_str = str(compress_result)
-    return f"Memory review: {review_stats}, profile: {compress_str}"
+    return f"Memory review: {review_stats}, profile: {compress_result}"
 
 
 async def _analyze_memory_consolidation(llm, digests: List[str], existing_entries) -> dict:
@@ -125,43 +92,35 @@ async def _analyze_memory_consolidation(llm, digests: List[str], existing_entrie
 
     from pathlib import Path
 
-    try:
-        dph_path = Path(__file__).parent / "system_dphs" / "memory_review_consolidation.dph"
-        dph_data = parse_system_dph(str(dph_path), {
-            "existing_text": existing_text,
-            "context_text": context_text,
-        })
-        sys_prompt = dph_data["config"].pop("system_prompt", "")
-        model_override = dph_data["config"].pop("model", "")
+    dph_path = Path(__file__).parent / "system_dphs" / "memory_review_consolidation.dph"
+    dph_data = parse_system_dph(str(dph_path), {
+        "existing_text": existing_text,
+        "context_text": context_text,
+    })
+    sys_prompt = dph_data["config"].pop("system_prompt", "")
+    model_override = dph_data["config"].pop("model", "")
 
-        response = await llm.complete(
-            dph_data["prompt"],
-            system=sys_prompt,
-            model_override=model_override,
-            **dph_data["config"]
+    response = await llm.complete(
+        dph_data["prompt"],
+        system=sys_prompt,
+        model_override=model_override,
+        **dph_data["config"]
+    )
+    result = parse_json_response(response)
+
+    # Validate entropy constraint
+    merge_count = len(result.get("merge_pairs", []))
+    deprecate_count = len(result.get("deprecate_ids", []))
+    reinforce_count = len(result.get("reinforce_ids", []))
+    if merge_count + deprecate_count < reinforce_count:
+        logger.warning(
+            "Entropy constraint violated: merge=%d + deprecate=%d < reinforce=%d, trimming reinforcements",
+            merge_count, deprecate_count, reinforce_count,
         )
-        result = parse_json_response(response)
+        allowed = merge_count + deprecate_count
+        result["reinforce_ids"] = result.get("reinforce_ids", [])[:allowed]
 
-        # Validate entropy constraint
-        merge_count = len(result.get("merge_pairs", []))
-        deprecate_count = len(result.get("deprecate_ids", []))
-        reinforce_count = len(result.get("reinforce_ids", []))
-        if merge_count + deprecate_count < reinforce_count:
-            logger.warning(
-                "Entropy constraint violated: merge=%d + deprecate=%d < reinforce=%d, trimming reinforcements",
-                merge_count, deprecate_count, reinforce_count,
-            )
-            allowed = merge_count + deprecate_count
-            result["reinforce_ids"] = result.get("reinforce_ids", [])[:allowed]
-
-        return result
-    except Exception as e:
-        if _is_missing_skill_llm(e) or isinstance(e, FileNotFoundError):
-            reason = "skill llm unavailable" if _is_missing_skill_llm(e) else f"dph missing: {e}"
-            logger.info("Memory consolidation skipped: %s", reason)
-            return _SkipResult(reason)
-        logger.error("Memory consolidation analysis failed: %s", e)
-        return {}
+    return result
 
 
 async def _compress_to_user_profile(context: SkillContext) -> str:
@@ -185,34 +144,26 @@ async def _compress_to_user_profile(context: SkillContext) -> str:
 
     from pathlib import Path
 
-    try:
-        dph_path = Path(__file__).parent / "system_dphs" / "memory_review_compression.dph"
-        dph_data = parse_system_dph(str(dph_path), {
-            "entries_text": entries_text,
-        })
-        sys_prompt = dph_data["config"].pop("system_prompt", "")
-        model_override = dph_data["config"].pop("model", "")
+    dph_path = Path(__file__).parent / "system_dphs" / "memory_review_compression.dph"
+    dph_data = parse_system_dph(str(dph_path), {
+        "entries_text": entries_text,
+    })
+    sys_prompt = dph_data["config"].pop("system_prompt", "")
+    model_override = dph_data["config"].pop("model", "")
 
-        response = await context.llm.complete(
-            dph_data["prompt"],
-            system=sys_prompt,
-            model_override=model_override,
-            **dph_data["config"]
-        )
-        profile_content = response.strip()
+    response = await context.llm.complete(
+        dph_data["prompt"],
+        system=sys_prompt,
+        model_override=model_override,
+        **dph_data["config"]
+    )
+    profile_content = response.strip()
 
-        # Write to USER.md
-        user_md_path = context.workspace_path / "USER.md"
-        user_md_path.write_text(
-            f"# 用户画像\n\n{profile_content}\n",
-            encoding="utf-8",
-        )
-        logger.info("Compressed %d memory entries to USER.md", len(active))
-        return f"compressed {len(active)} entries"
-    except Exception as e:
-        if _is_missing_skill_llm(e) or isinstance(e, FileNotFoundError):
-            reason = "skill llm unavailable" if _is_missing_skill_llm(e) else f"dph missing: {e}"
-            logger.info("Memory compression skipped: %s", reason)
-            return _SkipResult(reason)
-        logger.error("Memory compression to USER.md failed: %s", e)
-        return f"error: {e}"
+    # Write to USER.md
+    user_md_path = context.workspace_path / "USER.md"
+    user_md_path.write_text(
+        f"# 用户画像\n\n{profile_content}\n",
+        encoding="utf-8",
+    )
+    logger.info("Compressed %d memory entries to USER.md", len(active))
+    return f"compressed {len(active)} entries"
