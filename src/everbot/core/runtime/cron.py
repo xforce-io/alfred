@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
+from ..jobs.llm_errors import LLMConfigError, LLMTransientError
 from ..tasks.execution_gate import GateVerdict, TaskExecutionGate
 from ..tasks.task_manager import Task, TaskList, TaskState, get_due_tasks
 from .cron_delivery import CronDelivery
@@ -223,14 +224,30 @@ class CronExecutor:
         return result
 
     def _resolve_skill_model(self) -> str:
-        """Resolve the model for skill LLM calls from agent config."""
+        """Resolve the model for skill LLM calls.
+
+        Uses the 'fast' model from Dolphin GlobalConfig — skill jobs
+        (eval, reflection) are simple scoring tasks that don't need
+        a reasoning model.  Falls back to agent model if 'fast' is unset.
+        """
         from ..agent.factory import AgentFactory
+        try:
+            global_config = AgentFactory()._get_global_config()
+            fast_model = global_config.fast
+            if fast_model:
+                return fast_model
+        except Exception:
+            pass
         return AgentFactory._resolve_agent_model(self.agent_name)
 
     # ── Scheduler-facing task listing ─────────────────────────
 
     def list_due_inline_tasks(self, now: Optional[datetime] = None) -> list[dict[str, Any]]:
-        """List due inline tasks for external scheduler routing."""
+        """List due inline tasks for external scheduler routing.
+
+        Filters out tasks whose min_execution_interval hasn't elapsed,
+        preventing the scheduler from spinning on gated tasks.
+        """
         task_list = self.routine_manager.load_task_list()
         if task_list is None:
             return []
@@ -238,7 +255,9 @@ class CronExecutor:
         due = get_due_tasks(task_list, now=now)
         return [
             task_snapshot(t) for t in due
-            if self._task_mode(t) != "isolated" and task_snapshot(t)["id"]
+            if self._task_mode(t) != "isolated"
+            and task_snapshot(t)["id"]
+            and TaskExecutionGate._check_min_execution_interval(t, now=now)
         ]
 
     def list_due_isolated_tasks(self, now: Optional[datetime] = None) -> list[dict[str, Any]]:
@@ -354,6 +373,10 @@ class CronExecutor:
             verdict = self._check_job_gate(task)
             self._emit_gate_events(task, verdict)
             if not verdict.allowed:
+                # Rearm next_run_at so the scheduler doesn't re-trigger
+                # this task every tick (prevents spin on gated tasks).
+                self._rearm_job_task(task)
+                self.routine_manager.flush(task_list)
                 return TaskResult(
                     task_id=task.id, status="skipped",
                     execution_path="skill",
@@ -544,7 +567,7 @@ class CronExecutor:
             )
             await self.delivery.inject_to_history(result, run_id)
             # Suppress realtime push for no-op results (e.g. "Evaluated 0/7 skills")
-            if not result.startswith("Evaluated 0/"):
+            if not result.startswith(("Evaluated 0/", "LLM unavailable:")):
                 await self.delivery._emit_realtime(result, run_id)
 
             return result
@@ -681,6 +704,15 @@ class CronExecutor:
                 duration_ms=duration_ms, result=str(result)[:200],
             )
             return str(result)
+        except (LLMTransientError, LLMConfigError) as exc:
+            duration_ms = int(_time.time() * 1000) - start_ms
+            self._write_event(
+                "job_degraded", skill=job_name,
+                duration_ms=duration_ms, error=str(exc)[:200],
+                retriable=isinstance(exc, LLMTransientError),
+            )
+            logger.warning("Job %s skipped (LLM unavailable): %s", job_name, exc)
+            return f"LLM unavailable: {exc}"
         except Exception as exc:
             duration_ms = int(_time.time() * 1000) - start_ms
             self._write_event(

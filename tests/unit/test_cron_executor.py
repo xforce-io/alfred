@@ -12,6 +12,7 @@ from src.everbot.core.runtime.cron_delivery import CronDelivery
 from src.everbot.core.tasks.execution_gate import GateVerdict
 from src.everbot.core.tasks.routine_manager import RoutineManager
 from src.everbot.core.tasks.task_manager import TaskState
+from src.everbot.core.jobs.llm_errors import LLMTransientError, LLMConfigError
 
 
 def _make_executor(tmp_path: Path, **overrides) -> CronExecutor:
@@ -125,6 +126,40 @@ class TestSkillExecution:
         assert result.skipped == 1
         assert result.results[0].status == "skipped"
         assert result.results[0].error == "no_changes"
+
+    @pytest.mark.asyncio
+    async def test_gate_skip_rearms_next_run_at(self, tmp_path):
+        """When gate skips an inline task, next_run_at must advance so the
+        scheduler doesn't re-trigger it every tick (spin prevention)."""
+        old_next_run = "2026-03-01T11:00:00+00:00"
+        mgr = _seed_task(
+            tmp_path,
+            title="Gated task",
+            job="memory-review",
+            scanner="session",
+            schedule="2h",
+            min_execution_interval="2h",
+            next_run_at=old_next_run,
+        )
+        executor = _make_executor(tmp_path, routine_manager=mgr)
+        task_list = mgr.load_task_list()
+
+        with patch(
+            "src.everbot.core.runtime.cron.TaskExecutionGate.check",
+            return_value=GateVerdict(allowed=False, skip_reason="no_changes"),
+        ):
+            await executor.tick(
+                task_list,
+                run_agent=AsyncMock(),
+                inject_context=AsyncMock(),
+                run_id="test_run",
+            )
+
+        # Reload and verify next_run_at was advanced
+        refreshed = mgr.load_task_list()
+        task = refreshed.tasks[0]
+        assert task.next_run_at != old_next_run, \
+            "next_run_at should advance after gate skip to prevent scheduler spin"
 
 
 class TestJobGateAfterClaim:
@@ -285,6 +320,55 @@ class TestTaskListing:
         tasks = executor.list_due_isolated_tasks(now=now)
         assert len(tasks) == 1
         assert tasks[0]["title"] == "Isolated task"
+
+    def test_list_due_inline_excludes_interval_not_met(self, tmp_path):
+        """Tasks whose min_execution_interval hasn't elapsed since last_run_at
+        should NOT appear in list_due_inline_tasks, preventing scheduler spin."""
+        now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+        mgr = _seed_task(
+            tmp_path,
+            title="Gated job",
+            execution_mode="inline",
+            job="skill-evaluate",
+            min_execution_interval="2h",
+            next_run_at="2026-03-01T11:00:00+00:00",
+            now=now,
+        )
+        # Simulate: task ran at 11:30 UTC, only 30min ago — interval not met
+        task_list = mgr.load_task_list()
+        task = task_list.tasks[0]
+        task.last_run_at = "2026-03-01T11:30:00+00:00"
+        task.state = "pending"
+        task.next_run_at = "2026-03-01T11:00:00+00:00"  # past → get_due_tasks says "due"
+        mgr.flush(task_list)
+
+        executor = _make_executor(tmp_path, routine_manager=mgr)
+        tasks = executor.list_due_inline_tasks(now=now)
+        assert len(tasks) == 0, "Task with unmet min_execution_interval should be excluded"
+
+    def test_list_due_inline_includes_interval_met(self, tmp_path):
+        """Tasks whose min_execution_interval HAS elapsed should still appear."""
+        now = datetime(2026, 3, 1, 14, 0, tzinfo=timezone.utc)
+        mgr = _seed_task(
+            tmp_path,
+            title="Gated job",
+            execution_mode="inline",
+            job="skill-evaluate",
+            min_execution_interval="2h",
+            next_run_at="2026-03-01T11:00:00+00:00",
+            now=now,
+        )
+        # Simulate: task ran at 11:30 UTC, 2.5h ago — interval met
+        task_list = mgr.load_task_list()
+        task = task_list.tasks[0]
+        task.last_run_at = "2026-03-01T11:30:00+00:00"
+        task.state = "pending"
+        task.next_run_at = "2026-03-01T11:00:00+00:00"
+        mgr.flush(task_list)
+
+        executor = _make_executor(tmp_path, routine_manager=mgr)
+        tasks = executor.list_due_inline_tasks(now=now)
+        assert len(tasks) == 1
 
     def test_list_empty_when_no_heartbeat(self, tmp_path):
         executor = _make_executor(tmp_path)
@@ -529,3 +613,52 @@ class TestJobImportError:
         assert result.failed == 1
         assert "Cannot import job module" in result.results[0].error
         assert "project root" in result.results[0].error
+
+
+class TestInvokeJobLLMErrorHandling:
+    """_invoke_job should catch LLM errors and return degraded result, not raise."""
+
+    @pytest.mark.asyncio
+    async def test_transient_error_returns_degraded_not_raises(self, tmp_path):
+        mgr = _seed_task(tmp_path, title="Memory Review", job="memory-review")
+        executor = _make_executor(tmp_path, routine_manager=mgr)
+        task_list = mgr.load_task_list()
+        task = task_list.tasks[0]
+
+        with patch("importlib.import_module") as mock_import:
+            mock_module = MagicMock()
+            mock_module.run = AsyncMock(side_effect=LLMTransientError("Connection error"))
+            mock_import.return_value = mock_module
+            result = await executor._invoke_job(task, None, "test_run")
+
+        assert "LLM unavailable" in result
+        assert "Connection error" in result
+
+    @pytest.mark.asyncio
+    async def test_config_error_returns_degraded_not_raises(self, tmp_path):
+        mgr = _seed_task(tmp_path, title="Memory Review", job="memory-review")
+        executor = _make_executor(tmp_path, routine_manager=mgr)
+        task_list = mgr.load_task_list()
+        task = task_list.tasks[0]
+
+        with patch("importlib.import_module") as mock_import:
+            mock_module = MagicMock()
+            mock_module.run = AsyncMock(side_effect=LLMConfigError("model not found"))
+            mock_import.return_value = mock_module
+            result = await executor._invoke_job(task, None, "test_run")
+
+        assert "LLM unavailable" in result
+
+    @pytest.mark.asyncio
+    async def test_non_llm_error_still_raises(self, tmp_path):
+        mgr = _seed_task(tmp_path, title="Memory Review", job="memory-review")
+        executor = _make_executor(tmp_path, routine_manager=mgr)
+        task_list = mgr.load_task_list()
+        task = task_list.tasks[0]
+
+        with patch("importlib.import_module") as mock_import:
+            mock_module = MagicMock()
+            mock_module.run = AsyncMock(side_effect=ValueError("bad data"))
+            mock_import.return_value = mock_module
+            with pytest.raises(ValueError, match="bad data"):
+                await executor._invoke_job(task, None, "test_run")
