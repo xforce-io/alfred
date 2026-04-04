@@ -189,26 +189,22 @@ Output format:
 }}
 ```"""
 
-    try:
-        response = await llm.complete(prompt, system="You are a task discovery engine. Output valid JSON only.")
-        result = parse_json_response(response)
-        now = datetime.now(timezone.utc)
-        expires = now + timedelta(days=_EXPIRE_DAYS)
+    response = await llm.complete(prompt, system="You are a task discovery engine. Output valid JSON only.")
+    result = parse_json_response(response)
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(days=_EXPIRE_DAYS)
 
-        tasks = []
-        for item in result.get("tasks", [])[:3]:
-            tasks.append(DiscoveredTask(
-                title=item.get("title", ""),
-                description=item.get("description", ""),
-                urgency=item.get("urgency", "medium"),
-                source_session_id="",
-                discovered_at=now.isoformat(),
-                expires_at=expires.isoformat(),
-            ))
-        return tasks
-    except Exception as e:
-        logger.warning("Task discovery LLM call failed: %s", e)
-        return []
+    tasks = []
+    for item in result.get("tasks", [])[:3]:
+        tasks.append(DiscoveredTask(
+            title=item.get("title", ""),
+            description=item.get("description", ""),
+            urgency=item.get("urgency", "medium"),
+            source_session_id="",
+            discovered_at=now.isoformat(),
+            expires_at=expires.isoformat(),
+        ))
+    return tasks
 
 
 def _dedup_tasks(new_tasks: List[DiscoveredTask], existing: List[DiscoveredTask]) -> List[DiscoveredTask]:

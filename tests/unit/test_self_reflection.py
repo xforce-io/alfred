@@ -586,6 +586,33 @@ class TestSkillWithoutScanner:
         assert "No sessions to review" not in result
 
     @pytest.mark.asyncio
+    async def test_task_discover_llm_error_raises_not_swallowed(self, tmp_path, sessions_dir):
+        """task_discover should let LLM errors propagate, not swallow them."""
+        from src.everbot.core.jobs.task_discover import run
+        from src.everbot.core.runtime.skill_context import SkillContext
+        from src.everbot.core.memory.manager import MemoryManager
+        from src.everbot.core.jobs.llm_errors import LLMTransientError
+
+        self._write_session(sessions_dir, "web_session_test-agent_001", _1D_AGO)
+
+        mm = MemoryManager(tmp_path / "MEMORY.md")
+        mock_llm = AsyncMock()
+        mock_llm.complete.side_effect = LLMTransientError("Connection refused")
+
+        ctx = SkillContext(
+            sessions_dir=sessions_dir, workspace_path=tmp_path,
+            agent_name="test-agent", memory_manager=mm,
+            mailbox=AsyncMock(), llm=mock_llm, scan_result=None,
+        )
+
+        with pytest.raises(LLMTransientError, match="Connection refused"):
+            await run(ctx)
+
+        from src.everbot.core.scanners.reflection_state import ReflectionState
+        state_after = ReflectionState.load(tmp_path)
+        assert not state_after.get_watermark("task-discover")
+
+    @pytest.mark.asyncio
     async def test_memory_review_skips_when_skill_llm_unavailable(self, tmp_path, sessions_dir):
         """memory_review should raise LLMConfigError when skill LLM is unavailable."""
         from src.everbot.core.jobs.memory_review import run
