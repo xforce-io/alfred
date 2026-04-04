@@ -192,10 +192,17 @@ async def _check_llm(context: SkillContext) -> CheckResult:
             critical=True,
         )
     except Exception as e:
+        from .llm_errors import LLMTransientError, LLMConfigError
+        if isinstance(e, LLMTransientError):
+            msg = f"transient: {e}"
+        elif isinstance(e, LLMConfigError):
+            msg = f"config: {e}"
+        else:
+            msg = f"unexpected: {e}"
         return CheckResult(
             name="llm",
             ok=False,
-            message=f"API error: {e}",
+            message=msg,
             critical=True,
         )
 
