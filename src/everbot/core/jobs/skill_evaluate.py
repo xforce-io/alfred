@@ -32,6 +32,8 @@ async def run(context: SkillContext) -> str:
     if not skill_ids:
         return "No skill logs found"
 
+    from .llm_errors import LLMTransientError, LLMConfigError
+
     evaluated = 0
     for skill_id in skill_ids:
         try:
@@ -41,6 +43,9 @@ async def run(context: SkillContext) -> str:
             if result:
                 evaluated += 1
                 logger.info("Evaluated %s: %s", skill_id, result)
+        except (LLMTransientError, LLMConfigError):
+            logger.warning("LLM unavailable during %s evaluation, aborting remaining", skill_id)
+            raise
         except Exception as e:
             logger.warning("Failed to evaluate %s: %s", skill_id, e)
 
