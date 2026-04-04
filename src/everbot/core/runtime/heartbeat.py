@@ -1680,9 +1680,33 @@ class _SkillLLMClient:
             if k not in ("mode", "output_format", "system_prompt", "model"):
                 call_kwargs[k] = v
 
-        response = await client.chat.completions.create(
-            model=model_cfg.model_name,
-            messages=messages,
-            **call_kwargs,
-        )
-        return response.choices[0].message.content or ""
+        from ..jobs.llm_errors import LLMTransientError, LLMConfigError
+
+        try:
+            response = await client.chat.completions.create(
+                model=model_cfg.model_name,
+                messages=messages,
+                **call_kwargs,
+            )
+            return response.choices[0].message.content or ""
+        except (ConnectionError, TimeoutError, OSError) as e:
+            raise LLMTransientError(str(e)) from e
+        except Exception as e:
+            type_name = type(e).__name__
+            if type_name in (
+                "APIConnectionError", "APITimeoutError",
+                "RateLimitError", "InternalServerError",
+            ):
+                raise LLMTransientError(str(e)) from e
+            if type_name in (
+                "AuthenticationError", "NotFoundError",
+                "PermissionDeniedError",
+            ):
+                raise LLMConfigError(str(e)) from e
+            msg = str(e).lower()
+            if any(m in msg for m in (
+                "not found in configuration",
+                "no module named 'openai'",
+            )):
+                raise LLMConfigError(str(e)) from e
+            raise LLMTransientError(str(e)) from e

@@ -783,3 +783,113 @@ class TestSkillLLMClient:
 
         assert result == "ok"
         fake_config.get_model_config.assert_called_once_with("deepseek-chat")
+
+    # ── Exception classification tests ────────────────────────────
+
+    def _make_client_and_mocks(self):
+        """Helper: return (_SkillLLMClient, fake_config, fake_model_cfg)."""
+        from src.everbot.core.runtime.heartbeat import _SkillLLMClient
+
+        client = _SkillLLMClient(model="test-model")
+
+        fake_config = MagicMock()
+        fake_model_cfg = MagicMock()
+        fake_model_cfg.effective_api = "https://fake.example.com/v1"
+        fake_model_cfg.api_key = "fake-key"
+        fake_model_cfg.model_name = "test-model"
+        fake_model_cfg.max_tokens = 2000
+        fake_model_cfg.effective_headers = {}
+        fake_config.get_model_config.return_value = fake_model_cfg
+        return client, fake_config
+
+    @pytest.mark.asyncio
+    async def test_connection_error_raises_transient(self):
+        """ConnectionError from OpenAI client should be classified as LLMTransientError."""
+        import unittest.mock as um
+        from src.everbot.core.jobs.llm_errors import LLMTransientError
+
+        client, fake_config = self._make_client_and_mocks()
+
+        with um.patch(
+            "src.everbot.core.runtime.heartbeat._get_skill_global_config",
+            return_value=fake_config,
+        ), um.patch(
+            "src.everbot.core.runtime.heartbeat.AsyncOpenAI",
+        ) as mock_openai_cls:
+            mock_client = AsyncMock()
+            mock_client.chat.completions.create.side_effect = ConnectionError("peer reset")
+            mock_openai_cls.return_value = mock_client
+
+            with pytest.raises(LLMTransientError, match="peer reset"):
+                await client.complete("hello")
+
+    @pytest.mark.asyncio
+    async def test_timeout_error_raises_transient(self):
+        """TimeoutError from OpenAI client should be classified as LLMTransientError."""
+        import unittest.mock as um
+        from src.everbot.core.jobs.llm_errors import LLMTransientError
+
+        client, fake_config = self._make_client_and_mocks()
+
+        with um.patch(
+            "src.everbot.core.runtime.heartbeat._get_skill_global_config",
+            return_value=fake_config,
+        ), um.patch(
+            "src.everbot.core.runtime.heartbeat.AsyncOpenAI",
+        ) as mock_openai_cls:
+            mock_client = AsyncMock()
+            mock_client.chat.completions.create.side_effect = TimeoutError("request timed out")
+            mock_openai_cls.return_value = mock_client
+
+            with pytest.raises(LLMTransientError, match="request timed out"):
+                await client.complete("hello")
+
+    @pytest.mark.asyncio
+    async def test_openai_api_connection_error_raises_transient(self):
+        """openai.APIConnectionError should be classified as LLMTransientError."""
+        import unittest.mock as um
+        import openai
+        from src.everbot.core.jobs.llm_errors import LLMTransientError
+
+        client, fake_config = self._make_client_and_mocks()
+
+        with um.patch(
+            "src.everbot.core.runtime.heartbeat._get_skill_global_config",
+            return_value=fake_config,
+        ), um.patch(
+            "src.everbot.core.runtime.heartbeat.AsyncOpenAI",
+        ) as mock_openai_cls:
+            mock_client = AsyncMock()
+            mock_client.chat.completions.create.side_effect = openai.APIConnectionError(
+                request=MagicMock()
+            )
+            mock_openai_cls.return_value = mock_client
+
+            with pytest.raises(LLMTransientError):
+                await client.complete("hello")
+
+    @pytest.mark.asyncio
+    async def test_openai_auth_error_raises_config(self):
+        """openai.AuthenticationError should be classified as LLMConfigError."""
+        import unittest.mock as um
+        import openai
+        from src.everbot.core.jobs.llm_errors import LLMConfigError
+
+        client, fake_config = self._make_client_and_mocks()
+
+        with um.patch(
+            "src.everbot.core.runtime.heartbeat._get_skill_global_config",
+            return_value=fake_config,
+        ), um.patch(
+            "src.everbot.core.runtime.heartbeat.AsyncOpenAI",
+        ) as mock_openai_cls:
+            mock_client = AsyncMock()
+            mock_client.chat.completions.create.side_effect = openai.AuthenticationError(
+                message="invalid api key",
+                response=MagicMock(status_code=401),
+                body=None,
+            )
+            mock_openai_cls.return_value = mock_client
+
+            with pytest.raises(LLMConfigError, match="invalid api key"):
+                await client.complete("hello")
