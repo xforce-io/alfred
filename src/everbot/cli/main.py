@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ..infra.user_data import get_user_data_manager
 from ..infra.config import load_config, get_config, save_config, get_default_config
+from ..infra.log_cleanup import cleanup_alfred_logs
 from .daemon import EverBotDaemon
 from ..core.runtime.control import get_local_status, run_heartbeat_once
 from .doctor import collect_doctor_report
@@ -236,6 +237,28 @@ def cmd_doctor(args):
             print(f"    Hint: {item.hint}")
 
 
+def cmd_cleanup_logs(args):
+    """Clean up historical Alfred logs and migrate legacy skill logs."""
+    user_data = get_user_data_manager(
+        Path(args.alfred_home).expanduser() if args.alfred_home else None
+    )
+    summary = cleanup_alfred_logs(
+        user_data=user_data,
+        dry_run=not args.apply,
+        agent_name=getattr(args, "agent", "") or "",
+    )
+
+    mode = "执行" if args.apply else "预演"
+    print(f"日志清理{mode}完成")
+    print(f"扫描文件: {summary.files_scanned}")
+    print(f"更新文件: {summary.files_updated}")
+    print(f"创建备份: {summary.backups_created}")
+    print(f"脱敏行数: {summary.lines_redacted}")
+    print(f"迁移 segment: {summary.skill_segments_migrated}")
+    if not args.apply:
+        print("当前为预演模式；加上 --apply 才会真正写入。")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -297,6 +320,12 @@ def _build_parser() -> argparse.ArgumentParser:
     # doctor 命令
     parser_doctor = subparsers.add_parser("doctor", help="环境自检（配置/技能/依赖/工作区）")
     parser_doctor.set_defaults(func=cmd_doctor)
+
+    parser_cleanup = subparsers.add_parser("cleanup-logs", help="清理历史日志并迁移旧 skill_logs")
+    parser_cleanup.add_argument("--alfred-home", type=str, help="Alfred home 路径，默认使用 ~/.alfred 或 $ALFRED_HOME")
+    parser_cleanup.add_argument("--agent", type=str, help="只处理指定 agent 的 skill_logs")
+    parser_cleanup.add_argument("--apply", action="store_true", help="实际写入变更；默认仅预演")
+    parser_cleanup.set_defaults(func=cmd_cleanup_logs)
 
     # skills 命令（技能管理）
     register_skills_cli(subparsers)

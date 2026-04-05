@@ -363,9 +363,15 @@ If not, reply with `HEARTBEAT_OK`.
     def _write_heartbeat_event(self, event_type: str, **kwargs: Any) -> None:
         """Write a structured heartbeat event to the JSONL events file."""
         try:
+            from ...infra.logging_utils import rotate_log_file_if_needed
             user_data = get_user_data_manager()
             events_file = user_data.heartbeat_events_file
             events_file.parent.mkdir(parents=True, exist_ok=True)
+            rotate_log_file_if_needed(
+                events_file,
+                max_bytes=5 * 1024 * 1024,
+                backup_count=3,
+            )
             event = {
                 "timestamp": datetime.now().isoformat(),
                 "agent": self.agent_name,

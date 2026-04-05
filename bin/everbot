@@ -444,7 +444,7 @@ case "${cmd}" in
     "${BASH_SOURCE[0]}" start ${extra[@]+"${extra[@]}"} -- ${start_args[@]+"${start_args[@]}"}
     ;;
 
-  status|list|init|config|heartbeat|web|doctor|migrate-agent|skills)
+  status|list|init|config|heartbeat|web|doctor|migrate-agent|cleanup-logs|skills)
     exec python -m src.everbot.cli "${cmd}" "$@"
     ;;
 
@@ -461,6 +461,7 @@ Usage:
   bin/everbot heartbeat --agent NAME [--force]
   bin/everbot web [--host 127.0.0.1] [--port 8765]
   bin/everbot migrate-agent --agent NAME
+  bin/everbot cleanup-logs [--alfred-home PATH] [--agent NAME] [--apply]
   bin/everbot doctor
   bin/everbot skills <subcommand> [...]   # 技能管理（search/install/list/update/remove）
 

@@ -11,7 +11,6 @@ import asyncio
 import importlib
 import json
 import logging
-import re
 import time as _time
 import uuid
 from dataclasses import dataclass, field
@@ -59,6 +58,17 @@ _PERMANENT_ERROR_MARKERS: list[str] = [
     "billing", "account deactivated", "access denied",
 ]
 
+_TRANSIENT_LLM_ERROR_MARKERS: tuple[str, ...] = (
+    "remoteprotocolerror",
+    "apiconnectionerror",
+    "apitimeouterror",
+    "request timed out",
+    "connection error",
+    "peer closed connection",
+    "incomplete chunked read",
+    "server disconnected without sending a response",
+)
+
 
 def _is_permanent_error(exc: BaseException) -> bool:
     status = (
@@ -70,6 +80,14 @@ def _is_permanent_error(exc: BaseException) -> bool:
         return True
     text = str(exc).lower()
     return any(marker in text for marker in _PERMANENT_ERROR_MARKERS)
+
+
+def _is_transient_llm_error(exc: BaseException) -> bool:
+    """Return True for transport-level LLM failures worth one fast retry."""
+    type_name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    haystack = f"{type_name} {text}"
+    return any(marker in haystack for marker in _TRANSIENT_LLM_ERROR_MARKERS)
 
 
 # ── Result types ─────────────────────────────────────────────
@@ -597,10 +615,26 @@ class CronExecutor:
         agent = await self._create_job_agent(job_session_id)
         job_system_prompt = self._build_job_system_prompt(agent, task)
         try:
-            result = await asyncio.wait_for(
-                run_agent(agent, prompt, system_prompt_override=job_system_prompt),
-                timeout=task.timeout_seconds,
-            )
+            max_attempts = 2
+            result = ""
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    result = await asyncio.wait_for(
+                        run_agent(agent, prompt, system_prompt_override=job_system_prompt),
+                        timeout=task.timeout_seconds,
+                    )
+                    break
+                except Exception as exc:
+                    if attempt >= max_attempts or not _is_transient_llm_error(exc):
+                        raise
+                    logger.warning(
+                        "Transient isolated-agent LLM failure for %s (attempt %d/%d): %s",
+                        task.id,
+                        attempt,
+                        max_attempts,
+                        exc,
+                    )
+                    await asyncio.sleep(min(3, attempt))
             await self.session_manager.save_session(job_session_id, agent)
             await self.session_manager.mark_session_archived(job_session_id)
 
@@ -614,9 +648,6 @@ class CronExecutor:
             )
             await self.delivery.inject_to_history(result, run_id)
             await self.delivery._emit_realtime(result, run_id)
-
-            # SLM: record skill invocation for evaluation
-            self._record_skill_log(task, result, job_session_id)
 
             return result
         except Exception as exc:
@@ -816,66 +847,19 @@ class CronExecutor:
     def _task_mode(task: Any) -> str:
         return str(getattr(task, "execution_mode", "inline") or "inline")
 
-    def _record_skill_log(self, task: Task, output: str, session_id: str) -> None:
-        """Record skill invocations to the SLM log after task completion.
-
-        Reads the trajectory file to find which skills the LLM actually
-        loaded via _load_resource_skill(). Each unique skill is recorded once.
-        """
-        if self._skill_log_recorder is None:
-            return
-        desc = str(getattr(task, "description", "") or "")
-        skill_names = self._extract_skills_from_trajectory(session_id)
-        for skill_name in skill_names:
-            try:
-                self._skill_log_recorder.maybe_record(
-                    skill_name,
-                    session_id=session_id,
-                    skill_output=output or "",
-                    context_before=desc,
-                )
-            except Exception as e:
-                logger.debug("Failed to record skill log for %s: %s", skill_name, e)
-
-    def _extract_skills_from_trajectory(self, session_id: str) -> list[str]:
-        """Extract skill names from trajectory tool_calls of _load_resource_skill."""
-        try:
-            from ...infra.user_data import get_user_data_manager
-            udm = get_user_data_manager()
-            traj_path = udm.get_session_trajectory_path(self.agent_name, session_id)
-            if not traj_path.exists():
-                return []
-            data = json.loads(traj_path.read_text(encoding="utf-8"))
-            traj = data.get("trajectory", []) if isinstance(data, dict) else []
-            seen: set[str] = set()
-            for entry in traj:
-                if not isinstance(entry, dict) or entry.get("role") != "assistant":
-                    continue
-                for tc in entry.get("tool_calls", []):
-                    fn = tc.get("function", {})
-                    if fn.get("name") != "_load_resource_skill":
-                        continue
-                    args = fn.get("arguments", "")
-                    if isinstance(args, str):
-                        m = re.search(r'"skill_name"\s*:\s*"([^"]+)"', args)
-                        if m:
-                            seen.add(m.group(1))
-                    elif isinstance(args, dict):
-                        name = args.get("skill_name", "")
-                        if name:
-                            seen.add(name)
-            return list(seen)
-        except Exception as e:
-            logger.debug("Failed to extract skills from trajectory %s: %s", session_id, e)
-            return []
-
     def _write_event(self, event_type: str, **kwargs: Any) -> None:
         """Write a structured event to the JSONL events file."""
         try:
             from ...infra.user_data import get_user_data_manager
+            from ...infra.logging_utils import rotate_log_file_if_needed
             user_data = get_user_data_manager()
             events_file = user_data.heartbeat_events_file
             events_file.parent.mkdir(parents=True, exist_ok=True)
+            rotate_log_file_if_needed(
+                events_file,
+                max_bytes=5 * 1024 * 1024,
+                backup_count=3,
+            )
             event = {
                 "timestamp": datetime.now().isoformat(),
                 "agent": self.agent_name,

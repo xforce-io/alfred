@@ -662,3 +662,27 @@ class TestInvokeJobLLMErrorHandling:
             mock_import.return_value = mock_module
             with pytest.raises(ValueError, match="bad data"):
                 await executor._invoke_job(task, None, "test_run")
+
+
+class TestIsolatedAgentRetries:
+    @pytest.mark.asyncio
+    async def test_transient_remote_disconnect_retries_once(self, tmp_path):
+        mgr = _seed_task(tmp_path, title="Transient task", execution_mode="isolated")
+        executor = _make_executor(tmp_path, routine_manager=mgr)
+        task = mgr.load_task_list().tasks[0]
+
+        agent = MagicMock()
+        agent.executor.context = MagicMock()
+        executor._create_job_agent = AsyncMock(return_value=agent)
+        run_agent = AsyncMock(side_effect=[
+            ConnectionError("peer closed connection without sending complete message body"),
+            "final result",
+        ])
+
+        with patch.object(executor, "_build_job_system_prompt", return_value="system"):
+            result = await executor._run_isolated_agent(task, "run_123", run_agent=run_agent)
+
+        assert result == "final result"
+        assert run_agent.await_count == 2
+        executor.session_manager.save_session.assert_awaited()
+        executor.session_manager.mark_session_archived.assert_awaited()

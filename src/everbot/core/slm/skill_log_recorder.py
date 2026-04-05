@@ -14,6 +14,7 @@ to multi-process, add fcntl.flock around the write.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
@@ -23,6 +24,14 @@ from .segment_logger import SegmentLogger
 from .version_manager import read_frontmatter_version
 
 logger = logging.getLogger(__name__)
+
+_PLANNING_PREFIXES = (
+    "我将执行",
+    "首先，让我",
+    "让我先",
+    "我先",
+)
+_STEP_MARKER_RE = re.compile(r"^\s*[-*]\s*\[x\]\s*步骤\d+", re.MULTILINE)
 
 
 class SkillLogRecorder:
@@ -74,6 +83,9 @@ class SkillLogRecorder:
         session_id: str,
         skill_output: Optional[str] = "",
         context_before: Optional[str] = "",
+        status: str = "completed",
+        output_kind: str = "final",
+        error: Optional[str] = "",
     ) -> bool:
         """Record a skill invocation to the SLM log.
 
@@ -97,6 +109,9 @@ class SkillLogRecorder:
         if skill_name.startswith("_"):
             return False
 
+        normalized_output = self._normalize_skill_output(skill_output or "")
+        normalized_error = error or ""
+
         try:
             skill_md_path = self._find_skill_md(skill_name)
             version = read_frontmatter_version(skill_md_path)
@@ -105,9 +120,12 @@ class SkillLogRecorder:
                 skill_version=version,
                 triggered_at=datetime.now(timezone.utc).isoformat(),
                 context_before=context_before or "",
-                skill_output=skill_output or "",
+                skill_output=normalized_output,
                 context_after="",  # backfilled on next user message via backfill_context_after()
                 session_id=session_id,
+                status=status or "completed",
+                output_kind=output_kind or "final",
+                error=normalized_error,
             )
             self._logger.append(segment)
             self._last_skill[session_id] = skill_name
@@ -119,6 +137,34 @@ class SkillLogRecorder:
                 "SkillLogRecorder: failed to write log for skill '%s': %s", skill_name, e
             )
             return False
+
+    @staticmethod
+    def _normalize_skill_output(skill_output: str) -> str:
+        """Strip planning preamble from skill output, keeping substantive content."""
+        text = (skill_output or "").strip()
+        if not text:
+            return ""
+        # If the entire output is a short planning sentence, discard it.
+        for prefix in _PLANNING_PREFIXES:
+            if text.startswith(prefix) and "\n" not in text:
+                return ""
+        # If the output is purely a step checklist with no other content, discard it.
+        lines = text.splitlines()
+        if all(_STEP_MARKER_RE.match(line) or not line.strip() for line in lines):
+            return ""
+        # Strip leading planning lines but keep the rest.
+        result_lines: list[str] = []
+        skipping = True
+        for line in lines:
+            if skipping:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if stripped.startswith(_PLANNING_PREFIXES) or _STEP_MARKER_RE.match(line):
+                    continue
+                skipping = False
+            result_lines.append(line)
+        return "\n".join(result_lines).strip()
 
     def backfill_context_after(self, session_id: str, context_after: str) -> bool:
         """Backfill the user's reaction into the most recent segment for *session_id*.
@@ -179,6 +225,8 @@ def handle_skill_event(
         session_id=session_id,
         skill_output=getattr(event, "skill_output", None),
         context_before=context_before,
+        status="completed",
+        output_kind="final",
     )
 
 
@@ -242,6 +290,8 @@ def record_skills_from_raw_events(
                 session_id=session_id,
                 skill_output=progress.get("answer", ""),
                 context_before=context_before,
+                status="completed",
+                output_kind="final",
             ):
                 count += 1
     return count

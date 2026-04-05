@@ -49,6 +49,22 @@ class TestSegmentLogger:
             assert loaded[0].skill_output == "here is fix"
             assert loaded[0].context_after == "user: ok"
 
+    def test_large_output_is_truncated_to_artifact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger = SegmentLogger(Path(tmpdir))
+            large_output = "result:" + ("x" * 6000)
+
+            logger.append(_make_segment(skill_output=large_output))
+
+            loaded = logger.load("test-skill")
+            assert len(loaded) == 1
+            assert loaded[0].output_truncated is True
+            assert loaded[0].raw_output_path
+            assert Path(loaded[0].raw_output_path).exists()
+            assert Path(loaded[0].raw_output_path).read_text(encoding="utf-8") == large_output
+            assert loaded[0].skill_output != large_output
+            assert loaded[0].skill_output.endswith("...[truncated]")
+
     def test_load_by_version(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             logger = SegmentLogger(Path(tmpdir))
@@ -159,4 +175,3 @@ class TestBackfillContextAfter:
         with tempfile.TemporaryDirectory() as tmpdir:
             logger = SegmentLogger(Path(tmpdir))
             assert logger.backfill_context_after("ghost", "s1", "hi") is False
-

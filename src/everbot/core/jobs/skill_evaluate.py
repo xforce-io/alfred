@@ -5,6 +5,7 @@ agent's skill_logs/ directory, and produces eval_report.json in the
 agent's skill_eval/ directory.
 """
 
+import asyncio
 import logging
 
 from ..runtime.skill_context import SkillContext
@@ -13,6 +14,7 @@ from ..slm.segment_logger import SegmentLogger
 from ..slm.version_manager import VersionManager
 
 logger = logging.getLogger(__name__)
+_SKILL_EVALUATION_TIMEOUT_SECONDS = 45
 
 
 async def run(context: SkillContext) -> str:
@@ -35,6 +37,7 @@ async def run(context: SkillContext) -> str:
     from .llm_errors import LLMTransientError, LLMConfigError
 
     evaluated = 0
+    unavailable = 0
     for skill_id in skill_ids:
         try:
             result = await _evaluate_one(
@@ -44,8 +47,8 @@ async def run(context: SkillContext) -> str:
                 evaluated += 1
                 logger.info("Evaluated %s: %s", skill_id, result)
         except (LLMTransientError, LLMConfigError):
-            logger.warning("LLM unavailable during %s evaluation, aborting remaining", skill_id)
-            raise
+            unavailable += 1
+            logger.warning("LLM unavailable during %s evaluation, skipping skill", skill_id)
         except Exception as e:
             logger.warning("Failed to evaluate %s: %s", skill_id, e)
 
@@ -56,7 +59,10 @@ async def run(context: SkillContext) -> str:
         except Exception as e:
             logger.warning("Cleanup failed for %s: %s", skill_id, e)
 
-    return f"Evaluated {evaluated}/{len(skill_ids)} skills"
+    summary = f"Evaluated {evaluated}/{len(skill_ids)} skills"
+    if unavailable:
+        summary += f", skipped {unavailable} due to LLM unavailability"
+    return summary
 
 
 async def _evaluate_one(
@@ -90,7 +96,17 @@ async def _evaluate_one(
         logger.info("No segments with content for %s v%s", skill_id, target_version)
         return None
 
-    report = await evaluate_skill(context.llm, skill_id, target_version, segments)
+    from .llm_errors import LLMTransientError
+
+    try:
+        report = await asyncio.wait_for(
+            evaluate_skill(context.llm, skill_id, target_version, segments),
+            timeout=_SKILL_EVALUATION_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError as exc:
+        raise LLMTransientError(
+            f"Request timed out during skill evaluation for {skill_id}"
+        ) from exc
     ver_mgr.save_eval_report(skill_id, target_version, report)
 
     return (

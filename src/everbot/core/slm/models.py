@@ -29,6 +29,11 @@ class EvaluationSegment:
     skill_output: str  # skill response content
     context_after: str  # 1 turn after skill invocation (user reaction)
     session_id: str
+    status: str = "completed"
+    output_kind: str = "final"
+    error: str = ""
+    output_truncated: bool = False
+    raw_output_path: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -46,6 +51,11 @@ class EvaluationSegment:
             skill_output=str(data.get("skill_output", "")),
             context_after=str(data.get("context_after", "")),
             session_id=str(data.get("session_id", "")),
+            status=str(data.get("status", "completed")),
+            output_kind=str(data.get("output_kind", "final")),
+            error=str(data.get("error", "")),
+            output_truncated=bool(data.get("output_truncated", False)),
+            raw_output_path=str(data.get("raw_output_path", "")),
         )
 
     @classmethod

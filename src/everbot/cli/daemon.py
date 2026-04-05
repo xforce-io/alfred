@@ -19,6 +19,7 @@ from ..infra.user_data import get_user_data_manager
 from ..infra.config import get_config
 from ..core.agent.factory import get_agent_factory
 from ..infra.process import DaemonLock, write_pid_file, remove_pid_file
+from ..infra.logging_utils import configure_daemon_logging
 from ..core.runtime.scheduler import AgentSchedule, InspectorSchedule, Scheduler, SchedulerTask
 from ..channels.telegram_channel import TelegramChannel
 from ..core.models.constants import DAEMON_IDLE_SLEEP
@@ -593,15 +594,14 @@ async def main():
                        help="日志级别")
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    )
-
     daemon = EverBotDaemon(
         config_path=args.config,
         global_config_path=args.dolphin_config,
         default_model=args.model,
+    )
+    configure_daemon_logging(
+        level=args.log_level,
+        log_file=daemon.user_data.logs_dir / "everbot.out",
     )
 
     loop = asyncio.get_event_loop()

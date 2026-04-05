@@ -92,7 +92,7 @@ class TaskExecutionGate:
     # ── internal helpers ──────────────────────────────────────
 
     @staticmethod
-    def _check_min_execution_interval(task: Any) -> bool:
+    def _check_min_execution_interval(task: Any, now: Optional[datetime] = None) -> bool:
         """Return True if enough time has elapsed since *task.last_run_at*."""
         from .task_manager import parse_iso_datetime
 
@@ -115,5 +115,8 @@ class TaskExecutionGate:
             "h": timedelta(hours=amount),
             "d": timedelta(days=amount),
         }[unit]
-        now = datetime.now(timezone.utc)
+        if now is None:
+            now = datetime.now(timezone.utc)
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
         return now >= last_dt + delta
