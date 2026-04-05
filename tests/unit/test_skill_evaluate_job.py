@@ -96,3 +96,55 @@ async def test_run_skips_unavailable_skill_and_continues(tmp_path: Path):
         summary = await run(context)
 
     assert summary == "Evaluated 1/2 skills, skipped 1 due to LLM unavailability"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_one_falls_back_to_most_common_version(tmp_path: Path):
+    """When no SLM pointer exists, use the most common version in the log."""
+    skills_dir = tmp_path / "skills"
+    logs_dir = tmp_path / "skill_logs"
+    eval_dir = tmp_path / "skill_eval"
+    _write_skill_md(skills_dir, "gray-rhino")
+
+    seg_logger = SegmentLogger(logs_dir)
+    from src.everbot.core.slm.models import EvaluationSegment
+
+    for i in range(3):
+        seg_logger.append(EvaluationSegment(
+            skill_id="gray-rhino",
+            skill_version="2.0.0",
+            triggered_at=f"2026-04-05T0{i}:00:00+00:00",
+            context_before="user: run",
+            skill_output=f"output {i}",
+            context_after="user: ok",
+            session_id=f"sess-{i}",
+        ))
+
+    ver_mgr = VersionManager(skills_dir, eval_base_dir=eval_dir)
+    # No pointer exists → should fall back to "2.0.0"
+    assert ver_mgr.get_pointer("gray-rhino") is None
+
+    context = MagicMock()
+    context.llm = MagicMock()
+
+    from src.everbot.core.slm.models import EvalReport, JudgeResult
+
+    fake_report = EvalReport(
+        skill_id="gray-rhino",
+        skill_version="2.0.0",
+        evaluated_at="2026-04-05T00:00:00+00:00",
+        segment_count=3,
+        critical_issue_count=0,
+        critical_issue_rate=0.0,
+        mean_satisfaction=0.8,
+        results=[
+            JudgeResult(segment_index=i, has_critical_issue=False, satisfaction=0.8, reason="ok")
+            for i in range(3)
+        ],
+    )
+
+    with patch("src.everbot.core.jobs.skill_evaluate.evaluate_skill", new=AsyncMock(return_value=fake_report)):
+        result = await _evaluate_one(context, seg_logger, ver_mgr, "gray-rhino", tmp_path / "sessions")
+
+    assert result is not None
+    assert "v2.0.0" in result

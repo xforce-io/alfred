@@ -14,7 +14,7 @@ from ..slm.segment_logger import SegmentLogger
 from ..slm.version_manager import VersionManager
 
 logger = logging.getLogger(__name__)
-_SKILL_EVALUATION_TIMEOUT_SECONDS = 45
+_SKILL_EVALUATION_TIMEOUT_SECONDS = 120
 
 
 async def run(context: SkillContext) -> str:
@@ -77,9 +77,17 @@ async def _evaluate_one(
     if not entries:
         return None
 
-    # Find the current version to evaluate
+    # Find the current version to evaluate.
+    # If no SLM pointer exists, fall back to the most common version in the log
+    # so that skills recorded before SLM activation are still evaluated.
     pointer = ver_mgr.get_pointer(skill_id)
-    target_version = pointer.current_version if pointer else "baseline"
+    if pointer:
+        target_version = pointer.current_version
+    else:
+        from collections import Counter
+        version_counts = Counter(e.skill_version for e in entries)
+        target_version = version_counts.most_common(1)[0][0] if version_counts else "baseline"
+
     target_entries = [e for e in entries if e.skill_version == target_version]
 
     if not target_entries:
