@@ -105,6 +105,26 @@ def _is_permanent_error(exc: BaseException) -> bool:
     return any(marker in text for marker in _PERMANENT_ERROR_MARKERS)
 
 
+_TRANSIENT_LLM_ERROR_MARKERS: tuple[str, ...] = (
+    "remoteprotocolerror",
+    "apiconnectionerror",
+    "apitimeouterror",
+    "request timed out",
+    "connection error",
+    "peer closed connection",
+    "incomplete chunked read",
+    "server disconnected without sending a response",
+)
+
+
+def _is_transient_llm_error(exc: BaseException) -> bool:
+    """Return True for transport-level LLM failures that are not user-actionable."""
+    type_name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    haystack = f"{type_name} {text}"
+    return any(marker in haystack for marker in _TRANSIENT_LLM_ERROR_MARKERS)
+
+
 class HeartbeatRunner:
     """
     心跳运行器

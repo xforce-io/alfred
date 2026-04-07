@@ -58,16 +58,6 @@ _PERMANENT_ERROR_MARKERS: list[str] = [
     "billing", "account deactivated", "access denied",
 ]
 
-_TRANSIENT_LLM_ERROR_MARKERS: tuple[str, ...] = (
-    "remoteprotocolerror",
-    "apiconnectionerror",
-    "apitimeouterror",
-    "request timed out",
-    "connection error",
-    "peer closed connection",
-    "incomplete chunked read",
-    "server disconnected without sending a response",
-)
 
 
 def _is_permanent_error(exc: BaseException) -> bool:
@@ -81,13 +71,6 @@ def _is_permanent_error(exc: BaseException) -> bool:
     text = str(exc).lower()
     return any(marker in text for marker in _PERMANENT_ERROR_MARKERS)
 
-
-def _is_transient_llm_error(exc: BaseException) -> bool:
-    """Return True for transport-level LLM failures worth one fast retry."""
-    type_name = type(exc).__name__.lower()
-    text = str(exc).lower()
-    haystack = f"{type_name} {text}"
-    return any(marker in haystack for marker in _TRANSIENT_LLM_ERROR_MARKERS)
 
 
 # ── Result types ─────────────────────────────────────────────
@@ -625,6 +608,7 @@ class CronExecutor:
                     )
                     break
                 except Exception as exc:
+                    from .heartbeat import _is_transient_llm_error
                     if attempt >= max_attempts or not _is_transient_llm_error(exc):
                         raise
                     logger.warning(

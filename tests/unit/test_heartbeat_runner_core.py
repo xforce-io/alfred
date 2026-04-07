@@ -1237,3 +1237,18 @@ class TestIdleCooldown:
         runner = _make_runner(workspace_path=tmp_path, session_manager=manager)
         result = await runner.run_once_with_options()
         assert result == "HEARTBEAT_SKIPPED_USER_ACTIVE"
+
+
+# ── _is_transient_llm_error ────────────────────────────────────
+
+
+def test_is_transient_llm_error_detects_peer_closed():
+    from src.everbot.core.runtime.heartbeat import _is_transient_llm_error
+    exc = Exception("peer closed connection without sending complete message body (incomplete chunked read)")
+    assert _is_transient_llm_error(exc) is True
+
+
+def test_is_transient_llm_error_rejects_permanent():
+    from src.everbot.core.runtime.heartbeat import _is_transient_llm_error
+    exc = Exception("invalid api key")
+    assert _is_transient_llm_error(exc) is False
