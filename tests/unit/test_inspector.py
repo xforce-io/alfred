@@ -601,7 +601,7 @@ class TestInspect:
 
     @pytest.mark.asyncio
     async def test_empty_llm_response_does_not_update_state(self, tmp_path):
-        """Empty reflection responses must not be persisted as successful inspections."""
+        """Empty reflection responses must raise so retry logic can catch them."""
         inspector = _make_inspector(tmp_path)
         (tmp_path / "MEMORY.md").write_text("content")
         (tmp_path / "HEARTBEAT.md").write_text("hb")
@@ -610,13 +610,14 @@ class TestInspect:
         inject_context = AsyncMock(return_value="prompt")
 
         with patch.object(inspector, "_write_event"):
-            first = await inspector.inspect(
-                run_agent=run_agent,
-                inject_context=inject_context,
-                agent=MagicMock(),
-                heartbeat_content="hb",
-                run_id="run_empty_001",
-            )
+            with pytest.raises(RuntimeError, match="empty response"):
+                await inspector.inspect(
+                    run_agent=run_agent,
+                    inject_context=inject_context,
+                    agent=MagicMock(),
+                    heartbeat_content="hb",
+                    run_id="run_empty_001",
+                )
             second = await inspector.inspect(
                 run_agent=run_agent,
                 inject_context=inject_context,
@@ -625,12 +626,41 @@ class TestInspect:
                 run_id="run_empty_002",
             )
 
-        assert first.heartbeat_ok is False
-        assert first.output == "LLM_ERROR: empty response"
-        assert first.skipped is False
         assert second.skipped is False
         assert second.output == "HEARTBEAT_OK"
         assert run_agent.await_count == 2
+
+
+# ── LLM exception propagation ──
+
+
+class TestLLMExceptionPropagation:
+    """LLM failures must propagate so callers can retry."""
+
+    @pytest.mark.asyncio
+    async def test_inspect_propagates_llm_exception(self, tmp_path: Path):
+        """LLM failures during reflection should propagate, not be swallowed."""
+        inspector = _make_inspector(
+            tmp_path,
+            agent_factory=AsyncMock(),
+        )
+        inspector._run_llm = AsyncMock(
+            side_effect=ConnectionError("peer closed connection")
+        )
+        inspector._build_reflect_prompt = MagicMock(return_value="test prompt")
+        inspector._gather_context = MagicMock(return_value=InspectionContext(
+            heartbeat_content="test",
+            session_summary=None,
+            recent_events=[],
+        ))
+
+        with pytest.raises(ConnectionError, match="peer closed connection"):
+            await inspector.inspect(
+                heartbeat_content="test",
+                run_id="test_run",
+                session_manager=MagicMock(),
+                primary_session_id="session_1",
+            )
 
 
 # ── New output format {heartbeat_ok, push_message, routines} ──

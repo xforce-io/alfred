@@ -679,17 +679,11 @@ class Inspector:
                 response = await run_agent(agent, user_message, system_prompt_override=_REFLECT_SYSTEM_PROMPT)
         except Exception as exc:
             logger.warning("LLM reflection failed: %s", exc)
-            return InspectionResult(
-                heartbeat_ok=False,
-                output=f"LLM_ERROR: {exc}",
-            )
+            raise
 
         if not isinstance(response, str) or not response.strip():
             logger.warning("LLM reflection returned empty response")
-            return InspectionResult(
-                heartbeat_ok=False,
-                output="LLM_ERROR: empty response",
-            )
+            raise RuntimeError("LLM reflection returned empty response")
 
         # Parse response (unified format)
         parsed = self._reflection.extract_unified_response(response)
