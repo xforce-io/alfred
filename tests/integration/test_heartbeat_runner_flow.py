@@ -432,3 +432,55 @@ def test_read_heartbeat_md_marks_corrupted_json_mode(tmp_path: Path):
     assert runner._task_list is None
     assert runner._last_parse_result is not None
     assert runner._last_parse_result.status == ParseStatus.CORRUPTED
+
+
+# ============================================================
+# run_once_with_options: suppress transient LLM errors
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_run_once_suppresses_transient_llm_error(tmp_path: Path):
+    """Transient LLM errors (e.g. connection reset) should NOT be pushed to users."""
+    callback_args: list[tuple] = []
+
+    async def _on_result(agent_name: str, result: str):
+        callback_args.append((agent_name, result))
+
+    runner = _make_runner(
+        workspace_path=tmp_path,
+        on_result=_on_result,
+        max_retries=1,
+    )
+
+    runner._execute_with_retry = AsyncMock(
+        side_effect=ConnectionError("peer closed connection without sending complete message body")
+    )
+
+    result = await runner.run_once_with_options(force=True)
+    assert result == "HEARTBEAT_FAILED"
+    assert len(callback_args) == 0
+
+
+@pytest.mark.asyncio
+async def test_run_once_emits_permanent_error(tmp_path: Path):
+    """Permanent errors (e.g. invalid API key) should still be pushed to users."""
+    callback_args: list[tuple] = []
+
+    async def _on_result(agent_name: str, result: str):
+        callback_args.append((agent_name, result))
+
+    runner = _make_runner(
+        workspace_path=tmp_path,
+        on_result=_on_result,
+        max_retries=1,
+    )
+
+    exc = Exception("invalid api key")
+    exc.status_code = 401
+    runner._execute_with_retry = AsyncMock(side_effect=exc)
+
+    result = await runner.run_once_with_options(force=True)
+    assert result == "HEARTBEAT_FAILED"
+    assert len(callback_args) == 1
+    assert "invalid api key" in callback_args[0][1]

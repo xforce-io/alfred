@@ -1617,13 +1617,16 @@ If not, reply with `HEARTBEAT_OK`.
 
         except Exception as e:
             failure_summary = f"HEARTBEAT_FAILED: {type(e).__name__}: {e}"
-            logger.error("Heartbeat run failed: %s", failure_summary)
-            if self.on_result:
-                try:
-                    await self._emit_result(failure_summary)
-                except Exception as callback_error:
-                    logger.error("Heartbeat failure callback failed: %s", callback_error)
-            logger.error("[%s] 心跳失败: %s", self.agent_name, e)
+            if _is_transient_llm_error(e):
+                logger.info("[%s] Transient LLM error, suppressing user notification: %s", self.agent_name, e)
+            else:
+                logger.error("Heartbeat run failed: %s", failure_summary)
+                if self.on_result:
+                    try:
+                        await self._emit_result(failure_summary)
+                    except Exception as callback_error:
+                        logger.error("Heartbeat failure callback failed: %s", callback_error)
+                logger.error("[%s] 心跳失败: %s", self.agent_name, e)
             return "HEARTBEAT_FAILED"
 
     async def start(self):
