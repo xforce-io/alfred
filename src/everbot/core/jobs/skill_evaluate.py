@@ -32,7 +32,7 @@ async def run(context: SkillContext) -> str:
 
     skill_ids = seg_logger.list_skills()
     if not skill_ids:
-        return "No skill logs found"
+        return "HEARTBEAT_OK No skill logs found"
 
     from .llm_errors import LLMTransientError, LLMConfigError
 
@@ -62,7 +62,9 @@ async def run(context: SkillContext) -> str:
     summary = f"Evaluated {evaluated}/{len(skill_ids)} skills"
     if unavailable:
         summary += f", skipped {unavailable} due to LLM unavailability"
-    return summary
+        return summary
+    # Routine evaluation — suppress from user notification
+    return f"HEARTBEAT_OK {summary}"
 
 
 async def _evaluate_one(
