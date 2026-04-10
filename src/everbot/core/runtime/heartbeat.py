@@ -228,6 +228,8 @@ If not, reply with `HEARTBEAT_OK`.
         self._idle_cooldown_seconds = max(0, int(idle_cooldown_minutes or 15)) * 60
         self._reflection = ReflectionManager(workspace_path, self._reflect_force_interval)
         self._pending_delivery_details: list[str] = []
+        self._llm_unavailable_since: Optional[datetime] = None
+        self._llm_unavailable_last_notified_at: Optional[datetime] = None
         if summary_max_chars is not None:
             self.SUMMARY_MAX_CHARS = max(1, int(summary_max_chars))
 
@@ -753,6 +755,35 @@ If not, reply with `HEARTBEAT_OK`.
                                agent_name=self.agent_name, **event_scope_kwargs,
                                source_type="heartbeat", run_id=run_id)
                     return "HEARTBEAT_IDLE"
+
+                # LLM probe: skip all jobs if LLM is unreachable
+                if not await self._probe_llm():
+                    now = datetime.now()
+                    if self._llm_unavailable_since is None:
+                        # First failure — notify immediately
+                        self._llm_unavailable_since = now
+                        self._llm_unavailable_last_notified_at = now
+                        self._record_timeline_event("turn_end", run_id, status="completed", result="LLM_UNAVAILABLE")
+                        return "LLM 不可用, 心跳任务已暂停"
+                    else:
+                        elapsed = now - self._llm_unavailable_last_notified_at
+                        if elapsed >= timedelta(hours=2):
+                            # Repeat notification after cooldown
+                            hours = (now - self._llm_unavailable_since).total_seconds() / 3600
+                            self._llm_unavailable_last_notified_at = now
+                            self._record_timeline_event("turn_end", run_id, status="completed", result="LLM_UNAVAILABLE")
+                            return f"LLM 持续不可用 (已 {hours:.0f}h), 心跳任务仍暂停"
+                        else:
+                            # Within cooldown — suppress
+                            self._record_timeline_event("turn_end", run_id, status="completed", result="LLM_UNAVAILABLE_SUPPRESSED")
+                            return "HEARTBEAT_OK"
+
+                # LLM recovery check
+                if self._llm_unavailable_since is not None:
+                    self._llm_unavailable_since = None
+                    self._llm_unavailable_last_notified_at = None
+                    logger.info("[%s] LLM recovered", self.agent_name)
+                    await self._delivery.deliver_result("LLM 已恢复, 心跳任务恢复正常", run_id)
 
                 # Recover tasks stuck in 'running' (crash/timeout) before
                 # mode dispatch. Without this, stuck tasks cause reflect mode

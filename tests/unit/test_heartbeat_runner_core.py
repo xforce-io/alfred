@@ -1285,3 +1285,76 @@ async def test_probe_llm_timeout(tmp_path):
     mock_client.complete = AsyncMock(side_effect=asyncio.TimeoutError())
     runner._create_skill_llm_client = lambda: mock_client
     assert await runner._probe_llm() is False
+
+
+# ---------------------------------------------------------------------------
+# _execute_once – LLM probe gate tests
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def _always_acquired_lock():
+    yield True
+
+
+def _setup_runner_for_execute_once(tmp_path, probe_return):
+    """Helper to set up a runner with mocked dependencies for _execute_once tests."""
+    runner = _make_runner(workspace_path=tmp_path)
+    runner._probe_llm = AsyncMock(return_value=probe_return)
+    runner._read_heartbeat_md = lambda: _build_structured_md([{
+        "id": "t1", "title": "Test", "description": "", "schedule": "1h",
+        "state": "pending", "enabled": True, "execution_mode": "inline",
+    }])
+    runner.session_manager = MagicMock()
+    runner.session_manager.acquire_session = AsyncMock(return_value=True)
+    runner.session_manager.release_session = MagicMock()
+    runner.session_manager.file_lock = MagicMock(side_effect=lambda *a, **kw: _always_acquired_lock())
+    runner.session_manager.migrate_legacy_sessions_for_agent = AsyncMock()
+    return runner
+
+
+@pytest.mark.asyncio
+async def test_execute_once_skips_on_probe_failure(tmp_path):
+    """When LLM probe fails, _execute_once skips all jobs and returns notification."""
+    runner = _setup_runner_for_execute_once(tmp_path, probe_return=False)
+    result = await runner._execute_once()
+    assert "LLM 不可用" in result
+
+
+@pytest.mark.asyncio
+async def test_execute_once_cooldown_suppresses_repeated_notification(tmp_path):
+    """Second probe failure within 2h should be suppressed (HEARTBEAT_OK)."""
+    runner = _setup_runner_for_execute_once(tmp_path, probe_return=False)
+    # First call — should notify
+    result1 = await runner._execute_once()
+    assert "LLM 不可用" in result1
+    # Second call — within cooldown, should suppress
+    result2 = await runner._execute_once()
+    assert result2 == "HEARTBEAT_OK"
+
+
+@pytest.mark.asyncio
+async def test_execute_once_recovery_notification(tmp_path):
+    """When LLM recovers after being unavailable, notify recovery."""
+    runner = _setup_runner_for_execute_once(tmp_path, probe_return=False)
+    # First: probe fails
+    await runner._execute_once()
+    assert runner._llm_unavailable_since is not None
+    # Then: probe succeeds
+    runner._probe_llm = AsyncMock(return_value=True)
+    # Mock the rest of normal execution path to avoid real agent creation
+    runner._get_or_create_agent = AsyncMock()
+    runner._execute_structured_tasks = AsyncMock(return_value="HEARTBEAT_OK task done")
+    runner._should_deliver = lambda r: False
+    runner._save_session_atomic = AsyncMock()
+    runner._file_mgr = MagicMock()
+    runner._file_mgr.heartbeat_mode = "structured_due"
+    runner._file_mgr.task_list = []
+    runner._delivery = MagicMock()
+    runner._delivery.deliver_result = AsyncMock(return_value=True)
+    result = await runner._execute_once()
+    # Recovery state cleared
+    assert runner._llm_unavailable_since is None
+    # Recovery notification sent
+    runner._delivery.deliver_result.assert_called_once()
+    call_args = runner._delivery.deliver_result.call_args
+    assert "LLM 已恢复" in call_args[0][0]
