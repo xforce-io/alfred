@@ -1252,3 +1252,36 @@ def test_is_transient_llm_error_rejects_permanent():
     from src.everbot.core.runtime.heartbeat import _is_transient_llm_error
     exc = Exception("invalid api key")
     assert _is_transient_llm_error(exc) is False
+
+
+# ── _probe_llm ────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_probe_llm_success(tmp_path):
+    """Probe returns True when LLM responds."""
+    runner = _make_runner(workspace_path=tmp_path)
+    mock_client = AsyncMock()
+    mock_client.complete = AsyncMock(return_value="ok")
+    runner._create_skill_llm_client = lambda: mock_client
+    assert await runner._probe_llm() is True
+
+
+@pytest.mark.asyncio
+async def test_probe_llm_transient_failure(tmp_path):
+    """Probe returns False on transient LLM error."""
+    runner = _make_runner(workspace_path=tmp_path)
+    mock_client = AsyncMock()
+    mock_client.complete = AsyncMock(side_effect=ConnectionError("Connection error"))
+    runner._create_skill_llm_client = lambda: mock_client
+    assert await runner._probe_llm() is False
+
+
+@pytest.mark.asyncio
+async def test_probe_llm_timeout(tmp_path):
+    """Probe returns False on timeout."""
+    runner = _make_runner(workspace_path=tmp_path)
+    mock_client = AsyncMock()
+    mock_client.complete = AsyncMock(side_effect=asyncio.TimeoutError())
+    runner._create_skill_llm_client = lambda: mock_client
+    assert await runner._probe_llm() is False

@@ -1139,6 +1139,19 @@ If not, reply with `HEARTBEAT_OK`.
         model = AgentFactory._resolve_agent_model(self.agent_name)
         return _SkillLLMClient(model=model)
 
+    async def _probe_llm(self) -> bool:
+        """Quick LLM connectivity check. Returns True if LLM is reachable."""
+        try:
+            client = self._create_skill_llm_client()
+            await asyncio.wait_for(
+                client.complete("ping", max_tokens=1),
+                timeout=15,
+            )
+            return True
+        except Exception as e:
+            logger.warning("[%s] LLM probe failed: %s", self.agent_name, e)
+            return False
+
     def _check_min_execution_interval(self, task: Any) -> bool:
         """Check if minimum execution interval has elapsed since last run."""
         min_interval = getattr(task, "min_execution_interval", None)
