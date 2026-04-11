@@ -322,8 +322,10 @@ class TurnOrchestrator:
         self,
         policy: Optional[TurnPolicy] = None,
         prior_failures: Optional[Dict[str, int]] = None,
+        get_registered_tools: Optional[Callable[[], set]] = None,
     ):
         self.policy = policy or TurnPolicy()
+        self._get_registered_tools = get_registered_tools
         # Cross-turn failure memory: maps failure signatures to counts
         # accumulated from previous turns.  Callers can pass the
         # ``accumulated_failures`` dict back on the next turn to carry
@@ -562,6 +564,8 @@ class TurnOrchestrator:
         warned_intents: set = set()
         pid_to_intent: Dict[str, str] = {}
         sent_progress: Dict[str, str] = {}
+        phantom_tool_counts: Dict[str, int] = {}
+        phantom_pids: Dict[str, str] = {}  # pid -> tool_name
         non_progress_count = 0
         llm_started = False
         # Empty-output loop detection: track whether LLM produced any text
@@ -858,6 +862,30 @@ class TurnOrchestrator:
                 elif stage == "tool_call":
                     t_name = progress.get("tool_name", "")
 
+                    # Phantom tool guard: detect calls to unregistered tools
+                    if self._get_registered_tools is not None:
+                        registered = self._get_registered_tools()
+                        if t_name and t_name not in registered:
+                            phantom_tool_counts[t_name] = phantom_tool_counts.get(t_name, 0) + 1
+                            if phantom_tool_counts[t_name] > policy.max_phantom_tool_calls:
+                                _flush_trajectory()
+                                yield TurnEvent(
+                                    type=TurnEventType.TURN_ERROR,
+                                    error=(
+                                        f"PHANTOM_TOOL: tool `{t_name}` is not registered, "
+                                        f"called {phantom_tool_counts[t_name]} times, "
+                                        f"limit={policy.max_phantom_tool_calls}"
+                                    ),
+                                    answer=response,
+                                    tool_call_count=tool_call_count,
+                                    tool_execution_count=tool_execution_count,
+                                    tool_names_executed=list(tool_names_executed),
+                                    failed_tool_outputs=failed_tool_outputs,
+                                )
+                                return
+                            if pid:
+                                phantom_pids[pid] = t_name
+
                     # Empty-output loop detection
                     err = self._check_empty_output_loop(
                         llm_had_output_this_round, llm_had_think_this_round,
@@ -1002,6 +1030,15 @@ class TurnOrchestrator:
                             f" same command {tool_intent_signatures.get(_pid_intent, 0)} times."
                             f" Do NOT call it again. Respond to the user based"
                             f" on information you already have.]"
+                        )
+
+                    # Phantom tool correction: tell LLM this tool doesn't exist
+                    _phantom_name = phantom_pids.pop(pid, None) if pid else None
+                    if _phantom_name:
+                        out_preview += (
+                            f"\n[⚠ PHANTOM_TOOL: `{_phantom_name}` is not a registered tool"
+                            f" and cannot be called. Use registered tools"
+                            f" (_bash, _python, _grep, etc.) to complete the task.]"
                         )
 
                     yield TurnEvent(

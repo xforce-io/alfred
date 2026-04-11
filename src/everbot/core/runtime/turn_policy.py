@@ -90,6 +90,11 @@ class TurnPolicy:
     ])
     # Alias for max_same_failure_signature (used by quota-error detection).
     repeated_failure_limit: Optional[int] = None
+    # Maximum times an unregistered (phantom) tool may be called before
+    # the turn is terminated.  The first call is allowed to execute (since
+    # the orchestrator cannot cancel in-flight Dolphin tool execution) but
+    # receives a correction prompt in its tool_output.
+    max_phantom_tool_calls: int = 1
     # Internal helper tools excluded from tool-call budget counting.
     budget_exempt_tools: frozenset = field(default_factory=frozenset)
     # Directory patterns to exclude from grep-like tool searches.

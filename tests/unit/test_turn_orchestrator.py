@@ -1117,7 +1117,7 @@ async def test_skill_output_fallback_when_llm_empty():
     update last_successful_tool_output, causing empty '(无响应)' replies."""
     script = [
         _progress_event(_llm_delta("", think="loading skill")),
-        _progress_event(_skill_call("_load_resource_skill", "coding-master", pid="sk1")),
+        _progress_event(_skill_call("_load_resource_skill", "example-skill", pid="sk1")),
         _progress_event(_skill_output("_load_resource_skill", "SKILL.md content", pid="so1")),
         _progress_event(_llm_delta("", think="running analysis")),
         _progress_event(_skill_call("_bash", "dispatch.py analyze", pid="sk2")),
@@ -2143,13 +2143,13 @@ class TestQuotaErrorFallback:
             async def continue_chat(self, **kwargs):
                 for attempt in range(5):
                     # LLM decides to try the skill again
-                    yield _progress_event(_llm_delta(f"Trying coding-master attempt {attempt}... ", pid=f"t{attempt}"))
+                    yield _progress_event(_llm_delta(f"Trying example-skill attempt {attempt}... ", pid=f"t{attempt}"))
                     yield _progress_event(
-                        _skill_call("coding-master", '{"task": "analyze"}', pid=f"sk{attempt}")
+                        _skill_call("example-skill", '{"task": "analyze"}', pid=f"sk{attempt}")
                     )
                     yield _progress_event(
                         _skill_output(
-                            "coding-master",
+                            "example-skill",
                             "Error: You've hit your usage limit. Upgrade to Pro",
                             pid=f"so{attempt}",
                             status="failed",
@@ -2165,7 +2165,7 @@ class TestQuotaErrorFallback:
             repeated_failure_limit=3,
         ))
         events: list[TurnEvent] = []
-        async for te in orch.run_turn(agent, "use coding-master to analyze"):
+        async for te in orch.run_turn(agent, "use example-skill to analyze"):
             events.append(te)
 
         errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
@@ -2176,7 +2176,7 @@ class TestQuotaErrorFallback:
         error_msg = errors[0].error if errors else ""
         assert "REPEATED" in error_msg or "quota" in error_msg.lower(), (
             f"Expected REPEATED_TOOL_FAILURES or quota-related error, got: '{error_msg}'. "
-            "The agent invoked coding-master 5 times with the same quota error but "
+            "The agent invoked example-skill 5 times with the same quota error but "
             "the orchestrator did not detect the repeated failure pattern."
         )
 
@@ -2507,3 +2507,28 @@ async def test_channel_accumulated_text_reset_on_new_round():
     assert accumulated_text == "Final answer.", (
         f"Channel should show only final round text, got: {accumulated_text!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_phantom_tool_first_call_injects_warning():
+    """First call to an unregistered tool injects a correction into tool_output."""
+    script = [
+        _progress_event(_tool_call("_cm_next", '{"repo": "kweaver"}', pid="tc1")),
+        _progress_event(_tool_output("_cm_next", "some garbage output", pid="tc1")),
+        _progress_event(_llm_delta("OK I will use bash instead")),
+    ]
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(
+        TurnPolicy(max_attempts=1, max_tool_calls=20, max_phantom_tool_calls=1),
+        get_registered_tools=lambda: {"_bash", "_python", "_grep"},
+    )
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "go"):
+        events.append(te)
+
+    outputs = [e for e in events if e.type == TurnEventType.TOOL_OUTPUT]
+    assert len(outputs) == 1
+    assert "not a registered tool" in outputs[0].tool_output
+    # Turn should complete, not error
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert len(errors) == 0
