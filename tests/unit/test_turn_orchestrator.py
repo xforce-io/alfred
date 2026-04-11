@@ -2532,3 +2532,87 @@ async def test_phantom_tool_first_call_injects_warning():
     # Turn should complete, not error
     errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
     assert len(errors) == 0
+
+
+@pytest.mark.asyncio
+async def test_phantom_tool_second_call_triggers_error():
+    """Second call to same unregistered tool triggers TURN_ERROR."""
+    script = [
+        _progress_event(_tool_call("_cm_next", '{"repo": "a"}', pid="tc1")),
+        _progress_event(_tool_output("_cm_next", "garbage", pid="tc1")),
+        _progress_event(_tool_call("_cm_next", '{"repo": "b"}', pid="tc2")),
+        _progress_event(_tool_output("_cm_next", "more garbage", pid="tc2")),
+    ]
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(
+        TurnPolicy(max_attempts=1, max_tool_calls=20, max_phantom_tool_calls=1),
+        get_registered_tools=lambda: {"_bash", "_python"},
+    )
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "go"):
+        events.append(te)
+
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert len(errors) == 1
+    assert "PHANTOM_TOOL" in errors[0].error
+    assert "_cm_next" in errors[0].error
+
+
+@pytest.mark.asyncio
+async def test_phantom_tool_passes_after_dynamic_registration():
+    """Tool initially unregistered becomes valid after dynamic registration."""
+    script = [
+        _progress_event(_tool_call("_cm_next", '{"repo": "a"}', pid="tc1")),
+        _progress_event(_tool_output("_cm_next", "garbage", pid="tc1")),
+        _progress_event(_tool_call("_bash", 'echo hi', pid="tc2")),
+        _progress_event(_tool_output("_bash", "hi", pid="tc2")),
+        _progress_event(_tool_call("_cm_next", '{"repo": "a"}', pid="tc3")),
+        _progress_event(_tool_output("_cm_next", "real output", pid="tc3")),
+        _progress_event(_llm_delta("Done")),
+    ]
+    agent = _ScriptedAgent(script)
+
+    call_count = [0]
+    def get_tools():
+        call_count[0] += 1
+        if call_count[0] >= 3:
+            return {"_bash", "_python", "_cm_next"}
+        return {"_bash", "_python"}
+
+    orch = TurnOrchestrator(
+        TurnPolicy(max_attempts=1, max_tool_calls=20, max_phantom_tool_calls=1),
+        get_registered_tools=get_tools,
+    )
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "go"):
+        events.append(te)
+
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert len(errors) == 0
+    outputs = [e for e in events if e.type == TurnEventType.TOOL_OUTPUT]
+    assert "not a registered tool" in outputs[0].tool_output
+    assert "not a registered tool" not in outputs[2].tool_output
+
+
+@pytest.mark.asyncio
+async def test_phantom_tool_guard_disabled_without_callback():
+    """When get_registered_tools is None, phantom guard does not activate."""
+    script = [
+        _progress_event(_tool_call("_nonexistent", "args", pid="tc1")),
+        _progress_event(_tool_output("_nonexistent", "whatever", pid="tc1")),
+        _progress_event(_tool_call("_nonexistent", "args", pid="tc2")),
+        _progress_event(_tool_output("_nonexistent", "whatever", pid="tc2")),
+        _progress_event(_llm_delta("done")),
+    ]
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(
+        TurnPolicy(max_attempts=1, max_tool_calls=20),
+    )
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "go"):
+        events.append(te)
+
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert len(errors) == 0
+    outputs = [e for e in events if e.type == TurnEventType.TOOL_OUTPUT]
+    assert all("not a registered tool" not in o.tool_output for o in outputs)
