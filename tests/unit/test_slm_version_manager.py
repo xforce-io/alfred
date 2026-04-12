@@ -184,3 +184,26 @@ class TestVersionManager:
         assert mgr.get_active_version("nonexistent") == "baseline"
         mgr.publish("test-skill", "1.0", SKILL_CONTENT_V1)
         assert mgr.get_active_version("test-skill") == "1.0"
+
+
+class TestActivateClearsEvolveCount:
+    def test_activate_resets_consecutive_evolve_count(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        mgr = VersionManager(skills_dir)
+
+        # Publish v1, then v2
+        mgr.publish("test-skill", "1.0", SKILL_CONTENT_V1)
+        mgr.publish("test-skill", "2.0", SKILL_CONTENT_V2)
+
+        # Simulate evolve count
+        pointer = mgr.get_pointer("test-skill")
+        pointer.consecutive_evolve_count = 2
+        mgr._current_json("test-skill").write_text(pointer.to_json(), encoding="utf-8")
+
+        # Activate should clear it
+        mgr.activate("test-skill", "2.0")
+
+        pointer = mgr.get_pointer("test-skill")
+        assert pointer.consecutive_evolve_count == 0
+        assert pointer.stable_version == "2.0"

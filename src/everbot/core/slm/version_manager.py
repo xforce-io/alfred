@@ -227,6 +227,7 @@ class VersionManager:
         if pointer:
             pointer.stable_version = version
             pointer.repo_baseline = False
+            pointer.consecutive_evolve_count = 0
             self._current_json(skill_id).write_text(pointer.to_json(), encoding="utf-8")
 
         logger.info("Activated %s v%s", skill_id, version)
