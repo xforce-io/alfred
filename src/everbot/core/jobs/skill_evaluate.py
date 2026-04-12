@@ -32,7 +32,7 @@ _EVOLVE_SYSTEM = (
 )
 
 _EVOLVE_PROMPT = """\
-The following skill has been performing poorly. Analyze the failure cases and \
+The following skill definition needs improvement. Based on the failure cases below, \
 produce an improved version.
 
 ## Current Skill Definition
@@ -202,7 +202,7 @@ async def _post_evaluate(
         return
 
     try:
-        rolled_to = ver_mgr.rollback(skill_id, reason="auto-evolve: unhealthy evaluation")
+        ver_mgr.rollback(skill_id, reason="auto-evolve: unhealthy evaluation")
     except ValueError as e:
         logger.warning("Cannot rollback %s: %s", skill_id, e)
         return
@@ -233,14 +233,22 @@ async def _maybe_evolve(
     report: EvalReport,
 ) -> str | None:
     """Generate improved SKILL.md via LLM based on failure cases."""
-    skill_md = ver_mgr._skill_md(skill_id)
-    if not skill_md.exists():
-        return None
-    current_content = skill_md.read_text(encoding="utf-8")
+    # Read the version snapshot (not the live SKILL.md which rollback may have overwritten).
+    snapshot = ver_mgr._version_dir(skill_id, report.skill_version) / "skill.md"
+    if snapshot.exists():
+        current_content = snapshot.read_text(encoding="utf-8")
+    else:
+        # Fallback to live SKILL.md (e.g. baseline with no snapshot)
+        skill_md = ver_mgr._skill_md(skill_id)
+        if not skill_md.exists():
+            return None
+        current_content = skill_md.read_text(encoding="utf-8")
 
+    # Apply the same content filter used during evaluation to align with report.results.
     target_entries = seg_logger.load_by_version(skill_id, report.skill_version)
+    segments = [e for e in target_entries if e.skill_output or e.context_before]
     failed: List[tuple[EvaluationSegment, str]] = []
-    for entry, result in zip(target_entries, report.results):
+    for entry, result in zip(segments, report.results):
         if result.has_critical_issue or result.satisfaction < 0.5:
             failed.append((entry, result.reason))
     if not failed:
