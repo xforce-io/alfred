@@ -17,7 +17,7 @@ from src.everbot.core.slm.models import (
 class TestEvaluationSegment:
     def test_roundtrip(self):
         seg = EvaluationSegment(
-            skill_id="coding-master",
+            skill_id="example-skill",
             skill_version="1.0",
             triggered_at="2026-03-17T10:00:00Z",
             context_before="user: help me fix this bug",
@@ -27,7 +27,7 @@ class TestEvaluationSegment:
         )
         json_str = seg.to_json()
         restored = EvaluationSegment.from_json(json_str)
-        assert restored.skill_id == "coding-master"
+        assert restored.skill_id == "example-skill"
         assert restored.skill_version == "1.0"
         assert restored.session_id == "sess-123"
 
@@ -136,3 +136,25 @@ class TestCurrentPointer:
     def test_defaults(self):
         ptr = CurrentPointer.from_dict({})
         assert ptr.repo_baseline is True
+
+
+class TestCurrentPointerEvolveCount:
+    def test_default_evolve_count(self):
+        pointer = CurrentPointer(current_version="1.0", stable_version="0.9")
+        assert pointer.consecutive_evolve_count == 0
+
+    def test_roundtrip_with_evolve_count(self):
+        pointer = CurrentPointer(
+            current_version="1.0",
+            stable_version="0.9",
+            consecutive_evolve_count=2,
+        )
+        json_str = pointer.to_json()
+        restored = CurrentPointer.from_json(json_str)
+        assert restored.consecutive_evolve_count == 2
+
+    def test_backward_compat_missing_field(self):
+        """Old current.json without consecutive_evolve_count loads as 0."""
+        data = {"current_version": "1.0", "stable_version": "0.9", "repo_baseline": False}
+        pointer = CurrentPointer.from_dict(data)
+        assert pointer.consecutive_evolve_count == 0

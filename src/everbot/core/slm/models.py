@@ -208,6 +208,7 @@ class CurrentPointer:
     current_version: str
     stable_version: str
     repo_baseline: bool = True  # if True, stable = repo's original SKILL.md
+    consecutive_evolve_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -221,6 +222,7 @@ class CurrentPointer:
             current_version=str(data.get("current_version", "")),
             stable_version=str(data.get("stable_version", "")),
             repo_baseline=bool(data.get("repo_baseline", True)),
+            consecutive_evolve_count=int(data.get("consecutive_evolve_count", 0)),
         )
 
     @classmethod
