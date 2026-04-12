@@ -10,6 +10,14 @@ import pytest
 
 from src.everbot.core.jobs.llm_errors import LLMTransientError
 from src.everbot.core.jobs.skill_evaluate import _evaluate_one, run
+from src.everbot.core.slm.models import (
+    CurrentPointer,
+    EvalReport,
+    EvaluationSegment,
+    JudgeResult,
+    VersionMetadata,
+    VersionStatus,
+)
 from src.everbot.core.slm.segment_logger import SegmentLogger
 from src.everbot.core.slm.version_manager import VersionManager
 
@@ -148,3 +156,199 @@ async def test_evaluate_one_falls_back_to_most_common_version(tmp_path: Path):
 
     assert result is not None
     assert "v2.0.0" in result
+
+
+def _make_healthy_report(skill_id: str, version: str, n: int = 3) -> EvalReport:
+    return EvalReport(
+        skill_id=skill_id,
+        skill_version=version,
+        evaluated_at="2026-04-12T00:00:00+00:00",
+        segment_count=n,
+        critical_issue_count=0,
+        critical_issue_rate=0.0,
+        mean_satisfaction=0.85,
+        results=[
+            JudgeResult(segment_index=i, has_critical_issue=False, satisfaction=0.85, reason="ok")
+            for i in range(n)
+        ],
+    )
+
+
+def _make_unhealthy_report(skill_id: str, version: str, n: int = 4) -> EvalReport:
+    results = [
+        JudgeResult(segment_index=i, has_critical_issue=(i % 2 == 0), satisfaction=0.3, reason="bad output")
+        for i in range(n)
+    ]
+    critical = sum(1 for r in results if r.has_critical_issue)
+    return EvalReport(
+        skill_id=skill_id,
+        skill_version=version,
+        evaluated_at="2026-04-12T00:00:00+00:00",
+        segment_count=n,
+        critical_issue_count=critical,
+        critical_issue_rate=critical / n,
+        mean_satisfaction=0.3,
+        results=results,
+    )
+
+
+def _setup_skill_with_version(
+    skills_dir, logs_dir, eval_dir, skill_id, version, status=VersionStatus.TESTING,
+    *, with_stable_base: bool = False,
+):
+    """Create a skill with a specific version and status.
+
+    If with_stable_base=True, publishes a "0.1" base version first so that
+    rollback has a stable version to fall back to (instead of repo baseline).
+    """
+    ver_mgr = VersionManager(skills_dir, eval_base_dir=eval_dir)
+    if with_stable_base:
+        base_content = f"---\nname: {skill_id}\nversion: \"0.1\"\n---\nBase content"
+        ver_mgr.publish(skill_id, "0.1", base_content)
+        # Activate the base so it becomes stable when the next version is published
+        ver_mgr.activate(skill_id, "0.1")
+    content = f"---\nname: {skill_id}\nversion: \"{version}\"\n---\nSkill content"
+    ver_mgr.publish(skill_id, version, content)
+    # Set the desired status
+    meta = ver_mgr.get_metadata(skill_id, version)
+    meta.status = status
+    ver_dir = eval_dir / skill_id / "versions" / f"v{version}"
+    (ver_dir / "metadata.json").write_text(meta.to_json(), encoding="utf-8")
+    # Write segments
+    seg_logger = SegmentLogger(logs_dir)
+    for i in range(3):
+        seg_logger.append(EvaluationSegment(
+            skill_id=skill_id,
+            skill_version=version,
+            triggered_at=f"2026-04-12T0{i}:00:00+00:00",
+            context_before="user: do something",
+            skill_output=f"output {i}",
+            context_after="user: ok",
+            session_id=f"sess-{i}",
+        ))
+    return ver_mgr, seg_logger
+
+
+@pytest.mark.asyncio
+async def test_testing_healthy_activates(tmp_path: Path):
+    """Testing version + healthy report -> activate + evolve_count cleared."""
+    skills_dir = tmp_path / "skills"
+    logs_dir = tmp_path / "skill_logs"
+    eval_dir = tmp_path / "skill_eval"
+    skills_dir.mkdir()
+
+    ver_mgr, seg_logger = _setup_skill_with_version(
+        skills_dir, logs_dir, eval_dir, "my-skill", "1.0-evolve-202604", VersionStatus.TESTING,
+    )
+    pointer = ver_mgr.get_pointer("my-skill")
+    pointer.consecutive_evolve_count = 1
+    ver_mgr._current_json("my-skill").write_text(pointer.to_json(), encoding="utf-8")
+
+    context = MagicMock()
+    context.llm = MagicMock()
+    context.mailbox = AsyncMock()
+    context.mailbox.deposit = AsyncMock(return_value=True)
+
+    healthy_report = _make_healthy_report("my-skill", "1.0-evolve-202604")
+
+    with patch("src.everbot.core.jobs.skill_evaluate.evaluate_skill", new=AsyncMock(return_value=healthy_report)):
+        result = await _evaluate_one(context, seg_logger, ver_mgr, "my-skill", tmp_path / "sessions")
+
+    meta = ver_mgr.get_metadata("my-skill", "1.0-evolve-202604")
+    assert meta.status == VersionStatus.ACTIVE
+    pointer = ver_mgr.get_pointer("my-skill")
+    assert pointer.consecutive_evolve_count == 0
+    context.mailbox.deposit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unhealthy_triggers_rollback_and_evolve(tmp_path: Path):
+    """Unhealthy report -> rollback to stable + LLM evolve + publish testing."""
+    skills_dir = tmp_path / "skills"
+    logs_dir = tmp_path / "skill_logs"
+    eval_dir = tmp_path / "skill_eval"
+    skills_dir.mkdir()
+
+    ver_mgr, seg_logger = _setup_skill_with_version(
+        skills_dir, logs_dir, eval_dir, "bad-skill", "1.0", VersionStatus.ACTIVE,
+        with_stable_base=True,
+    )
+
+    context = MagicMock()
+    context.llm = AsyncMock()
+    context.llm.complete = AsyncMock(return_value=(
+        "---\nname: bad-skill\nversion: \"1.0-evolve-fix\"\n---\nImproved content"
+    ))
+    context.mailbox = AsyncMock()
+    context.mailbox.deposit = AsyncMock(return_value=True)
+
+    unhealthy_report = _make_unhealthy_report("bad-skill", "1.0")
+
+    with patch("src.everbot.core.jobs.skill_evaluate.evaluate_skill", new=AsyncMock(return_value=unhealthy_report)):
+        result = await _evaluate_one(context, seg_logger, ver_mgr, "bad-skill", tmp_path / "sessions")
+
+    pointer = ver_mgr.get_pointer("bad-skill")
+    assert "evolve" in pointer.current_version
+    meta = ver_mgr.get_metadata("bad-skill", pointer.current_version)
+    assert meta.status == VersionStatus.TESTING
+    assert pointer.consecutive_evolve_count == 1
+    context.mailbox.deposit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_evolve_count_exceeded_suspends(tmp_path: Path):
+    """Consecutive evolve > MAX -> suspend skill."""
+    skills_dir = tmp_path / "skills"
+    logs_dir = tmp_path / "skill_logs"
+    eval_dir = tmp_path / "skill_eval"
+    skills_dir.mkdir()
+
+    ver_mgr, seg_logger = _setup_skill_with_version(
+        skills_dir, logs_dir, eval_dir, "stuck-skill", "1.0", VersionStatus.ACTIVE,
+        with_stable_base=True,
+    )
+    pointer = ver_mgr.get_pointer("stuck-skill")
+    pointer.consecutive_evolve_count = 3
+    ver_mgr._current_json("stuck-skill").write_text(pointer.to_json(), encoding="utf-8")
+
+    context = MagicMock()
+    context.llm = MagicMock()
+    context.mailbox = AsyncMock()
+    context.mailbox.deposit = AsyncMock(return_value=True)
+
+    unhealthy_report = _make_unhealthy_report("stuck-skill", "1.0")
+
+    with patch("src.everbot.core.jobs.skill_evaluate.evaluate_skill", new=AsyncMock(return_value=unhealthy_report)):
+        result = await _evaluate_one(context, seg_logger, ver_mgr, "stuck-skill", tmp_path / "sessions")
+
+    meta = ver_mgr.get_metadata("stuck-skill", "1.0")
+    assert meta.status == VersionStatus.SUSPENDED
+
+
+@pytest.mark.asyncio
+async def test_evolve_llm_failure_still_rolls_back(tmp_path: Path):
+    """If LLM evolve fails, rollback still happens but no new version published."""
+    skills_dir = tmp_path / "skills"
+    logs_dir = tmp_path / "skill_logs"
+    eval_dir = tmp_path / "skill_eval"
+    skills_dir.mkdir()
+
+    ver_mgr, seg_logger = _setup_skill_with_version(
+        skills_dir, logs_dir, eval_dir, "fail-skill", "2.0", VersionStatus.ACTIVE,
+        with_stable_base=True,
+    )
+
+    context = MagicMock()
+    context.llm = AsyncMock()
+    context.llm.complete = AsyncMock(return_value="invalid garbage no frontmatter")
+    context.mailbox = AsyncMock()
+    context.mailbox.deposit = AsyncMock(return_value=True)
+
+    unhealthy_report = _make_unhealthy_report("fail-skill", "2.0")
+
+    with patch("src.everbot.core.jobs.skill_evaluate.evaluate_skill", new=AsyncMock(return_value=unhealthy_report)):
+        result = await _evaluate_one(context, seg_logger, ver_mgr, "fail-skill", tmp_path / "sessions")
+
+    pointer = ver_mgr.get_pointer("fail-skill")
+    assert pointer.current_version != "2.0"
+    assert "evolve" not in pointer.current_version
