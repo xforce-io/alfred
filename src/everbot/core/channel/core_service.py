@@ -231,12 +231,20 @@ class ChannelCoreService:
             if session_data:
                 self.session_manager.restore_timeline(session_id, session_data.timeline or [])
                 await self.session_manager.restore_to_agent(agent, session_data)
+                # Restore cross-turn failure memory from persisted session.
+                _persisted_fm = getattr(session_data, "failure_memory", None)
+                if _persisted_fm:
+                    self._session_failure_memory[session_id] = dict(_persisted_fm)
             _restore_ok = True
             self._inject_skill_updates_if_needed(agent, session_id, session_data)
             if isinstance(message, list):
-                # Multimodal message: skip mailbox composition, pass as-is
+                # Multimodal message: skip mailbox composition, pass as-is.
+                # Still drain mailbox so events don't accumulate across turns
+                # and leak into the next text message (intent-hijack bug).
                 effective_message = message
-                mailbox_ack_ids = []
+                _, mailbox_ack_ids = self._compose_turn_message(
+                    "", session_data, agent_name,
+                )
             else:
                 effective_message, mailbox_ack_ids = self._compose_turn_message(
                     message,
@@ -491,10 +499,13 @@ class ChannelCoreService:
 
             await on_event(OutboundMessage(session_id, "", msg_type="end"))
 
+            # Persist failure memory into the session so it survives restarts.
+            _fm = self._session_failure_memory.get(session_id)
             await self.session_manager.save_session(
                 session_id,
                 agent,
                 lock_already_held=True,
+                failure_memory=_fm if _fm else None,
             )
             await self._ack_mailbox_events(session_id, mailbox_ack_ids, lock_already_held=True)
             logger.debug("Session persisted: %s", session_id)

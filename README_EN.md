@@ -74,7 +74,6 @@ EverBot extends Agent capabilities through pluggable skill modules. Each skill i
 
 | Skill | Purpose | Key Features |
 |-------|---------|-------------|
-| **coding-master** | Code review & dev automation | Deep review SOP, bugfix workflow, feature dev, workspace lock |
 | **routine-manager** | Task scheduling | Cron/Interval scheduling, timezone-aware, execution mode config |
 | **invest** | Unified investment analysis | Multi-source signals (macro liquidity, value scoring, China market, box breakout), causal chains, probability distributions |
 | **gray-rhino** | Risk trend alerts | News clustering, gray rhino identification, asset impact mapping |
@@ -286,7 +285,6 @@ alfred/
 │   └── infra/                # Infrastructure (config, workspace, process management)
 │
 ├── skills/                   # Extensible skill modules
-│   ├── coding-master/        # Code review & dev automation
 │   ├── routine-manager/      # Task scheduling
 │   ├── invest/               # Unified investment analysis (macro liquidity, value scoring, China market signals)
 │   ├── gray-rhino/           # Risk trend alerts

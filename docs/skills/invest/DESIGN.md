@@ -22,7 +22,7 @@ invest 由以下现有技能合并演化而来：
 
 四层架构：**公约层 → 工作区层 → 工具层 → 数据层**。
 
-与 coding-master 的关键区别：invest 的工具层需要访问外部数据源（FRED / yfinance / Tushare / RSS），这些外部依赖**封装在工具层内部，对 agent 透明**。agent 不需要关心 API 超时、重试、缓存等问题，只通过工具返回值中的元信息（freshness、confidence）感知数据质量。
+invest 的工具层需要访问外部数据源（FRED / yfinance / Tushare / RSS），这些外部依赖**封装在工具层内部，对 agent 透明**。agent 不需要关心 API 超时、重试、缓存等问题，只通过工具返回值中的元信息（freshness、confidence）感知数据质量。
 
 ```
 ┌─────────────────────────────────────────────────────┐

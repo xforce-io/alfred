@@ -158,9 +158,8 @@ class WorkspaceLoader:
                     f"...（更多记忆请读取 MEMORY.md）"
                 )
 
-        # Heartbeat and coding sections loaded on-demand:
+        # Heartbeat sections loaded on-demand:
         # - 心跳任务 → routine-manager skill 的 list 命令
-        # - 开发状态 → coding-master skill 的 status/progress 命令
 
         if not parts:
             return ""

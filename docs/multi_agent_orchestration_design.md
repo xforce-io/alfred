@@ -39,7 +39,7 @@
 
 当前 SKILL 体系（SOP markdown + dispatch 脚本）解决了**灵活性**问题——LLM 能做的事情变多了。但灵活性本身不等于任务能**完成**。
 
-以 coding-master 的 `sop-feature-dev.md` 为例，SOP 写得很详细（调研、规划、实现、测试、提交），但在单轮执行下：
+以某个技能的 `sop-feature-dev.md` 为例，SOP 写得很详细（调研、规划、实现、测试、提交），但在单轮执行下：
 
 ```
 LLM 读 SOP → 写了几个文件 → 工具预算用完 → 结束
@@ -904,7 +904,7 @@ class TaskSession:
 现有 SKILL 结构 + 新增 workflows 目录：
 
 ```
-skills/coding-master/
+skills/<skill-name>/
   ├── SKILL.md                        # 领域知识 + 意图路由表
   ├── scripts/                        # 工具脚本（已有）
   ├── references/                     # SOP 指令文档（已有）
@@ -1761,7 +1761,7 @@ Total time: ~4 分钟
 - Artifact 注入（input_artifacts → user message）+ 长度截断
 - **PhaseGroup 上下文膨胀防护**：iteration 2 条件 inherit（token 阈值）、iteration 3+ 清空重建 + failure_history 摘要注入
 
-**验收**：coding-master 的 bugfix workflow 端到端跑通——research→plan→implement⟷verify 完整流程，verify 失败正确回到 implement，PhaseGroup 耗尽正确回退到 rollback_target。PhaseGroup iteration 2 在历史 token 量 < 阈值时保留上轮对话、超阈值或 iteration 3+ 清空重建。setup_phase 在首次进入和回退重入时正确执行、内循环不执行。checkpoint 暂停后进程重启可恢复等待状态（含 timeout_expired 的 --force resume）。workflow 结束后用户收到包含执行轨迹、verify 历史、变更文件的 report。
+**验收**：bugfix workflow 端到端跑通——research→plan→implement⟷verify 完整流程，verify 失败正确回到 implement，PhaseGroup 耗尽正确回退到 rollback_target。PhaseGroup iteration 2 在历史 token 量 < 阈值时保留上轮对话、超阈值或 iteration 3+ 清空重建。setup_phase 在首次进入和回退重入时正确执行、内循环不执行。checkpoint 暂停后进程重启可恢复等待状态（含 timeout_expired 的 --force resume）。workflow 结束后用户收到包含执行轨迹、verify 历史、变更文件的 report。
 
 ### Phase 2: 人机交互 + 完整持久化 + 递归
 
@@ -1847,7 +1847,7 @@ src/everbot/core/orchestration/           [NEW]
   ├── events.py                           # TaskSessionEvent 定义
   └── report.py                           # WorkflowReport 生成 + Markdown 渲染
 
-skills/coding-master/
+skills/<skill-name>/
   └── workflows/                          [NEW]
       ├── feature-dev.yaml
       ├── bugfix.yaml

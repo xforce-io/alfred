@@ -28,7 +28,7 @@ from src.everbot.core.slm.version_manager import VersionManager
 
 SKILL_V1 = """\
 ---
-name: coding-master
+name: example-skill
 version: "1.0"
 description: Code review and generation
 ---
@@ -37,7 +37,7 @@ You are a coding assistant. Help users write clean code.
 
 SKILL_V2 = """\
 ---
-name: coding-master
+name: example-skill
 version: "2.0"
 description: Code review and generation (improved)
 ---
@@ -46,13 +46,34 @@ You are an advanced coding assistant with deeper analysis.
 
 
 class MockLLM:
-    """Configurable mock: returns different scores based on call order."""
+    """Configurable mock that returns batch JSON arrays for judge_segments.
+
+    ``evaluate_skill`` makes a **single** LLM call for all segments and
+    expects a JSON array back.  This mock detects the number of
+    ``### Segment`` blocks in the prompt and:
+
+    * If len(responses) matches segment count → wrap all responses into one array.
+    * If len(responses) == 1 → replicate the single response N times.
+    * Otherwise → use the first response replicated N times (safe fallback).
+    """
 
     def __init__(self, responses: list[str]):
         self._responses = responses
         self._index = 0
 
     async def complete(self, prompt: str, system: str = "") -> str:
+        import re as _re
+        segment_count = len(_re.findall(r"### Segment \d+", prompt))
+
+        if segment_count > 1:
+            if len(self._responses) == segment_count:
+                # Per-segment responses — combine them all into one array.
+                return "[" + ", ".join(self._responses) + "]"
+            # Single (or mismatched) response — replicate the current one.
+            resp = self._responses[self._index % len(self._responses)]
+            self._index += 1
+            return "[" + ", ".join([resp] * segment_count) + "]"
+
         resp = self._responses[self._index % len(self._responses)]
         self._index += 1
         return resp
@@ -104,14 +125,14 @@ class TestSLMLifecycle:
         seg_logger = SegmentLogger(logs_dir)
 
         # ── Step 1: Publish v1.0 ──
-        ver_mgr.publish("coding-master", "1.0", SKILL_V1)
+        ver_mgr.publish("example-skill", "1.0", SKILL_V1)
 
-        skill_md = skills_dir / "coding-master" / "SKILL.md"
+        skill_md = skills_dir / "example-skill" / "SKILL.md"
         assert skill_md.exists()
         assert 'version: "1.0"' in skill_md.read_text()
-        assert ver_mgr.get_active_version("coding-master") == "1.0"
+        assert ver_mgr.get_active_version("example-skill") == "1.0"
 
-        ptr = ver_mgr.get_pointer("coding-master")
+        ptr = ver_mgr.get_pointer("example-skill")
         assert ptr.current_version == "1.0"
         assert ptr.repo_baseline is True
 
@@ -119,7 +140,7 @@ class TestSLMLifecycle:
         for i in range(5):
             _log_segment(
                 seg_logger,
-                skill_id="coding-master", version="1.0",
+                skill_id="example-skill", version="1.0",
                 session_id=f"sess-{i}",
                 triggered_at=f"2026-03-17T1{i}:00:00Z",
                 context_before=f"user: help me with task {i}",
@@ -127,32 +148,32 @@ class TestSLMLifecycle:
                 context_after="user: that works, thanks",
             )
 
-        assert seg_logger.count("coding-master") == 5
+        assert seg_logger.count("example-skill") == 5
 
         # ── Step 3: Evaluate v1.0 ──
-        v1_segments = seg_logger.load_by_version("coding-master", "1.0")
+        v1_segments = seg_logger.load_by_version("example-skill", "1.0")
         assert len(v1_segments) == 5
 
         llm_v1 = MockLLM([_good_judge_response(0.85)])
-        report_v1 = await evaluate_skill(llm_v1, "coding-master", "1.0", v1_segments)
+        report_v1 = await evaluate_skill(llm_v1, "example-skill", "1.0", v1_segments)
 
         assert report_v1.segment_count == 5
         assert report_v1.critical_issue_rate == 0.0
         assert report_v1.mean_satisfaction == 0.85
         assert report_v1.is_healthy
 
-        ver_mgr.save_eval_report("coding-master", "1.0", report_v1)
-        ver_mgr.activate("coding-master", "1.0")
+        ver_mgr.save_eval_report("example-skill", "1.0", report_v1)
+        ver_mgr.activate("example-skill", "1.0")
 
-        meta_v1 = ver_mgr.get_metadata("coding-master", "1.0")
+        meta_v1 = ver_mgr.get_metadata("example-skill", "1.0")
         assert meta_v1.status == VersionStatus.ACTIVE
         assert meta_v1.eval_summary["satisfaction_score"] == 0.85
 
         # ── Step 4: Publish v2.0 ──
-        ver_mgr.publish("coding-master", "2.0", SKILL_V2)
+        ver_mgr.publish("example-skill", "2.0", SKILL_V2)
 
-        assert ver_mgr.get_active_version("coding-master") == "2.0"
-        ptr = ver_mgr.get_pointer("coding-master")
+        assert ver_mgr.get_active_version("example-skill") == "2.0"
+        ptr = ver_mgr.get_pointer("example-skill")
         assert ptr.current_version == "2.0"
         assert ptr.stable_version == "1.0"
         assert ptr.repo_baseline is False
@@ -161,7 +182,7 @@ class TestSLMLifecycle:
         for i in range(5):
             _log_segment(
                 seg_logger,
-                skill_id="coding-master", version="2.0",
+                skill_id="example-skill", version="2.0",
                 session_id=f"sess-v2-{i}",
                 triggered_at=f"2026-03-18T1{i}:00:00Z",
                 context_before=f"user: review this code block {i}",
@@ -170,7 +191,7 @@ class TestSLMLifecycle:
             )
 
         # ── Step 6: Evaluate v2.0 — 2/5 are critical ──
-        v2_segments = seg_logger.load_by_version("coding-master", "2.0")
+        v2_segments = seg_logger.load_by_version("example-skill", "2.0")
         assert len(v2_segments) == 5
 
         llm_v2 = MockLLM([
@@ -180,55 +201,55 @@ class TestSLMLifecycle:
             _good_judge_response(0.8),
             _good_judge_response(0.75),
         ])
-        report_v2 = await evaluate_skill(llm_v2, "coding-master", "2.0", v2_segments)
+        report_v2 = await evaluate_skill(llm_v2, "example-skill", "2.0", v2_segments)
 
         assert report_v2.segment_count == 5
         assert report_v2.critical_issue_count == 2
         assert abs(report_v2.critical_issue_rate - 0.4) < 0.01
         assert not report_v2.is_healthy
 
-        ver_mgr.save_eval_report("coding-master", "2.0", report_v2)
+        ver_mgr.save_eval_report("example-skill", "2.0", report_v2)
 
         # ── Step 7: Rollback to v1.0 ──
-        rolled_to = ver_mgr.rollback("coding-master", reason="40% critical issue rate")
+        rolled_to = ver_mgr.rollback("example-skill", reason="40% critical issue rate")
         assert rolled_to == "1.0"
 
         assert 'version: "1.0"' in skill_md.read_text()
-        assert ver_mgr.get_active_version("coding-master") == "1.0"
+        assert ver_mgr.get_active_version("example-skill") == "1.0"
 
-        meta_v2 = ver_mgr.get_metadata("coding-master", "2.0")
+        meta_v2 = ver_mgr.get_metadata("example-skill", "2.0")
         assert meta_v2.status == VersionStatus.SUSPENDED
         assert "40% critical" in meta_v2.suspended_reason
 
-        ptr = ver_mgr.get_pointer("coding-master")
+        ptr = ver_mgr.get_pointer("example-skill")
         assert ptr.current_version == "1.0"
 
         # ── Step 8: Consistency check passes ──
-        assert ver_mgr.check_consistency("coding-master") is True
+        assert ver_mgr.check_consistency("example-skill") is True
 
         # ── Step 9: Rollback to repo baseline (delete override) ──
-        ptr = ver_mgr.get_pointer("coding-master")
+        ptr = ver_mgr.get_pointer("example-skill")
         ptr.repo_baseline = True
         ptr.stable_version = ""
-        (skills_dir / "coding-master" / ".eval" / "current.json").write_text(
+        (skills_dir / "example-skill" / ".eval" / "current.json").write_text(
             ptr.to_json(), encoding="utf-8"
         )
 
-        rolled_to = ver_mgr.rollback("coding-master", reason="revert to repo original")
+        rolled_to = ver_mgr.rollback("example-skill", reason="revert to repo original")
         assert rolled_to == "baseline"
         assert not skill_md.exists()
 
         # ── Step 10: Version history preserved ──
-        versions = ver_mgr.list_versions("coding-master")
+        versions = ver_mgr.list_versions("example-skill")
         assert "1.0" in versions
         assert "2.0" in versions
 
-        loaded_report = ver_mgr.get_eval_report("coding-master", "1.0")
+        loaded_report = ver_mgr.get_eval_report("example-skill", "1.0")
         assert loaded_report is not None
         assert loaded_report.mean_satisfaction == 0.85
 
         # Segments still accessible
-        all_segments = seg_logger.load("coding-master")
+        all_segments = seg_logger.load("example-skill")
         assert len(all_segments) == 10  # 5 v1.0 + 5 v2.0
 
 
@@ -244,14 +265,14 @@ class TestSLMSuccessfulUpgrade:
 
         ver_mgr = VersionManager(skills_dir)
         seg_logger = SegmentLogger(logs_dir)
-        skill_md = skills_dir / "coding-master" / "SKILL.md"
+        skill_md = skills_dir / "example-skill" / "SKILL.md"
 
         # ── Step 1: Publish and activate v1.0 ──
-        ver_mgr.publish("coding-master", "1.0", SKILL_V1)
+        ver_mgr.publish("example-skill", "1.0", SKILL_V1)
         for i in range(10):
             _log_segment(
                 seg_logger,
-                skill_id="coding-master", version="1.0",
+                skill_id="example-skill", version="1.0",
                 session_id=f"v1-{i}",
                 triggered_at=f"2026-03-17T{10+i}:00:00Z",
                 context_before=f"user: task {i}",
@@ -259,28 +280,28 @@ class TestSLMSuccessfulUpgrade:
                 context_after="user: ok",
             )
 
-        v1_segments = seg_logger.load_by_version("coding-master", "1.0")
+        v1_segments = seg_logger.load_by_version("example-skill", "1.0")
         llm_v1 = MockLLM([_good_judge_response(0.75)])
-        report_v1 = await evaluate_skill(llm_v1, "coding-master", "1.0", v1_segments)
-        ver_mgr.save_eval_report("coding-master", "1.0", report_v1)
-        ver_mgr.activate("coding-master", "1.0")
+        report_v1 = await evaluate_skill(llm_v1, "example-skill", "1.0", v1_segments)
+        ver_mgr.save_eval_report("example-skill", "1.0", report_v1)
+        ver_mgr.activate("example-skill", "1.0")
 
         assert report_v1.mean_satisfaction == 0.75
-        assert ver_mgr.get_metadata("coding-master", "1.0").status == VersionStatus.ACTIVE
+        assert ver_mgr.get_metadata("example-skill", "1.0").status == VersionStatus.ACTIVE
 
         # ── Step 2: Publish v2.0 (enters testing) ──
-        ver_mgr.publish("coding-master", "2.0", SKILL_V2)
+        ver_mgr.publish("example-skill", "2.0", SKILL_V2)
 
-        ptr = ver_mgr.get_pointer("coding-master")
+        ptr = ver_mgr.get_pointer("example-skill")
         assert ptr.current_version == "2.0"
         assert ptr.stable_version == "1.0"
-        assert ver_mgr.get_metadata("coding-master", "2.0").status == VersionStatus.TESTING
+        assert ver_mgr.get_metadata("example-skill", "2.0").status == VersionStatus.TESTING
 
         # ── Step 3: Log segments for v2.0 — all good, higher satisfaction ──
         for i in range(20):
             _log_segment(
                 seg_logger,
-                skill_id="coding-master", version="2.0",
+                skill_id="example-skill", version="2.0",
                 session_id=f"v2-{i}",
                 triggered_at=f"2026-03-18T{10+i}:00:00Z",
                 context_before=f"user: complex task {i}",
@@ -289,11 +310,11 @@ class TestSLMSuccessfulUpgrade:
             )
 
         # ── Step 4: Evaluate v2.0 — better than v1.0 ──
-        v2_segments = seg_logger.load_by_version("coding-master", "2.0")
+        v2_segments = seg_logger.load_by_version("example-skill", "2.0")
         assert len(v2_segments) == 20
 
         llm_v2 = MockLLM([_good_judge_response(0.92)])
-        report_v2 = await evaluate_skill(llm_v2, "coding-master", "2.0", v2_segments)
+        report_v2 = await evaluate_skill(llm_v2, "example-skill", "2.0", v2_segments)
 
         assert report_v2.segment_count == 20
         assert report_v2.critical_issue_rate == 0.0
@@ -302,17 +323,17 @@ class TestSLMSuccessfulUpgrade:
 
         assert report_v2.mean_satisfaction > report_v1.mean_satisfaction
 
-        ver_mgr.save_eval_report("coding-master", "2.0", report_v2)
+        ver_mgr.save_eval_report("example-skill", "2.0", report_v2)
 
         # ── Step 5: Activate v2.0 — becomes new stable ──
-        ver_mgr.activate("coding-master", "2.0")
+        ver_mgr.activate("example-skill", "2.0")
 
-        meta_v2 = ver_mgr.get_metadata("coding-master", "2.0")
+        meta_v2 = ver_mgr.get_metadata("example-skill", "2.0")
         assert meta_v2.status == VersionStatus.ACTIVE
         assert meta_v2.verification_phase == "full"
         assert meta_v2.eval_summary["satisfaction_score"] == 0.92
 
-        ptr = ver_mgr.get_pointer("coding-master")
+        ptr = ver_mgr.get_pointer("example-skill")
         assert ptr.current_version == "2.0"
         assert ptr.stable_version == "2.0"
         assert ptr.repo_baseline is False
@@ -321,13 +342,13 @@ class TestSLMSuccessfulUpgrade:
         assert 'version: "2.0"' in skill_md.read_text()
 
         # ── Step 7: Both versions' reports are preserved and comparable ──
-        r1 = ver_mgr.get_eval_report("coding-master", "1.0")
-        r2 = ver_mgr.get_eval_report("coding-master", "2.0")
+        r1 = ver_mgr.get_eval_report("example-skill", "1.0")
+        r2 = ver_mgr.get_eval_report("example-skill", "2.0")
         assert r1.mean_satisfaction == 0.75
         assert r2.mean_satisfaction == 0.92
         assert r2.segment_count > r1.segment_count
 
-        assert ver_mgr.get_metadata("coding-master", "1.0").status == VersionStatus.ACTIVE
+        assert ver_mgr.get_metadata("example-skill", "1.0").status == VersionStatus.ACTIVE
 
 
 class TestSLMHumanOverrideFlow:

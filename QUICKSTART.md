@@ -135,9 +135,9 @@ everbot:
       - name: alice-bot
         bot_token: "${TELEGRAM_BOT_TOKEN}"
         default_agent: "alice"
-      - name: coding-bot
-        bot_token: "${TELEGRAM_CODING_BOT_TOKEN}"
-        default_agent: "coding-master"
+      - name: helper-bot
+        bot_token: "${TELEGRAM_HELPER_BOT_TOKEN}"
+        default_agent: "my_helper"
 ```
 
 > 多 Bot 模式下，每个 Bot 有独立的 token、独立的绑定关系、独立的默认 Agent。需要分别在 @BotFather 创建。
@@ -254,67 +254,58 @@ everbot:
 
 ## 创建专用 Bot
 
-> 基础 `init` 创建的是通用 Agent。当你需要一个**专注于特定领域**的 Bot（如编程、投资分析），应按以下流程创建专用 Bot。
+> 基础 `init` 创建的是通用 Agent。当你需要一个**专注于特定领域**的 Bot（如投资分析、运维监控），应按以下流程创建专用 Bot。
 >
 > 核心思路：缩窄 Bot 的职责范围，让即使能力较弱的模型也能通过结构化工具完成复杂任务。
 
 ### 第 1 步：初始化
 
 ```bash
-./bin/everbot init coding-master
+./bin/everbot init demo_agent
 ```
 
 这会：
-- 创建工作区 `~/.alfred/agents/coding-master/`
+- 创建工作区 `~/.alfred/agents/demo_agent/`
 - 自动注册到 `~/.alfred/config.yaml`
 - 生成默认的模板文件
 
 ### 第 2 步：定义身份（SOUL.md）
 
-编辑 `~/.alfred/agents/coding-master/SOUL.md`，将通用身份改为专用身份：
+编辑 `~/.alfred/agents/demo_agent/SOUL.md`，将通用身份改为专用身份：
 
 ```markdown
-# coding-master 的灵魂
+# demo_agent 的灵魂
 
 ## 身份
-我是 coding-master，专注于代码开发、审查和调试的编程专家。
+我是 demo_agent，专注于特定领域的专家助手。
 
 ## 人格特征
-- 严谨、注重代码质量
-- 遇到不确定时，先读代码再下结论
-- 永远通过工具执行，不输出代码块让用户手动跑
+- 严谨、注重质量
+- 遇到不确定时，先查证再下结论
+- 永远通过工具执行，不输出指令让用户手动跑
 
 ## 核心价值
-- 所有代码工作必须通过 coding-master 工具链完成
 - 行动先于解释
 - 一次只做一件事，做完再做下一件
 ```
 
 ### 第 3 步：定义行为规范（AGENTS.md）
 
-编辑 `~/.alfred/agents/coding-master/AGENTS.md`，聚焦于编程职责：
+编辑 `~/.alfred/agents/demo_agent/AGENTS.md`，聚焦于领域职责：
 
 ```markdown
-# coding-master 行为规范
+# demo_agent 行为规范
 
 ## 身份
-你是 coding-master，一个专注于代码工作的编程专家。
+你是 demo_agent，一个专注于特定领域的专家助手。
 
 ## 核心职责
-1. 代码开发（feature delivery）
-2. 代码审查（code review）
-3. Bug 调试（debugging）
-4. 代码分析（analysis）
+1. 领域任务执行
+2. 数据分析与报告
+3. 问题排查与诊断
 
 ## 工作方式
-- 所有代码工作**必须**通过 coding-master 技能的 $CM 命令完成
-- 第一步永远是 `$CM lock --repo <name> --mode <mode>`
 - 通过 `_bash` 工具调用执行命令，**绝不**输出代码块让用户手动运行
-- 完成后执行 `$CM unlock` 释放锁
-
-## 权限与工具
-- `_bash`: 执行命令（包括 $CM 命令）
-- `_python`: 执行复杂逻辑
 - `_read_file` / `_read_folder`: 读取文件
 
 ## 限制
@@ -331,11 +322,12 @@ everbot:
 ```yaml
 everbot:
   agents:
-    coding-master:
-      workspace: ~/.alfred/agents/coding-master
-      model: kimi-code          # 可选：指定模型，不设则用 default_model
+    demo_agent:
+      workspace: ~/.alfred/agents/demo_agent
+      model: gpt-4              # 可选：指定模型，不设则用 default_model
       heartbeat:
-        enabled: false          # 编程 Bot 通常不需要心跳
+        enabled: true
+        interval: 60
 ```
 
 模型解析优先级：
@@ -356,8 +348,8 @@ everbot:
 对于专用 Bot，建议将核心技能放到 Agent 专属目录：
 
 ```bash
-# 将 coding-master 技能复制为 Bot 专属
-cp -r skills/coding-master ~/.alfred/agents/coding-master/skills/
+# 将技能复制为 Bot 专属
+cp -r skills/invest ~/.alfred/agents/demo_agent/skills/
 ```
 
 > 也可以直接使用仓库内置的技能（不复制），专用 Bot 一样能发现它。复制的好处是可以针对该 Bot 定制技能内容。
@@ -379,9 +371,9 @@ cp -r skills/coding-master ~/.alfred/agents/coding-master/skills/
 
 Bot 创建完成后，可从任意已启用的 Channel 访问：
 
-**Web**：连接时指定 `agent_name=coding-master`
+**Web**：连接时指定 `agent_name=demo_agent`
 
-**Telegram（共享 Bot）**：在已有 Bot 中发送 `/start coding-master` 切换 Agent
+**Telegram（共享 Bot）**：在已有 Bot 中发送 `/start demo_agent` 切换 Agent
 
 **Telegram（独立 Bot）**：为专用 Bot 创建独立的 Telegram Bot：
 
@@ -393,25 +385,25 @@ everbot:
       - name: alice-bot
         bot_token: "${TELEGRAM_BOT_TOKEN}"
         default_agent: alice
-      - name: coding-bot
-        bot_token: "${TELEGRAM_CODING_BOT_TOKEN}"
-        default_agent: coding-master
+      - name: demo-bot
+        bot_token: "${TELEGRAM_DEMO_BOT_TOKEN}"
+        default_agent: demo_agent
 ```
 
 ```bash
 # 设置环境变量后重启
-export TELEGRAM_CODING_BOT_TOKEN="从 @BotFather 获取的 token"
+export TELEGRAM_DEMO_BOT_TOKEN="从 @BotFather 获取的 token"
 ./bin/everbot restart
 ```
 
-**CLI 心跳**：`./bin/everbot heartbeat --agent coding-master`
+**CLI 心跳**：`./bin/everbot heartbeat --agent demo_agent`
 
 > Channel 只是接入方式，不影响 Bot 本身的能力。同一个 Bot 可以同时被多个 Channel 访问。
 
 ### 工作区文件一览
 
 ```
-~/.alfred/agents/coding-master/
+~/.alfred/agents/demo_agent/
 ├── SOUL.md          # 身份定义 → 注入 system prompt
 ├── AGENTS.md        # 行为规范 → 注入 system prompt
 ├── USER.md          # 用户画像 → 注入 system prompt
@@ -419,8 +411,6 @@ export TELEGRAM_CODING_BOT_TOKEN="从 @BotFather 获取的 token"
 ├── HEARTBEAT.md     # 心跳任务（运行时按需加载）
 ├── agent.dph        # Dolphin Agent 定义
 └── skills/          # Agent 专属技能目录
-    └── coding-master/
-        └── SKILL.md
 ```
 
 ### 设计原则

@@ -289,6 +289,7 @@ class TestAgentCreationSkip:
 
         runner.session_manager.acquire_session = AsyncMock(return_value=True)
         runner.session_manager.release_session = MagicMock()
+        monkeypatch.setattr(runner, "_probe_llm", AsyncMock(return_value=True))
 
         result = await runner._execute_once()
         assert result == "HEARTBEAT_OK"
@@ -312,6 +313,7 @@ class TestAgentCreationSkip:
 
         runner.session_manager.acquire_session = AsyncMock(return_value=True)
         runner.session_manager.release_session = MagicMock()
+        monkeypatch.setattr(runner, "_probe_llm", AsyncMock(return_value=True))
 
         result = await runner._execute_once()
         assert result == "HEARTBEAT_OK"
@@ -342,6 +344,7 @@ class TestAgentCreationSkip:
 
         runner.session_manager.acquire_session = AsyncMock(return_value=True)
         runner.session_manager.release_session = MagicMock()
+        monkeypatch.setattr(runner, "_probe_llm", AsyncMock(return_value=True))
 
         # Run 10 consecutive heartbeat cycles
         for _ in range(10):
@@ -397,6 +400,21 @@ class TestAgentCreationSkip:
 
         runner.session_manager.acquire_session = AsyncMock(return_value=True)
         runner.session_manager.release_session = MagicMock()
+        monkeypatch.setattr(runner, "_probe_llm", AsyncMock(return_value=True))
+
+        # Inspector.agent_factory creates a separate agent for reflection.
+        # Its continue_chat must return an async iterator, not a coroutine.
+        async def _fake_continue_chat(**kwargs):
+            # Yield a minimal LLM-style progress event with valid JSON
+            # so Inspector._run_llm can parse a reflection response.
+            yield {"_progress": [{"stage": "llm", "delta": '{"action": "none"}'}]}
+
+        reflect_agent = SimpleNamespace(continue_chat=_fake_continue_chat)
+
+        async def _fake_agent_factory(*args, **kwargs):
+            return reflect_agent
+
+        runner._inspector.agent_factory = _fake_agent_factory
 
         await runner._execute_once()
         get_agent_mock.assert_awaited_once()

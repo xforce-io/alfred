@@ -1464,3 +1464,54 @@ class TestEnsureBuiltinJobs:
         task_list = routine_mgr.load_task_list()
         job_names = [t.job for t in task_list.tasks if t.job]
         assert job_names.count("memory-review") == 1
+
+
+# ── Reflection file hash persistence ─────────────────────────
+
+
+class TestReflectFileHashPersistence:
+    """reflect_file_hashes survives persist → init round-trip."""
+
+    def test_hashes_persisted_and_restored(self, tmp_path):
+        """Hashes written by update_state are restored on next Inspector init."""
+        inspector = _make_inspector(tmp_path)
+
+        # Write known file content so hashes are deterministic.
+        (tmp_path / "MEMORY.md").write_text("mem-v1")
+        (tmp_path / "HEARTBEAT.md").write_text("hb-v1")
+
+        # Simulate successful inspection — writes hashes to state file.
+        inspector._reflection.update_reflect_state()
+        saved_hashes = dict(inspector._reflection.last_reflect_file_hashes)
+        assert saved_hashes  # non-empty
+
+        ctx = InspectionContext(memory_content="mem-v1", session_summary="s")
+        inspector.update_state(ctx)
+
+        # Now change a file BEFORE creating a new Inspector (simulates restart).
+        (tmp_path / "MEMORY.md").write_text("mem-v2")
+
+        # New Inspector should restore the OLD hashes from disk, not recompute.
+        inspector2 = _make_inspector(tmp_path)
+        assert inspector2._reflection.last_reflect_file_hashes == saved_hashes
+
+        # Because the on-disk hash differs from current file content,
+        # should_skip_reflection must return False (change detected).
+        assert inspector2._reflection.should_skip_reflection() is False
+
+    def test_fallback_recompute_when_no_hashes_in_state(self, tmp_path):
+        """When state file has no reflect_file_hashes, fall back to recompute."""
+        state_dir = tmp_path / ".alfred" / "test_agent" / "tmp"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        state_file = state_dir / INSPECTOR_STATE_FILE
+        state_file.write_text(json.dumps({
+            "last_run_at": datetime.now().isoformat(),
+            # No reflect_file_hashes key — legacy state file
+        }))
+
+        (tmp_path / "MEMORY.md").write_text("content")
+        inspector = _make_inspector(tmp_path)
+
+        # Should have recomputed hashes (non-empty) rather than empty dict.
+        assert inspector._reflection.last_reflect_file_hashes
+        assert "MEMORY.md" in inspector._reflection.last_reflect_file_hashes

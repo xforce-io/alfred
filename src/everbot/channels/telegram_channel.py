@@ -464,11 +464,15 @@ class TelegramChannel:
                     d.get("file_id", ""),
                     d.get("file_name", ""),
                     agent_name,
+                    declared_size=d.get("file_size", 0),
                 )
-                if local_path:
+                if local_path == telegram_media.DOWNLOAD_TOO_LARGE:
+                    file_mb = d.get("file_size", 0) / (1024 * 1024)
+                    message += f" (文件太大({file_mb:.1f} MB)，超过 Telegram Bot 20 MB 下载限制，无法接收)"
+                elif local_path:
                     message += f" path={local_path}"
                 else:
-                    message += " (文件下载失败)"
+                    message += " (文件下载失败，请重新上传文件，或者确认文件有效性后再为你处理)"
 
         if not message:
             return
@@ -668,6 +672,17 @@ class TelegramChannel:
             final_text, final_entities = self._convert_markdown(full_reply[:TELEGRAM_MSG_LIMIT])
             await self._edit_message(chat_id, streaming_message_id, final_text, final_entities)
             return
+
+        # If streaming started but failed mid-way, delete the unformatted
+        # streaming message so the batch send below doesn't duplicate it.
+        if streaming_message_id and streaming_failed:
+            try:
+                await self._client.post(
+                    f"{self._base_url}/deleteMessage",
+                    json={"chat_id": chat_id, "message_id": streaming_message_id},
+                )
+            except Exception as exc:
+                logger.debug("Failed to delete streaming message: %s", exc)
 
         # Fallback: batch send (original behavior)
         converted_text, converted_entities = self._convert_markdown(full_reply)
@@ -991,12 +1006,14 @@ class TelegramChannel:
     def _safe_local_path(self, target_dir: Path, filename: str) -> Optional[Path]:
         return telegram_media.safe_local_path(target_dir, filename)
 
-    async def _download_document(self, file_id: str, file_name: str, agent_name: str) -> Optional[str]:
+    async def _download_document(
+        self, file_id: str, file_name: str, agent_name: str, *, declared_size: int = 0,
+    ) -> Optional[str]:
         """Download a Telegram document file and return the local path."""
         target_dir = self._user_data.get_agent_tmp_dir(agent_name)
         return await telegram_media.download_document(
             self._client, self._base_url, self._file_base_url,
-            file_id, file_name, target_dir,
+            file_id, file_name, target_dir, declared_size=declared_size,
         )
 
     async def _download_voice(self, file_id: str, agent_name: str) -> Optional[str]:

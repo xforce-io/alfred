@@ -40,10 +40,10 @@ Alfred 当前缺乏从历史经验中主动学习的能力。Memory 只在会话
   memory-review: 静默整合 memory，不通知用户
   task-discover: 发现任务 → mailbox.deposit() 通知用户
     → 用户下次对话时看到 "Background Updates" 中的任务提议
-    → 用户决定是否让 coding-master 执行（手动触发）
+    → 用户决定是否让 agent 执行（手动触发）
 ```
 
-**当前闭环策略**：task-discover 的 mailbox 消息中附带可执行的指令模板（如 `$D develop --task "xxx"`），用户复制即可触发 coding-master。不做自动分发，保持人在回路。
+**当前闭环策略**：task-discover 的 mailbox 消息中附带可执行的指令模板（如 `$D develop --task "xxx"`），用户复制即可触发 agent。不做自动分发，保持人在回路。
 
 ### 2.2 inline vs isolated 模式选择
 
@@ -570,9 +570,9 @@ class TaskDiscoverState:
 ### 9.2 事件格式
 
 ```json
-{"timestamp": "2026-03-04T10:30:00", "agent": "coding-master", "event": "scanner_check", "scanner": "session", "has_changes": true, "new_count": 3, "change_summary": "3 new sessions since last scan"}
-{"timestamp": "2026-03-04T10:30:01", "agent": "coding-master", "event": "skill_started", "skill": "memory-review", "scan_summary": "3 new sessions"}
-{"timestamp": "2026-03-04T10:30:15", "agent": "coding-master", "event": "skill_completed", "skill": "memory-review", "duration_ms": 14200, "result": "merged 2, deprecated 1, re-extracted 1"}
+{"timestamp": "2026-03-04T10:30:00", "agent": "my_agent", "event": "scanner_check", "scanner": "session", "has_changes": true, "new_count": 3, "change_summary": "3 new sessions since last scan"}
+{"timestamp": "2026-03-04T10:30:01", "agent": "my_agent", "event": "skill_started", "skill": "memory-review", "scan_summary": "3 new sessions"}
+{"timestamp": "2026-03-04T10:30:15", "agent": "my_agent", "event": "skill_completed", "skill": "memory-review", "duration_ms": 14200, "result": "merged 2, deprecated 1, re-extracted 1"}
 ```
 
 **设计决策**：事件和日志记在一起（同一个 jsonl 文件），不分开。分开记的问题是关联分析困难（要跨文件 join）、时序不连续。用 `event` 字段区分类型即可。

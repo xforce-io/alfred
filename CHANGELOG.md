@@ -9,13 +9,6 @@
 - fix(daemon): 非交互 shell 下加载 `~/.env.secrets`，启动时快速失败检查环境变量
 - fix(telegram): 启动时清除 pending updates 防止 stale replay
 
-### Coding Master 技能
-- feat(coding-master): 完整的代码审查与开发自动化技能，集成 Codex 引擎
-- feat(coding-master): 模块化 SOP 架构（深度审查、Bugfix、Feature 开发）
-- feat(coding-master): 复杂度工作流、验收标准、工作区基线保证
-- feat(coding-master): `analyze --repos` 支持无锁审查，工作区弹性增强
-- fix(coding-master): 引擎命令超时设为 600s
-
 ### 核心功能增强
 - feat(memory): 结构化记忆系统（Phase 1）—— LLM 提取关键事实、Token 级去重、自动合并归档
 - feat(core): 技能阶段守护、邮箱错误 ACK、Session 锁加固
@@ -33,7 +26,6 @@
 
 ### 工程改进
 - refactor: 拆分单体模块，重组测试结构（unit/integration/web）
-- test(coding-master): 新增深度审查 E2E 测试
 - fix(tasks): 调度任务重试耗尽后重新激活
 - fix(heartbeat): 过滤内联任务失败标记，不展示给用户
 
@@ -74,7 +66,6 @@
   - 实时对话、Agent/Session 管理 API、API Key 认证
 
 #### 技能系统
-- **coding-master**: 代码审查与开发自动化（深度审查 SOP、Bugfix、Feature）
 - **routine-manager**: 任务调度（Cron/Interval、时区感知）
 - **investment-signal**: 市场分析（宏观流动性、价值投资、中国市场信号）
 - **daily-attractor**: 每日市场监控与 Telegram 推送

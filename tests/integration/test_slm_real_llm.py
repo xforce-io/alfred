@@ -44,7 +44,7 @@ class _RealLLMClient:
 
 SKILL_V1 = """\
 ---
-name: coding-master
+name: example-skill
 version: "1.0"
 description: Code review and generation
 ---
@@ -53,7 +53,7 @@ You are a coding assistant.
 
 SKILL_V2 = """\
 ---
-name: coding-master
+name: example-skill
 version: "2.0"
 description: Code review and generation (improved)
 ---
@@ -74,7 +74,7 @@ class TestSLMRealLLMLifecycle:
         # ── Good segments: user clearly satisfied ──
         good_segments = [
             EvaluationSegment(
-                skill_id="coding-master",
+                skill_id="example-skill",
                 skill_version="1.0",
                 triggered_at="2026-03-17T10:00:00Z",
                 context_before="user: Can you help me write a Python function to check if a number is prime?",
@@ -89,7 +89,7 @@ class TestSLMRealLLMLifecycle:
                 session_id="good-1",
             ),
             EvaluationSegment(
-                skill_id="coding-master",
+                skill_id="example-skill",
                 skill_version="1.0",
                 triggered_at="2026-03-17T11:00:00Z",
                 context_before="user: How do I sort a list of dicts by a key in Python?",
@@ -106,7 +106,7 @@ class TestSLMRealLLMLifecycle:
         # ── Bad segments: user clearly dissatisfied ──
         bad_segments = [
             EvaluationSegment(
-                skill_id="coding-master",
+                skill_id="example-skill",
                 skill_version="2.0",
                 triggered_at="2026-03-18T10:00:00Z",
                 context_before="user: Fix the TypeError in my database migration script.",
@@ -121,7 +121,7 @@ class TestSLMRealLLMLifecycle:
                 session_id="bad-1",
             ),
             EvaluationSegment(
-                skill_id="coding-master",
+                skill_id="example-skill",
                 skill_version="2.0",
                 triggered_at="2026-03-18T11:00:00Z",
                 context_before="user: Add input validation to the login form.",
@@ -135,7 +135,7 @@ class TestSLMRealLLMLifecycle:
         ]
 
         # ── Evaluate good segments (v1.0) ──
-        report_good = await evaluate_skill(llm, "coding-master", "1.0", good_segments)
+        report_good = await evaluate_skill(llm, "example-skill", "1.0", good_segments)
 
         print(f"\n=== Good segments report ===")
         print(f"  Segments: {report_good.segment_count}")
@@ -145,7 +145,7 @@ class TestSLMRealLLMLifecycle:
             print(f"  [{r.segment_index}] critical={r.has_critical_issue} sat={r.satisfaction:.2f} reason={r.reason}")
 
         # ── Evaluate bad segments (v2.0) ──
-        report_bad = await evaluate_skill(llm, "coding-master", "2.0", bad_segments)
+        report_bad = await evaluate_skill(llm, "example-skill", "2.0", bad_segments)
 
         print(f"\n=== Bad segments report ===")
         print(f"  Segments: {report_bad.segment_count}")
@@ -180,11 +180,11 @@ class TestSLMRealLLMLifecycle:
         llm = _RealLLMClient()
 
         # ── Publish v1.0 and evaluate good interactions ──
-        ver_mgr.publish("coding-master", "1.0", SKILL_V1)
+        ver_mgr.publish("example-skill", "1.0", SKILL_V1)
 
         v1_segs = [
             EvaluationSegment(
-                skill_id="coding-master", skill_version="1.0",
+                skill_id="example-skill", skill_version="1.0",
                 triggered_at="2026-03-17T10:00:00Z",
                 context_before="user: Write a function that reverses a string.",
                 skill_output="```python\ndef reverse(s): return s[::-1]\n```\nSimple and Pythonic.",
@@ -192,7 +192,7 @@ class TestSLMRealLLMLifecycle:
                 session_id="s1",
             ),
             EvaluationSegment(
-                skill_id="coding-master", skill_version="1.0",
+                skill_id="example-skill", skill_version="1.0",
                 triggered_at="2026-03-17T11:00:00Z",
                 context_before="user: How to read a CSV file?",
                 skill_output="```python\nimport csv\nwith open('data.csv') as f:\n    reader = csv.reader(f)\n    for row in reader:\n        print(row)\n```",
@@ -201,20 +201,20 @@ class TestSLMRealLLMLifecycle:
             ),
         ]
 
-        report_v1 = await evaluate_skill(llm, "coding-master", "1.0", v1_segs)
-        ver_mgr.save_eval_report("coding-master", "1.0", report_v1)
-        ver_mgr.activate("coding-master", "1.0")
+        report_v1 = await evaluate_skill(llm, "example-skill", "1.0", v1_segs)
+        ver_mgr.save_eval_report("example-skill", "1.0", report_v1)
+        ver_mgr.activate("example-skill", "1.0")
 
         print(f"\nv1.0: satisfaction={report_v1.mean_satisfaction:.2f}, critical={report_v1.critical_issue_rate:.0%}")
 
         assert report_v1.is_healthy, f"v1.0 should be healthy: {report_v1.mean_satisfaction:.2f}"
 
         # ── Publish v2.0 and evaluate bad interactions ──
-        ver_mgr.publish("coding-master", "2.0", SKILL_V2)
+        ver_mgr.publish("example-skill", "2.0", SKILL_V2)
 
         v2_segs = [
             EvaluationSegment(
-                skill_id="coding-master", skill_version="2.0",
+                skill_id="example-skill", skill_version="2.0",
                 triggered_at="2026-03-18T10:00:00Z",
                 context_before="user: Add error handling to my API endpoint.",
                 skill_output="I've rewritten your entire API from scratch using a different framework.",
@@ -222,7 +222,7 @@ class TestSLMRealLLMLifecycle:
                 session_id="s3",
             ),
             EvaluationSegment(
-                skill_id="coding-master", skill_version="2.0",
+                skill_id="example-skill", skill_version="2.0",
                 triggered_at="2026-03-18T11:00:00Z",
                 context_before="user: Fix the null pointer in line 42.",
                 skill_output="The issue is complex. Let me analyze... [500 words of analysis with no code fix]",
@@ -231,8 +231,8 @@ class TestSLMRealLLMLifecycle:
             ),
         ]
 
-        report_v2 = await evaluate_skill(llm, "coding-master", "2.0", v2_segs)
-        ver_mgr.save_eval_report("coding-master", "2.0", report_v2)
+        report_v2 = await evaluate_skill(llm, "example-skill", "2.0", v2_segs)
+        ver_mgr.save_eval_report("example-skill", "2.0", report_v2)
 
         print(f"v2.0: satisfaction={report_v2.mean_satisfaction:.2f}, critical={report_v2.critical_issue_rate:.0%}")
 
@@ -242,13 +242,13 @@ class TestSLMRealLLMLifecycle:
         )
 
         # ── Decision: v2.0 is worse → rollback ──
-        rolled_to = ver_mgr.rollback("coding-master", reason="satisfaction regression detected by real LLM judge")
+        rolled_to = ver_mgr.rollback("example-skill", reason="satisfaction regression detected by real LLM judge")
         assert rolled_to == "1.0"
 
         # Verify state after rollback
-        assert ver_mgr.get_active_version("coding-master") == "1.0"
-        assert ver_mgr.get_metadata("coding-master", "2.0").status == VersionStatus.SUSPENDED
-        assert ver_mgr.check_consistency("coding-master") is True
+        assert ver_mgr.get_active_version("example-skill") == "1.0"
+        assert ver_mgr.get_metadata("example-skill", "2.0").status == VersionStatus.SUSPENDED
+        assert ver_mgr.check_consistency("example-skill") is True
 
         print(f"Rolled back to v1.0. Lifecycle complete.")
 
@@ -269,12 +269,12 @@ class TestSLMRealLLMLifecycle:
         llm = _RealLLMClient()
 
         # ── Phase 1: v1.0 — functional but basic ──
-        ver_mgr.publish("coding-master", "1.0", SKILL_V1)
+        ver_mgr.publish("example-skill", "1.0", SKILL_V1)
 
         # v1.0 segments: correct answers, user accepts but wants more depth
         v1_segs = [
             EvaluationSegment(
-                skill_id="coding-master", skill_version="1.0",
+                skill_id="example-skill", skill_version="1.0",
                 triggered_at="2026-03-17T10:00:00Z",
                 context_before="user: How do I handle errors in async Python code?",
                 skill_output=(
@@ -286,7 +286,7 @@ class TestSLMRealLLMLifecycle:
                 session_id="v1-1",
             ),
             EvaluationSegment(
-                skill_id="coding-master", skill_version="1.0",
+                skill_id="example-skill", skill_version="1.0",
                 triggered_at="2026-03-17T11:00:00Z",
                 context_before="user: What's the best way to parse JSON in Python?",
                 skill_output="Use `json.loads(text)` to parse a JSON string into a dict.\n```python\nimport json\ndata = json.loads(raw_text)\n```",
@@ -294,7 +294,7 @@ class TestSLMRealLLMLifecycle:
                 session_id="v1-2",
             ),
             EvaluationSegment(
-                skill_id="coding-master", skill_version="1.0",
+                skill_id="example-skill", skill_version="1.0",
                 triggered_at="2026-03-17T12:00:00Z",
                 context_before="user: Help me write a retry decorator.",
                 skill_output=(
@@ -309,9 +309,9 @@ class TestSLMRealLLMLifecycle:
             ),
         ]
 
-        report_v1 = await evaluate_skill(llm, "coding-master", "1.0", v1_segs)
-        ver_mgr.save_eval_report("coding-master", "1.0", report_v1)
-        ver_mgr.activate("coding-master", "1.0")
+        report_v1 = await evaluate_skill(llm, "example-skill", "1.0", v1_segs)
+        ver_mgr.save_eval_report("example-skill", "1.0", report_v1)
+        ver_mgr.activate("example-skill", "1.0")
 
         print(f"\n=== Phase 1: v1.0 baseline ===")
         print(f"  satisfaction={report_v1.mean_satisfaction:.2f}, critical={report_v1.critical_issue_rate:.0%}")
@@ -323,16 +323,16 @@ class TestSLMRealLLMLifecycle:
             f"v1.0 shouldn't have critical issues (user accepted all outputs), got {report_v1.critical_issue_rate:.0%}"
 
         # ── Phase 2: v2.0 — improved, richer responses ──
-        ver_mgr.publish("coding-master", "2.0", SKILL_V2)
+        ver_mgr.publish("example-skill", "2.0", SKILL_V2)
 
-        assert ver_mgr.get_pointer("coding-master").current_version == "2.0"
-        assert ver_mgr.get_pointer("coding-master").stable_version == "1.0"
-        assert ver_mgr.get_metadata("coding-master", "2.0").status == VersionStatus.TESTING
+        assert ver_mgr.get_pointer("example-skill").current_version == "2.0"
+        assert ver_mgr.get_pointer("example-skill").stable_version == "1.0"
+        assert ver_mgr.get_metadata("example-skill", "2.0").status == VersionStatus.TESTING
 
         # v2.0 segments: skill gives complete, high-quality answers
         v2_segs = [
             EvaluationSegment(
-                skill_id="coding-master", skill_version="2.0",
+                skill_id="example-skill", skill_version="2.0",
                 triggered_at="2026-03-18T10:00:00Z",
                 context_before="user: How do I handle errors in async Python code?",
                 skill_output=(
@@ -353,7 +353,7 @@ class TestSLMRealLLMLifecycle:
                 session_id="v2-1",
             ),
             EvaluationSegment(
-                skill_id="coding-master", skill_version="2.0",
+                skill_id="example-skill", skill_version="2.0",
                 triggered_at="2026-03-18T11:00:00Z",
                 context_before="user: What's the best way to parse JSON in Python?",
                 skill_output=(
@@ -372,7 +372,7 @@ class TestSLMRealLLMLifecycle:
                 session_id="v2-2",
             ),
             EvaluationSegment(
-                skill_id="coding-master", skill_version="2.0",
+                skill_id="example-skill", skill_version="2.0",
                 triggered_at="2026-03-18T12:00:00Z",
                 context_before="user: Help me write a retry decorator.",
                 skill_output=(
@@ -396,8 +396,8 @@ class TestSLMRealLLMLifecycle:
             ),
         ]
 
-        report_v2 = await evaluate_skill(llm, "coding-master", "2.0", v2_segs)
-        ver_mgr.save_eval_report("coding-master", "2.0", report_v2)
+        report_v2 = await evaluate_skill(llm, "example-skill", "2.0", v2_segs)
+        ver_mgr.save_eval_report("example-skill", "2.0", report_v2)
 
         print(f"\n=== Phase 2: v2.0 evaluation ===")
         print(f"  satisfaction={report_v2.mean_satisfaction:.2f}, critical={report_v2.critical_issue_rate:.0%}")
@@ -419,24 +419,24 @@ class TestSLMRealLLMLifecycle:
         assert report_v2.critical_issue_rate == 0, "v2.0 should have no critical issues"
 
         # ── Phase 4: Activate v2.0 as new stable ──
-        ver_mgr.activate("coding-master", "2.0")
+        ver_mgr.activate("example-skill", "2.0")
 
-        meta_v2 = ver_mgr.get_metadata("coding-master", "2.0")
+        meta_v2 = ver_mgr.get_metadata("example-skill", "2.0")
         assert meta_v2.status == VersionStatus.ACTIVE
         assert meta_v2.verification_phase == "full"
 
-        ptr = ver_mgr.get_pointer("coding-master")
+        ptr = ver_mgr.get_pointer("example-skill")
         assert ptr.current_version == "2.0"
         assert ptr.stable_version == "2.0"  # v2.0 is now the stable version
         assert ptr.repo_baseline is False
 
         # SKILL.md should be v2.0
-        skill_md = skills_dir / "coding-master" / "SKILL.md"
+        skill_md = skills_dir / "example-skill" / "SKILL.md"
         assert 'version: "2.0"' in skill_md.read_text()
 
         # ── Phase 5: Verify both reports are preserved for audit ──
-        r1 = ver_mgr.get_eval_report("coding-master", "1.0")
-        r2 = ver_mgr.get_eval_report("coding-master", "2.0")
+        r1 = ver_mgr.get_eval_report("example-skill", "1.0")
+        r2 = ver_mgr.get_eval_report("example-skill", "2.0")
         assert r1 is not None and r2 is not None
         assert r2.mean_satisfaction > r1.mean_satisfaction
 

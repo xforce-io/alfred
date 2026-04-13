@@ -337,6 +337,7 @@ async def test_execute_once_runs_reflection_when_no_due_structured_task(
     monkeypatch.setattr(runner, "_write_task_snapshot", MagicMock())
     monkeypatch.setattr(runner, "_inject_result_to_primary_history", AsyncMock(return_value=True))
     monkeypatch.setattr(runner, "_deposit_deliver_event_to_primary_session", AsyncMock(return_value=True))
+    monkeypatch.setattr(runner, "_probe_llm", AsyncMock(return_value=True))
 
     result = await runner._execute_once()
 

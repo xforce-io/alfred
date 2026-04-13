@@ -16,6 +16,23 @@ MAX_DOCUMENT_SIZE = 50 * 1024 * 1024   # 50 MB
 MAX_VOICE_SIZE = 20 * 1024 * 1024      # 20 MB
 MAX_PHOTO_SIZE = 20 * 1024 * 1024      # 20 MB
 
+# Telegram Bot API hard limit for file downloads via getFile.
+TELEGRAM_BOT_API_DOWNLOAD_LIMIT = 20 * 1024 * 1024  # 20 MB
+
+# Sentinel returned when a file exceeds the Bot API download limit
+# and no fallback source is available.
+DOWNLOAD_TOO_LARGE = "__TOO_LARGE__"
+
+# Regex for arXiv IDs in filenames, e.g. "2604.06425v1.pdf" or "2604.06425.pdf"
+# Anchored to start + requires .pdf suffix to avoid false positives on
+# filenames that happen to contain digit sequences like "report_2024.12345.xlsx".
+_ARXIV_ID_RE = re.compile(r"^(\d{4}\.\d{4,5})(v\d+)?\.pdf$", re.IGNORECASE)
+
+# Known public-source URL templates keyed by source name.
+_PUBLIC_SOURCES: list[tuple[re.Pattern, str]] = [
+    (_ARXIV_ID_RE, "https://arxiv.org/pdf/{id}"),
+]
+
 
 def extract_media_text(msg: dict, extract_urls_fn) -> str:
     """Extract a structured text description from a media message.
@@ -119,6 +136,54 @@ async def _download_bytes(
     return resp.content
 
 
+async def _try_public_source_download(
+    file_name: str,
+    target_dir: Path,
+) -> Optional[str]:
+    """Try to download a file from a public source based on its filename.
+
+    Returns the local path on success, None if no source matched or download
+    failed.
+    """
+    for pattern, url_template in _PUBLIC_SOURCES:
+        m = pattern.search(file_name)
+        if not m:
+            continue
+
+        arxiv_id = m.group(1) + (m.group(2) or "")
+        url = url_template.format(id=arxiv_id)
+        logger.info("Attempting public-source download: %s", url)
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=httpx.Timeout(60.0, connect=10.0),
+            ) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                # Check Content-Length header before accessing .content to
+                # avoid loading an unexpectedly huge response into memory.
+                cl = resp.headers.get("content-length")
+                if cl and int(cl) > MAX_DOCUMENT_SIZE:
+                    logger.warning("Public-source Content-Length too large (%s bytes)", cl)
+                    return None
+                if len(resp.content) > MAX_DOCUMENT_SIZE:
+                    logger.warning("Public-source file too large (%d bytes)", len(resp.content))
+                    return None
+
+                doc_dir = target_dir / "documents"
+                doc_dir.mkdir(parents=True, exist_ok=True)
+                safe_name = sanitize_filename(file_name)
+                local_path = safe_local_path(doc_dir, safe_name)
+                if local_path is None:
+                    return None
+                local_path.write_bytes(resp.content)
+                logger.info("Public-source download OK: %s -> %s", url, local_path)
+                return str(local_path)
+        except Exception as exc:
+            logger.warning("Public-source download failed (%s): %s", url, exc)
+    return None
+
+
 async def download_document(
     client: httpx.AsyncClient,
     base_url: str,
@@ -126,16 +191,46 @@ async def download_document(
     file_id: str,
     file_name: str,
     target_dir: Path,
+    *,
+    declared_size: int = 0,
 ) -> Optional[str]:
-    """Download a Telegram document file and return the local path."""
+    """Download a Telegram document file and return the local path.
+
+    Returns :data:`DOWNLOAD_TOO_LARGE` when the file exceeds the Telegram
+    Bot API download limit (20 MB) so the caller can show a specific message.
+    """
     if not file_id or client is None:
         return None
+
+    # Early check using the size reported in the message update – avoids
+    # a wasted getFile round-trip for files that are clearly too large.
+    if declared_size and declared_size > TELEGRAM_BOT_API_DOWNLOAD_LIMIT:
+        logger.warning(
+            "Document %s declared size (%d) exceeds Bot API download limit (%d)",
+            file_id, declared_size, TELEGRAM_BOT_API_DOWNLOAD_LIMIT,
+        )
+        # Try to grab from a public source before giving up.
+        fallback = await _try_public_source_download(file_name, target_dir)
+        if fallback:
+            return fallback
+        return DOWNLOAD_TOO_LARGE
+
     try:
         file_info = await _get_telegram_file(client, base_url, file_id)
         if file_info is None:
             return None
 
         file_size = file_info.get("file_size", 0)
+        if file_size and file_size > TELEGRAM_BOT_API_DOWNLOAD_LIMIT:
+            logger.warning(
+                "Document %s file_size (%d) exceeds Bot API download limit (%d)",
+                file_id, file_size, TELEGRAM_BOT_API_DOWNLOAD_LIMIT,
+            )
+            fallback = await _try_public_source_download(file_name, target_dir)
+            if fallback:
+                return fallback
+            return DOWNLOAD_TOO_LARGE
+
         if file_size and file_size > MAX_DOCUMENT_SIZE:
             logger.warning(
                 "Document %s exceeds size limit (%d > %d), skipping",

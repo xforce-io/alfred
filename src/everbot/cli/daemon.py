@@ -394,9 +394,9 @@ class EverBotDaemon:
                 - name: alice-bot
                   bot_token: ${TELEGRAM_BOT_TOKEN}
                   default_agent: alice
-                - name: coding-bot
-                  bot_token: ${TELEGRAM_CODING_BOT_TOKEN}
-                  default_agent: coding-master
+                - name: dev-bot
+                  bot_token: ${TELEGRAM_DEV_BOT_TOKEN}
+                  default_agent: dev-agent
         """
         channels_cfg = (
             (self.config.get("everbot", {}) or {}).get("channels", {}) or {}

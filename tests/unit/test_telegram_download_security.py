@@ -158,7 +158,8 @@ class TestDownloadDocumentSizeLimit:
         ch._client.get = AsyncMock(return_value=_mock_getfile_response("docs/big.pdf", 60 * 1024 * 1024))
 
         result = await ch._download_document("file123", "big.pdf", "test_agent")
-        assert result is None
+        from src.everbot.channels.telegram_media import DOWNLOAD_TOO_LARGE
+        assert result == DOWNLOAD_TOO_LARGE
         # Download should NOT have been attempted (only 1 call to getFile)
         assert ch._client.get.call_count == 1
 

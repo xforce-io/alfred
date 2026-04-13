@@ -111,13 +111,13 @@ tools:
 
 class TestNormalizeSkillName:
     def test_hyphen_to_underscore(self):
-        assert AgentFactory._normalize_skill_name("coding-master") == "coding_master"
+        assert AgentFactory._normalize_skill_name("example-skill") == "example_skill"
 
     def test_uppercase_to_lower(self):
-        assert AgentFactory._normalize_skill_name("Coding_Master") == "coding_master"
+        assert AgentFactory._normalize_skill_name("Example_Skill") == "example_skill"
 
     def test_already_normalized(self):
-        assert AgentFactory._normalize_skill_name("coding_master") == "coding_master"
+        assert AgentFactory._normalize_skill_name("example_skill") == "example_skill"
 
 
 # ===========================================================================
@@ -146,12 +146,12 @@ class TestGetAgentSkillsFilter:
     @patch("src.everbot.core.agent.factory.get_config")
     def test_include_mode(self, mock_get_config):
         mock_get_config.return_value = {
-            "everbot": {"agents": {"cm": {"skills": {"include": ["coding_master", "invest"]}}}}
+            "everbot": {"agents": {"cm": {"skills": {"include": ["example_skill", "invest"]}}}}
         }
         factory = self._make_factory()
         names, mode = factory._get_agent_skills_filter("cm")
         assert mode == "include"
-        assert names == {"coding_master", "invest"}
+        assert names == {"example_skill", "invest"}
 
     @patch("src.everbot.core.agent.factory.get_config")
     def test_exclude_mode(self, mock_get_config):
@@ -253,13 +253,13 @@ class TestLoadCustomSkillkits:
     @patch("src.everbot.core.agent.factory.get_config")
     def test_include_filter_allows_matching_skillkit(self, mock_get_config):
         with tempfile.TemporaryDirectory() as tmpdir:
-            skillkit_dir = Path(tmpdir) / "coding-master"
+            skillkit_dir = Path(tmpdir) / "example-skill"
             skillkit_dir.mkdir()
 
             mock_get_config.return_value = {
                 "everbot": {"agents": {"cm": {
                     "skillkit_dirs": [str(skillkit_dir)],
-                    "skills": {"include": ["coding_master"]},
+                    "skills": {"include": ["example_skill"]},
                 }}}
             }
             factory = self._make_factory()
@@ -280,7 +280,7 @@ class TestLoadCustomSkillkits:
             mock_get_config.return_value = {
                 "everbot": {"agents": {"cm": {
                     "skillkit_dirs": [str(skillkit_dir)],
-                    "skills": {"include": ["coding_master"]},
+                    "skills": {"include": ["example_skill"]},
                 }}}
             }
             factory = self._make_factory()
@@ -295,13 +295,13 @@ class TestLoadCustomSkillkits:
     @patch("src.everbot.core.agent.factory.get_config")
     def test_exclude_filter_blocks_matching_skillkit(self, mock_get_config):
         with tempfile.TemporaryDirectory() as tmpdir:
-            skillkit_dir = Path(tmpdir) / "coding-master"
+            skillkit_dir = Path(tmpdir) / "example-skill"
             skillkit_dir.mkdir()
 
             mock_get_config.return_value = {
                 "everbot": {"agents": {"cm": {
                     "skillkit_dirs": [str(skillkit_dir)],
-                    "skills": {"exclude": ["coding_master"]},
+                    "skills": {"exclude": ["example_skill"]},
                 }}}
             }
             factory = self._make_factory()
@@ -316,7 +316,7 @@ class TestLoadCustomSkillkits:
     @patch("src.everbot.core.agent.factory.get_config")
     def test_exclude_filter_allows_non_matching_skillkit(self, mock_get_config):
         with tempfile.TemporaryDirectory() as tmpdir:
-            skillkit_dir = Path(tmpdir) / "coding-master"
+            skillkit_dir = Path(tmpdir) / "example-skill"
             skillkit_dir.mkdir()
 
             mock_get_config.return_value = {
@@ -336,15 +336,15 @@ class TestLoadCustomSkillkits:
 
     @patch("src.everbot.core.agent.factory.get_config")
     def test_hyphen_underscore_normalization_in_filter(self, mock_get_config):
-        """skills.include=['coding-master'] should match dir 'coding_master' and vice versa."""
+        """skills.include=['example-skill'] should match dir 'example_skill' and vice versa."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            skillkit_dir = Path(tmpdir) / "coding_master"
+            skillkit_dir = Path(tmpdir) / "example_skill"
             skillkit_dir.mkdir()
 
             mock_get_config.return_value = {
                 "everbot": {"agents": {"cm": {
                     "skillkit_dirs": [str(skillkit_dir)],
-                    "skills": {"include": ["coding-master"]},
+                    "skills": {"include": ["example-skill"]},
                 }}}
             }
             factory = self._make_factory()

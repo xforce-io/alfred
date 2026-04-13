@@ -4,8 +4,8 @@ Integration test: Deep Review e2e flow.
 Verifies that a "帮我 review 下 alfred 项目" message triggers the correct
 tool call sequence through ChannelCoreService:
 
-  _load_resource_skill("coding-master")       → Gateway loaded
-  _load_skill_resource("coding-master", ...)   → Deep Review SOP loaded
+  _load_resource_skill("example-skill")       → Gateway loaded
+  _load_skill_resource("example-skill", ...)   → Deep Review SOP loaded
   _bash(quick-status --repos alfred)           → Gather context
   _bash(workspace-check --repos alfred ...)    → Acquire workspace
   _bash(analyze --workspace ... --engine ...)  → Engine-powered analysis
@@ -218,7 +218,7 @@ def _build_deep_review_script():
     """Build the scripted event sequence for a successful deep review.
 
     Simulates agent behavior:
-    1. Load coding-master skill (gateway)
+    1. Load example-skill skill (gateway)
     2. Load deep-review SOP
     3. quick-status (gather context)
     4. workspace-check (acquire)
@@ -227,19 +227,19 @@ def _build_deep_review_script():
     7. release workspace
     """
     return [
-        # Step 1: Agent loads coding-master gateway
-        _p(_llm_think("用户要求 review alfred 项目，先加载 coding-master 技能")),
+        # Step 1: Agent loads example-skill gateway
+        _p(_llm_think("用户要求 review alfred 项目，先加载 example-skill 技能")),
         _p(_skill("_load_resource_skill",
-                   '{"skill_name": "coding-master"}',
+                   '{"skill_name": "example-skill"}',
                    pid="sk1")),
         _p(_skill_done("_load_resource_skill",
-                       output="# Coding Master Skill\n## Intent Routing ...",
+                       output="# Example Skill\n## Intent Routing ...",
                        pid="sk1")),
 
         # Step 2: Agent loads deep-review SOP
         _p(_llm_think("加载 deep-review SOP")),
         _p(_skill("_load_skill_resource",
-                   '{"skill_name": "coding-master", "resource_path": "references/sop-deep-review.md"}',
+                   '{"skill_name": "example-skill", "resource_path": "references/sop-deep-review.md"}',
                    pid="sk2")),
         _p(_skill_done("_load_skill_resource",
                        output="# SOP: Deep Review\nUse when user asks to review ...",
@@ -314,7 +314,7 @@ async def test_deep_review_flow_calls_engine_analysis():
     E2E: "帮我 review 下 alfred 项目" triggers the full deep review pipeline.
 
     Verifies:
-    1. coding-master skill is loaded (gateway)
+    1. example-skill skill is loaded (gateway)
     2. deep-review SOP is loaded via _load_skill_resource
     3. workspace-check is called to acquire workspace
     4. analyze is called with --engine (engine-powered deep analysis)
@@ -420,9 +420,9 @@ async def test_deep_review_without_engine_call_is_incomplete():
     # Script that skips workspace-check and analyze — just uses quick commands
     shallow_script = [
         _p(_skill("_load_resource_skill",
-                   '{"skill_name": "coding-master"}', pid="sk1")),
+                   '{"skill_name": "example-skill"}', pid="sk1")),
         _p(_skill_done("_load_resource_skill",
-                       output="# Coding Master Skill ...", pid="sk1")),
+                       output="# Example Skill ...", pid="sk1")),
         # Directly does quick-status without loading SOP
         _p(_skill("_bash",
                    '{"cmd": "python dispatch.py quick-status --repos alfred"}',

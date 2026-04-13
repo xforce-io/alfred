@@ -1013,7 +1013,7 @@ class TestHandleUpdateMedia:
         assert len(received) == 1
         assert "[文件: data.csv (text/csv)]" in received[0]
         assert "path=/tmp/docs/data.csv" in received[0]
-        channel._download_document.assert_awaited_once_with("d1", "data.csv", "test_agent")
+        channel._download_document.assert_awaited_once_with("d1", "data.csv", "test_agent", declared_size=0)
 
     @pytest.mark.asyncio
     async def test_document_download_failure(self, channel):
@@ -1034,7 +1034,7 @@ class TestHandleUpdateMedia:
         }))
 
         assert len(received) == 1
-        assert "(文件下载失败)" in received[0]
+        assert "(文件下载失败" in received[0]
 
     @pytest.mark.asyncio
     async def test_document_with_caption(self, channel):

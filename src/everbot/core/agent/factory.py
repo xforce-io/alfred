@@ -372,7 +372,7 @@ class AgentFactory:
     def _parse_dph_tools(dph_path: Path) -> list[str] | None:
         """Extract the tools=[...] list from a DPH file without executing it.
 
-        Returns a list like ``['coding_master', '_date']`` or ``None``
+        Returns a list like ``['my_skillkit', '_date']`` or ``None``
         if no ``tools=`` parameter is found.
         """
         try:
@@ -614,7 +614,7 @@ Current time: $current_time
                 skillkit_dir = (project_root / skillkit_dir).resolve()
 
             # Derive skill identity from directory basename for filter check.
-            # e.g. "skills/coding-master" → "coding_master"
+            # e.g. "skills/web-search" → "web_search"
             dir_skill_name = self._normalize_skill_name(skillkit_dir.name)
 
             if normalized_filter is not None:

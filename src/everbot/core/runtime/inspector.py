@@ -204,9 +204,16 @@ class Inspector:
                 self._reflection.last_reflect_at = datetime.fromisoformat(
                     persisted["last_run_at"]
                 )
-                self._reflection.last_reflect_file_hashes = (
-                    self._reflection.compute_file_hashes()
-                )
+                # Restore file hashes from persisted state if available;
+                # fall back to recomputing (loses change detection across
+                # the restart window, but safe).
+                saved_hashes = persisted.get("reflect_file_hashes")
+                if isinstance(saved_hashes, dict) and saved_hashes:
+                    self._reflection.last_reflect_file_hashes = saved_hashes
+                else:
+                    self._reflection.last_reflect_file_hashes = (
+                        self._reflection.compute_file_hashes()
+                    )
             except (TypeError, ValueError):
                 pass
 
@@ -569,6 +576,7 @@ class Inspector:
             "last_push_at": prev_state.get("last_push_at"),
             "context_hashes": self._compute_context_hashes(ctx),
             "last_idle_hours": ctx.idle_hours,
+            "reflect_file_hashes": self._reflection.last_reflect_file_hashes,
         }
         self._persist_state(state)
 

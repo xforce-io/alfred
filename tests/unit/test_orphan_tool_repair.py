@@ -88,7 +88,7 @@ class TestOrphanToolMessageRepair:
     async def test_orphan_tool_becomes_user_context(self):
         """Orphan tool message should be merged into preceding user message."""
         history = [
-            {"role": "user", "content": "use coding master"},
+            {"role": "user", "content": "use example skill"},
             {"role": "tool", "content": "[PIN]\n# Skill Docs Here",
              "tool_call_id": "tc_lost_001"},
             {"role": "assistant", "content": "OK, running CM..."},

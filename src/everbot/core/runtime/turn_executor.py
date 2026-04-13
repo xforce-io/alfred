@@ -90,11 +90,12 @@ class TurnExecutor:
 
             policy = _SESSION_TYPE_POLICIES.get(session_type)
             if policy is not None:
-                # Build tool-name lookup for phantom-tool guard
+                # Build tool-name lookup for phantom-tool guard.
+                # Re-evaluate get_skillkit_raw() on each call so dynamically
+                # registered tools are visible immediately.
                 get_tools = None
                 if hasattr(agent, "get_skillkit_raw") and agent.get_skillkit_raw() is not None:
-                    skillkit_raw = agent.get_skillkit_raw()
-                    get_tools = lambda: set(skillkit_raw.getSkillNames())  # noqa: E731
+                    get_tools = lambda: set(agent.get_skillkit_raw().getSkillNames())  # noqa: E731
                 orchestrator = TurnOrchestrator(policy, get_registered_tools=get_tools)
                 async for event in orchestrator.run_turn(
                     agent,

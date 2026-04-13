@@ -510,6 +510,7 @@ class SessionManager:
         *,
         lock_already_held: bool = False,
         trailing_messages: Optional[List[Dict[str, Any]]] = None,
+        failure_memory: Optional[Dict[str, int]] = None,
     ):
         """保存 Session.
 
@@ -555,6 +556,7 @@ class SessionManager:
                 timeline=timeline,
                 context_trace=context_trace,
                 trailing_messages=trailing_messages,
+                failure_memory=failure_memory,
             )
             logger.debug("Session persisted.")
             return
@@ -600,6 +602,7 @@ class SessionManager:
                 session_data.created_at = created_at_hint or datetime.now(timezone.utc).isoformat()
             session_data.timeline = timeline or []
             session_data.context_trace = context_trace or {}
+            session_data.failure_memory = failure_memory or {}
 
         updated = await self.update_atomic(session_id, _mutator, timeout=10.0, blocking=True)
         if updated is None:

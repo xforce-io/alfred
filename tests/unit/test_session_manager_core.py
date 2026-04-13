@@ -1381,3 +1381,56 @@ class TestIsolatedJobResultNotRestoredToLLMContext:
         hb_msg = restored_history[2]
         assert "结果..." in hb_msg["content"]
         assert hb_msg.get("metadata", {}).get("source") == "heartbeat"
+
+
+# ===========================================================================
+# Failure memory persistence round-trip
+# ===========================================================================
+
+
+class TestFailureMemoryPersistence:
+    """failure_memory field survives save → load round-trip."""
+
+    @pytest.mark.asyncio
+    async def test_failure_memory_round_trip(self, tmp_path: Path):
+        persistence = SessionPersistence(tmp_path)
+        session_id = "web_session_test_agent"
+        fm = {"bash_exec:abc123": 3, "python_exec:def456": 1}
+
+        data = _make_session_data(session_id=session_id, failure_memory=fm)
+        await persistence.save_data(data)
+
+        loaded = await persistence.load(session_id)
+        assert loaded is not None
+        assert loaded.failure_memory == fm
+
+    @pytest.mark.asyncio
+    async def test_missing_failure_memory_defaults_empty(self, tmp_path: Path):
+        persistence = SessionPersistence(tmp_path)
+        session_id = "web_session_test_agent"
+
+        data = _make_session_data(session_id=session_id)
+        await persistence.save_data(data)
+
+        loaded = await persistence.load(session_id)
+        assert loaded is not None
+        assert loaded.failure_memory == {}
+
+    @pytest.mark.asyncio
+    async def test_cleared_on_successful_turn(self, tmp_path: Path):
+        """When failure_memory is set to empty dict, it persists as empty."""
+        persistence = SessionPersistence(tmp_path)
+        session_id = "web_session_test_agent"
+
+        # First save with failures
+        data = _make_session_data(session_id=session_id, failure_memory={"sig:x": 2})
+        await persistence.save_data(data)
+
+        # Then save with cleared failures
+        data.failure_memory = {}
+        data.revision += 1
+        await persistence.save_data(data)
+
+        loaded = await persistence.load(session_id)
+        assert loaded is not None
+        assert loaded.failure_memory == {}

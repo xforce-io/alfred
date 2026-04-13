@@ -389,3 +389,62 @@ async def test_process_message_acks_mailbox_on_error():
 
     # The turn errored, but mailbox should still be acked
     core.session_manager.ack_mailbox_events.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Bug: multimodal messages skip mailbox consumption, causing heartbeat events
+# to accumulate and leak into the next text turn.
+#
+# Incident: user sent a paper screenshot (multimodal) → bot discussed the
+# paper → user replied "好的，我也好奇具体怎么做的" (text).  A heartbeat result
+# about "反共识信号已生成" had been deposited into the mailbox before the
+# multimodal turn, but the multimodal turn skipped mailbox composition
+# (isinstance(message, list) → mailbox_ack_ids = []).  The heartbeat event
+# survived into the next text turn, was prepended to the user's message,
+# and hijacked the LLM's intent resolution.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_multimodal_message_skips_mailbox_ack_bug():
+    """Multimodal messages skip mailbox composition and do NOT ack events.
+
+    This means pending mailbox events survive across the multimodal turn
+    and leak into the next text message — potentially hijacking user intent.
+    """
+    agent = _DummyAgent(
+        events=[
+            {"_progress": [{"id": "p1", "status": "running", "stage": "llm", "delta": "OK"}]},
+        ]
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        core = _make_core_service(Path(tmp))
+        core.session_manager.load_session = AsyncMock(return_value=SimpleNamespace(
+            mailbox=[
+                {"event_id": "evt_hb", "event_type": "heartbeat_result",
+                 "summary": "每日反共识信号已顺利生成",
+                 "detail": "反共识信号已顺利生成，包含三个核心信号"},
+            ],
+            timeline=[],
+        ))
+        collector = _EventCollector()
+
+        # Send a multimodal message (image)
+        multimodal_msg = [
+            {"type": "text", "text": "[图片]"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9j/..."}},
+        ]
+        await core.process_message(
+            agent, "demo_agent", "tg_session_demo_agent__123",
+            multimodal_msg, collector,
+        )
+
+    # FIXED: mailbox events must be acked even for multimodal messages
+    # so they don't accumulate and leak into the next text turn.
+    ack_call_args = core.session_manager.ack_mailbox_events.call_args
+    assert ack_call_args is not None, "ack_mailbox_events should be called"
+    ack_ids = ack_call_args[0][1] if len(ack_call_args[0]) > 1 else []
+    assert "evt_hb" in ack_ids, (
+        f"Heartbeat event should be acked even for multimodal messages, got {ack_ids}"
+    )

@@ -24,6 +24,7 @@ class SessionData:
     timeline: list = None
     context_trace: Dict[str, Any] = None
     revision: int = 0
+    failure_memory: Dict[str, int] = None  # cross-turn failure signatures
 
     def __init__(self, **kwargs):
         # Compatibility for old sessions
@@ -42,6 +43,7 @@ class SessionData:
         self.timeline = kwargs.get("timeline", kwargs.get("trajectory_events", []))
         self.context_trace = kwargs.get("context_trace", {})
         self.revision = kwargs.get("revision", 0)
+        self.failure_memory = kwargs.get("failure_memory") or {}
 
     def to_dict(self) -> Dict:
         return asdict(self)

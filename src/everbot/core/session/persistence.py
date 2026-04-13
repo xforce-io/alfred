@@ -252,6 +252,7 @@ class SessionPersistence:
         timeline: Optional[list] = None,
         context_trace: Optional[Dict[str, Any]] = None,
         trailing_messages: Optional[List[Dict[str, Any]]] = None,
+        failure_memory: Optional[Dict[str, int]] = None,
     ):
         """
         保存 Session 到文件
@@ -303,6 +304,7 @@ class SessionPersistence:
                 timeline=timeline or [],
                 context_trace=context_trace or {},
                 revision=next_revision,
+                failure_memory=failure_memory or {},
             )
 
             # Compress history for long-lived sessions before persisting.
