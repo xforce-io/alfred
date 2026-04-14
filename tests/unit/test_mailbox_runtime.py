@@ -24,6 +24,8 @@ def test_compose_message_with_mailbox_updates_prefixes_user_message():
     message, ack_ids = compose_message_with_mailbox_updates(user_message, mailbox)
 
     assert message.startswith("## Background Updates")
+    assert "仅可作为线索" in message
+    assert "必须先读取真实任务源" in message
     assert "[heartbeat_result] 你有新的日报" in message
     assert "Detail: 详见日报附件" in message
     assert message.endswith(user_message)
@@ -238,3 +240,27 @@ def test_compose_message_multiple_events_last_one_closest_to_user():
     assert benign_pos < topical_pos < user_section_start, (
         "Events are ordered chronologically; last event is closest to user message"
     )
+
+
+def test_compose_message_warns_task_queries_to_verify_real_task_source():
+    """Task schedule/config queries must be grounded in the real task source.
+
+    Regression: the old mailbox preamble told the model to cite heartbeat
+    updates directly without verification, which caused partial background
+    notifications to be mistaken for authoritative task configuration.
+    """
+    user_message = "我怎么记得十点半有个任务的"
+    mailbox = [
+        {
+            "event_id": "evt_hb",
+            "event_type": "heartbeat_result",
+            "summary": "你好呀，今天的kweaver严重bug巡检刚出结果",
+            "detail": "你好呀，今天的kweaver严重bug巡检刚出结果",
+        },
+    ]
+
+    message, _ = compose_message_with_mailbox_updates(user_message, mailbox)
+
+    assert "任务配置、执行时间、调度频率、下次运行时间" in message
+    assert "必须先读取真实任务源" in message
+    assert "HEARTBEAT.md / task list" in message

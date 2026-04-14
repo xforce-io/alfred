@@ -227,12 +227,18 @@ class TelegramChannel:
                 continue
             if target_chat and str(chat_id) != target_chat:
                 continue
-            await self._send_message(chat_id, text, entities)
+            sent = await self._send_message(chat_id, text, entities)
             # Deposit heartbeat result into channel session mailbox so the
             # next user turn sees it via "## Background Updates" prefix.
             # This replaces the old inject_history_message approach which
             # created fake assistant messages and placeholder pairs that
             # broke role alternation on restore.
+            if not sent:
+                logger.warning(
+                    "Skip mailbox mirror for %s chat %s because Telegram delivery failed",
+                    source_type, chat_id,
+                )
+                continue
             if source_type != "deferred_result" and hasattr(self._session_manager, "deposit_mailbox_event"):
                 from ..core.models.system_event import build_system_event
 

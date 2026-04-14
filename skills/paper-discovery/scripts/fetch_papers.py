@@ -6,6 +6,7 @@ Fetch trending AI/ML papers from HuggingFace JSON API with arXiv fallback.
 
 import argparse
 import json
+import logging
 import math
 import re
 import sys
@@ -13,6 +14,8 @@ from datetime import datetime
 from typing import List, Dict, Any
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 def generate_one_line_summary(abstract: str) -> str:
@@ -22,11 +25,23 @@ def generate_one_line_summary(abstract: str) -> str:
 
     try:
         import asyncio
+        import os
         from dolphin.core.llm.llm_client import LLMClient
         from dolphin.core.common.enums import Messages as DolphinMessages, MessageRole
         from dolphin.core.context import Context
+        from dolphin.core.config.global_config import GlobalConfig
 
-        context = Context()
+        # Load config from dolphin.yaml so LLMClient gets context_engineer_config
+        config_path = os.path.join(
+            os.path.dirname(__file__), "..", "..", "..", "config", "dolphin.yaml"
+        )
+        config_path = os.path.normpath(config_path)
+        if os.path.exists(config_path):
+            config = GlobalConfig.from_yaml(config_path)
+        else:
+            logger.warning("dolphin.yaml not found at %s, using default GlobalConfig", config_path)
+            config = GlobalConfig()
+        context = Context(config=config)
         llm_client = LLMClient(context)
         msgs = DolphinMessages()
         prompt = (
@@ -35,8 +50,8 @@ def generate_one_line_summary(abstract: str) -> str:
         )
         msgs.append_message(MessageRole.USER, prompt)
 
-        config = context.get_config()
-        model = getattr(config, "fast_llm", None) or "qwen-turbo"
+        runtime_config = context.get_config()
+        model = getattr(runtime_config, "fast_llm", None) or "qwen-turbo"
 
         async def _call():
             result = ""

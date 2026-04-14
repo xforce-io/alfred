@@ -7,6 +7,10 @@ import inspect
 import os
 import signal
 import logging
+import contextlib
+import faulthandler
+import subprocess
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
@@ -18,7 +22,12 @@ from ..core.session.session import SessionManager
 from ..infra.user_data import get_user_data_manager
 from ..infra.config import get_config
 from ..core.agent.factory import get_agent_factory
-from ..infra.process import DaemonLock, write_pid_file, remove_pid_file
+from ..infra.process import (
+    DaemonLock,
+    write_pid_file,
+    remove_pid_file,
+    is_pid_running,
+)
 from ..infra.logging_utils import configure_daemon_logging
 from ..core.runtime.scheduler import AgentSchedule, InspectorSchedule, Scheduler, SchedulerTask
 from ..channels.telegram_channel import TelegramChannel
@@ -59,6 +68,12 @@ class EverBotDaemon:
         self._legacy_runner_tasks: Dict[str, asyncio.Task] = {}
         self._telegram_channels: List[TelegramChannel] = []
         self._daemon_lock: Optional[DaemonLock] = None
+        self._run_id: str = uuid.uuid4().hex[:12]
+        self._shutdown_requested: bool = False
+        self._shutdown_signal: Optional[str] = None
+        self._lifecycle_task: Optional[asyncio.Task] = None
+        self._lifecycle_monitor_proc: Optional[subprocess.Popen] = None
+        self._fault_log_handle = None
 
         self.agent_factory = get_agent_factory(
             global_config_path=global_config_path,
@@ -276,6 +291,150 @@ class EverBotDaemon:
         self.user_data.ensure_directories()
         self.session_manager = SessionManager(self.user_data.sessions_dir)
         logger.info("组件初始化完成")
+
+    def _read_lifecycle_snapshot(self) -> Dict[str, Any]:
+        """Read daemon lifecycle snapshot from disk."""
+        try:
+            return json.loads(self.user_data.lifecycle_file.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except Exception as exc:
+            logger.warning("Failed to read lifecycle snapshot: %s", exc)
+            return {}
+
+    def _write_lifecycle_snapshot(
+        self,
+        *,
+        status: str,
+        graceful_shutdown: bool,
+        exit_reason: Optional[str] = None,
+        last_alive_at: Optional[str] = None,
+    ) -> None:
+        """Persist daemon lifecycle facts for post-mortem diagnostics."""
+        snapshot = self._read_lifecycle_snapshot()
+        now_iso = datetime.now().isoformat()
+        snapshot.update({
+            "run_id": self._run_id,
+            "pid": self._pid,
+            "status": status,
+            "started_at": self._started_at,
+            "updated_at": now_iso,
+            "last_alive_at": last_alive_at or now_iso,
+            "graceful_shutdown": bool(graceful_shutdown),
+            "shutdown_requested": bool(self._shutdown_requested),
+            "shutdown_signal": self._shutdown_signal,
+            "exit_reason": exit_reason,
+            "parent_pid": os.getppid(),
+            "agents": list(self.heartbeat_runners.keys()),
+        })
+        try:
+            self.user_data.lifecycle_file.parent.mkdir(parents=True, exist_ok=True)
+            self.user_data.lifecycle_file.write_text(
+                json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.warning("Failed to write lifecycle snapshot: %s", exc)
+
+    def _report_previous_unexpected_exit(self) -> None:
+        """Report the previous daemon run if it disappeared ungracefully."""
+        previous = self._read_lifecycle_snapshot()
+        if not previous:
+            return
+        prev_run_id = str(previous.get("run_id") or "").strip()
+        if not prev_run_id or prev_run_id == self._run_id:
+            return
+        if bool(previous.get("graceful_shutdown", False)):
+            return
+        prev_pid = int(previous.get("pid") or 0)
+        if prev_pid > 0 and is_pid_running(prev_pid):
+            return
+        logger.error(
+            "Previous daemon run exited unexpectedly: run_id=%s pid=%s status=%s "
+            "last_alive_at=%s shutdown_signal=%s exit_reason=%s",
+            prev_run_id,
+            previous.get("pid"),
+            previous.get("status"),
+            previous.get("last_alive_at"),
+            previous.get("shutdown_signal"),
+            previous.get("exit_reason"),
+        )
+
+    async def _run_lifecycle_probe(self) -> None:
+        """Update daemon liveness marker periodically."""
+        while self._running:
+            self._write_lifecycle_snapshot(
+                status="running",
+                graceful_shutdown=False,
+                exit_reason=None,
+            )
+            await asyncio.sleep(15)
+
+    def request_shutdown(self, reason: str) -> None:
+        """Record shutdown intent before scheduling graceful stop."""
+        self._shutdown_requested = True
+        self._shutdown_signal = reason
+
+    def _enable_fault_handler(self) -> None:
+        """Capture interpreter-level crashes into a dedicated fault log."""
+        if self._fault_log_handle is not None:
+            return
+        fault_log = self.user_data.logs_dir / "everbot.fault.log"
+        fault_log.parent.mkdir(parents=True, exist_ok=True)
+        self._fault_log_handle = open(fault_log, "a", encoding="utf-8")
+        faulthandler.enable(file=self._fault_log_handle, all_threads=True)
+
+    def _disable_fault_handler(self) -> None:
+        """Release fault handler resources on shutdown."""
+        if self._fault_log_handle is None:
+            return
+        try:
+            faulthandler.disable()
+        except Exception:
+            pass
+        try:
+            self._fault_log_handle.close()
+        except Exception:
+            pass
+        self._fault_log_handle = None
+
+    def _start_lifecycle_monitor(self) -> None:
+        """Launch a detached sidecar to mark hard exits that skip finally."""
+        if self._pid is None or self._lifecycle_monitor_proc is not None:
+            return
+        cmd = [
+            sys.executable,
+            "-m",
+            "src.everbot.cli.lifecycle_monitor",
+            "--pid",
+            str(self._pid),
+            "--run-id",
+            self._run_id,
+            "--lifecycle-file",
+            str(self.user_data.lifecycle_file),
+            "--poll-seconds",
+            "2.0",
+        ]
+        try:
+            self._lifecycle_monitor_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as exc:
+            logger.warning("Failed to start lifecycle monitor: %s", exc)
+
+    def _stop_lifecycle_monitor(self) -> None:
+        """Stop the detached lifecycle monitor during graceful shutdown."""
+        proc = self._lifecycle_monitor_proc
+        if proc is None:
+            return
+        if proc.poll() is None:
+            with contextlib.suppress(Exception):
+                proc.terminate()
+        self._lifecycle_monitor_proc = None
 
     def _write_status_snapshot(self) -> None:
         """Write a status snapshot to disk for CLI/Web consumption."""
@@ -498,34 +657,58 @@ class EverBotDaemon:
         self._daemon_lock.acquire()
 
         self._running = True
+        self._shutdown_requested = False
+        self._shutdown_signal = None
         logger.info("EverBot 守护进程启动")
         cleanup_task: Optional[asyncio.Task] = None
+        graceful_shutdown = False
+        exit_reason = "unknown"
 
         try:
             await self._init_components()
             self._validate_env_refs()
+            self._enable_fault_handler()
+            self._report_previous_unexpected_exit()
             self._pid = write_pid_file(self.user_data.pid_file)
+            self._write_lifecycle_snapshot(
+                status="starting",
+                graceful_shutdown=False,
+                exit_reason=None,
+            )
+            self._start_lifecycle_monitor()
             self._create_heartbeat_runners()
             self._telegram_channels = self._create_telegram_channels()
             for tg_ch in self._telegram_channels:
                 await tg_ch.start()
             self._write_status_snapshot()
+            self._lifecycle_task = asyncio.create_task(self._run_lifecycle_probe())
             cleanup_task = asyncio.create_task(self._run_job_cleanup_loop())
 
             if not self.heartbeat_runners:
                 logger.warning("无心跳任务，守护进程将保持空闲状态")
                 while self._running:
                     await asyncio.sleep(DAEMON_IDLE_SLEEP)
+                graceful_shutdown = True
+                exit_reason = "shutdown_requested"
                 return
 
             # All scheduling goes through the unified Scheduler
             self._scheduler = self._build_scheduler()
             logger.info("Daemon running in unified scheduler mode")
             await self._scheduler.run_forever()
+            if self._shutdown_requested:
+                graceful_shutdown = True
+                exit_reason = "shutdown_requested"
+            else:
+                exit_reason = "scheduler_returned_unexpectedly"
+                logger.error("Scheduler.run_forever() returned unexpectedly")
 
         except asyncio.CancelledError:
+            graceful_shutdown = self._shutdown_requested
+            exit_reason = "cancelled"
             raise
         except Exception as e:
+            exit_reason = f"exception:{type(e).__name__}"
             logger.error("守护进程异常: %s", e)
             raise
         finally:
@@ -538,12 +721,24 @@ class EverBotDaemon:
             if cleanup_task is not None:
                 cleanup_task.cancel()
                 await asyncio.gather(cleanup_task, return_exceptions=True)
+            if self._lifecycle_task is not None:
+                self._lifecycle_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await self._lifecycle_task
+                self._lifecycle_task = None
             if self._legacy_runner_tasks:
                 legacy_tasks = list(self._legacy_runner_tasks.values())
                 for task in legacy_tasks:
                     task.cancel()
                 await asyncio.gather(*legacy_tasks, return_exceptions=True)
                 self._legacy_runner_tasks.clear()
+            self._write_lifecycle_snapshot(
+                status="stopped" if graceful_shutdown else "crashed",
+                graceful_shutdown=graceful_shutdown,
+                exit_reason=exit_reason,
+            )
+            self._stop_lifecycle_monitor()
+            self._disable_fault_handler()
             self._pid = None
             self._write_status_snapshot()
             remove_pid_file(self.user_data.pid_file)
@@ -552,6 +747,8 @@ class EverBotDaemon:
 
     async def stop(self):
         """停止守护进程"""
+        if not self._shutdown_requested:
+            self.request_shutdown("stop_called")
         self._running = False
         for tg_ch in self._telegram_channels:
             try:
@@ -607,12 +804,14 @@ async def main():
     loop = asyncio.get_event_loop()
     _shutdown_tasks: list[asyncio.Task] = []
 
-    def _request_shutdown():
+    def _request_shutdown(sig_name: str):
+        daemon.request_shutdown(sig_name)
+        logger.warning("Received shutdown signal: %s", sig_name)
         task = asyncio.create_task(daemon.stop())
         _shutdown_tasks.append(task)
 
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _request_shutdown)
+        loop.add_signal_handler(sig, _request_shutdown, sig.name)
 
     await daemon.start()
 

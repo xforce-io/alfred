@@ -67,6 +67,11 @@ class UserDataManager:
         return self.alfred_home / "everbot.status.json"
 
     @property
+    def lifecycle_file(self) -> Path:
+        """Daemon lifecycle forensic file path."""
+        return self.alfred_home / "everbot.lifecycle.json"
+
+    @property
     def heartbeat_log_file(self) -> Path:
         """Heartbeat log file path."""
         return self.logs_dir / "heartbeat.log"

@@ -212,6 +212,27 @@ class TestEventFiltering:
         assert "Task completed" in deposited_event["detail"]
 
     @pytest.mark.asyncio
+    async def test_skips_mailbox_mirror_when_telegram_delivery_fails(self, channel):
+        """Do not mirror unseen heartbeat events into tg session mailbox.
+
+        Regression: _on_background_event previously deposited mailbox events
+        even when Telegram send failed, causing hidden background updates to
+        leak into the next user turn despite no visible push notification.
+        """
+        channel._send_message = AsyncMock(return_value=False)
+
+        await channel._on_background_event("session_1", {
+            "source_type": "heartbeat_delivery",
+            "agent_name": "my_agent",
+            "detail": "Task completed",
+            "deliver": True,
+            "scope": "agent",
+        })
+
+        channel._send_message.assert_awaited_once()
+        channel._session_manager.deposit_mailbox_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_ignores_non_heartbeat_delivery(self, channel):
         await channel._on_background_event("session_1", {
             "source_type": "heartbeat",

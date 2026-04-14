@@ -76,6 +76,24 @@ class _FakeRunner:
         self._running = False
 
 
+class _FakePopen:
+    """Minimal subprocess stub used for lifecycle monitor tests."""
+
+    instances = []
+
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        self.terminated = False
+        self.__class__.instances.append(self)
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        self.terminated = True
+
+
 class _FakeTickRunner:
     """Fake runner exposing run_once_with_options for unified scheduler mode."""
 
@@ -369,6 +387,127 @@ async def test_daemon_start_stop_updates_status_snapshot(monkeypatch, tmp_path: 
     assert "demo_agent" in snapshot["heartbeats"]
     assert "metrics" in snapshot
     assert daemon.user_data.pid_file.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_daemon_start_stop_updates_lifecycle_snapshot(monkeypatch, tmp_path: Path):
+    alfred_home = tmp_path / ".alfred"
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        {
+            "everbot": {
+                "enabled": True,
+                "agents": {
+                    "demo_agent": {
+                        "heartbeat": {
+                            "enabled": True,
+                            "interval": 1,
+                            "active_hours": [0, 24],
+                        }
+                    }
+                },
+            }
+        },
+        str(config_path),
+    )
+
+    monkeypatch.setattr(
+        daemon_module,
+        "get_user_data_manager",
+        lambda: UserDataManager(alfred_home=alfred_home),
+    )
+    monkeypatch.setattr(daemon_module, "HeartbeatRunner", _FakeRunner)
+    monkeypatch.setattr(
+        daemon_module,
+        "get_agent_factory",
+        lambda **kwargs: SimpleNamespace(create_agent=AsyncMock()),
+    )
+    _FakePopen.instances.clear()
+    monkeypatch.setattr(daemon_module.subprocess, "Popen", _FakePopen)
+    _FakeRunner.instances.clear()
+
+    daemon = daemon_module.EverBotDaemon(config_path=str(config_path))
+    run_task = asyncio.create_task(daemon.start())
+    await asyncio.sleep(0.08)
+    await daemon.stop()
+    await asyncio.wait_for(run_task, timeout=2.0)
+
+    lifecycle_path = daemon.user_data.lifecycle_file
+    assert lifecycle_path.exists()
+    snapshot = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    assert snapshot["status"] == "stopped"
+    assert snapshot["graceful_shutdown"] is True
+    assert snapshot["exit_reason"] == "shutdown_requested"
+    assert snapshot["run_id"]
+    assert snapshot["last_alive_at"]
+    assert snapshot["parent_pid"] >= 1
+    assert len(_FakePopen.instances) == 1
+    assert _FakePopen.instances[0].terminated is True
+
+
+@pytest.mark.asyncio
+async def test_daemon_reports_previous_unexpected_exit(monkeypatch, tmp_path: Path, caplog):
+    alfred_home = tmp_path / ".alfred"
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        {
+            "everbot": {
+                "enabled": True,
+                "agents": {
+                    "demo_agent": {
+                        "heartbeat": {
+                            "enabled": True,
+                            "interval": 1,
+                            "active_hours": [0, 24],
+                        }
+                    }
+                },
+            }
+        },
+        str(config_path),
+    )
+
+    monkeypatch.setattr(
+        daemon_module,
+        "get_user_data_manager",
+        lambda: UserDataManager(alfred_home=alfred_home),
+    )
+    monkeypatch.setattr(daemon_module, "HeartbeatRunner", _FakeRunner)
+    monkeypatch.setattr(
+        daemon_module,
+        "get_agent_factory",
+        lambda **kwargs: SimpleNamespace(create_agent=AsyncMock()),
+    )
+    _FakePopen.instances.clear()
+    monkeypatch.setattr(daemon_module.subprocess, "Popen", _FakePopen)
+    _FakeRunner.instances.clear()
+
+    user_data = UserDataManager(alfred_home=alfred_home)
+    user_data.ensure_directories()
+    user_data.lifecycle_file.write_text(
+        json.dumps(
+            {
+                "run_id": "prev_run",
+                "pid": 999999,
+                "status": "running",
+                "last_alive_at": "2026-04-14T01:23:45",
+                "graceful_shutdown": False,
+                "shutdown_signal": None,
+                "exit_reason": None,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    daemon = daemon_module.EverBotDaemon(config_path=str(config_path))
+    with caplog.at_level("ERROR"):
+        run_task = asyncio.create_task(daemon.start())
+        await asyncio.sleep(0.08)
+        await daemon.stop()
+        await asyncio.wait_for(run_task, timeout=2.0)
+
+    assert "Previous daemon run exited unexpectedly" in caplog.text
 
 
 @pytest.mark.asyncio

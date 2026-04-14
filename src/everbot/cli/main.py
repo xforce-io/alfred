@@ -12,6 +12,7 @@ from ..infra.user_data import get_user_data_manager
 from ..infra.config import load_config, get_config, save_config, get_default_config
 from ..infra.log_cleanup import cleanup_alfred_logs
 from .daemon import EverBotDaemon
+from .launch_agent import cmd_service_install, cmd_service_status, cmd_service_uninstall
 from ..core.runtime.control import get_local_status, run_heartbeat_once
 from .doctor import collect_doctor_report
 from .skills_cli import register_skills_cli
@@ -326,6 +327,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser_cleanup.add_argument("--agent", type=str, help="只处理指定 agent 的 skill_logs")
     parser_cleanup.add_argument("--apply", action="store_true", help="实际写入变更；默认仅预演")
     parser_cleanup.set_defaults(func=cmd_cleanup_logs)
+
+    parser_service_install = subparsers.add_parser("service-install", help="安装 macOS LaunchAgent 常驻服务")
+    parser_service_install.set_defaults(func=cmd_service_install)
+
+    parser_service_uninstall = subparsers.add_parser("service-uninstall", help="卸载 macOS LaunchAgent 常驻服务")
+    parser_service_uninstall.set_defaults(func=cmd_service_uninstall)
+
+    parser_service_status = subparsers.add_parser("service-status", help="查看 macOS LaunchAgent 状态")
+    parser_service_status.set_defaults(func=cmd_service_status)
 
     # skills 命令（技能管理）
     register_skills_cli(subparsers)
