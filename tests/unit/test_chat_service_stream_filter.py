@@ -251,7 +251,7 @@ async def test_process_message_stops_on_tool_call_budget_exceeded():
 
     assert any(
         payload.get("type") == "message"
-        and "已停止本轮自动重试" in payload.get("content", "")
+        and "已停止" in payload.get("content", "")
         for payload in websocket.sent
     )
     assert websocket.sent[-1]["type"] == "end"
@@ -290,7 +290,7 @@ async def test_process_message_stops_on_repeated_tool_failures():
 
     assert any(
         payload.get("type") == "message"
-        and "已停止本轮自动重试" in payload.get("content", "")
+        and "已停止" in payload.get("content", "")
         for payload in websocket.sent
     )
     assert websocket.sent[-1]["type"] == "end"

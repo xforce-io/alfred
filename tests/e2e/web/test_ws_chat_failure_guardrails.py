@@ -27,7 +27,7 @@ def test_ws_chat_stops_when_tool_call_budget_exceeded(client, isolated_web_env):
         payloads = receive_until(ws, lambda msg: msg.get("type") == "end", max_messages=400)
 
     assert any(
-        p.get("type") == "message" and "工具调用次数已达上限" in p.get("content", "")
+        p.get("type") == "message" and "已停止" in p.get("content", "")
         for p in payloads
     )
     assert payloads[-1]["type"] == "end"

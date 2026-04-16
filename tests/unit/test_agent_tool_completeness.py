@@ -33,7 +33,7 @@ class TestAgentToolCompleteness:
         """创建模拟的 agent，不依赖真实文件系统"""
         # Mock skillkit
         mock_skillkit = Mock()
-        mock_skillkit.getSkillNames.return_value = REQUIRED_TOOLS + ["_web_search"]
+        mock_skillkit.getToolNames.return_value = REQUIRED_TOOLS + ["_web_search"]
         mock_skillkit.getName.return_value = "resource_skillkit"
 
         # Mock skill
@@ -46,7 +46,7 @@ class TestAgentToolCompleteness:
 
         # Mock context
         mock_context = Mock()
-        mock_context.get_skillkit.return_value = mock_skillkit
+        mock_context.get_toolkit.return_value = mock_skillkit
 
         # Mock agent
         mock_agent = Mock()
@@ -87,11 +87,11 @@ class TestAgentToolCompleteness:
     def test_skillkit_has_load_resource_skill(self, mock_agent):
         """测试 context 中的 skillkit 包含 _load_resource_skill"""
         context = mock_agent.executor.context
-        skillkit = context.get_skillkit()
+        skillkit = context.get_toolkit()
 
         assert skillkit is not None, "Context 中没有 skillkit"
 
-        skill_names = list(skillkit.getSkillNames())
+        skill_names = list(skillkit.getToolNames())
 
         # 检查必需的技能工具
         assert "_load_resource_skill" in skill_names, (
@@ -106,12 +106,12 @@ class TestAgentToolCompleteness:
     def test_resource_skills_metadata_available(self, mock_agent):
         """测试资源技能的元数据可用"""
         context = mock_agent.executor.context
-        skillkit = context.get_skillkit()
+        skillkit = context.get_toolkit()
 
         assert skillkit is not None, "Context 中没有 skillkit"
 
         # 验证 skillkit 返回了预期的技能列表
-        skill_names = list(skillkit.getSkillNames())
+        skill_names = list(skillkit.getToolNames())
         assert len(skill_names) > 0, "Skillkit 中没有可用的技能"
         assert "_load_resource_skill" in skill_names, (
             "资源技能元数据为空。\n"
@@ -121,7 +121,7 @@ class TestAgentToolCompleteness:
     def test_owner_skillkit_correctly_set(self, mock_agent):
         """测试技能的 owner_skillkit 正确设置"""
         context = mock_agent.executor.context
-        skillkit = context.get_skillkit()
+        skillkit = context.get_toolkit()
 
         assert skillkit is not None, "Context 中没有 skillkit"
 
@@ -143,11 +143,11 @@ class TestAgentToolCompleteness:
     def test_all_required_tools_available(self, mock_agent):
         """测试所有必需的工具都可用"""
         context = mock_agent.executor.context
-        skillkit = context.get_skillkit()
+        skillkit = context.get_toolkit()
 
         assert skillkit is not None, "Context 中没有 skillkit"
 
-        skill_names = set(skillkit.getSkillNames())
+        skill_names = set(skillkit.getToolNames())
 
         missing_tools = []
         for tool in REQUIRED_TOOLS:

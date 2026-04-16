@@ -13,8 +13,8 @@ from typing import List
 
 import httpx
 
-from dolphin.core.skill.skillkit import Skillkit
-from dolphin.core.skill.skill_function import SkillFunction
+from dolphin.core.tool.toolkit import Toolkit as Skillkit
+from dolphin.core.tool.tool_function import ToolFunction as SkillFunction
 
 from ..core.channel.session_resolver import ChannelSessionResolver
 from ..core.models.constants import TIMEOUT_UPLOAD, LIMIT_CAPTION

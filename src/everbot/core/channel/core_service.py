@@ -80,12 +80,14 @@ def _build_circuit_break_summary(exc: Exception, kind: str) -> str:
 
     if kind == "budget":
         reason = "工具调用次数已达上限，继续重试很可能是无效循环"
+    elif kind == "intent":
+        reason = "检测到重复调用同一工具，已自动停止"
     elif kind == "loop":
         reason = "检测到重复操作模式，已自动停止"
     else:
         reason = "同类错误连续出现，当前策略未能取得进展"
 
-    if kind == "loop":
+    if kind in ("loop", "intent"):
         return (
             f"已停止：{stats}{tools_desc}，{reason}。"
             "你可以给我一个更具体的指令，或换一种做法。"
@@ -554,7 +556,10 @@ class ChannelCoreService:
                     run_id=run_id,
                 )
                 err_msg = str(e)
-                if err_msg.startswith(("TOOL_CALL_BUDGET_EXCEEDED", "REPEATED_TOOL_INTENT", "THINK_ONLY_LOOP", "EMPTY_OUTPUT_LOOP")):
+                if err_msg.startswith("REPEATED_TOOL_INTENT"):
+                    summary = _build_circuit_break_summary(e, "intent")
+                    await on_event(OutboundMessage(session_id, summary, msg_type="text"))
+                elif err_msg.startswith(("TOOL_CALL_BUDGET_EXCEEDED", "THINK_ONLY_LOOP", "EMPTY_OUTPUT_LOOP")):
                     summary = _build_circuit_break_summary(e, "budget")
                     await on_event(OutboundMessage(session_id, summary, msg_type="text"))
                 elif err_msg.startswith("REPEATED_TEXT_LOOP"):

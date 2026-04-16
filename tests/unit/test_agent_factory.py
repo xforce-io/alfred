@@ -227,7 +227,7 @@ class TestLoadCustomSkillkits:
         factory._load_custom_skillkits(agent, "cm")
 
         # global_skills should never be accessed if no dirs configured
-        agent.global_skills._loadCustomSkillkitsFromPath.assert_not_called()
+        agent.global_skills._loadCustomToolkitsFromPath.assert_not_called()
 
     @patch("src.everbot.core.agent.factory.get_config")
     def test_loads_skillkit_dir(self, mock_get_config):
@@ -248,7 +248,7 @@ class TestLoadCustomSkillkits:
 
             factory._load_custom_skillkits(agent, "cm")
 
-            gs._loadCustomSkillkitsFromPath.assert_called_once_with(str(skillkit_dir))
+            gs._loadCustomToolkitsFromPath.assert_called_once_with(str(skillkit_dir))
 
     @patch("src.everbot.core.agent.factory.get_config")
     def test_include_filter_allows_matching_skillkit(self, mock_get_config):
@@ -269,7 +269,7 @@ class TestLoadCustomSkillkits:
 
             factory._load_custom_skillkits(agent, "cm")
 
-            gs._loadCustomSkillkitsFromPath.assert_called_once()
+            gs._loadCustomToolkitsFromPath.assert_called_once()
 
     @patch("src.everbot.core.agent.factory.get_config")
     def test_include_filter_blocks_non_matching_skillkit(self, mock_get_config):
@@ -290,7 +290,7 @@ class TestLoadCustomSkillkits:
 
             factory._load_custom_skillkits(agent, "cm")
 
-            gs._loadCustomSkillkitsFromPath.assert_not_called()
+            gs._loadCustomToolkitsFromPath.assert_not_called()
 
     @patch("src.everbot.core.agent.factory.get_config")
     def test_exclude_filter_blocks_matching_skillkit(self, mock_get_config):
@@ -311,7 +311,7 @@ class TestLoadCustomSkillkits:
 
             factory._load_custom_skillkits(agent, "cm")
 
-            gs._loadCustomSkillkitsFromPath.assert_not_called()
+            gs._loadCustomToolkitsFromPath.assert_not_called()
 
     @patch("src.everbot.core.agent.factory.get_config")
     def test_exclude_filter_allows_non_matching_skillkit(self, mock_get_config):
@@ -332,7 +332,7 @@ class TestLoadCustomSkillkits:
 
             factory._load_custom_skillkits(agent, "cm")
 
-            gs._loadCustomSkillkitsFromPath.assert_called_once()
+            gs._loadCustomToolkitsFromPath.assert_called_once()
 
     @patch("src.everbot.core.agent.factory.get_config")
     def test_hyphen_underscore_normalization_in_filter(self, mock_get_config):
@@ -354,11 +354,11 @@ class TestLoadCustomSkillkits:
 
             factory._load_custom_skillkits(agent, "cm")
 
-            gs._loadCustomSkillkitsFromPath.assert_called_once()
+            gs._loadCustomToolkitsFromPath.assert_called_once()
 
     @patch("src.everbot.core.agent.factory.get_config")
     def test_load_failure_does_not_propagate(self, mock_get_config):
-        """_loadCustomSkillkitsFromPath raising should be caught, not propagated."""
+        """_loadCustomToolkitsFromPath raising should be caught, not propagated."""
         with tempfile.TemporaryDirectory() as tmpdir:
             skillkit_dir = Path(tmpdir) / "bad_skillkit"
             skillkit_dir.mkdir()
@@ -370,7 +370,7 @@ class TestLoadCustomSkillkits:
             }
             factory = self._make_factory()
             gs = MagicMock()
-            gs._loadCustomSkillkitsFromPath.side_effect = RuntimeError("import failed")
+            gs._loadCustomToolkitsFromPath.side_effect = RuntimeError("import failed")
             agent = MagicMock()
             agent.global_skills = gs
 
@@ -379,16 +379,16 @@ class TestLoadCustomSkillkits:
 
 
 # ===========================================================================
-# _syncAllSkills after custom skillkit loading
+# _syncAllTools after custom skillkit loading
 # ===========================================================================
 
 
-class TestSyncAllSkillsAfterCustomLoad:
-    """Custom skillkits must be visible in allSkills, not just installedSkillset."""
+class TestSyncAllToolsAfterCustomLoad:
+    """Custom skillkits must be visible in allTools, not just installedToolSet."""
 
     @pytest.mark.asyncio
-    async def test_create_agent_syncs_allskills_after_custom_load(self):
-        """After _load_custom_skillkits, _syncAllSkills must be called so
+    async def test_create_agent_syncs_alltools_after_custom_load(self):
+        """After _load_custom_skillkits, _syncAllTools must be called so
         custom tools appear in context.all_skills (used by tools= filtering)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = UserDataManager(alfred_home=Path(tmpdir))
@@ -400,16 +400,16 @@ class TestSyncAllSkillsAfterCustomLoad:
             workspace_path = manager.get_agent_dir("test_agent")
             agent = await factory.create_agent("test_agent", workspace_path)
 
-            # After creation, allSkills should be in sync with installedSkillset
+            # After creation, allTools should be in sync with installedToolSet
             gs = getattr(agent, "global_skills", None)
             if gs is not None:
-                installed_names = set(gs.installedSkillset.getSkillNames())
-                all_names = set(gs.allSkills.getSkillNames())
-                # Every installed skill must be in allSkills
+                installed_names = set(gs.installedToolSet.getToolNames())
+                all_names = set(gs.allTools.getToolNames())
+                # Every installed tool must be in allTools
                 missing = installed_names - all_names
                 assert not missing, (
-                    f"Skills in installedSkillset but not in allSkills: {missing}. "
-                    f"_syncAllSkills was not called after custom skillkit loading."
+                    f"Tools in installedToolSet but not in allTools: {missing}. "
+                    f"_syncAllTools was not called after custom skillkit loading."
                 )
 
 

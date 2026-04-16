@@ -12,7 +12,7 @@ import logging
 import re
 import threading
 
-from dolphin.sdk import DolphinAgent, GlobalSkills
+from dolphin.sdk import DolphinAgent, GlobalToolkits as GlobalSkills
 from dolphin.core.config.global_config import GlobalConfig
 from ...infra.dolphin_compat import (
     KEY_HISTORY_COMPACT_ON_PERSIST,
@@ -306,11 +306,11 @@ class AgentFactory:
         #    否则 context.all_skills 不会包含这些工具）
         self._load_custom_skillkits(agent, agent_name)
 
-        # 7.5 刷新 allSkills — _loadCustomSkillkitsFromPath 只写入
-        #     installedSkillset，不会自动同步到 allSkills
+        # 7.5 刷新 allTools — _loadCustomToolkitsFromPath 只写入
+        #     installedToolSet，不会自动同步到 allTools
         gs = getattr(agent, "global_skills", None)
-        if gs is not None and hasattr(gs, "_syncAllSkills"):
-            gs._syncAllSkills()
+        if gs is not None and hasattr(gs, "_syncAllTools"):
+            gs._syncAllTools()
 
         # 8. 初始化
         await agent.initialize()
@@ -581,7 +581,7 @@ Current time: $current_time
         """Load custom skillkits from per-agent skillkit_dirs config.
 
         Reads ``everbot.agents.<name>.skillkit_dirs`` from config.yaml
-        and delegates to Dolphin's ``GlobalSkills._loadCustomSkillkitsFromPath()``
+        and delegates to Dolphin's ``GlobalSkills._loadCustomToolkitsFromPath()``
         for scanning and registration.
 
         Respects per-agent ``skills.include`` / ``skills.exclude``: if a filter
@@ -634,7 +634,7 @@ Current time: $current_time
                     continue
 
             try:
-                gs._loadCustomSkillkitsFromPath(str(skillkit_dir))
+                gs._loadCustomToolkitsFromPath(str(skillkit_dir))
                 logger.info(
                     "Loaded custom skillkits from %s for agent '%s'",
                     skillkit_dir, agent_name,
@@ -811,7 +811,7 @@ Current time: $current_time
 
         # Locate the ResourceSkillkit via the owner_skillkit binding on
         # the _load_resource_skill function that it registers.
-        installed = getattr(global_skills, "installedSkillset", None)
+        installed = getattr(global_skills, "installedToolSet", None)
         if installed is not None:
             loader_skill = installed.getSkill("_load_resource_skill") if hasattr(installed, "getSkill") else None
             if loader_skill is not None:

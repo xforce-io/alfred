@@ -227,7 +227,15 @@ class TelegramChannel:
                 continue
             if target_chat and str(chat_id) != target_chat:
                 continue
-            sent = await self._send_message(chat_id, text, entities)
+            # Split long heartbeat messages instead of truncating
+            parts = self._split_message(text)
+            if len(parts) <= 1:
+                sent = await self._send_message(chat_id, text, entities)
+            else:
+                sent = True
+                for part in parts:
+                    if not await self._send_message(chat_id, part):
+                        sent = False
             # Deposit heartbeat result into channel session mailbox so the
             # next user turn sees it via "## Background Updates" prefix.
             # This replaces the old inject_history_message approach which
@@ -857,7 +865,7 @@ class TelegramChannel:
         gs = getattr(agent, "global_skills", None)
         if gs is None:
             return
-        installed = getattr(gs, "installedSkillset", None)
+        installed = getattr(gs, "installedToolSet", None)
         if installed is None:
             return
         if installed.hasSkill("_tg_send_file"):

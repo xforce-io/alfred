@@ -31,7 +31,7 @@ def _build_global_skills(skill_names, with_meta=True):
     构造模拟的 GlobalSkills 运行时对象。
 
     模拟真实的 Dolphin SDK 对象图：
-      global_skills.installedSkillset
+      global_skills.installedToolSet
         .getSkill("_load_resource_skill")
           .owner_skillkit  →  ResourceSkillkit
             .get_available_skills() → [name, ...]
@@ -59,13 +59,13 @@ def _build_global_skills(skill_names, with_meta=True):
     loader_skill = MagicMock()
     loader_skill.owner_skillkit = resource_skillkit
 
-    # installedSkillset
+    # installedToolSet
     installed_skillset = MagicMock()
     installed_skillset.getSkill.return_value = loader_skill
 
     # GlobalSkills（注意：没有 skillkits 属性，这是旧代码的错误假设）
     global_skills = SimpleNamespace(
-        installedSkillset=installed_skillset,
+        installedToolSet=installed_skillset,
     )
 
     return global_skills
@@ -75,7 +75,7 @@ class TestExtractRuntimeAvailableSkills:
     """_extract_runtime_available_skills 核心路径测试"""
 
     def test_extracts_skills_via_owner_skillkit(self, factory):
-        """核心回归测试：通过 installedSkillset → owner_skillkit 路径提取 skills"""
+        """核心回归测试：通过 installedToolSet → owner_skillkit 路径提取 skills"""
         gs = _build_global_skills(["example-skill", "dev-browser", "paper-discovery"])
 
         with patch.object(factory, "_load_disabled_skills", return_value=set()):
@@ -86,7 +86,7 @@ class TestExtractRuntimeAvailableSkills:
         assert names == {"example-skill", "dev-browser", "paper-discovery"}
 
     def test_returns_empty_when_no_installed_skillset(self, factory):
-        """GlobalSkills 没有 installedSkillset 时返回空"""
+        """GlobalSkills 没有 installedToolSet 时返回空"""
         gs = SimpleNamespace()  # 无任何属性
 
         with patch.object(factory, "_load_disabled_skills", return_value=set()):
@@ -95,10 +95,10 @@ class TestExtractRuntimeAvailableSkills:
         assert result == []
 
     def test_returns_empty_when_loader_skill_not_found(self, factory):
-        """installedSkillset 中找不到 _load_resource_skill 时返回空"""
+        """installedToolSet 中找不到 _load_resource_skill 时返回空"""
         installed = MagicMock()
         installed.getSkill.return_value = None
-        gs = SimpleNamespace(installedSkillset=installed)
+        gs = SimpleNamespace(installedToolSet=installed)
 
         with patch.object(factory, "_load_disabled_skills", return_value=set()):
             result = factory._extract_runtime_available_skills(gs, "test-agent")
@@ -110,7 +110,7 @@ class TestExtractRuntimeAvailableSkills:
         loader_skill = SimpleNamespace()  # 无 owner_skillkit
         installed = MagicMock()
         installed.getSkill.return_value = loader_skill
-        gs = SimpleNamespace(installedSkillset=installed)
+        gs = SimpleNamespace(installedToolSet=installed)
 
         with patch.object(factory, "_load_disabled_skills", return_value=set()):
             result = factory._extract_runtime_available_skills(gs, "test-agent")
@@ -135,7 +135,7 @@ class TestExtractRuntimeAvailableSkills:
         """超长 description 被截断到 150 字符 + ..."""
         gs = _build_global_skills(["long-desc"])
         # 替换 meta 的 description 为超长字符串（需要覆盖 side_effect）
-        skillkit = gs.installedSkillset.getSkill("_load_resource_skill").owner_skillkit
+        skillkit = gs.installedToolSet.getSkill("_load_resource_skill").owner_skillkit
         long_desc = "A" * 200
         skillkit.get_skill_meta.side_effect = None
         skillkit.get_skill_meta.return_value = SimpleNamespace(
@@ -152,7 +152,7 @@ class TestExtractRuntimeAvailableSkills:
     def test_meta_exception_does_not_break(self, factory):
         """get_skill_meta 抛异常时不影响整体提取"""
         gs = _build_global_skills(["good-skill", "bad-skill"])
-        skillkit = gs.installedSkillset.getSkill("_load_resource_skill").owner_skillkit
+        skillkit = gs.installedToolSet.getSkill("_load_resource_skill").owner_skillkit
 
         def flaky_meta(name):
             if name == "bad-skill":
@@ -196,7 +196,7 @@ class TestExtractRuntimeAvailableSkills:
     def test_home_path_replaced_with_tilde(self, factory):
         """base_path 中的 home 目录被替换为 ~"""
         gs = _build_global_skills(["my-skill"])
-        skillkit = gs.installedSkillset.getSkill("_load_resource_skill").owner_skillkit
+        skillkit = gs.installedToolSet.getSkill("_load_resource_skill").owner_skillkit
         home = str(Path.home())
         skillkit.get_skill_meta.side_effect = None
         skillkit.get_skill_meta.return_value = SimpleNamespace(

@@ -27,7 +27,7 @@ def get_current_resource_skills(agent: Any) -> Dict[str, str]:
     if global_skills is None:
         return {}
 
-    installed = getattr(global_skills, "installedSkillset", None)
+    installed = getattr(global_skills, "installedToolSet", None)
     if installed is None:
         return {}
 

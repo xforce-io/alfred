@@ -78,8 +78,8 @@ class TestAgentCacheIssue:
                 workspace_path=demo_workspace
             )
             context = agent.executor.context
-            skillkit = context.get_skillkit()
-            return list(skillkit.getSkillNames()) if skillkit else []
+            skillkit = context.get_toolkit()
+            return list(skillkit.getToolNames()) if skillkit else []
         
         tools = asyncio.run(get_skillkit_tools())
 

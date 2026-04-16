@@ -52,6 +52,9 @@ def build_launch_agent_plist(*, project_root: Path, alfred_home: Path) -> Dict[s
 
     shell_parts = [
         "set -euo pipefail",
+        # Ensure common user-level bin dirs are on PATH so tools like
+        # claude, codex, node, brew utilities are reachable from launchd.
+        "export PATH=\"$HOME/.local/bin:/opt/homebrew/bin:$PATH\"",
         f"export PYTHONPATH={_quote_shell(str(project_root))}",
         f"export ALFRED_PROJECT_ROOT={_quote_shell(str(project_root))}",
         f"export ALFRED_HOME={_quote_shell(str(alfred_home))}",
