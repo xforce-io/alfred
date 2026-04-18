@@ -44,11 +44,11 @@ async def test_agent_skills():
     print("\n3. 检查 agent 配置...")
     config = agent1.global_config
 
-    if hasattr(config, 'resource_skills'):
-        print("✓ resource_skills 配置存在")
+    if hasattr(config, 'resource_tools'):
+        print("✓ resource_tools 配置存在")
 
-        if isinstance(config.resource_skills, dict):
-            directories = config.resource_skills.get('directories', [])
+        if isinstance(config.resource_tools, dict):
+            directories = config.resource_tools.get('directories', [])
             print("✓ Skills 目录:")
             for dir_path in directories:
                 print(f"  - {dir_path}")
@@ -60,19 +60,19 @@ async def test_agent_skills():
             else:
                 print("⚠️  Agent 专属目录不在最高优先级")
         else:
-            print("⚠️  resource_skills 不是 dict 类型")
+            print("⚠️  resource_tools 不是 dict 类型")
     else:
-        print("⚠️  resource_skills 配置不存在")
+        print("⚠️  resource_tools 配置不存在")
 
     # 4. 检查 GlobalSkills
     print("\n4. 检查 GlobalSkills...")
-    global_skills = agent1.global_skills
+    global_toolkits = agent1.global_toolkits
 
     # 通过 installedToolSet → _load_resource_skill → owner_skillkit 获取 ResourceSkillkit
     resource_skillkit = None
-    installed = getattr(global_skills, "installedToolSet", None)
+    installed = getattr(global_toolkits, "installedToolSet", None)
     if installed is not None:
-        loader_skill = installed.getSkill("_load_resource_skill") if hasattr(installed, "getSkill") else None
+        loader_skill = installed.getTool("_load_resource_skill") if hasattr(installed, "getTool") else None
         if loader_skill is not None:
             resource_skillkit = getattr(loader_skill, "owner_skillkit", None)
 

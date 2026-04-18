@@ -56,8 +56,11 @@ def parse_yaml_file(path: Path) -> Dict[str, Any]:
 
 def dolphin_has_system_skillkit(config: Dict[str, Any]) -> bool:
     """Check if system_skillkit is enabled in Dolphin config."""
+    tool = config.get("tool", {}) if isinstance(config.get("tool", {}), dict) else {}
     skill = config.get("skill", {}) if isinstance(config.get("skill", {}), dict) else {}
-    enabled = skill.get("enabled_skills", [])
+    enabled = tool.get("enabled_tools")
+    if enabled is None:
+        enabled = skill.get("enabled_skills", [])
     if not isinstance(enabled, list):
         return False
     return any(str(x).strip() == "system_skillkit" for x in enabled)
@@ -151,7 +154,7 @@ def collect_doctor_report(
                 level="WARN",
                 title="system_skillkit",
                 details="system_skillkit is not enabled in Dolphin config.",
-                hint='Add "system_skillkit" under skill.enabled_skills in dolphin.yaml.',
+                hint='Add "system_skillkit" under tool.enabled_tools (or legacy skill.enabled_skills) in dolphin.yaml.',
             )
         )
     else:

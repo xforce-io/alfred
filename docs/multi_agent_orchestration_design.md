@@ -1869,7 +1869,7 @@ skills/<skill-name>/
 
 ### C. LLM 可用工具
 
-**已有工具**（Dolphin 内置）：`_bash`, `_python`, `_read_file`, `_read_folder`, `_date`, `_load_skill_resource`
+**已有工具**（Dolphin 内置）：`_bash`, `_python`, `_read_file`, `_read_folder`, `_date`, `_read_skill_asset`
 
 **新增框架工具**：
 

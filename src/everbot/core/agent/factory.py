@@ -12,7 +12,7 @@ import logging
 import re
 import threading
 
-from dolphin.sdk import DolphinAgent, GlobalToolkits as GlobalSkills
+from dolphin.sdk import DolphinAgent, GlobalToolkits
 from dolphin.core.config.global_config import GlobalConfig
 from ...infra.dolphin_compat import (
     KEY_HISTORY_COMPACT_ON_PERSIST,
@@ -50,7 +50,16 @@ class AgentFactory:
         self.global_config_path = global_config_path or self._find_global_config()
         self.default_model = default_model
         self._global_config: Optional[GlobalConfig] = None
-        # 不再缓存 GlobalSkills，每个 agent 创建独立实例
+        # 不再缓存 GlobalToolkits，每个 agent 创建独立实例
+
+    @staticmethod
+    def _ensure_resource_tools_config(agent_config: GlobalConfig) -> Dict[str, Any]:
+        """Ensure ``resource_tools`` exists and return the mutable config dict."""
+        resource_tools = getattr(agent_config, "resource_tools", None)
+        if not isinstance(resource_tools, dict):
+            resource_tools = {}
+            agent_config._resource_tools = resource_tools
+        return resource_tools
 
     def _find_global_config(self) -> str:
         """
@@ -109,15 +118,10 @@ class AgentFactory:
         # 添加 agent 专属 skills 目录
         agent_skills_dir = str(workspace_path / "skills")
 
-        # 确保 resource_skills 配置存在
-        if agent_config.resource_skills is None:
-            agent_config._resource_skills = {}
-
-        if not isinstance(agent_config.resource_skills, dict):
-            agent_config._resource_skills = {}
+        resource_tools = self._ensure_resource_tools_config(agent_config)
 
         # 获取或创建 directories 列表（拷贝一份避免修改原列表）
-        base_directories = agent_config.resource_skills.get('directories', [])
+        base_directories = resource_tools.get('directories', [])
         if not isinstance(base_directories, list):
             base_directories = []
 
@@ -143,25 +147,25 @@ class AgentFactory:
                 directories.append(bundled_skills_dir_str)
                 logger.info("添加仓库内置 skills 目录: %s", bundled_skills_dir_str)
 
-        agent_config.resource_skills['directories'] = directories
+        resource_tools['directories'] = directories
 
-        # 确保 resource_skills 是启用的
-        if 'enabled' not in agent_config.resource_skills:
-            agent_config.resource_skills['enabled'] = True
+        # 确保 resource_tools 是启用的
+        if 'enabled' not in resource_tools:
+            resource_tools['enabled'] = True
 
         # 注入变量供 SKILL.md 中的 $WORKSPACE_ROOT 等占位符替换
-        variables = agent_config.resource_skills.get('variables', {})
+        variables = resource_tools.get('variables', {})
         variables['WORKSPACE_ROOT'] = str(workspace_path)
-        agent_config.resource_skills['variables'] = variables
+        resource_tools['variables'] = variables
 
-        # 透传 per-agent skills include/exclude 到 resource_skills，
+        # 透传 per-agent skills include/exclude 到 resource_tools，
         # 让 dolphin ResourceSkillkit 在 initialize() 时自行过滤
         if agent_name:
             filter_names, mode = self._get_agent_skills_filter(agent_name)
             if filter_names is not None:
-                agent_config.resource_skills[mode] = list(filter_names)
+                resource_tools[mode] = list(filter_names)
                 logger.info(
-                    "Passed skills.%s=%s to resource_skills config for '%s'",
+                    "Passed skills.%s=%s to resource_tools config for '%s'",
                     mode, sorted(filter_names), agent_name,
                 )
 
@@ -287,17 +291,17 @@ class AgentFactory:
         if extra_variables:
             variables.update(extra_variables)
 
-        # 5. 为此 agent 创建独立的 GlobalSkills（包含专属 skills 目录）
-        logger.info("为 Agent %s 创建独立 GlobalSkills", agent_name)
-        agent_skills = GlobalSkills(agent_config)
-        logger.info("GlobalSkills 创建完成")
+        # 5. 为此 agent 创建独立的 GlobalToolkits（包含专属 skills 目录）
+        logger.info("为 Agent %s 创建独立 GlobalToolkits", agent_name)
+        agent_toolkits = GlobalToolkits(agent_config)
+        logger.info("GlobalToolkits 创建完成")
 
         # 6. 创建 Agent
         agent = DolphinAgent(
             name=agent_name,
             file_path=str(agent_dph_path),
             global_config=agent_config,
-            global_skills=agent_skills,
+            global_toolkits=agent_toolkits,
             variables=variables,
             verbose=False,
         )
@@ -308,7 +312,7 @@ class AgentFactory:
 
         # 7.5 刷新 allTools — _loadCustomToolkitsFromPath 只写入
         #     installedToolSet，不会自动同步到 allTools
-        gs = getattr(agent, "global_skills", None)
+        gs = getattr(agent, "global_toolkits", None) or getattr(agent, "global_skills", None)
         if gs is not None and hasattr(gs, "_syncAllTools"):
             gs._syncAllTools()
 
@@ -321,7 +325,10 @@ class AgentFactory:
         agent.executor.context.init_trajectory(trajectory_path, overwrite=True)
         logger.info("Trajectory initialized: %s", trajectory_path)
 
-        runtime_skills = self._extract_runtime_available_skills(agent.global_skills, agent_name)
+        runtime_global_toolkits = (
+            getattr(agent, "global_toolkits", None) or getattr(agent, "global_skills", None)
+        )
+        runtime_skills = self._extract_runtime_available_skills(runtime_global_toolkits, agent_name)
         if runtime_skills:
             skills_section = self._build_skills_prompt_section(runtime_skills)
             workspace_instructions = self._upsert_skills_prompt_section(
@@ -352,12 +359,12 @@ class AgentFactory:
             context.set_last_model_name(actual_model)
             logger.info("Pre-seeded last_model_name: %s", actual_model)
 
-        # Pre-seed last_skills from DPH tools= so that continue_exploration
+        # Pre-seed last_tools from DPH tools= so that continue_exploration
         # (which bypasses DPH execution) inherits the tools filter.
         dph_skills = self._parse_dph_tools(agent_dph_path)
-        if dph_skills and hasattr(context, "set_last_skills"):
-            context.set_last_skills(dph_skills)
-            logger.info("Pre-seeded last_skills from DPH: %s", dph_skills)
+        if dph_skills and hasattr(context, "set_last_tools"):
+            context.set_last_tools(dph_skills)
+            logger.info("Pre-seeded last_tools from DPH: %s", dph_skills)
 
         # Clean up temporary heartbeat DPH after agent initialisation.
         if _tmp_dph is not None and _tmp_dph.exists():
@@ -596,7 +603,7 @@ Current time: $current_time
         if not skillkit_dirs:
             return
 
-        gs = getattr(agent, "global_skills", None)
+        gs = getattr(agent, "global_toolkits", None) or getattr(agent, "global_skills", None)
         if gs is None:
             return
 
@@ -650,8 +657,9 @@ Current time: $current_time
         directories = []
 
         # 从配置获取
-        if hasattr(agent_config, 'resource_skills') and isinstance(agent_config.resource_skills, dict):
-            config_dirs = agent_config.resource_skills.get('directories', [])
+        resource_tools = getattr(agent_config, "resource_tools", None)
+        if isinstance(resource_tools, dict):
+            config_dirs = resource_tools.get('directories', [])
             for d in config_dirs:
                 path = Path(d).expanduser()
                 if path.exists() and path.is_dir():
@@ -809,16 +817,19 @@ Current time: $current_time
         """Extract actually available resource skills from runtime skillkit."""
         resource_skillkit = None
 
-        # Locate the ResourceSkillkit via the owner_skillkit binding on
+        # Locate the ResourceSkillkit via the owner binding on
         # the _load_resource_skill function that it registers.
         installed = getattr(global_skills, "installedToolSet", None)
         if installed is not None:
-            loader_skill = installed.getSkill("_load_resource_skill") if hasattr(installed, "getSkill") else None
+            loader_skill = installed.getTool("_load_resource_skill") if hasattr(installed, "getTool") else None
             if loader_skill is not None:
-                resource_skillkit = getattr(loader_skill, "owner_skillkit", None)
+                resource_skillkit = (
+                    getattr(loader_skill, "owner_toolkit", None)
+                    or getattr(loader_skill, "owner_skillkit", None)
+                )
 
         if resource_skillkit is None:
-            logger.debug("ResourceSkillkit not found via owner_skillkit, skills injection skipped.")
+            logger.debug("ResourceSkillkit not found via owner binding, skills injection skipped.")
             return []
 
         get_available_skills = getattr(resource_skillkit, "get_available_skills", None)

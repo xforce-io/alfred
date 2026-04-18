@@ -628,7 +628,7 @@ class TelegramChannel:
                 name = meta.get("skill_name", "")
 
                 # Hide internal resource-loading tools entirely
-                if name in ("_load_resource_skill", "_load_skill_resource"):
+                if name in ("_load_resource_skill", "_read_skill_asset"):
                     return
 
                 if status in ("processing", "running"):
@@ -862,19 +862,19 @@ class TelegramChannel:
 
     def _ensure_telegram_skillkit(self, agent: Any) -> None:
         """Register TelegramSkillkit on the agent if not already present."""
-        gs = getattr(agent, "global_skills", None)
+        gs = getattr(agent, "global_toolkits", None) or getattr(agent, "global_skills", None)
         if gs is None:
             return
         installed = getattr(gs, "installedToolSet", None)
         if installed is None:
             return
-        if installed.hasSkill("_tg_send_file"):
+        if installed.hasTool("_tg_send_file"):
             return
 
         from .telegram_skillkit import TelegramSkillkit
 
         tg_skillkit = TelegramSkillkit(bot_token=self._bot_token)
-        installed.addSkillkit(tg_skillkit)
+        installed.addToolkit(tg_skillkit)
         logger.info("Registered TelegramSkillkit on agent")
 
     # ------------------------------------------------------------------

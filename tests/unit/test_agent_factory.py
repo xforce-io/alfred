@@ -71,6 +71,31 @@ async def test_agent_factory_with_workspace_instructions():
 
 
 @pytest.mark.asyncio
+async def test_agent_factory_preseeds_last_tools_from_dph():
+    """DPH tools filter must be persisted into context for continue_chat."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manager = UserDataManager(alfred_home=Path(tmpdir))
+        manager.ensure_directories()
+        manager.init_agent_workspace("test_agent")
+
+        agent_dir = manager.get_agent_dir("test_agent")
+        expected_tools = [
+            "_bash",
+            "_python",
+            "_date",
+            "_read_file",
+            "_read_folder",
+        ]
+
+        factory = AgentFactory(global_config_path="", default_model="gpt-4")
+        agent = await factory.create_agent("test_agent", agent_dir)
+
+        context = agent.executor.context
+        assert hasattr(context, "get_last_tools")
+        assert context.get_last_tools() == expected_tools
+
+
+@pytest.mark.asyncio
 async def test_agent_factory_legacy_yaml_agent_dph_is_supported():
     """Legacy YAML-style agent.dph should be migrated to a compatible DPH file."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -226,8 +251,8 @@ class TestLoadCustomSkillkits:
 
         factory._load_custom_skillkits(agent, "cm")
 
-        # global_skills should never be accessed if no dirs configured
-        agent.global_skills._loadCustomToolkitsFromPath.assert_not_called()
+        # global_toolkits should never be accessed if no dirs configured
+        agent.global_toolkits._loadCustomToolkitsFromPath.assert_not_called()
 
     @patch("src.everbot.core.agent.factory.get_config")
     def test_loads_skillkit_dir(self, mock_get_config):
@@ -244,7 +269,7 @@ class TestLoadCustomSkillkits:
             factory = self._make_factory()
             gs = MagicMock()
             agent = MagicMock()
-            agent.global_skills = gs
+            agent.global_toolkits = gs
 
             factory._load_custom_skillkits(agent, "cm")
 
@@ -265,7 +290,7 @@ class TestLoadCustomSkillkits:
             factory = self._make_factory()
             gs = MagicMock()
             agent = MagicMock()
-            agent.global_skills = gs
+            agent.global_toolkits = gs
 
             factory._load_custom_skillkits(agent, "cm")
 
@@ -286,7 +311,7 @@ class TestLoadCustomSkillkits:
             factory = self._make_factory()
             gs = MagicMock()
             agent = MagicMock()
-            agent.global_skills = gs
+            agent.global_toolkits = gs
 
             factory._load_custom_skillkits(agent, "cm")
 
@@ -307,7 +332,7 @@ class TestLoadCustomSkillkits:
             factory = self._make_factory()
             gs = MagicMock()
             agent = MagicMock()
-            agent.global_skills = gs
+            agent.global_toolkits = gs
 
             factory._load_custom_skillkits(agent, "cm")
 
@@ -328,7 +353,7 @@ class TestLoadCustomSkillkits:
             factory = self._make_factory()
             gs = MagicMock()
             agent = MagicMock()
-            agent.global_skills = gs
+            agent.global_toolkits = gs
 
             factory._load_custom_skillkits(agent, "cm")
 
@@ -350,7 +375,7 @@ class TestLoadCustomSkillkits:
             factory = self._make_factory()
             gs = MagicMock()
             agent = MagicMock()
-            agent.global_skills = gs
+            agent.global_toolkits = gs
 
             factory._load_custom_skillkits(agent, "cm")
 
@@ -372,7 +397,7 @@ class TestLoadCustomSkillkits:
             gs = MagicMock()
             gs._loadCustomToolkitsFromPath.side_effect = RuntimeError("import failed")
             agent = MagicMock()
-            agent.global_skills = gs
+            agent.global_toolkits = gs
 
             # Should not raise
             factory._load_custom_skillkits(agent, "cm")
@@ -401,7 +426,7 @@ class TestSyncAllToolsAfterCustomLoad:
             agent = await factory.create_agent("test_agent", workspace_path)
 
             # After creation, allTools should be in sync with installedToolSet
-            gs = getattr(agent, "global_skills", None)
+            gs = getattr(agent, "global_toolkits", None)
             if gs is not None:
                 installed_names = set(gs.installedToolSet.getToolNames())
                 all_names = set(gs.allTools.getToolNames())

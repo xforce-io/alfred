@@ -1698,11 +1698,11 @@ async def test_drain_filters_load_resource_skill():
 
 
 @pytest.mark.asyncio
-async def test_drain_filters_load_skill_resource():
-    """_load_skill_resource (Level 3 resource loader) is also internal."""
+async def test_drain_filters_read_skill_asset():
+    """_read_skill_asset (Level 3 resource loader) is also internal."""
     items = [
         {"_progress": [{"stage": "skill", "status": "completed",
-                         "skill_info": {"name": "_load_skill_resource"},
+                         "skill_info": {"name": "_read_skill_asset"},
                          "output": "scripts/etl.py content..."}]},
         {"_progress": [{"stage": "llm", "delta": "Here is the analysis."}]},
     ]

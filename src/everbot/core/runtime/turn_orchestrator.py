@@ -602,7 +602,8 @@ class TurnOrchestrator:
                 traj = getattr(ctx, "trajectory", None) if ctx else None
                 cm = getattr(ctx, "context_manager", None) if ctx else None
                 if traj and cm and traj.is_enabled():
-                    tools_schema = ctx.skillkit.getSkillsSchema() if ctx.skillkit else []
+                    toolkit = getattr(ctx, "toolkit", None) or getattr(ctx, "skillkit", None)
+                    tools_schema = toolkit.getToolsSchema() if toolkit else []
                     status = ctx.get_var_value("_status") or {}
                     stage_index = status.get("explore_time", 0)
                     model = ctx.get_last_model_name() if hasattr(ctx, "get_last_model_name") else None
@@ -1175,7 +1176,7 @@ async def _drain_after_timeout(
                     # SKILL.md content) and must not be forwarded to the user.
                     skill_info = progress.get("skill_info") or {}
                     skill_name = skill_info.get("name") or progress.get("tool_name") or ""
-                    if skill_name in ("_load_resource_skill", "_load_skill_resource"):
+                    if skill_name in ("_load_resource_skill", "_read_skill_asset"):
                         continue
                     output = (
                         progress.get("answer")

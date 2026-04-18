@@ -242,8 +242,16 @@ If not, reply with `HEARTBEAT_OK`.
         # Wrap agent_factory to restrict tools available in the heartbeat session.
         # _bash and _python are removed so the LLM cannot directly write HEARTBEAT.md;
         # routine management must go through routine_cli.py / RoutineManager instead.
+        # Resource skill loading remains enabled because many scheduled jobs depend
+        # on SKILL.md instructions (for example gray-rhino style analysis skills).
         # Isolated job agents are created separately and retain full tool access.
-        _HEARTBEAT_TOOLS = ["_date", "_read_file", "_read_folder"]
+        _HEARTBEAT_TOOLS = [
+            "_date",
+            "_read_file",
+            "_read_folder",
+            "_load_resource_skill",
+            "_read_skill_asset",
+        ]
 
         async def _restricted_agent_factory(name: str, workspace: Any) -> Any:
             try:

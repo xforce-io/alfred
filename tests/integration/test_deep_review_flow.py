@@ -5,7 +5,7 @@ Verifies that a "帮我 review 下 alfred 项目" message triggers the correct
 tool call sequence through ChannelCoreService:
 
   _load_resource_skill("example-skill")       → Gateway loaded
-  _load_skill_resource("example-skill", ...)   → Deep Review SOP loaded
+  _read_skill_asset("example-skill", ...)   → Deep Review SOP loaded
   _bash(quick-status --repos alfred)           → Gather context
   _bash(workspace-check --repos alfred ...)    → Acquire workspace
   _bash(analyze --workspace ... --engine ...)  → Engine-powered analysis
@@ -238,10 +238,10 @@ def _build_deep_review_script():
 
         # Step 2: Agent loads deep-review SOP
         _p(_llm_think("加载 deep-review SOP")),
-        _p(_skill("_load_skill_resource",
+        _p(_skill("_read_skill_asset",
                    '{"skill_name": "example-skill", "resource_path": "references/sop-deep-review.md"}',
                    pid="sk2")),
-        _p(_skill_done("_load_skill_resource",
+        _p(_skill_done("_read_skill_asset",
                        output="# SOP: Deep Review\nUse when user asks to review ...",
                        pid="sk2")),
 
@@ -315,7 +315,7 @@ async def test_deep_review_flow_calls_engine_analysis():
 
     Verifies:
     1. example-skill skill is loaded (gateway)
-    2. deep-review SOP is loaded via _load_skill_resource
+    2. deep-review SOP is loaded via _read_skill_asset
     3. workspace-check is called to acquire workspace
     4. analyze is called with --engine (engine-powered deep analysis)
     5. release is called to free workspace
@@ -343,9 +343,9 @@ async def test_deep_review_flow_calls_engine_analysis():
         f"Expected _load_resource_skill in {invoked_names}"
 
     # 2. Deep Review SOP loaded
-    assert "_load_skill_resource" in invoked_names, \
-        f"Expected _load_skill_resource in {invoked_names}"
-    sop_args = collector.skill_args_for("_load_skill_resource")
+    assert "_read_skill_asset" in invoked_names, \
+        f"Expected _read_skill_asset in {invoked_names}"
+    sop_args = collector.skill_args_for("_read_skill_asset")
     assert any("sop-deep-review" in a for a in sop_args), \
         f"Expected sop-deep-review.md to be loaded, got args: {sop_args}"
 
@@ -371,7 +371,7 @@ async def test_deep_review_flow_calls_engine_analysis():
     # 7. Session was saved
     core.session_manager.save_session.assert_awaited()
 
-    # 8. Internal tools (_load_resource_skill, _load_skill_resource) are
+    # 8. Internal tools (_load_resource_skill, _read_skill_asset) are
     #    budget-exempt — they should not count toward tool call limit
     #    (verified by the fact that 8 total skill calls didn't exceed budget)
 
@@ -447,7 +447,7 @@ async def test_deep_review_without_engine_call_is_incomplete():
 
     # No deep-review SOP loaded
     sop_loaded = any("sop-deep-review" in a
-                     for a in collector.skill_args_for("_load_skill_resource"))
+                     for a in collector.skill_args_for("_read_skill_asset"))
     assert not sop_loaded, "Shallow review should NOT load deep-review SOP"
 
     # No analyze call

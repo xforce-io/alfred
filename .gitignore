@@ -28,6 +28,12 @@ node_modules/
 
 # Browser automation data
 skills/dev-browser/profiles/
+skills/web/profiles/
+skills/web/tmp/
+
+# Skill runtime data
+skills/*/data/
+skill_eval/
 
 # Cache data
 data/cache/
@@ -39,6 +45,14 @@ log/
 # Backup files
 *.bak
 *.backup
+baks/
+
+# Shadowcoder tool artifacts
+.shadowcoder/
+.shadowcoder-requirements/
+
+# Top-level scratch scripts
+tmp_*.py
 
 # IDE / Editor
 .vscode/

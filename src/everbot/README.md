@@ -208,7 +208,7 @@ async def create_agent(agent_name: str, workspace_path: Path):
         name=agent_name,
         file_path=str(workspace_path / "agent.dph"),
         global_config=runtime.global_config,
-        global_skills=runtime.global_skills,
+        global_toolkits=runtime.globalToolkits,
         variables={
             "workspace_instructions": workspace_instructions,
             "model_name": "gpt-4",

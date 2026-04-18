@@ -57,6 +57,27 @@ def _make_runner(workspace_path: Path = Path("."), **overrides) -> HeartbeatRunn
     return HeartbeatRunner(**defaults)
 
 
+@pytest.mark.asyncio
+async def test_restricted_agent_factory_keeps_resource_skill_tools(tmp_path: Path):
+    """Heartbeat runner should preserve resource skill loaders in restricted mode."""
+    agent_factory = AsyncMock(return_value=object())
+    runner = _make_runner(workspace_path=tmp_path, agent_factory=agent_factory)
+
+    await runner._restricted_agent_factory("demo_agent", tmp_path)
+
+    agent_factory.assert_awaited_once_with(
+        "demo_agent",
+        tmp_path,
+        tools_override=[
+            "_date",
+            "_read_file",
+            "_read_folder",
+            "_load_resource_skill",
+            "_read_skill_asset",
+        ],
+    )
+
+
 def _build_structured_md(tasks: list[dict] | None = None) -> str:
     """Build a valid HEARTBEAT.md string with optional task list."""
     task_list = {"version": 2, "tasks": tasks or []}

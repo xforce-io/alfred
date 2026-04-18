@@ -21,7 +21,7 @@ REQUIRED_TOOLS = [
     "_read_file",
     "_read_folder",
     "_load_resource_skill",
-    "_load_skill_resource",
+    "_read_skill_asset",
 ]
 
 
@@ -41,8 +41,8 @@ class TestAgentToolCompleteness:
         mock_skill.get_function_name.return_value = "_load_resource_skill"
         mock_skill.owner_skillkit = mock_skillkit
 
-        mock_skillkit.getSkills.return_value = [mock_skill]
-        mock_skillkit.getSkill.return_value = mock_skill
+        mock_skillkit.getTools.return_value = [mock_skill]
+        mock_skillkit.getTool.return_value = mock_skill
 
         # Mock context
         mock_context = Mock()
@@ -67,7 +67,7 @@ class TestAgentToolCompleteness:
             - _read_file
             - _read_folder
             - _load_resource_skill
-            - _load_skill_resource
+            - _read_skill_asset
         """
 
     def test_agent_dph_contains_required_tools(self, mock_agent_dph_content):
@@ -98,8 +98,8 @@ class TestAgentToolCompleteness:
             f"Skillkit 中缺少 _load_resource_skill\n"
             f"可用工具: {skill_names}"
         )
-        assert "_load_skill_resource" in skill_names, (
-            f"Skillkit 中缺少 _load_skill_resource\n"
+        assert "_read_skill_asset" in skill_names, (
+            f"Skillkit 中缺少 _read_skill_asset\n"
             f"可用工具: {skill_names}"
         )
 
@@ -126,7 +126,7 @@ class TestAgentToolCompleteness:
         assert skillkit is not None, "Context 中没有 skillkit"
 
         # 检查 _load_resource_skill 的 owner
-        for skill in skillkit.getSkills():
+        for skill in skillkit.getTools():
             if skill.get_function_name() == "_load_resource_skill":
                 owner = getattr(skill, "owner_skillkit", None)
                 assert owner is not None, (

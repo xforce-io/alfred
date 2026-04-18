@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -45,6 +46,35 @@ def _make_channel(tmp_path: Path, **kwargs) -> TelegramChannel:
     )
     ch._bindings_path = tmp_path / "bindings.json"
     return ch
+
+
+class TestTelegramToolkitRegistration:
+    def test_registers_telegram_toolkit_via_tool_api(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        installed = MagicMock()
+        installed.hasTool.return_value = False
+        agent = SimpleNamespace(
+            global_toolkits=SimpleNamespace(installedToolSet=installed),
+            global_skills=None,
+        )
+
+        ch._ensure_telegram_skillkit(agent)
+
+        installed.hasTool.assert_called_once_with("_tg_send_file")
+        installed.addToolkit.assert_called_once()
+
+    def test_skips_registration_when_tool_already_present(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        installed = MagicMock()
+        installed.hasTool.return_value = True
+        agent = SimpleNamespace(
+            global_toolkits=SimpleNamespace(installedToolSet=installed),
+            global_skills=None,
+        )
+
+        ch._ensure_telegram_skillkit(agent)
+
+        installed.addToolkit.assert_not_called()
 
 
 # ===========================================================================
