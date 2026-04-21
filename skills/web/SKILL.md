@@ -50,6 +50,14 @@ $SKILL_DIR/server.sh &
 
 Wait for the `Ready` message. First run installs dependencies and Chromium.
 
+### ⚠️ Rules — do NOT break these
+
+1. **Never use `~/Library/Application Support/Google/Chrome/...` or your system Chrome profile.** It's locked by the live Chrome app, and tilde doesn't expand inside double quotes — you'll silently get a brand-new empty profile and loop on timeouts. Always use the server's persistent profile at `$SKILL_DIR/profiles/browser-data` (automatic via `connect()`).
+2. **Never call `playwright` CLI directly** (`playwright screenshot`, `playwright install`, etc.). Always go through `connect()` so you share the running server's browser context and its persisted cookies.
+3. **Never try to "repair" the browser by reinstalling chromium or pkill-ing `Google Chrome for Testing`.** If `connect()` fails, read `skills/web/server.log`, check `lsof -iTCP:9222` — `localhost:teamcoherence` in `lsof` output **is** port 9222, don't kill it.
+4. **If a site needs login** (x.com, twitter.com, github private, etc.) and the first snapshot shows only `Sign in / Sign up / Join today` — **stop and tell the user**. Do NOT fabricate content from search results and present it as the page content. Ask the user to log in once via the persistent profile; thereafter headless sessions reuse the cookies.
+5. **Don't retry the same failing command with only the timeout changed.** After 2 identical failures, change strategy or report the failure.
+
 ### Run scripts
 
 **CRITICAL: Always run from `skills/web/`** (the `@/` import alias requires it).
