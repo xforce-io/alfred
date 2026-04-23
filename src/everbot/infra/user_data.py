@@ -204,7 +204,12 @@ class UserDataManager:
             bundled = Path(__file__).resolve().parents[3] / "skills"
             if bundled.exists():
                 skill_dirs.append(bundled)
-            return SkillLogRecorder(skill_logs_dir=logs_dir, skill_dirs=skill_dirs)
+            eval_base_dir = self.get_agent_skill_eval_dir(agent_name) if agent_name else None
+            return SkillLogRecorder(
+                skill_logs_dir=logs_dir,
+                skill_dirs=skill_dirs,
+                eval_base_dir=eval_base_dir,
+            )
         except Exception as _err:
             logger.warning("Failed to create SkillLogRecorder: %s", _err)
             return None
