@@ -2,6 +2,7 @@
 用户数据统一管理
 """
 
+import os
 from pathlib import Path
 from typing import List, Dict, Optional
 import re
@@ -22,7 +23,6 @@ class UserDataManager:
     """
 
     def __init__(self, alfred_home: Optional[Path] = None):
-        import os
         if alfred_home is None:
             env_home = os.environ.get("ALFRED_HOME")
             if env_home:
@@ -93,7 +93,6 @@ class UserDataManager:
         Resolution: env var ALFRED_REPO_ROOT, then the git root of this
         process's source file. Returns None if neither is a real directory.
         """
-        import os
         candidate = os.environ.get("ALFRED_REPO_ROOT")
         if candidate:
             p = Path(candidate).expanduser() / "skills"

@@ -103,7 +103,14 @@ class TestEnsureRegisteredBootstrap:
 
         assert result.action == RegistrationAction.BOOTSTRAPPED
         pointer = vm.get_pointer("bar")
+        assert pointer is not None
+        assert pointer.current_version == "1.0.0"
         assert pointer.repo_baseline is False
+        meta = vm.get_metadata("bar", "1.0.0")
+        assert meta is not None
+        assert meta.status == VersionStatus.ACTIVE
+        snapshot = tmp_path / "eval" / "bar" / "versions" / "v1.0.0" / "skill.md"
+        assert snapshot.exists()
 
     def test_skill_md_missing_is_noop(self, tmp_path: Path):
         vm = _mk_ver_mgr(tmp_path)
@@ -117,3 +124,42 @@ class TestEnsureRegisteredBootstrap:
         vm.activate("foo", "1.0.0")
         result = ensure_registered(vm, "foo", repo_skills_dir=None)
         assert result.action == RegistrationAction.NOOP
+
+    def test_bootstrap_populates_eval_summary_from_existing_report(self, tmp_path: Path):
+        """D3-A: if eval_report.json exists before bootstrap, metadata.eval_summary
+        must reflect its critical_rate and satisfaction."""
+        from src.everbot.core.slm.models import EvalReport
+        vm = _mk_ver_mgr(tmp_path)
+        (tmp_path / "skills" / "baz").mkdir(parents=True)
+        (tmp_path / "skills" / "baz" / "SKILL.md").write_text(SKILL_MD_V1)
+        # Pre-seed an unhealthy eval_report (mirrors the paper-discovery
+        # production state the migration needs to handle).
+        report = EvalReport(
+            skill_id="baz", skill_version="1.0.0",
+            evaluated_at="2026-04-24T00:00:00",
+            segment_count=8, critical_issue_count=4,
+            critical_issue_rate=0.5, mean_satisfaction=0.51,
+            results=[],
+        )
+        vm.save_eval_report("baz", "1.0.0", report)
+
+        result = ensure_registered(vm, "baz", repo_skills_dir=None)
+
+        assert result.action == RegistrationAction.BOOTSTRAPPED
+        meta = vm.get_metadata("baz", "1.0.0")
+        assert meta is not None
+        assert meta.eval_summary is not None
+        assert meta.eval_summary["critical_issue_rate"] == 0.5
+        assert meta.eval_summary["satisfaction_score"] == 0.51
+
+    def test_bootstrap_leaves_eval_summary_none_when_no_report(self, tmp_path: Path):
+        vm = _mk_ver_mgr(tmp_path)
+        (tmp_path / "skills" / "qux").mkdir(parents=True)
+        (tmp_path / "skills" / "qux" / "SKILL.md").write_text(SKILL_MD_V1)
+
+        result = ensure_registered(vm, "qux", repo_skills_dir=None)
+
+        assert result.action == RegistrationAction.BOOTSTRAPPED
+        meta = vm.get_metadata("qux", "1.0.0")
+        assert meta is not None
+        assert meta.eval_summary is None

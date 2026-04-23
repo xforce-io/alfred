@@ -129,7 +129,7 @@ def _ensure_registered_locked(
 
     # Fresh bootstrap path: pointer absent → write snapshot, metadata, then pointer
     if before.pointer is None:
-        return _bootstrap(ver_mgr, skill_id, before, repo_skills_dir)
+        return _bootstrap(ver_mgr, skill_id, before, repo_skills_dir, inspector)
 
     # Other states (partial repair / conflict) handled in Task 4.
     raise NotImplementedError(
@@ -144,6 +144,7 @@ def _bootstrap(
     skill_id: str,
     before: FileState,
     repo_skills_dir: Optional[Path],
+    inspector: StateInspector,
 ) -> RegistrationResult:
     version = before.skill_md_version or "baseline"
     skill_md_path = ver_mgr._skill_md(skill_id)
@@ -191,7 +192,7 @@ def _bootstrap(
     ver_mgr._current_json(skill_id).parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(ver_mgr._current_json(skill_id), pointer.to_json())
 
-    after = StateInspector(ver_mgr).inspect(skill_id)
+    after = inspector.inspect(skill_id)
     logger.info(
         "SLM bootstrapped %s v%s (repo_baseline=%s, eval_summary=%s)",
         skill_id, version, repo_baseline, eval_summary is not None,
