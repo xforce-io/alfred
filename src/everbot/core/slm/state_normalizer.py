@@ -166,11 +166,11 @@ def _repair(
     version = before.pointer.current_version
     ver_dir = ver_mgr._version_dir(skill_id, version)
     ver_dir.mkdir(parents=True, exist_ok=True)
-    skill_content = ver_mgr._skill_md(skill_id).read_text(encoding="utf-8")
 
     action = RegistrationAction.NOOP
 
     if not before.snapshot_exists:
+        skill_content = ver_mgr._skill_md(skill_id).read_text(encoding="utf-8")
         atomic_write_text(ver_dir / "skill.md", skill_content)
         action = RegistrationAction.REPAIRED_SNAPSHOT
 
@@ -190,6 +190,7 @@ def _repair(
             eval_summary=eval_summary,
         )
         atomic_write_text(ver_dir / "metadata.json", meta.to_json())
+        # REPAIRED_METADATA takes precedence if both were missing — last write wins.
         action = RegistrationAction.REPAIRED_METADATA
 
     after = inspector.inspect(skill_id)
