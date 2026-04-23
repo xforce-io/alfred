@@ -87,6 +87,28 @@ class UserDataManager:
         return self.alfred_home / "skills"
 
     @property
+    def repo_skills_dir(self) -> Optional[Path]:
+        """Return the path to the alfred repo's skills/ dir if locatable.
+
+        Resolution: env var ALFRED_REPO_ROOT, then the git root of this
+        process's source file. Returns None if neither is a real directory.
+        """
+        import os
+        candidate = os.environ.get("ALFRED_REPO_ROOT")
+        if candidate:
+            p = Path(candidate).expanduser() / "skills"
+            if p.is_dir():
+                return p
+        # Walk up from this file to find a dir containing pyproject.toml.
+        here = Path(__file__).resolve()
+        for parent in here.parents:
+            if (parent / "pyproject.toml").exists():
+                p = parent / "skills"
+                if p.is_dir():
+                    return p
+        return None
+
+    @property
     def skill_logs_dir(self) -> Path:
         """SLM evaluation segment logs (global, legacy — prefer agent-scoped)"""
         return self.alfred_home / "skill_logs"
