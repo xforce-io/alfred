@@ -181,6 +181,18 @@ async def _post_evaluate(
     """Post-evaluation actions: activate healthy testing, rollback+evolve unhealthy."""
     meta = ver_mgr.get_metadata(skill_id, target_version)
     if not meta:
+        try:
+            await context.mailbox.deposit(
+                summary=f"SLM 异常：技能 {skill_id} v{target_version} 缺少 metadata，评估终止",
+                detail=(
+                    "_post_evaluate found metadata=None after ensure_registered; "
+                    "likely concurrent deletion or partial write. Re-run heartbeat "
+                    "may self-heal; investigate if it recurs."
+                ),
+            )
+        except Exception:
+            pass
+        logger.error("SLM abort: %s v%s metadata missing", skill_id, target_version)
         return
 
     if meta.status == VersionStatus.TESTING and report.is_healthy:
@@ -217,7 +229,14 @@ async def _post_evaluate(
     try:
         ver_mgr.rollback(skill_id, reason="auto-evolve: unhealthy evaluation")
     except ValueError as e:
-        logger.warning("Cannot rollback %s: %s", skill_id, e)
+        try:
+            await context.mailbox.deposit(
+                summary=f"SLM 异常：技能 {skill_id} 回滚失败，无法触发进化",
+                detail=str(e),
+            )
+        except Exception:
+            pass
+        logger.error("SLM rollback failed for %s: %s", skill_id, e)
         return
 
     new_version = await _maybe_evolve(context, ver_mgr, seg_logger, skill_id, report)

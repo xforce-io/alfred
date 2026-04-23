@@ -432,3 +432,75 @@ class TestEvaluateOneEnsuresRegistered:
         # Returned None (skipped) and no pointer created
         assert result is None
         assert ver_mgr.get_pointer("ghost") is None
+
+
+class TestPostEvaluateMailboxCoverage:
+    @pytest.mark.asyncio
+    async def test_no_metadata_sends_mailbox_alert(self, tmp_path):
+        """When _post_evaluate detects meta=None, it must notify the agent
+        via mailbox, not silently return."""
+        skills_dir, logs_dir, eval_dir = tmp_path / "skills", tmp_path / "logs", tmp_path / "eval"
+        for d in (skills_dir, logs_dir, eval_dir):
+            d.mkdir()
+        (skills_dir / "foo").mkdir()
+        (skills_dir / "foo" / "SKILL.md").write_text(
+            '---\nname: foo\nversion: "1.0.0"\n---\nbody\n'
+        )
+        ver_mgr = VersionManager(skills_dir, eval_base_dir=eval_dir)
+        seg_logger = SegmentLogger(logs_dir)
+
+        # Capture mailbox deposits.
+        mailbox_deposits: list = []
+        async def capture(summary, detail=""):
+            mailbox_deposits.append({"summary": summary, "detail": detail})
+        context = _mk_context(tmp_path)
+        context.mailbox.deposit = capture
+
+        # Set up: bootstrap foo, then delete metadata to force the meta=None branch.
+        from src.everbot.core.slm.state_normalizer import ensure_registered
+        ensure_registered(ver_mgr, "foo", repo_skills_dir=None)
+        meta_path = eval_dir / "foo" / "versions" / "v1.0.0" / "metadata.json"
+        meta_path.unlink()
+
+        report = _make_unhealthy_report("foo", "1.0.0")
+        from src.everbot.core.jobs.skill_evaluate import _post_evaluate
+        await _post_evaluate(context, ver_mgr, seg_logger, "foo", "1.0.0", report)
+
+        assert len(mailbox_deposits) >= 1, "expected a mailbox deposit"
+        assert any(
+            "metadata" in d["summary"].lower() or "metadata" in d["detail"].lower()
+            for d in mailbox_deposits
+        ), f"no metadata-related deposit: {mailbox_deposits}"
+
+    @pytest.mark.asyncio
+    async def test_rollback_failure_sends_mailbox_alert(self, tmp_path):
+        """When rollback raises ValueError, _post_evaluate must notify via mailbox."""
+        from unittest.mock import patch
+        skills_dir, logs_dir, eval_dir = tmp_path / "skills", tmp_path / "logs", tmp_path / "eval"
+        for d in (skills_dir, logs_dir, eval_dir):
+            d.mkdir()
+        (skills_dir / "foo").mkdir()
+        (skills_dir / "foo" / "SKILL.md").write_text(
+            '---\nname: foo\nversion: "1.0.0"\n---\nbody\n'
+        )
+        ver_mgr = VersionManager(skills_dir, eval_base_dir=eval_dir)
+        seg_logger = SegmentLogger(logs_dir)
+
+        mailbox_deposits: list = []
+        async def capture(summary, detail=""):
+            mailbox_deposits.append({"summary": summary, "detail": detail})
+        context = _mk_context(tmp_path)
+        context.mailbox.deposit = capture
+
+        from src.everbot.core.slm.state_normalizer import ensure_registered
+        ensure_registered(ver_mgr, "foo", repo_skills_dir=None)
+
+        report = _make_unhealthy_report("foo", "1.0.0")
+        from src.everbot.core.jobs.skill_evaluate import _post_evaluate
+        with patch.object(ver_mgr, "rollback", side_effect=ValueError("simulated rollback failure")):
+            await _post_evaluate(context, ver_mgr, seg_logger, "foo", "1.0.0", report)
+
+        assert any(
+            "回滚" in d["summary"] or "rollback" in d["detail"].lower()
+            for d in mailbox_deposits
+        ), f"no rollback-related deposit: {mailbox_deposits}"
