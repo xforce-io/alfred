@@ -22,11 +22,11 @@ from src.everbot.core.slm.segment_logger import SegmentLogger
 from src.everbot.core.slm.version_manager import VersionManager
 
 
-def _write_skill_md(base: Path, skill_name: str) -> None:
+def _write_skill_md(base: Path, skill_name: str, version: str = "baseline") -> None:
     skill_dir = base / skill_name
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(
-        f"---\nname: {skill_name}\nversion: baseline\n---\n",
+        f"---\nname: {skill_name}\nversion: {version}\n---\n",
         encoding="utf-8",
     )
 
@@ -108,11 +108,12 @@ async def test_run_skips_unavailable_skill_and_continues(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_evaluate_one_falls_back_to_most_common_version(tmp_path: Path):
-    """When no SLM pointer exists, use the most common version in the log."""
+    """When no SLM pointer exists, ensure_registered bootstraps from SKILL.md;
+    evaluation then proceeds on the bootstrapped version."""
     skills_dir = tmp_path / "skills"
     logs_dir = tmp_path / "skill_logs"
     eval_dir = tmp_path / "skill_eval"
-    _write_skill_md(skills_dir, "gray-rhino")
+    _write_skill_md(skills_dir, "gray-rhino", version="2.0.0")
 
     seg_logger = SegmentLogger(logs_dir)
     from src.everbot.core.slm.models import EvaluationSegment
@@ -129,7 +130,7 @@ async def test_evaluate_one_falls_back_to_most_common_version(tmp_path: Path):
         ))
 
     ver_mgr = VersionManager(skills_dir, eval_base_dir=eval_dir)
-    # No pointer exists → should fall back to "2.0.0"
+    # No pointer exists → ensure_registered bootstraps "2.0.0" from SKILL.md
     assert ver_mgr.get_pointer("gray-rhino") is None
 
     context = MagicMock()
@@ -156,6 +157,20 @@ async def test_evaluate_one_falls_back_to_most_common_version(tmp_path: Path):
 
     assert result is not None
     assert "v2.0.0" in result
+
+
+def _mk_context(tmp_path: Path):
+    """Minimal SkillContext stub for tests — provides no-op llm and mailbox."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    llm = SimpleNamespace(complete=AsyncMock(return_value=""))
+    mailbox = SimpleNamespace(deposit=AsyncMock(return_value=None))
+    return SimpleNamespace(
+        llm=llm,
+        mailbox=mailbox,
+        skill_logs_dir=tmp_path / "logs",
+        skill_eval_dir=tmp_path / "eval",
+    )
 
 
 def _make_healthy_report(skill_id: str, version: str, n: int = 3) -> EvalReport:
@@ -352,3 +367,68 @@ async def test_evolve_llm_failure_still_rolls_back(tmp_path: Path):
     pointer = ver_mgr.get_pointer("fail-skill")
     assert pointer.current_version != "2.0"
     assert "evolve" not in pointer.current_version
+
+
+class TestEvaluateOneEnsuresRegistered:
+    @pytest.mark.asyncio
+    async def test_unregistered_skill_is_bootstrapped_before_eval(self, tmp_path):
+        """A skill with no pointer must end up registered after _evaluate_one,
+        regardless of whether evaluation produces a report."""
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "foo").mkdir()
+        (skills_dir / "foo" / "SKILL.md").write_text(
+            '---\nname: foo\nversion: "1.0.0"\n---\nbody\n'
+        )
+        logs_dir = tmp_path / "logs"
+        eval_dir = tmp_path / "eval"
+        sessions_dir = tmp_path / "sessions"
+        logs_dir.mkdir()
+        eval_dir.mkdir()
+        sessions_dir.mkdir()
+
+        seg_logger = SegmentLogger(logs_dir)
+        seg_logger.append(EvaluationSegment(
+            skill_id="foo", skill_version="1.0.0",
+            triggered_at="2026-04-24T00:00:00",
+            context_before="hi", skill_output="response", context_after="",
+            session_id="s1",
+        ))
+        ver_mgr = VersionManager(skills_dir, eval_base_dir=eval_dir)
+
+        # Precondition: no pointer
+        assert ver_mgr.get_pointer("foo") is None
+
+        healthy_report = _make_healthy_report("foo", "1.0.0")
+        context = _mk_context(tmp_path)
+        with patch(
+            "src.everbot.core.jobs.skill_evaluate.evaluate_skill",
+            new=AsyncMock(return_value=healthy_report),
+        ):
+            await _evaluate_one(context, seg_logger, ver_mgr, "foo", sessions_dir)
+
+        assert ver_mgr.get_pointer("foo") is not None
+
+    @pytest.mark.asyncio
+    async def test_skill_md_missing_is_skipped(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        logs_dir = tmp_path / "logs"
+        eval_dir = tmp_path / "eval"
+        for d in (skills_dir, logs_dir, eval_dir):
+            d.mkdir()
+        seg_logger = SegmentLogger(logs_dir)
+        # segment pointing at a skill that has no SKILL.md
+        seg_logger.append(EvaluationSegment(
+            skill_id="ghost", skill_version="1.0.0",
+            triggered_at="2026-04-24T00:00:00",
+            context_before="hi", skill_output="response", context_after="",
+            session_id="s1",
+        ))
+        ver_mgr = VersionManager(skills_dir, eval_base_dir=eval_dir)
+        context = _mk_context(tmp_path)
+
+        result = await _evaluate_one(context, seg_logger, ver_mgr, "ghost", tmp_path / "sessions")
+
+        # Returned None (skipped) and no pointer created
+        assert result is None
+        assert ver_mgr.get_pointer("ghost") is None

@@ -110,6 +110,20 @@ async def _evaluate_one(
     sessions_dir,
 ) -> str | None:
     """Evaluate a single skill. Returns summary string or None if skipped."""
+    # Self-heal: ensure this skill has pointer+metadata+snapshot before we
+    # do anything. Handles both first-time skills and partial state from
+    # crash / manual edit.
+    from ..slm.state_normalizer import ensure_registered, RegistrationAction
+    from ...infra.user_data import get_user_data_manager
+    repo_skills = get_user_data_manager().repo_skills_dir
+    registration = ensure_registered(ver_mgr, skill_id, repo_skills_dir=repo_skills)
+    if registration.action == RegistrationAction.SKILL_MISSING:
+        logger.warning("Skipping %s: SKILL.md missing", skill_id)
+        return None
+    if registration.action == RegistrationAction.CONFLICT_DETECTED:
+        logger.warning("Skipping %s: %s", skill_id, registration.detail)
+        return f"conflict: {registration.detail}"
+
     entries = seg_logger.load(skill_id)
     if not entries:
         return None
