@@ -43,6 +43,14 @@ def read_frontmatter_version(skill_md_path: Path) -> str:
 class VersionManager:
     """Manage skill versions and per-agent evaluation data.
 
+    Concurrency invariant: publish/rollback/activate write several files
+    without per-call locking. Callers must hold the per-skill file lock
+    (slm._atomic_io.skill_lock on {eval_dir}/.lock) for the duration of
+    any write call. Today the only writer paths are ensure_registered
+    and _post_evaluate, both of which acquire the lock. Adding a new
+    caller — e.g. a CLI improver, an HTTP admin endpoint — without
+    acquiring the lock will race against them.
+
     Directory layout (per-agent eval)::
 
         ~/.alfred/agents/{agent}/skill_eval/{skill_id}/
