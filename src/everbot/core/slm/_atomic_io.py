@@ -41,9 +41,14 @@ def atomic_write_text(target: Path, content: str, *, encoding: str = "utf-8") ->
 
 @contextlib.contextmanager
 def skill_lock(lock_path: Path) -> Iterator[None]:
-    """Exclusive per-skill file lock via fcntl.flock. Blocks until acquired."""
+    """Exclusive per-skill file lock via fcntl.flock. Blocks until acquired.
+
+    Not re-entrant: do not nest two skill_lock contexts on the same path
+    within the same thread (safe on Linux via fd semantics, deadlocks on
+    strict BSD flock).
+    """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "a+") as f:
+    with open(lock_path, "a") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         try:
             yield

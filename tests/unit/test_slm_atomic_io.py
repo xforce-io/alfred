@@ -32,6 +32,23 @@ class TestAtomicWriteText:
         with pytest.raises(FileNotFoundError):
             atomic_write_text(target, "hello")
 
+    def test_no_temp_file_leaks_on_write_failure(self, tmp_path: Path, monkeypatch):
+        target = tmp_path / "out.txt"
+        target.write_text("original")
+
+        def fail_fsync(fd):
+            raise OSError("simulated fsync failure")
+
+        monkeypatch.setattr(os, "fsync", fail_fsync)
+        with pytest.raises(OSError, match="simulated fsync failure"):
+            atomic_write_text(target, "new content")
+
+        # Target must still contain original content (atomicity guarantee)
+        assert target.read_text() == "original"
+        # No .tmp leftovers in dir
+        leftovers = [p for p in tmp_path.iterdir() if p.name != "out.txt"]
+        assert leftovers == [], f"tempfile leaked: {leftovers}"
+
 
 class TestSkillLock:
     def test_serializes_concurrent_writers(self, tmp_path: Path):
