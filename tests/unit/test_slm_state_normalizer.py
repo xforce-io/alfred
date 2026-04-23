@@ -163,3 +163,71 @@ class TestEnsureRegisteredBootstrap:
         meta = vm.get_metadata("qux", "1.0.0")
         assert meta is not None
         assert meta.eval_summary is None
+
+
+class TestEnsureRegisteredRepair:
+    def test_missing_metadata_is_repaired(self, tmp_path: Path):
+        vm = _mk_ver_mgr(tmp_path)
+        vm.publish("foo", "1.0.0", SKILL_MD_V1)
+        # Delete metadata.json, leave pointer + snapshot
+        meta_path = tmp_path / "eval" / "foo" / "versions" / "v1.0.0" / "metadata.json"
+        meta_path.unlink()
+
+        result = ensure_registered(vm, "foo", repo_skills_dir=None)
+
+        assert result.action == RegistrationAction.REPAIRED_METADATA
+        meta = vm.get_metadata("foo", "1.0.0")
+        assert meta is not None
+        assert meta.status == VersionStatus.ACTIVE
+
+    def test_missing_snapshot_is_repaired(self, tmp_path: Path):
+        vm = _mk_ver_mgr(tmp_path)
+        vm.publish("foo", "1.0.0", SKILL_MD_V1)
+        snap_path = tmp_path / "eval" / "foo" / "versions" / "v1.0.0" / "skill.md"
+        snap_path.unlink()
+
+        result = ensure_registered(vm, "foo", repo_skills_dir=None)
+
+        assert result.action == RegistrationAction.REPAIRED_SNAPSHOT
+        assert snap_path.exists()
+        assert snap_path.read_text() == SKILL_MD_V1
+
+    def test_version_conflict_is_not_auto_fixed(self, tmp_path: Path):
+        """If SKILL.md version differs from pointer.current_version,
+        ensure_registered must NOT auto-resolve — it must flag CONFLICT_DETECTED
+        and leave disk state untouched (per policy D1-A)."""
+        vm = _mk_ver_mgr(tmp_path)
+        vm.publish("foo", "1.0.0", SKILL_MD_V1)
+        # Corrupt: user edits SKILL.md to 1.1.0 and deletes snapshot
+        (tmp_path / "skills" / "foo" / "SKILL.md").write_text(
+            SKILL_MD_V1.replace('"1.0.0"', '"1.1.0"')
+        )
+        snap_path = tmp_path / "eval" / "foo" / "versions" / "v1.0.0" / "skill.md"
+        snap_path.unlink()
+
+        result = ensure_registered(vm, "foo", repo_skills_dir=None)
+
+        assert result.action == RegistrationAction.CONFLICT_DETECTED
+        # Snapshot NOT reconstructed from mismatched SKILL.md
+        assert not snap_path.exists()
+        # Pointer untouched — still points at 1.0.0
+        pointer = vm.get_pointer("foo")
+        assert pointer.current_version == "1.0.0"
+
+    def test_both_missing_reports_repaired_metadata(self, tmp_path: Path):
+        """When both snapshot and metadata are missing, action == REPAIRED_METADATA
+        (metadata repair is the final write, so it wins for reporting)."""
+        vm = _mk_ver_mgr(tmp_path)
+        vm.publish("foo", "1.0.0", SKILL_MD_V1)
+        meta_path = tmp_path / "eval" / "foo" / "versions" / "v1.0.0" / "metadata.json"
+        snap_path = tmp_path / "eval" / "foo" / "versions" / "v1.0.0" / "skill.md"
+        meta_path.unlink()
+        snap_path.unlink()
+
+        result = ensure_registered(vm, "foo", repo_skills_dir=None)
+
+        assert result.action == RegistrationAction.REPAIRED_METADATA
+        assert snap_path.exists()
+        meta = vm.get_metadata("foo", "1.0.0")
+        assert meta is not None
+        assert meta.status == VersionStatus.ACTIVE

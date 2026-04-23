@@ -131,11 +131,74 @@ def _ensure_registered_locked(
     if before.pointer is None:
         return _bootstrap(ver_mgr, skill_id, before, repo_skills_dir, inspector)
 
-    # Other states (partial repair / conflict) handled in Task 4.
-    raise NotImplementedError(
-        f"state not yet handled for {skill_id}: "
-        f"pointer={before.pointer}, metadata={before.metadata}, "
-        f"snapshot={before.snapshot_exists}"
+    # Pointer exists. Classify partial state.
+    assert before.pointer is not None
+
+    # D1-A: any version mismatch between SKILL.md and pointer → conflict.
+    # Do NOT auto-fix — emit CONFLICT_DETECTED and leave disk untouched.
+    if (
+        before.skill_md_version is not None
+        and before.skill_md_version != before.pointer.current_version
+    ):
+        return RegistrationResult(
+            skill_id=skill_id,
+            action=RegistrationAction.CONFLICT_DETECTED,
+            detail=(
+                f"SKILL.md version={before.skill_md_version} != "
+                f"pointer.current_version={before.pointer.current_version}"
+            ),
+            before=before,
+            after=before,
+        )
+
+    # Versions match. Repair missing materials from authoritative sources.
+    return _repair(ver_mgr, skill_id, before, inspector)
+
+
+def _repair(
+    ver_mgr: VersionManager,
+    skill_id: str,
+    before: FileState,
+    inspector: StateInspector,
+) -> RegistrationResult:
+    """Repair missing metadata and/or snapshot when pointer and SKILL.md agree."""
+    assert before.pointer is not None
+    version = before.pointer.current_version
+    ver_dir = ver_mgr._version_dir(skill_id, version)
+    ver_dir.mkdir(parents=True, exist_ok=True)
+    skill_content = ver_mgr._skill_md(skill_id).read_text(encoding="utf-8")
+
+    action = RegistrationAction.NOOP
+
+    if not before.snapshot_exists:
+        atomic_write_text(ver_dir / "skill.md", skill_content)
+        action = RegistrationAction.REPAIRED_SNAPSHOT
+
+    if before.metadata is None:
+        eval_report = ver_mgr.get_eval_report(skill_id, version)
+        eval_summary = None
+        if eval_report is not None:
+            eval_summary = {
+                "critical_issue_rate": eval_report.critical_issue_rate,
+                "satisfaction_score": eval_report.mean_satisfaction,
+            }
+        meta = VersionMetadata(
+            version=version,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            status=VersionStatus.ACTIVE,
+            verification_phase="full",
+            eval_summary=eval_summary,
+        )
+        atomic_write_text(ver_dir / "metadata.json", meta.to_json())
+        action = RegistrationAction.REPAIRED_METADATA
+
+    after = inspector.inspect(skill_id)
+    logger.info("SLM repaired %s v%s (%s)", skill_id, version, action.value)
+    return RegistrationResult(
+        skill_id=skill_id,
+        action=action,
+        before=before,
+        after=after,
     )
 
 
