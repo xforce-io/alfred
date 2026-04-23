@@ -21,7 +21,6 @@ from .version_manager import VersionManager, read_frontmatter_version
 class RegistrationAction(str, Enum):
     NOOP = "noop"
     BOOTSTRAPPED = "bootstrapped"
-    REPAIRED_POINTER = "repaired_pointer"
     REPAIRED_METADATA = "repaired_metadata"
     REPAIRED_SNAPSHOT = "repaired_snapshot"
     CONFLICT_DETECTED = "conflict_detected"
@@ -31,6 +30,8 @@ class RegistrationAction(str, Enum):
 @dataclass
 class FileState:
     skill_md_exists: bool
+    # None iff skill_md_exists=False; "baseline" when file exists but has
+    # no version key in frontmatter. Never None when skill_md_exists=True.
     skill_md_version: Optional[str]
     pointer: Optional[CurrentPointer]
     metadata: Optional[VersionMetadata]
