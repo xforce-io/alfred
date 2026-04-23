@@ -107,7 +107,7 @@ async def test_run_skips_unavailable_skill_and_continues(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_evaluate_one_falls_back_to_most_common_version(tmp_path: Path):
+async def test_evaluate_one_uses_bootstrapped_pointer_version(tmp_path: Path):
     """When no SLM pointer exists, ensure_registered bootstraps from SKILL.md;
     evaluation then proceeds on the bootstrapped version."""
     skills_dir = tmp_path / "skills"

@@ -129,12 +129,11 @@ async def _evaluate_one(
         return None
 
     pointer = ver_mgr.get_pointer(skill_id)
-    if pointer:
-        target_version = pointer.current_version
-    else:
-        from collections import Counter
-        version_counts = Counter(e.skill_version for e in entries)
-        target_version = version_counts.most_common(1)[0][0] if version_counts else "baseline"
+    # ensure_registered above guarantees pointer exists (unless SKILL_MISSING
+    # or CONFLICT_DETECTED already returned early). A missing pointer here
+    # would signal a bootstrap bug — let it fail loudly.
+    assert pointer is not None, f"ensure_registered did not create pointer for {skill_id}"
+    target_version = pointer.current_version
 
     target_entries = [e for e in entries if e.skill_version == target_version]
     if not target_entries:
