@@ -289,12 +289,25 @@ class VersionManager:
     def check_consistency(self, skill_id: str) -> bool:
         """Check if SKILL.md frontmatter version matches current.json.
 
-        If inconsistent, fix current.json to match SKILL.md (SKILL.md is truth).
-        Returns True if was consistent, False if fixed.
+        If pointer is missing entirely, delegate to ensure_registered which
+        bootstraps the missing materials. This closes the long-standing
+        blind spot where un-published skills were treated as 'not managed'.
+
+        Returns True if was consistent (or successfully bootstrapped),
+        False if fixed.
         """
         pointer = self.get_pointer(skill_id)
         if not pointer:
-            return True  # not managed by SLM
+            # Lazy import avoids circular (state_normalizer imports VersionManager).
+            # repo_skills_dir=None is the safe choice — bootstrap will set
+            # repo_baseline=False, so rollback will never unlink the skill file.
+            from .state_normalizer import ensure_registered, RegistrationAction
+            result = ensure_registered(self, skill_id, repo_skills_dir=None)
+            return result.action in (
+                RegistrationAction.NOOP,
+                RegistrationAction.BOOTSTRAPPED,
+                RegistrationAction.SKILL_MISSING,
+            )
 
         actual = self.get_active_version(skill_id)
         if actual == pointer.current_version:
