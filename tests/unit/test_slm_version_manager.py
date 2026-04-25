@@ -3,6 +3,8 @@
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from src.everbot.core.slm.models import (
     CurrentPointer,
     EvalReport,
@@ -233,3 +235,88 @@ class TestCheckConsistencyNoPointer:
 
         assert ok is True
         assert vm.get_pointer("ghost") is None
+
+
+class TestSymlinkProtection:
+    def _setup_symlinked_skill(self, tmp_path, skill_id="paper", version="1.0"):
+        """Create the install pattern that bit production: a real skill in
+        upstream/, with ~/.alfred/skills/<id>/ as a symlink to it."""
+        upstream = tmp_path / "upstream" / skill_id
+        upstream.mkdir(parents=True)
+        upstream_md = upstream / "SKILL.md"
+        upstream_md.write_text(
+            f'---\nname: {skill_id}\nversion: "{version}"\n---\nbody\n'
+        )
+
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        # Symlink the skill dir (not just the SKILL.md) — matches production layout.
+        (skills_dir / skill_id).symlink_to(upstream)
+
+        eval_dir = tmp_path / "eval"
+        eval_dir.mkdir()
+        return VersionManager(skills_dir, eval_base_dir=eval_dir), upstream_md
+
+    def test_is_symlink_managed_detects_symlinked_dir(self, tmp_path):
+        vm, _ = self._setup_symlinked_skill(tmp_path)
+        assert vm.is_symlink_managed("paper") is True
+
+    def test_is_symlink_managed_false_for_real_dir(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        (skills_dir / "real").mkdir(parents=True)
+        (skills_dir / "real" / "SKILL.md").write_text(SKILL_CONTENT_V1)
+        (tmp_path / "eval").mkdir()
+        vm = VersionManager(skills_dir, eval_base_dir=tmp_path / "eval")
+        assert vm.is_symlink_managed("real") is False
+
+    def test_rollback_refuses_symlinked_skill(self, tmp_path):
+        vm, upstream_md = self._setup_symlinked_skill(tmp_path)
+        # Bootstrap so a pointer exists
+        from src.everbot.core.slm.state_normalizer import ensure_registered
+        ensure_registered(vm, "paper", repo_skills_dir=None)
+
+        with pytest.raises(ValueError, match="symlink-managed"):
+            vm.rollback("paper", reason="test")
+
+        # Critical: upstream file was NOT touched
+        assert upstream_md.exists()
+        assert "version" in upstream_md.read_text()
+
+    def test_publish_refuses_symlinked_skill(self, tmp_path):
+        vm, upstream_md = self._setup_symlinked_skill(tmp_path)
+        original_content = upstream_md.read_text()
+
+        with pytest.raises(ValueError, match="symlink-managed"):
+            vm.publish("paper", "2.0", '---\nname: paper\nversion: "2.0"\n---\nnew\n')
+
+        # Critical: upstream content unchanged
+        assert upstream_md.read_text() == original_content
+
+
+class TestBootstrapSymlinkAware:
+    def test_bootstrap_forces_repo_baseline_false_on_symlink(self, tmp_path):
+        """Even if repo_skills_dir contains the skill, a symlink-managed
+        user dir must NOT get repo_baseline=True (would arm a rollback bomb)."""
+        from src.everbot.core.slm.state_normalizer import (
+            ensure_registered,
+            RegistrationAction,
+        )
+
+        # Repo skills dir
+        repo_skills = tmp_path / "repo_skills"
+        (repo_skills / "foo").mkdir(parents=True)
+        (repo_skills / "foo" / "SKILL.md").write_text(SKILL_CONTENT_V1)
+        # User skills dir is a symlink to repo
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "foo").symlink_to(repo_skills / "foo")
+        (tmp_path / "eval").mkdir()
+
+        vm = VersionManager(skills_dir, eval_base_dir=tmp_path / "eval")
+        result = ensure_registered(vm, "foo", repo_skills_dir=repo_skills)
+
+        assert result.action == RegistrationAction.BOOTSTRAPPED
+        pointer = vm.get_pointer("foo")
+        assert pointer is not None
+        # The bug: without symlink detection, this would be True.
+        assert pointer.repo_baseline is False

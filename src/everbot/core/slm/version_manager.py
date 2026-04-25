@@ -96,6 +96,24 @@ class VersionManager:
     def _skill_md(self, skill_id: str) -> Path:
         return self._skill_dir(skill_id) / "SKILL.md"
 
+    def is_symlink_managed(self, skill_id: str) -> bool:
+        """Return True if this skill's user dir or SKILL.md path traverses a
+        symlink (e.g. ``~/.alfred/skills/foo/`` is symlinked to a repo dir).
+
+        SLM cannot safely write or unlink through such a path: ``Path.unlink``
+        and ``Path.write_text`` follow symlinks, so they would mutate the
+        upstream target rather than a per-user override. Both publish() and
+        rollback() must abort on symlink-managed skills to avoid corrupting
+        upstream files.
+        """
+        skill_dir = self._skill_dir(skill_id)
+        if skill_dir.is_symlink():
+            return True
+        skill_md = skill_dir / "SKILL.md"
+        if skill_md.is_symlink():
+            return True
+        return False
+
     # ------------------------------------------------------------------
     # Read
     # ------------------------------------------------------------------
@@ -160,7 +178,19 @@ class VersionManager:
         2. Snapshot to .eval/versions/v{version}/
         3. Update current.json
         4. Set previous active version as stable (if exists)
+
+        Refuses to operate on symlink-managed skills: writing to the live
+        SKILL.md would resolve through the symlink and overwrite the
+        upstream repo file. Caller (typically _maybe_evolve) must treat
+        this as evolve-failed.
         """
+        if self.is_symlink_managed(skill_id):
+            raise ValueError(
+                f"{skill_id} is symlink-managed; publish would overwrite upstream. "
+                "SLM evolve is disabled for symlinked skills — convert the install "
+                "to a real directory to enable evolution."
+            )
+
         skill_dir = self._skill_dir(skill_id)
         skill_dir.mkdir(parents=True, exist_ok=True)
 
@@ -248,7 +278,21 @@ class VersionManager:
         """Rollback to the stable version.
 
         Returns the version rolled back to, or raises ValueError.
+
+        Refuses to operate on symlink-managed skills: both branches below
+        would resolve through the symlink and mutate upstream files (an
+        unlink would destroy the upstream SKILL.md; a write_text would
+        overwrite upstream with snapshot content). Caller must surface the
+        error so the operator can switch the install layout if SLM evolve
+        is required for that skill.
         """
+        if self.is_symlink_managed(skill_id):
+            raise ValueError(
+                f"{skill_id} is symlink-managed; rollback would mutate upstream. "
+                "Convert the install to a real directory (copy SKILL.md instead "
+                "of symlinking) to enable SLM rollback/evolve."
+            )
+
         pointer = self.get_pointer(skill_id)
         if not pointer:
             raise ValueError(f"No SLM pointer for {skill_id}, nothing to rollback")

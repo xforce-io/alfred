@@ -214,9 +214,12 @@ def _bootstrap(
     skill_md_path = ver_mgr._skill_md(skill_id)
     skill_content = skill_md_path.read_text(encoding="utf-8")
 
-    # D2-A: repo_baseline only if the skill also exists in repo's skills/
+    # D2-A: repo_baseline only if the skill also exists in repo's skills/.
+    # Symlink-managed installs (~/.alfred/skills/<id>/ → repo) must NOT be
+    # repo_baseline=True: rollback would unlink through the symlink and
+    # destroy the repo's SKILL.md. Detect symlink and force False.
     repo_baseline = False
-    if repo_skills_dir is not None:
+    if repo_skills_dir is not None and not ver_mgr.is_symlink_managed(skill_id):
         repo_candidate = repo_skills_dir / skill_id / "SKILL.md"
         repo_baseline = repo_candidate.exists()
 

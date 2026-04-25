@@ -307,7 +307,11 @@ async def _maybe_evolve(
         logger.warning("Evolve output for %s failed validation", skill_id)
         return None
 
-    ver_mgr.publish(skill_id, new_version, new_content)
+    try:
+        ver_mgr.publish(skill_id, new_version, new_content)
+    except ValueError as e:
+        logger.warning("Cannot publish evolved %s: %s", skill_id, e)
+        return None
     logger.info("Evolved %s to v%s", skill_id, new_version)
     return new_version
 
