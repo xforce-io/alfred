@@ -110,17 +110,30 @@ async def _evaluate_one(
     sessions_dir,
 ) -> str | None:
     """Evaluate a single skill. Returns summary string or None if skipped."""
+    # Self-heal: ensure this skill has pointer+metadata+snapshot before we
+    # do anything. Handles both first-time skills and partial state from
+    # crash / manual edit.
+    from ..slm.state_normalizer import ensure_registered, RegistrationAction
+    from ...infra.user_data import get_user_data_manager
+    repo_skills = get_user_data_manager().repo_skills_dir
+    registration = ensure_registered(ver_mgr, skill_id, repo_skills_dir=repo_skills)
+    if registration.action == RegistrationAction.SKILL_MISSING:
+        logger.warning("Skipping %s: SKILL.md missing", skill_id)
+        return None
+    if registration.action == RegistrationAction.CONFLICT_DETECTED:
+        logger.warning("Skipping %s: %s", skill_id, registration.detail)
+        return f"conflict: {registration.detail}"
+
     entries = seg_logger.load(skill_id)
     if not entries:
         return None
 
     pointer = ver_mgr.get_pointer(skill_id)
-    if pointer:
-        target_version = pointer.current_version
-    else:
-        from collections import Counter
-        version_counts = Counter(e.skill_version for e in entries)
-        target_version = version_counts.most_common(1)[0][0] if version_counts else "baseline"
+    # ensure_registered above guarantees pointer exists (unless SKILL_MISSING
+    # or CONFLICT_DETECTED already returned early). A missing pointer here
+    # would signal a bootstrap bug — let it fail loudly.
+    assert pointer is not None, f"ensure_registered did not create pointer for {skill_id}"
+    target_version = pointer.current_version
 
     target_entries = [e for e in entries if e.skill_version == target_version]
     if not target_entries:
@@ -168,6 +181,18 @@ async def _post_evaluate(
     """Post-evaluation actions: activate healthy testing, rollback+evolve unhealthy."""
     meta = ver_mgr.get_metadata(skill_id, target_version)
     if not meta:
+        try:
+            await context.mailbox.deposit(
+                summary=f"SLM 异常：技能 {skill_id} v{target_version} 缺少 metadata，评估终止",
+                detail=(
+                    "_post_evaluate found metadata=None after ensure_registered; "
+                    "likely concurrent deletion or partial write. Re-run heartbeat "
+                    "may self-heal; investigate if it recurs."
+                ),
+            )
+        except Exception:
+            pass
+        logger.error("SLM abort: %s v%s metadata missing", skill_id, target_version)
         return
 
     if meta.status == VersionStatus.TESTING and report.is_healthy:
@@ -204,7 +229,14 @@ async def _post_evaluate(
     try:
         ver_mgr.rollback(skill_id, reason="auto-evolve: unhealthy evaluation")
     except ValueError as e:
-        logger.warning("Cannot rollback %s: %s", skill_id, e)
+        try:
+            await context.mailbox.deposit(
+                summary=f"SLM 异常：技能 {skill_id} 回滚失败，无法触发进化",
+                detail=str(e),
+            )
+        except Exception:
+            pass
+        logger.error("SLM rollback failed for %s: %s", skill_id, e)
         return
 
     new_version = await _maybe_evolve(context, ver_mgr, seg_logger, skill_id, report)

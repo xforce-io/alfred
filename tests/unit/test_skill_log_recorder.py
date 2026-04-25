@@ -839,3 +839,64 @@ class TestEnsureCorePathHasRecorder:
         assert core_with_recorder._skill_log_recorder_fallback is recorder
         # _get_recorder falls back to legacy recorder
         assert core_with_recorder._get_recorder("any_agent") is recorder
+
+
+# ---------------------------------------------------------------------------
+# Task 8: SkillLogRecorder bootstraps skill on first invocation
+# ---------------------------------------------------------------------------
+
+class TestRecorderBootstrapsViaEnsureRegistered:
+    def test_first_invocation_bootstraps_skill(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "newskill").mkdir()
+        (skills_dir / "newskill" / "SKILL.md").write_text(
+            '---\nname: newskill\nversion: "1.0.0"\n---\nbody\n'
+        )
+        logs_dir = tmp_path / "logs"
+        eval_dir = tmp_path / "eval"
+        logs_dir.mkdir()
+        eval_dir.mkdir()
+
+        recorder = SkillLogRecorder(
+            skill_logs_dir=logs_dir,
+            skills_dir=skills_dir,
+            eval_base_dir=eval_dir,
+        )
+
+        recorder.maybe_record(
+            skill_name="newskill",
+            skill_output="hello",
+            context_before="hi",
+            session_id="s1",
+        )
+
+        from src.everbot.core.slm.version_manager import VersionManager
+        ver_mgr = VersionManager(skills_dir, eval_base_dir=eval_dir)
+        assert ver_mgr.get_pointer("newskill") is not None, \
+            "ensure_registered should have bootstrapped a pointer for newskill"
+
+    def test_recorder_works_without_eval_base_dir(self, tmp_path):
+        """If eval_base_dir is None (e.g. legacy callers), recorder does
+        not attempt bootstrap — it should simply record as before."""
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "s").mkdir()
+        (skills_dir / "s" / "SKILL.md").write_text(
+            '---\nname: s\nversion: "1.0.0"\n---\nbody\n'
+        )
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+
+        recorder = SkillLogRecorder(
+            skill_logs_dir=logs_dir,
+            skills_dir=skills_dir,
+            # eval_base_dir omitted — legacy pattern
+        )
+        # Must not raise
+        recorder.maybe_record(
+            skill_name="s",
+            skill_output="ok",
+            context_before="",
+            session_id="s1",
+        )

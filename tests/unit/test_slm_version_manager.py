@@ -207,3 +207,29 @@ class TestActivateClearsEvolveCount:
         pointer = mgr.get_pointer("test-skill")
         assert pointer.consecutive_evolve_count == 0
         assert pointer.stable_version == "2.0"
+
+
+class TestCheckConsistencyNoPointer:
+    def test_no_pointer_triggers_bootstrap(self, tmp_path):
+        (tmp_path / "skills" / "foo").mkdir(parents=True)
+        (tmp_path / "skills" / "foo" / "SKILL.md").write_text(SKILL_CONTENT_V1)
+        (tmp_path / "eval").mkdir()
+        vm = VersionManager(tmp_path / "skills", eval_base_dir=tmp_path / "eval")
+
+        # Before fix: returns True silently with no pointer created.
+        # After fix: delegates to ensure_registered which bootstraps.
+        ok = vm.check_consistency("foo")
+
+        assert ok is True
+        assert vm.get_pointer("foo") is not None
+
+    def test_no_pointer_and_no_skill_md_still_returns_true(self, tmp_path):
+        """SKILL_MISSING case: nothing to bootstrap, nothing to break."""
+        (tmp_path / "eval").mkdir()
+        vm = VersionManager(tmp_path / "skills", eval_base_dir=tmp_path / "eval")
+        (tmp_path / "skills").mkdir()
+
+        ok = vm.check_consistency("ghost")
+
+        assert ok is True
+        assert vm.get_pointer("ghost") is None

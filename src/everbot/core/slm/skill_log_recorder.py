@@ -48,6 +48,7 @@ class SkillLogRecorder:
         skill_dirs: Union[Sequence[Path], Path, None] = None,
         *,
         skills_dir: Optional[Path] = None,
+        eval_base_dir: Optional[Path] = None,
     ) -> None:
         # SegmentLogger is stateless across calls (open/write/close each time)
         # so sharing one instance is safe.
@@ -62,6 +63,9 @@ class SkillLogRecorder:
             self._skill_dirs = [skills_dir]
         else:
             self._skill_dirs = []
+        # Optional eval_base_dir enables SLM bootstrap on first invocation.
+        # When None, bootstrap is skipped (legacy callers unaffected).
+        self._eval_base_dir: Optional[Path] = eval_base_dir
         # Track last recorded skill per session for backfill targeting
         self._last_skill: Dict[str, str] = {}  # session_id -> skill_id
 
@@ -108,6 +112,19 @@ class SkillLogRecorder:
         # Filter internal tools (all starting with "_")
         if skill_name.startswith("_"):
             return False
+
+        # Earliest self-heal: first time we see a skill invocation, ensure
+        # its SLM materials exist. Quietly skip if eval_base_dir is not set
+        # (legacy callers) or if bootstrap fails (we still want to log the
+        # invocation even if SLM bookkeeping hiccups).
+        if self._eval_base_dir is not None and self._skill_dirs:
+            try:
+                from .state_normalizer import ensure_registered
+                from .version_manager import VersionManager
+                vm = VersionManager(self._skill_dirs[0], eval_base_dir=self._eval_base_dir)
+                ensure_registered(vm, skill_name, repo_skills_dir=None)
+            except Exception as e:
+                logger.warning("ensure_registered failed for %s: %s", skill_name, e)
 
         normalized_output = self._normalize_skill_output(skill_output or "")
         normalized_error = error or ""

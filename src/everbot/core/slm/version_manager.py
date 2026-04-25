@@ -43,6 +43,14 @@ def read_frontmatter_version(skill_md_path: Path) -> str:
 class VersionManager:
     """Manage skill versions and per-agent evaluation data.
 
+    Concurrency invariant: publish/rollback/activate write several files
+    without per-call locking. Callers must hold the per-skill file lock
+    (slm._atomic_io.skill_lock on {eval_dir}/.lock) for the duration of
+    any write call. Today the only writer paths are ensure_registered
+    and _post_evaluate, both of which acquire the lock. Adding a new
+    caller — e.g. a CLI improver, an HTTP admin endpoint — without
+    acquiring the lock will race against them.
+
     Directory layout (per-agent eval)::
 
         ~/.alfred/agents/{agent}/skill_eval/{skill_id}/
@@ -289,12 +297,25 @@ class VersionManager:
     def check_consistency(self, skill_id: str) -> bool:
         """Check if SKILL.md frontmatter version matches current.json.
 
-        If inconsistent, fix current.json to match SKILL.md (SKILL.md is truth).
-        Returns True if was consistent, False if fixed.
+        If pointer is missing entirely, delegate to ensure_registered which
+        bootstraps the missing materials. This closes the long-standing
+        blind spot where un-published skills were treated as 'not managed'.
+
+        Returns True if was consistent (or successfully bootstrapped),
+        False if fixed.
         """
         pointer = self.get_pointer(skill_id)
         if not pointer:
-            return True  # not managed by SLM
+            # Lazy import avoids circular (state_normalizer imports VersionManager).
+            # repo_skills_dir=None is the safe choice — bootstrap will set
+            # repo_baseline=False, so rollback will never unlink the skill file.
+            from .state_normalizer import ensure_registered, RegistrationAction
+            result = ensure_registered(self, skill_id, repo_skills_dir=None)
+            return result.action in (
+                RegistrationAction.NOOP,
+                RegistrationAction.BOOTSTRAPPED,
+                RegistrationAction.SKILL_MISSING,
+            )
 
         actual = self.get_active_version(skill_id)
         if actual == pointer.current_version:

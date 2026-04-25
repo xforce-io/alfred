@@ -2,6 +2,7 @@
 用户数据统一管理
 """
 
+import os
 from pathlib import Path
 from typing import List, Dict, Optional
 import re
@@ -22,7 +23,6 @@ class UserDataManager:
     """
 
     def __init__(self, alfred_home: Optional[Path] = None):
-        import os
         if alfred_home is None:
             env_home = os.environ.get("ALFRED_HOME")
             if env_home:
@@ -85,6 +85,27 @@ class UserDataManager:
     def skills_dir(self) -> Path:
         """全局技能目录"""
         return self.alfred_home / "skills"
+
+    @property
+    def repo_skills_dir(self) -> Optional[Path]:
+        """Return the path to the alfred repo's skills/ dir if locatable.
+
+        Resolution: env var ALFRED_REPO_ROOT, then the git root of this
+        process's source file. Returns None if neither is a real directory.
+        """
+        candidate = os.environ.get("ALFRED_REPO_ROOT")
+        if candidate:
+            p = Path(candidate).expanduser() / "skills"
+            if p.is_dir():
+                return p
+        # Walk up from this file to find a dir containing pyproject.toml.
+        here = Path(__file__).resolve()
+        for parent in here.parents:
+            if (parent / "pyproject.toml").exists():
+                p = parent / "skills"
+                if p.is_dir():
+                    return p
+        return None
 
     @property
     def skill_logs_dir(self) -> Path:
@@ -183,7 +204,12 @@ class UserDataManager:
             bundled = Path(__file__).resolve().parents[3] / "skills"
             if bundled.exists():
                 skill_dirs.append(bundled)
-            return SkillLogRecorder(skill_logs_dir=logs_dir, skill_dirs=skill_dirs)
+            eval_base_dir = self.get_agent_skill_eval_dir(agent_name) if agent_name else None
+            return SkillLogRecorder(
+                skill_logs_dir=logs_dir,
+                skill_dirs=skill_dirs,
+                eval_base_dir=eval_base_dir,
+            )
         except Exception as _err:
             logger.warning("Failed to create SkillLogRecorder: %s", _err)
             return None
