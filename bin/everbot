@@ -378,6 +378,31 @@ case "${cmd}" in
 
   restart)
     ensure_dirs
+    # If no per-invocation args, delegate to the platform service manager
+    # (launchctl on macOS, systemctl --user on Linux). This avoids racing
+    # against keepalive respawn and preserves auto-start on boot/login.
+    # If args are present (e.g. --no-web, --foreground), skip — those would
+    # be ignored by the service manager; fall through to manual stop+start.
+    if (( $# == 0 )); then
+      case "$(uname -s)" in
+        Darwin)
+          _svc_label="com.alfred.everbot"
+          _svc_target="gui/$(id -u)/${_svc_label}"
+          if launchctl print "${_svc_target}" >/dev/null 2>&1; then
+            echo "Restarting via launchctl (${_svc_label})..."
+            exec launchctl kickstart -k "${_svc_target}"
+          fi
+          ;;
+        Linux)
+          _svc_unit="${EVERBOT_SYSTEMD_UNIT:-everbot.service}"
+          if systemctl --user cat "${_svc_unit}" >/dev/null 2>&1; then
+            echo "Restarting via systemctl --user ${_svc_unit}..."
+            exec systemctl --user restart "${_svc_unit}"
+          fi
+          ;;
+      esac
+      # No service manager detected — fall through to manual stop+start.
+    fi
     # restart supports: bin/everbot restart [--foreground] [start args...]
     background=1
     no_web=0
