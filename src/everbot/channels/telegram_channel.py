@@ -187,7 +187,12 @@ class TelegramChannel:
             return
 
         source_type = data.get("source_type")
-        if source_type not in ("heartbeat_delivery", "deferred_result", "inspector_push"):
+        if source_type not in (
+            "heartbeat_delivery",
+            "deferred_result",
+            "inspector_push",
+            "skill_notification",
+        ):
             return
 
         agent_name = data.get("agent_name")
@@ -203,6 +208,8 @@ class TelegramChannel:
             msg_prefix = "[Deferred Result]"
         elif source_type == "inspector_push":
             msg_prefix = None
+        elif source_type == "skill_notification":
+            msg_prefix = "[SLM]"
         else:
             msg_prefix = "[Heartbeat]"
 
@@ -253,12 +260,21 @@ class TelegramChannel:
                 tg_session_id = ChannelSessionResolver.resolve(
                     "telegram", agent_name, chat_id,
                 )
+                # Map push source_type to a stable mailbox event_type and a
+                # source-specific dedupe_key so different push families
+                # don't collapse together in the channel mailbox.
+                if source_type == "skill_notification":
+                    mirror_event_type = "skill_notification"
+                    mirror_dedupe = f"skill_notification:{agent_name}:{detail[:50]}"
+                else:
+                    mirror_event_type = "heartbeat_result"
+                    mirror_dedupe = f"heartbeat:{agent_name}:{run_id}"
                 event = build_system_event(
-                    event_type="heartbeat_result",
+                    event_type=mirror_event_type,
                     source_session_id=source_session_id,
                     summary=detail[:300],
                     detail=detail,
-                    dedupe_key=f"heartbeat:{agent_name}:{run_id}",
+                    dedupe_key=mirror_dedupe,
                 )
                 ok = await self._session_manager.deposit_mailbox_event(
                     tg_session_id, event, timeout=TIMEOUT_FAST, blocking=False,

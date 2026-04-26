@@ -58,7 +58,19 @@ class MailboxAdapter:
         self._agent_name = agent_name
 
     async def deposit(self, summary: str, detail: str) -> bool:
-        """Deposit a skill notification to user's primary session mailbox."""
+        """Deposit a skill notification to user's primary session mailbox.
+
+        Two-stage delivery, matching how Inspector emits push notifications:
+        1. Persist to primary session mailbox (durable, survives restart;
+           consumed via Background Updates on next primary chat turn).
+        2. Emit a realtime push event so user-facing channels (Telegram,
+           web SSE) deliver immediately AND mirror to their per-channel
+           session mailbox so the user sees it on their next turn there.
+
+        Without step 2, skill notifications would land in the web session
+        mailbox but the user chatting via Telegram would never see them —
+        the gap that hid SLM aborts for months.
+        """
         from ..models.system_event import build_system_event
 
         event = build_system_event(
@@ -80,7 +92,29 @@ class MailboxAdapter:
             )
             if not ok:
                 logger.warning("Failed to deposit skill notification to mailbox")
-            return ok
         except Exception as e:
             logger.warning("Mailbox deposit failed: %s", e)
-            return False
+            ok = False
+
+        # Realtime emit — best-effort, does not affect deposit success.
+        try:
+            from .events import emit
+            await emit(
+                self._primary_session_id,
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": summary,
+                    "summary": summary[:300],
+                    "detail": detail or summary,
+                    "source_type": "skill_notification",
+                    "deliver": True,
+                },
+                agent_name=self._agent_name,
+                scope="agent",
+                source_type="skill_notification",
+            )
+        except Exception as e:
+            logger.warning("Skill notification realtime emit failed: %s", e)
+
+        return ok
