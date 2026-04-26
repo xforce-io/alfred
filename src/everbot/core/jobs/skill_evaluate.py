@@ -65,7 +65,18 @@ async def run(context: SkillContext) -> str:
     skill_eval_dir = context.skill_eval_dir
 
     seg_logger = SegmentLogger(skill_logs_dir)
-    ver_mgr = VersionManager(udm.skills_dir, eval_base_dir=skill_eval_dir)
+    # Layered SLM: writable = agent workspace skills (loader layer 0).
+    # Read chain mirrors dolphin's loader priority (workspace → user → repo)
+    # so bootstrap can find baseline content even when workspace is empty.
+    agent_name = getattr(context, "agent_name", "") or ""
+    if agent_name:
+        writable = udm.get_agent_writable_skills_dir(agent_name)
+        read_dirs = udm.get_agent_read_skill_dirs(agent_name)
+    else:
+        # Fallback for legacy callers without agent_name in context.
+        writable = udm.skills_dir
+        read_dirs = [udm.skills_dir]
+    ver_mgr = VersionManager(writable, eval_base_dir=skill_eval_dir, read_skill_dirs=read_dirs)
 
     skill_ids = seg_logger.list_skills()
     if not skill_ids:
