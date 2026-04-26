@@ -65,16 +65,27 @@ class VersionManager:
     ``skills_dir/{skill_id}/.eval/`` for backward compatibility.
     """
 
-    def __init__(self, skills_dir: Path, eval_base_dir: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        skills_dir: Path,
+        eval_base_dir: Optional[Path] = None,
+        read_skill_dirs: Optional[List[Path]] = None,
+    ) -> None:
         """
         Args:
-            skills_dir: Global skill directory (for reading/writing SKILL.md).
-            eval_base_dir: Per-agent eval directory. Each skill gets a
-                subdirectory ``eval_base_dir/{skill_id}/``.
-                When ``None``, uses legacy ``skills_dir/{id}/.eval/``.
+            skills_dir: Writable skills directory. SLM publish/rollback writes
+                here. For agent workspaces this is layer 0 of the loader chain.
+            eval_base_dir: Per-agent eval directory.
+            read_skill_dirs: Read priority chain (highest first). Used by
+                _resolve_skill_md to find baseline SKILL.md content across
+                layers. Defaults to ``[skills_dir]`` for backward compat —
+                old callers see exactly the previous behavior.
         """
         self._skills_dir = skills_dir
         self._eval_base_dir = eval_base_dir
+        self._read_skill_dirs: List[Path] = (
+            list(read_skill_dirs) if read_skill_dirs else [skills_dir]
+        )
 
     def _skill_dir(self, skill_id: str) -> Path:
         return self._skills_dir / skill_id
@@ -95,6 +106,19 @@ class VersionManager:
 
     def _skill_md(self, skill_id: str) -> Path:
         return self._skill_dir(skill_id) / "SKILL.md"
+
+    def _resolve_skill_md(self, skill_id: str) -> Path:
+        """Find the live SKILL.md by walking read dirs in priority order.
+
+        Returns the highest-priority path that exists. If no layer has the
+        file, returns the writable path (caller can decide whether to
+        treat that as 'missing' or write content there).
+        """
+        for d in self._read_skill_dirs:
+            candidate = d / skill_id / "SKILL.md"
+            if candidate.exists():
+                return candidate
+        return self._skill_md(skill_id)
 
     def is_symlink_managed(self, skill_id: str) -> bool:
         """Return True if this skill's user dir or SKILL.md path traverses a

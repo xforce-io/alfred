@@ -320,3 +320,64 @@ class TestBootstrapSymlinkAware:
         assert pointer is not None
         # The bug: without symlink detection, this would be True.
         assert pointer.repo_baseline is False
+
+
+class TestVersionManagerLayeredRead:
+    def test_resolve_skill_md_prefers_writable(self, tmp_path: Path):
+        writable = tmp_path / "writable"
+        readable = tmp_path / "readable"
+        for d in (writable, readable):
+            (d / "foo").mkdir(parents=True)
+        (writable / "foo" / "SKILL.md").write_text(
+            '---\nname: foo\nversion: "writable"\n---\nbody\n'
+        )
+        (readable / "foo" / "SKILL.md").write_text(
+            '---\nname: foo\nversion: "readable"\n---\nbody\n'
+        )
+
+        vm = VersionManager(
+            writable, eval_base_dir=tmp_path / "eval",
+            read_skill_dirs=[writable, readable],
+        )
+        resolved = vm._resolve_skill_md("foo")
+        assert resolved == writable / "foo" / "SKILL.md"
+        assert read_frontmatter_version(resolved) == "writable"
+
+    def test_resolve_skill_md_falls_through_to_lower_layer(self, tmp_path: Path):
+        writable = tmp_path / "writable"
+        layer1 = tmp_path / "layer1"
+        layer2 = tmp_path / "layer2"
+        # writable empty for "bar"
+        writable.mkdir()
+        (layer2 / "bar").mkdir(parents=True)
+        (layer2 / "bar" / "SKILL.md").write_text(
+            '---\nname: bar\nversion: "from_layer2"\n---\nbody\n'
+        )
+        layer1.mkdir()  # empty too
+
+        vm = VersionManager(
+            writable, eval_base_dir=tmp_path / "eval",
+            read_skill_dirs=[writable, layer1, layer2],
+        )
+        resolved = vm._resolve_skill_md("bar")
+        assert resolved == layer2 / "bar" / "SKILL.md"
+
+    def test_resolve_falls_back_to_writable_when_nothing_exists(self, tmp_path: Path):
+        """Even when no layer has the file, _resolve returns the writable
+        path so callers can proceed with a deterministic location."""
+        writable = tmp_path / "writable"
+        writable.mkdir()
+        vm = VersionManager(
+            writable, eval_base_dir=tmp_path / "eval",
+            read_skill_dirs=[writable],
+        )
+        resolved = vm._resolve_skill_md("ghost")
+        assert resolved == writable / "ghost" / "SKILL.md"
+        assert not resolved.exists()
+
+    def test_default_read_dirs_is_writable_alone_for_back_compat(self, tmp_path: Path):
+        """Existing single-arg constructor callers must not break."""
+        writable = tmp_path / "writable"
+        writable.mkdir()
+        vm = VersionManager(writable, eval_base_dir=tmp_path / "eval")
+        assert vm._read_skill_dirs == [writable]
