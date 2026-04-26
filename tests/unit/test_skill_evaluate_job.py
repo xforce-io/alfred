@@ -504,3 +504,59 @@ class TestPostEvaluateMailboxCoverage:
             "回滚" in d["summary"] or "rollback" in d["detail"].lower()
             for d in mailbox_deposits
         ), f"no rollback-related deposit: {mailbox_deposits}"
+
+
+# ── _sanitize_llm_skill_md tests ────────────────────────────────────
+
+class TestSanitizeLLMSkillMd:
+    def _good(self) -> str:
+        return '---\nname: foo\nversion: "1.0"\n---\nbody\n'
+
+    def test_clean_input_passthrough(self):
+        from src.everbot.core.jobs.skill_evaluate import _sanitize_llm_skill_md
+        text = self._good()
+        assert _sanitize_llm_skill_md(text) == text.strip()
+
+    def test_strips_markdown_code_fence(self):
+        from src.everbot.core.jobs.skill_evaluate import _sanitize_llm_skill_md, _validate_skill_md
+        wrapped = f"```markdown\n{self._good()}```"
+        result = _sanitize_llm_skill_md(wrapped)
+        assert result.startswith("---")
+        assert _validate_skill_md(result)
+
+    def test_strips_yaml_code_fence(self):
+        from src.everbot.core.jobs.skill_evaluate import _sanitize_llm_skill_md, _validate_skill_md
+        wrapped = f"```yaml\n{self._good()}```"
+        result = _sanitize_llm_skill_md(wrapped)
+        assert _validate_skill_md(result)
+
+    def test_strips_unmarked_code_fence(self):
+        from src.everbot.core.jobs.skill_evaluate import _sanitize_llm_skill_md, _validate_skill_md
+        wrapped = f"```\n{self._good()}```"
+        result = _sanitize_llm_skill_md(wrapped)
+        assert _validate_skill_md(result)
+
+    def test_strips_preamble(self):
+        from src.everbot.core.jobs.skill_evaluate import _sanitize_llm_skill_md, _validate_skill_md
+        wrapped = f"Here is the improved skill:\n\n{self._good()}"
+        result = _sanitize_llm_skill_md(wrapped)
+        assert result.startswith("---")
+        assert _validate_skill_md(result)
+
+    def test_strips_combined_preamble_and_fence(self):
+        from src.everbot.core.jobs.skill_evaluate import _sanitize_llm_skill_md, _validate_skill_md
+        wrapped = f"Sure, here's the file:\n\n```markdown\n{self._good()}```"
+        result = _sanitize_llm_skill_md(wrapped)
+        assert _validate_skill_md(result)
+
+    def test_empty_input(self):
+        from src.everbot.core.jobs.skill_evaluate import _sanitize_llm_skill_md
+        assert _sanitize_llm_skill_md("") == ""
+        assert _sanitize_llm_skill_md(None) is None  # type: ignore[arg-type]
+
+    def test_truly_garbage_still_invalid(self):
+        from src.everbot.core.jobs.skill_evaluate import _sanitize_llm_skill_md, _validate_skill_md
+        # Sanitizer doesn't fabricate frontmatter — garbage input stays invalid.
+        garbage = "Some random LLM rambling about skills with no markdown."
+        result = _sanitize_llm_skill_md(garbage)
+        assert not _validate_skill_md(result)

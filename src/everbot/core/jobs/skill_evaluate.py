@@ -314,8 +314,12 @@ async def _maybe_evolve(
         logger.warning("Evolve LLM call failed for %s: %s", skill_id, e)
         return None
 
+    new_content = _sanitize_llm_skill_md(new_content)
     if not _validate_skill_md(new_content):
-        logger.warning("Evolve output for %s failed validation", skill_id)
+        preview = (new_content or "")[:200].replace("\n", "\\n")
+        logger.warning(
+            "Evolve output for %s failed validation. Preview: %r", skill_id, preview
+        )
         return None
 
     try:
@@ -338,6 +342,43 @@ def _build_failure_block(failed: List[tuple[EvaluationSegment, str]]) -> str:
             f"**Judge Assessment:** {reason}"
         )
     return "\n\n".join(parts)
+
+
+def _sanitize_llm_skill_md(content: str) -> str:
+    """Strip common LLM output decorations to recover the raw skill file.
+
+    LLMs frequently ignore "output ONLY the file" instructions and add:
+    - Markdown code fences (```markdown / ```yaml / ```)
+    - Conversational preamble before the frontmatter
+    - Trailing whitespace or fence
+    - Leading whitespace before the opening ``---``
+
+    We strip these so _validate_skill_md sees just the file content. If the
+    output truly has no recognizable frontmatter, validation will still
+    reject it — sanitization only handles decoration, not malformed content.
+    """
+    if not content:
+        return content
+    text = content.strip()
+
+    # Strip leading code fence (``` or ```yaml or ```markdown)
+    if text.startswith("```"):
+        first_newline = text.find("\n")
+        if first_newline != -1:
+            text = text[first_newline + 1:].lstrip()
+
+    # Strip trailing code fence
+    if text.rstrip().endswith("```"):
+        text = text.rstrip()
+        text = text[: text.rfind("```")].rstrip()
+
+    # If a preamble pushed the frontmatter further down, jump to it.
+    if not text.startswith("---"):
+        m = re.search(r"^---\s*$", text, re.MULTILINE)
+        if m:
+            text = text[m.start():]
+
+    return text
 
 
 def _validate_skill_md(content: str) -> bool:
