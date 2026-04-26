@@ -30,21 +30,47 @@ def main() -> int:
     p.add_argument("--eval-dir", required=True, type=Path)
     p.add_argument("--repo-skills-dir", default=None, type=Path)
     p.add_argument("--json", action="store_true")
+    p.add_argument(
+        "--read-skill-dirs", default=None,
+        help=(
+            "Colon-separated read priority chain for layered SKILL.md lookup."
+            " Example: '/path/workspace_skills:/path/user_skills:/path/repo_skills'."
+            " Default = single dir = --skills-dir."
+        ),
+    )
     args = p.parse_args()
 
-    vm = VersionManager(args.skills_dir, eval_base_dir=args.eval_dir)
+    read_skill_dirs = None
+    if args.read_skill_dirs:
+        read_skill_dirs = [Path(p) for p in args.read_skill_dirs.split(":") if p]
+    vm = VersionManager(
+        args.skills_dir,
+        eval_base_dir=args.eval_dir,
+        read_skill_dirs=read_skill_dirs,
+    )
+
+    candidate_dirs = [args.skills_dir]
+    if read_skill_dirs:
+        candidate_dirs = read_skill_dirs
+    seen: set[str] = set()
     results = []
-    for skill_dir in sorted(args.skills_dir.iterdir()):
-        if not skill_dir.is_dir():
+    for base in candidate_dirs:
+        if not base.exists():
             continue
-        if not (skill_dir / "SKILL.md").exists():
-            continue
-        r = ensure_registered(vm, skill_dir.name, repo_skills_dir=args.repo_skills_dir)
-        results.append({
-            "skill_id": r.skill_id,
-            "action": r.action.value,
-            "detail": r.detail,
-        })
+        for skill_dir in sorted(base.iterdir()):
+            if not skill_dir.is_dir():
+                continue
+            if skill_dir.name in seen:
+                continue
+            if not (skill_dir / "SKILL.md").exists():
+                continue
+            seen.add(skill_dir.name)
+            r = ensure_registered(vm, skill_dir.name, repo_skills_dir=args.repo_skills_dir)
+            results.append({
+                "skill_id": r.skill_id,
+                "action": r.action.value,
+                "detail": r.detail,
+            })
 
     counts = Counter(r["action"] for r in results)
     report = {

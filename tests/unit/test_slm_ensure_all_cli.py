@@ -86,3 +86,32 @@ def test_skips_non_skill_dirs(tmp_path: Path):
     out = json.loads(result.stdout)
     assert len(out["skills"]) == 1
     assert out["skills"][0]["skill_id"] == "alpha"
+
+
+def test_layered_read_dirs_arg(tmp_path: Path):
+    workspace_skills = tmp_path / "workspace_skills"
+    user_skills = tmp_path / "user_skills"
+    eval_dir = tmp_path / "eval"
+    for d in (workspace_skills, user_skills, eval_dir):
+        d.mkdir()
+    # Skill exists in user_skills (lower layer), not workspace
+    (user_skills / "alpha").mkdir()
+    (user_skills / "alpha" / "SKILL.md").write_text(
+        '---\nname: alpha\nversion: "1.0.0"\n---\nbody\n'
+    )
+
+    repo_root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [sys.executable, str(repo_root / "scripts" / "slm_ensure_all.py"),
+         "--skills-dir", str(workspace_skills),
+         "--eval-dir", str(eval_dir),
+         "--read-skill-dirs", f"{workspace_skills}:{user_skills}",
+         "--json"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    # alpha should be bootstrapped — content found in lower layer
+    assert out["summary"].get("bootstrapped") == 1
+    # And critically, the writable dir should NOT have a SKILL.md created
+    assert not (workspace_skills / "alpha" / "SKILL.md").exists()
