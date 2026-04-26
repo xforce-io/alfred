@@ -10,11 +10,13 @@ from typing import Any, Dict, Optional
 
 
 class VersionStatus(str, Enum):
+    # DRAFT is the from_dict fallback when JSON has no status key — kept
+    # defensively. Production writers always set TESTING / ACTIVE / SUSPENDED
+    # explicitly.
     DRAFT = "draft"
     TESTING = "testing"
     ACTIVE = "active"
     SUSPENDED = "suspended"
-    DEPRECATED = "deprecated"
 
 
 
