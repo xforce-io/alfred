@@ -381,3 +381,43 @@ class TestVersionManagerLayeredRead:
         writable.mkdir()
         vm = VersionManager(writable, eval_base_dir=tmp_path / "eval")
         assert vm._read_skill_dirs == [writable]
+
+
+class TestRollbackWithLayeredWritable:
+    def test_rollback_does_not_touch_lower_layer_when_writable_is_workspace(
+        self, tmp_path: Path
+    ):
+        """The exact production scenario: ~/.alfred/skills/<id> is a symlink
+        to <repo>/skills/<id>. With layered writable=workspace, rollback
+        operates on workspace only. Symlinked layer is untouched."""
+        repo = tmp_path / "repo"
+        global_dir = tmp_path / "global"
+        workspace = tmp_path / "workspace"
+        for d in (global_dir, workspace):
+            d.mkdir()
+        (repo / "p").mkdir(parents=True)
+        repo_md = repo / "p" / "SKILL.md"
+        repo_md.write_text('---\nname: p\nversion: "1.0"\n---\nbaseline\n')
+        # global/p is a symlink to repo/p — exactly the production layout
+        (global_dir / "p").symlink_to(repo / "p")
+
+        vm = VersionManager(
+            workspace, eval_base_dir=tmp_path / "eval",
+            read_skill_dirs=[workspace, global_dir, repo],
+        )
+        # Bootstrap so a pointer+snapshot exist
+        from src.everbot.core.slm.state_normalizer import ensure_registered
+        ensure_registered(vm, "p", repo_skills_dir=None)
+
+        # Now publish an evolved version (writes to workspace)
+        evolved = '---\nname: p\nversion: "1.0-evolve-x"\n---\nimproved\n'
+        vm.publish("p", "1.0-evolve-x", evolved)
+        assert (workspace / "p" / "SKILL.md").exists()
+        # repo + symlink unchanged
+        assert repo_md.read_text().startswith('---\nname: p\nversion: "1.0"')
+
+        # Rollback the evolved version — writable should change/remove,
+        # repo MUST remain pristine.
+        vm.rollback("p", reason="test")
+        assert repo_md.read_text().startswith('---\nname: p\nversion: "1.0"'), \
+            "repo file must NOT be modified by rollback"
