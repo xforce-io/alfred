@@ -60,7 +60,7 @@ class StateInspector:
         self._vm = ver_mgr
 
     def inspect(self, skill_id: str) -> FileState:
-        skill_md = self._vm._skill_md(skill_id)
+        skill_md = self._vm._resolve_skill_md(skill_id)
         skill_md_exists = skill_md.exists()
         skill_md_version = (
             read_frontmatter_version(skill_md) if skill_md_exists else None

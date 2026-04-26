@@ -231,3 +231,35 @@ class TestEnsureRegisteredRepair:
         meta = vm.get_metadata("foo", "1.0.0")
         assert meta is not None
         assert meta.status == VersionStatus.ACTIVE
+
+
+class TestStateInspectorLayered:
+    def test_skill_md_exists_when_only_lower_layer_has_it(self, tmp_path: Path):
+        """The 'exists' question is about the loader's perspective: any
+        layer counts. Writable layer empty + lower layer has it = exists."""
+        writable = tmp_path / "writable"
+        readable = tmp_path / "readable"
+        writable.mkdir()
+        (readable / "foo").mkdir(parents=True)
+        (readable / "foo" / "SKILL.md").write_text(
+            '---\nname: foo\nversion: "1.0.0"\n---\nbody\n'
+        )
+
+        vm = VersionManager(
+            writable, eval_base_dir=tmp_path / "eval",
+            read_skill_dirs=[writable, readable],
+        )
+        state = StateInspector(vm).inspect("foo")
+        assert state.skill_md_exists is True
+        assert state.skill_md_version == "1.0.0"
+
+    def test_skill_md_missing_when_no_layer_has_it(self, tmp_path: Path):
+        writable = tmp_path / "writable"
+        writable.mkdir()
+        vm = VersionManager(
+            writable, eval_base_dir=tmp_path / "eval",
+            read_skill_dirs=[writable],
+        )
+        state = StateInspector(vm).inspect("ghost")
+        assert state.skill_md_exists is False
+        assert state.skill_md_version is None
