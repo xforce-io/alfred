@@ -77,7 +77,6 @@ class TestVersionManager:
         meta = mgr.get_metadata("test-skill", "1.0")
         assert meta is not None
         assert meta.status == VersionStatus.TESTING
-        assert meta.verification_phase == "dense"
 
         # Pointer created
         ptr = mgr.get_pointer("test-skill")
@@ -141,7 +140,6 @@ class TestVersionManager:
 
         meta = mgr.get_metadata("test-skill", "1.0")
         assert meta.status == VersionStatus.ACTIVE
-        assert meta.verification_phase == "full"
 
         ptr = mgr.get_pointer("test-skill")
         assert ptr.stable_version == "1.0"

@@ -186,7 +186,6 @@ def _repair(
             version=version,
             created_at=datetime.now(timezone.utc).isoformat(),
             status=VersionStatus.ACTIVE,
-            verification_phase="full",
             eval_summary=eval_summary,
         )
         atomic_write_text(ver_dir / "metadata.json", meta.to_json())
@@ -245,7 +244,6 @@ def _bootstrap(
         version=version,
         created_at=datetime.now(timezone.utc).isoformat(),
         status=VersionStatus.ACTIVE,
-        verification_phase="full",
         eval_summary=eval_summary,
     )
     atomic_write_text(ver_dir / "metadata.json", meta.to_json())

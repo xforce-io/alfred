@@ -330,7 +330,6 @@ class TestSLMSuccessfulUpgrade:
 
         meta_v2 = ver_mgr.get_metadata("example-skill", "2.0")
         assert meta_v2.status == VersionStatus.ACTIVE
-        assert meta_v2.verification_phase == "full"
         assert meta_v2.eval_summary["satisfaction_score"] == 0.92
 
         ptr = ver_mgr.get_pointer("example-skill")

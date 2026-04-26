@@ -423,7 +423,6 @@ class TestSLMRealLLMLifecycle:
 
         meta_v2 = ver_mgr.get_metadata("example-skill", "2.0")
         assert meta_v2.status == VersionStatus.ACTIVE
-        assert meta_v2.verification_phase == "full"
 
         ptr = ver_mgr.get_pointer("example-skill")
         assert ptr.current_version == "2.0"

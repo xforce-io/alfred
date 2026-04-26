@@ -234,7 +234,6 @@ class VersionManager:
             version=version,
             created_at=datetime.now(timezone.utc).isoformat(),
             status=VersionStatus.TESTING,
-            verification_phase="dense",
         )
         (ver_dir / "metadata.json").write_text(meta.to_json(), encoding="utf-8")
 
@@ -275,12 +274,11 @@ class VersionManager:
             (ver_dir / "metadata.json").write_text(meta.to_json(), encoding="utf-8")
 
     def activate(self, skill_id: str, version: str) -> None:
-        """Mark a version as active (passed all verification phases)."""
+        """Mark a version as active (passed is_promotable evaluation)."""
         meta = self.get_metadata(skill_id, version)
         if not meta:
             raise ValueError(f"Version {version} not found for {skill_id}")
         meta.status = VersionStatus.ACTIVE
-        meta.verification_phase = "full"
         ver_dir = self._version_dir(skill_id, version)
         (ver_dir / "metadata.json").write_text(meta.to_json(), encoding="utf-8")
 

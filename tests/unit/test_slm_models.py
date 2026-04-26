@@ -108,7 +108,6 @@ class TestVersionMetadata:
             version="2.0",
             created_at="2026-03-17T00:00:00Z",
             status=VersionStatus.ACTIVE,
-            verification_phase="full",
             eval_summary={"critical_issue_rate": 0.02, "satisfaction_score": 0.81},
         )
         json_str = meta.to_json()
@@ -120,9 +119,20 @@ class TestVersionMetadata:
     def test_minimal(self):
         meta = VersionMetadata(version="1.0", created_at="now")
         d = meta.to_dict()
-        assert "verification_phase" not in d
         assert "eval_summary" not in d
         assert "suspended_reason" not in d
+
+    def test_legacy_metadata_with_verification_phase_is_loadable(self):
+        """Old metadata.json files in production may carry the now-removed
+        `verification_phase` field. Loading should ignore it gracefully,
+        not error."""
+        legacy_json = (
+            '{"version": "1.0", "created_at": "now", "status": "active", '
+            '"verification_phase": "full"}'
+        )
+        meta = VersionMetadata.from_json(legacy_json)
+        assert meta.version == "1.0"
+        assert meta.status == VersionStatus.ACTIVE
 
 
 class TestCurrentPointer:

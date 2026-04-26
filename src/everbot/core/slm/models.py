@@ -193,7 +193,6 @@ class VersionMetadata:
     version: str
     created_at: str  # ISO 8601
     status: VersionStatus = VersionStatus.DRAFT
-    verification_phase: str = ""  # dense / medium / extended / full
     eval_summary: Optional[Dict[str, float]] = None
     suspended_reason: str = ""
 
@@ -203,8 +202,6 @@ class VersionMetadata:
             "created_at": self.created_at,
             "status": self.status.value,
         }
-        if self.verification_phase:
-            d["verification_phase"] = self.verification_phase
         if self.eval_summary:
             d["eval_summary"] = self.eval_summary
         if self.suspended_reason:
@@ -220,7 +217,6 @@ class VersionMetadata:
             version=str(data.get("version", "")),
             created_at=str(data.get("created_at", "")),
             status=VersionStatus(data.get("status", "draft")),
-            verification_phase=str(data.get("verification_phase", "")),
             eval_summary=data.get("eval_summary"),
             suspended_reason=str(data.get("suspended_reason", "")),
         )
