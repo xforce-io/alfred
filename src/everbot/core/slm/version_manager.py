@@ -348,6 +348,10 @@ class VersionManager:
             if not snapshot.exists():
                 raise ValueError(f"Stable snapshot missing: {skill_id} v{stable}")
             skill_md = self._skill_md(skill_id)
+            # Ensure the writable layer's <skills_dir>/<skill_id>/ exists.
+            # With layered SLM, the writable dir is the agent workspace which
+            # is typically empty until the first publish/rollback writes here.
+            skill_md.parent.mkdir(parents=True, exist_ok=True)
             skill_md.write_text(snapshot.read_text(encoding="utf-8"), encoding="utf-8")
             rolled_to = stable
 
