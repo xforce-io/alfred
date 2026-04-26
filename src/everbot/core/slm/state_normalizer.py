@@ -170,7 +170,7 @@ def _repair(
     action = RegistrationAction.NOOP
 
     if not before.snapshot_exists:
-        skill_content = ver_mgr._skill_md(skill_id).read_text(encoding="utf-8")
+        skill_content = ver_mgr._resolve_skill_md(skill_id).read_text(encoding="utf-8")
         atomic_write_text(ver_dir / "skill.md", skill_content)
         action = RegistrationAction.REPAIRED_SNAPSHOT
 
@@ -211,7 +211,7 @@ def _bootstrap(
     inspector: StateInspector,
 ) -> RegistrationResult:
     version = before.skill_md_version or "baseline"
-    skill_md_path = ver_mgr._skill_md(skill_id)
+    skill_md_path = ver_mgr._resolve_skill_md(skill_id)
     skill_content = skill_md_path.read_text(encoding="utf-8")
 
     # D2-A: repo_baseline only if the skill also exists in repo's skills/.

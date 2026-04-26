@@ -263,3 +263,74 @@ class TestStateInspectorLayered:
         state = StateInspector(vm).inspect("ghost")
         assert state.skill_md_exists is False
         assert state.skill_md_version is None
+
+
+class TestBootstrapLayered:
+    def test_bootstrap_reads_baseline_from_lower_layer_does_not_write_writable(
+        self, tmp_path: Path
+    ):
+        """Bootstrap of a skill that lives only in a lower read layer:
+        - snapshot copies content from the lower layer
+        - pointer/metadata are written to eval dir
+        - writable layer's SKILL.md is NOT created (we don't want to
+          materialize an unwanted override at the highest priority)."""
+        writable = tmp_path / "writable"
+        readable = tmp_path / "readable"
+        writable.mkdir()
+        (readable / "qux").mkdir(parents=True)
+        (readable / "qux" / "SKILL.md").write_text(
+            '---\nname: qux\nversion: "1.0.0"\n---\nbaseline body\n'
+        )
+
+        vm = VersionManager(
+            writable, eval_base_dir=tmp_path / "eval",
+            read_skill_dirs=[writable, readable],
+        )
+        result = ensure_registered(vm, "qux", repo_skills_dir=None)
+
+        assert result.action == RegistrationAction.BOOTSTRAPPED
+
+        # Pointer + metadata + snapshot all materialized in eval dir.
+        pointer = vm.get_pointer("qux")
+        assert pointer.current_version == "1.0.0"
+        snap = tmp_path / "eval" / "qux" / "versions" / "v1.0.0" / "skill.md"
+        assert snap.exists()
+        assert "baseline body" in snap.read_text()
+
+        # CRITICAL: writable layer untouched — no unwanted override.
+        assert not (writable / "qux" / "SKILL.md").exists()
+
+
+class TestRepairLayered:
+    def test_repair_reads_baseline_from_lower_layer_when_writable_empty(
+        self, tmp_path: Path
+    ):
+        """If pointer exists but snapshot is missing, _repair must be able
+        to reconstruct the snapshot from a lower read layer (writable
+        empty is the normal state for un-evolved skills)."""
+        writable = tmp_path / "writable"
+        readable = tmp_path / "readable"
+        writable.mkdir()
+        (readable / "rep").mkdir(parents=True)
+        (readable / "rep" / "SKILL.md").write_text(
+            '---\nname: rep\nversion: "1.0.0"\n---\nbaseline content\n'
+        )
+
+        vm = VersionManager(
+            writable, eval_base_dir=tmp_path / "eval",
+            read_skill_dirs=[writable, readable],
+        )
+        # First bootstrap to get pointer + metadata + snapshot
+        result = ensure_registered(vm, "rep", repo_skills_dir=None)
+        assert result.action == RegistrationAction.BOOTSTRAPPED
+
+        # Now delete the snapshot to force _repair on next ensure
+        snap = tmp_path / "eval" / "rep" / "versions" / "v1.0.0" / "skill.md"
+        snap.unlink()
+
+        # Second call: pointer exists, snapshot missing, writable empty.
+        # _repair must fall through to the readable layer to reconstruct.
+        result = ensure_registered(vm, "rep", repo_skills_dir=None)
+        assert result.action == RegistrationAction.REPAIRED_SNAPSHOT
+        assert snap.exists()
+        assert "baseline content" in snap.read_text()
