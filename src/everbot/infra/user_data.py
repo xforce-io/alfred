@@ -120,6 +120,29 @@ class UserDataManager:
         """Per-agent SLM evaluation data directory (version pointers + reports)."""
         return self.get_agent_dir(agent_name) / "skill_eval"
 
+    def get_agent_writable_skills_dir(self, agent_name: str) -> Path:
+        """Per-agent writable skills directory (= dolphin loader layer 0).
+
+        SLM evolved versions land here. The loader already prioritizes this
+        path over `~/.alfred/skills/` and `<repo>/skills/`, so writes here
+        cleanly override lower-layer baselines without touching them.
+        """
+        return self.get_agent_dir(agent_name) / "skills"
+
+    def get_agent_read_skill_dirs(self, agent_name: str) -> List[Path]:
+        """Skill resolution priority chain (highest priority first).
+
+        Mirrors the order dolphin's SkillLoader uses: agent workspace →
+        user global → repo bundled. SLM uses this chain for read-only
+        baseline lookup; for writes it uses get_agent_writable_skills_dir
+        only (= the chain's first entry).
+        """
+        dirs: List[Path] = [self.get_agent_writable_skills_dir(agent_name), self.skills_dir]
+        repo = self.repo_skills_dir
+        if repo is not None:
+            dirs.append(repo)
+        return dirs
+
     @property
     def trajectories_dir(self) -> Path:
         """执行轨迹目录"""
