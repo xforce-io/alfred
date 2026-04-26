@@ -206,18 +206,24 @@ async def _post_evaluate(
         logger.error("SLM abort: %s v%s metadata missing", skill_id, target_version)
         return
 
-    if meta.status == VersionStatus.TESTING and report.is_healthy:
+    if meta.status == VersionStatus.TESTING and report.is_promotable:
         ver_mgr.activate(skill_id, target_version)
         try:
             await context.mailbox.deposit(
                 summary=f"技能 {skill_id} v{target_version} 验证通过，已生效",
-                detail="",
+                detail=(
+                    f"segments={report.segment_count}, "
+                    f"satisfaction={report.mean_satisfaction:.2f}, "
+                    f"critical_rate={report.critical_issue_rate:.0%}"
+                ),
             )
         except Exception:
             pass
         return
 
     if report.is_healthy:
+        # Healthy but not yet promotable (TESTING with too few segments, or
+        # ACTIVE which is already at its target state). Stay live, observe.
         return
 
     pointer = ver_mgr.get_pointer(skill_id)

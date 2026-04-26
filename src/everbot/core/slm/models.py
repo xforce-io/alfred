@@ -105,8 +105,37 @@ class EvalReport:
 
     @property
     def is_healthy(self) -> bool:
-        """No critical issues and satisfaction above minimum threshold."""
+        """No critical issues and satisfaction above minimum threshold.
+
+        Used as the rollback trigger: if False, _post_evaluate routes the
+        skill into rollback + evolve. NOT used as the promotion threshold —
+        see is_promotable for that, which requires statistical confidence.
+        """
         return self.critical_issue_rate <= 0.05 and self.mean_satisfaction >= 0.6
+
+    @property
+    def is_promotable(self) -> bool:
+        """TESTING → ACTIVE promotion criterion: stricter than is_healthy.
+
+        Activation locks the version in as the new stable baseline (clears
+        consecutive_evolve_count, makes it the rollback target for future
+        evolves). Promoting on a single lucky-good evaluation creates churn:
+        the next eval might surface a regression and trigger another evolve
+        cycle, wasting LLM budget.
+
+        Three guards:
+        - segment_count >= MIN_PROMOTION_SEGMENTS (3): require enough samples
+          for the mean to be statistically meaningful, not a single coin flip.
+        - critical_issue_rate == 0: any critical issue is disqualifying;
+          the 5% slack in is_healthy is for "OK to keep using" not "OK to
+          permanently bless."
+        - mean_satisfaction >= 0.7: stricter bar than is_healthy's 0.6 floor.
+        """
+        return (
+            self.segment_count >= 3
+            and self.critical_issue_rate == 0.0
+            and self.mean_satisfaction >= 0.7
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)

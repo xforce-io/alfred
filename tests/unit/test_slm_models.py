@@ -158,3 +158,47 @@ class TestCurrentPointerEvolveCount:
         data = {"current_version": "1.0", "stable_version": "0.9", "repo_baseline": False}
         pointer = CurrentPointer.from_dict(data)
         assert pointer.consecutive_evolve_count == 0
+
+
+# ── is_promotable threshold tests ──────────────────────────────────
+
+class TestIsPromotable:
+    def _report(self, *, segments: int, sat: float, crit_rate: float):
+        from src.everbot.core.slm.models import EvalReport
+        return EvalReport(
+            skill_id="x", skill_version="1.0", evaluated_at="2026-04-26T00:00:00",
+            segment_count=segments,
+            critical_issue_count=int(round(segments * crit_rate)),
+            critical_issue_rate=crit_rate,
+            mean_satisfaction=sat,
+            results=[],
+        )
+
+    def test_promotable_meets_all_three_guards(self):
+        r = self._report(segments=3, sat=0.7, crit_rate=0.0)
+        assert r.is_promotable is True
+
+    def test_segments_below_minimum_blocks(self):
+        # Even with perfect scores, < 3 segments not enough.
+        r = self._report(segments=2, sat=1.0, crit_rate=0.0)
+        assert r.is_promotable is False
+        assert r.is_healthy is True  # but still healthy enough not to rollback
+
+    def test_one_critical_blocks_promotion(self):
+        # 1/3 critical → rate 0.333. Even though sat is high.
+        r = self._report(segments=3, sat=0.9, crit_rate=0.333)
+        assert r.is_promotable is False
+        assert r.is_healthy is False  # would also trigger rollback
+
+    def test_low_satisfaction_blocks_promotion(self):
+        # 0.6 sat = healthy, but < 0.7 promotion bar.
+        r = self._report(segments=10, sat=0.6, crit_rate=0.0)
+        assert r.is_promotable is False
+        assert r.is_healthy is True  # OK for not-rolling-back
+
+    def test_promotable_implies_healthy(self):
+        # Logical sanity: any promotable report should also be healthy.
+        for segs, sat in [(3, 0.7), (5, 0.85), (10, 1.0)]:
+            r = self._report(segments=segs, sat=sat, crit_rate=0.0)
+            assert r.is_promotable is True
+            assert r.is_healthy is True

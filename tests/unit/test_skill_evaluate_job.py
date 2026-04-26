@@ -560,3 +560,46 @@ class TestSanitizeLLMSkillMd:
         garbage = "Some random LLM rambling about skills with no markdown."
         result = _sanitize_llm_skill_md(garbage)
         assert not _validate_skill_md(result)
+
+
+@pytest.mark.asyncio
+async def test_testing_healthy_but_not_promotable_does_not_activate(tmp_path: Path):
+    """Healthy with too few segments (< 3) is NOT enough to promote.
+
+    Previously: `if status==TESTING and is_healthy: activate()` — single
+    lucky-good evaluation (e.g. 1 segment with sat=0.85) auto-promoted to
+    ACTIVE, locking in stable_version on noisy evidence.
+
+    After is_promotable gate: the version stays TESTING, the loader keeps
+    serving it, and we wait for more evaluation cycles to confirm.
+    """
+    skills_dir = tmp_path / "skills"
+    logs_dir = tmp_path / "skill_logs"
+    eval_dir = tmp_path / "skill_eval"
+    skills_dir.mkdir()
+
+    ver_mgr, seg_logger = _setup_skill_with_version(
+        skills_dir, logs_dir, eval_dir, "my-skill", "1.0-evolve-202604", VersionStatus.TESTING,
+    )
+
+    context = MagicMock()
+    context.llm = MagicMock()
+    context.mailbox = AsyncMock()
+    context.mailbox.deposit = AsyncMock(return_value=True)
+
+    # Healthy (sat=0.85, crit=0%) but only 1 segment — below promotion floor.
+    one_seg_healthy = _make_healthy_report("my-skill", "1.0-evolve-202604", n=1)
+
+    with patch("src.everbot.core.jobs.skill_evaluate.evaluate_skill", new=AsyncMock(return_value=one_seg_healthy)):
+        await _evaluate_one(context, seg_logger, ver_mgr, "my-skill", tmp_path / "sessions")
+
+    # Critical assertion: version stays TESTING, NOT promoted.
+    meta = ver_mgr.get_metadata("my-skill", "1.0-evolve-202604")
+    assert meta.status == VersionStatus.TESTING, \
+        f"single-segment healthy must NOT promote, got status={meta.status}"
+
+    # No "verification passed" mailbox should have fired.
+    deposits = context.mailbox.deposit.await_args_list
+    summaries = [str(c.kwargs.get("summary", "")) for c in deposits]
+    assert not any("验证通过" in s for s in summaries), \
+        f"Unexpected promotion notification: {summaries}"
