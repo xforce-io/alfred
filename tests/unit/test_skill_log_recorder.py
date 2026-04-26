@@ -900,3 +900,40 @@ class TestRecorderBootstrapsViaEnsureRegistered:
             context_before="",
             session_id="s1",
         )
+
+
+class TestRecorderUsesLayeredVersionManager:
+    def test_ensure_registered_finds_skill_in_lower_layer(self, tmp_path: Path):
+        """If a skill exists only in the lower read layer (e.g., user-global
+        symlink to repo) and not the writable layer, the recorder's
+        bootstrap path must still find and register it."""
+        workspace_skills = tmp_path / "workspace_skills"
+        user_skills = tmp_path / "user_skills"
+        eval_dir = tmp_path / "eval"
+        logs_dir = tmp_path / "logs"
+        for d in (workspace_skills, user_skills, eval_dir, logs_dir):
+            d.mkdir()
+        (user_skills / "newskill").mkdir()
+        (user_skills / "newskill" / "SKILL.md").write_text(
+            '---\nname: newskill\nversion: "1.0.0"\n---\nbody\n'
+        )
+
+        recorder = SkillLogRecorder(
+            skill_logs_dir=logs_dir,
+            skill_dirs=[workspace_skills, user_skills],
+            eval_base_dir=eval_dir,
+        )
+        recorder.maybe_record(
+            skill_name="newskill",
+            skill_output="hello",
+            context_before="hi",
+            session_id="s1",
+        )
+
+        from src.everbot.core.slm.version_manager import VersionManager
+        vm = VersionManager(
+            workspace_skills, eval_base_dir=eval_dir,
+            read_skill_dirs=[workspace_skills, user_skills],
+        )
+        assert vm.get_pointer("newskill") is not None, \
+            "ensure_registered should have bootstrapped from the lower read layer"

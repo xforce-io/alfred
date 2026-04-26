@@ -118,10 +118,15 @@ class SkillLogRecorder:
         # (legacy callers) or if bootstrap fails (we still want to log the
         # invocation even if SLM bookkeeping hiccups).
         if self._eval_base_dir is not None and self._skill_dirs:
+            from .state_normalizer import ensure_registered
+            from .version_manager import VersionManager
+            # Writable = highest-priority dir; read chain = full priority list.
+            vm = VersionManager(
+                self._skill_dirs[0],
+                eval_base_dir=self._eval_base_dir,
+                read_skill_dirs=list(self._skill_dirs),
+            )
             try:
-                from .state_normalizer import ensure_registered
-                from .version_manager import VersionManager
-                vm = VersionManager(self._skill_dirs[0], eval_base_dir=self._eval_base_dir)
                 ensure_registered(vm, skill_name, repo_skills_dir=None)
             except Exception as e:
                 logger.warning("ensure_registered failed for %s: %s", skill_name, e)
