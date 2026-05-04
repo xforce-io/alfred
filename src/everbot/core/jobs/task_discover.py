@@ -7,7 +7,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
 
@@ -20,8 +20,7 @@ logger = logging.getLogger(__name__)
 
 _STATE_FILENAME = ".task_discover_state.json"
 _SIMILARITY_THRESHOLD = 0.5
-_MAX_PENDING_TASKS = 3
-_EXPIRE_DAYS = 7
+_MAX_PENDING_TASKS = 30
 
 
 @dataclass
@@ -33,14 +32,6 @@ class DiscoveredTask:
     urgency: str  # high | medium | low
     source_session_id: str
     discovered_at: str
-    expires_at: str
-
-    @property
-    def expired(self) -> bool:
-        try:
-            return datetime.fromisoformat(self.expires_at) < datetime.now(timezone.utc)
-        except (ValueError, TypeError):
-            return False
 
     def to_dict(self) -> dict:
         return {
@@ -49,7 +40,6 @@ class DiscoveredTask:
             "urgency": self.urgency,
             "source_session_id": self.source_session_id,
             "discovered_at": self.discovered_at,
-            "expires_at": self.expires_at,
         }
 
     @classmethod
@@ -60,7 +50,6 @@ class DiscoveredTask:
             urgency=data.get("urgency", "medium"),
             source_session_id=data.get("source_session_id", ""),
             discovered_at=data.get("discovered_at", ""),
-            expires_at=data.get("expires_at", ""),
         )
 
 
@@ -131,15 +120,13 @@ async def run(context: SkillContext) -> str:
 
     # LLM analysis
     task_state = TaskDiscoverState.load(context.workspace_path)
-    existing_titles = [t.title for t in task_state.pending_tasks if not t.expired]
+    existing_titles = [t.title for t in task_state.pending_tasks]
     new_tasks = await _discover_tasks(context.llm, digests, existing_titles)
 
-    # Clean expired + append new + hard limit
-    task_state.pending_tasks = [t for t in task_state.pending_tasks if not t.expired]
     if new_tasks:
-        # Dedup against existing
         new_tasks = _dedup_tasks(new_tasks, task_state.pending_tasks)
-        task_state.pending_tasks = (task_state.pending_tasks + new_tasks)[:_MAX_PENDING_TASKS]
+        # LRU: newest at tail; keep most recent _MAX_PENDING_TASKS
+        task_state.pending_tasks = (task_state.pending_tasks + new_tasks)[-_MAX_PENDING_TASKS:]
         if new_tasks:
             await context.mailbox.deposit(
                 summary=f"发现 {len(new_tasks)} 个待办任务",
@@ -192,7 +179,6 @@ Output format:
     response = await llm.complete(prompt, system="You are a task discovery engine. Output valid JSON only.")
     result = parse_json_response(response)
     now = datetime.now(timezone.utc)
-    expires = now + timedelta(days=_EXPIRE_DAYS)
 
     tasks = []
     for item in result.get("tasks", [])[:3]:
@@ -202,7 +188,6 @@ Output format:
             urgency=item.get("urgency", "medium"),
             source_session_id="",
             discovered_at=now.isoformat(),
-            expires_at=expires.isoformat(),
         ))
     return tasks
 

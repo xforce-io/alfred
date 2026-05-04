@@ -411,7 +411,7 @@ class TestTaskDiscoverState:
 
     def test_save_and_load(self, tmp_path):
         from src.everbot.core.jobs.task_discover import TaskDiscoverState, DiscoveredTask
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timezone
 
         now = datetime.now(timezone.utc)
         task = DiscoveredTask(
@@ -420,7 +420,6 @@ class TestTaskDiscoverState:
             urgency="high",
             source_session_id="web_session_test_001",
             discovered_at=now.isoformat(),
-            expires_at=(now + timedelta(days=7)).isoformat(),
         )
         state = TaskDiscoverState(pending_tasks=[task])
         state.save(tmp_path)
@@ -428,19 +427,30 @@ class TestTaskDiscoverState:
         loaded = TaskDiscoverState.load(tmp_path)
         assert len(loaded.pending_tasks) == 1
         assert loaded.pending_tasks[0].title == "Fix login bug"
-        assert not loaded.pending_tasks[0].expired
 
-    def test_expired_task(self):
-        from src.everbot.core.jobs.task_discover import DiscoveredTask
-        task = DiscoveredTask(
-            title="Old task",
-            description="",
-            urgency="low",
-            source_session_id="",
-            discovered_at="2020-01-01T00:00:00+00:00",
-            expires_at="2020-01-08T00:00:00+00:00",
+    def test_load_ignores_legacy_expires_at(self, tmp_path):
+        """Existing state files may still carry expires_at; loader must ignore it."""
+        import json
+        from src.everbot.core.jobs.task_discover import TaskDiscoverState
+
+        legacy = {
+            "pending_tasks": [
+                {
+                    "title": "legacy task",
+                    "description": "",
+                    "urgency": "medium",
+                    "source_session_id": "",
+                    "discovered_at": "2020-01-01T00:00:00+00:00",
+                    "expires_at": "2020-01-08T00:00:00+00:00",
+                }
+            ]
+        }
+        (tmp_path / ".task_discover_state.json").write_text(
+            json.dumps(legacy), encoding="utf-8"
         )
-        assert task.expired
+        loaded = TaskDiscoverState.load(tmp_path)
+        assert len(loaded.pending_tasks) == 1
+        assert loaded.pending_tasks[0].title == "legacy task"
 
 
 # ── Skill Autonomy Tests (no scanner gate) ────────────────────
