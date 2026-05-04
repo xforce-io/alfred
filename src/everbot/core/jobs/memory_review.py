@@ -5,7 +5,7 @@ Strategy: consolidate existing entries, then compress to USER.md profile.
 """
 
 import logging
-from typing import List
+from typing import List, Optional
 
 from ..runtime.skill_context import SkillContext
 from ..scanners.session_scanner import SessionScanner
@@ -15,8 +15,14 @@ from .llm_utils import parse_json_response, parse_system_dph
 logger = logging.getLogger(__name__)
 
 
-async def run(context: SkillContext) -> str:
-    """Execute memory review: consolidate entries and compress to profile."""
+async def run(context: SkillContext) -> Optional[str]:
+    """Execute memory review: consolidate entries and compress to profile.
+
+    Returns None — this job is silent by contract; review/compression
+    stats are recorded via logger only and never surfaced to the user.
+    Integrity errors still log at ERROR but are not pushed: the next
+    review run self-heals and a persistent failure shows up in metrics.
+    """
     scanner = SessionScanner(context.sessions_dir)
     state = ReflectionState.load(context.workspace_path)
 
@@ -27,7 +33,7 @@ async def run(context: SkillContext) -> str:
     else:
         sessions = scanner.get_reviewable_sessions(skill_wm, agent_name=context.agent_name)
     if not sessions:
-        return "No sessions to review"
+        return None
 
     # 2. Extract digests, skip failed sessions
     digests, digest_session_ids = [], []
@@ -42,7 +48,7 @@ async def run(context: SkillContext) -> str:
             continue
 
     if not digests:
-        return "All sessions failed to extract"
+        return None
 
     # 3. Consolidation analysis (single LLM call)
     existing = context.memory_manager.load_entries()
@@ -55,7 +61,7 @@ async def run(context: SkillContext) -> str:
         review_stats = context.memory_manager.apply_review(review)
     except IntegrityError as e:
         logger.error("Memory consolidation integrity violation: %s", e)
-        return f"IntegrityError: {e}"
+        return None
 
     # Defense against concurrent writes: apply_review holds flock but another
     # process_session_end could have inserted entries between our load and save.
@@ -73,7 +79,8 @@ async def run(context: SkillContext) -> str:
     if last_successful_session:
         state.set_watermark("memory-review", last_successful_session.updated_at)
         state.save(context.workspace_path)
-    return f"Memory review: {review_stats}, profile: {compress_result}"
+    logger.info("Memory review: %s, profile: %s", review_stats, compress_result)
+    return None
 
 
 async def _analyze_memory_consolidation(llm, digests: List[str], existing_entries) -> dict:

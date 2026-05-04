@@ -12,7 +12,7 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 
 from ..runtime.skill_context import SkillContext
 from ..slm.judge import evaluate_skill
@@ -56,8 +56,15 @@ produce an improved version.
 """
 
 
-async def run(context: SkillContext) -> str:
-    """Evaluate all skills that have accumulated new entries since last report."""
+async def run(context: SkillContext) -> Optional[str]:
+    """Evaluate all skills that have accumulated new entries since last report.
+
+    Returns None for the typical silent path — actionable skill state
+    changes (promoted / suspended / improved / rolled back) reach the
+    user via ``context.mailbox.deposit`` inside ``_post_evaluate``. Only
+    persistent LLM unavailability is surfaced here, since it indicates a
+    degraded mode the user should know about.
+    """
     from ...infra.user_data import get_user_data_manager
 
     udm = get_user_data_manager()
@@ -81,7 +88,7 @@ async def run(context: SkillContext) -> str:
 
     skill_ids = seg_logger.list_skills()
     if not skill_ids:
-        return "HEARTBEAT_OK No skill logs found"
+        return None
 
     from .llm_errors import LLMTransientError, LLMConfigError
 
@@ -107,11 +114,10 @@ async def run(context: SkillContext) -> str:
         except Exception as e:
             logger.warning("Cleanup failed for %s: %s", skill_id, e)
 
-    summary = f"Evaluated {evaluated}/{len(skill_ids)} skills"
+    logger.info("Evaluated %d/%d skills", evaluated, len(skill_ids))
     if unavailable:
-        summary += f", skipped {unavailable} due to LLM unavailability"
-        return summary
-    return f"HEARTBEAT_OK {summary}"
+        return f"Evaluated {evaluated}/{len(skill_ids)} skills, skipped {unavailable} due to LLM unavailability"
+    return None
 
 
 async def _evaluate_one(

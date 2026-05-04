@@ -122,7 +122,7 @@ class TestE2EDeterministicTask:
         result = await runner._execute_structured_tasks(fake_agent, hb_content, "e2e_run_1")
 
         # Should contain time info (deterministic result)
-        assert "当前时间" in result or result == "HEARTBEAT_OK"
+        assert result is not None and "当前时间" in result
         # LLM should NOT have been called
         run_agent_mock.assert_not_called()
 
@@ -240,7 +240,8 @@ class TestE2ETimeoutTask:
 
         result = await runner._execute_structured_tasks(fake_agent, hb_content, "e2e_run_3")
 
-        assert result == "HEARTBEAT_OK"
+        # Timeout produces no user-visible output → silent (None)
+        assert result is None
 
         # Verify error persisted to disk
         disk_tasks = _reload_tasks(tmp_path)

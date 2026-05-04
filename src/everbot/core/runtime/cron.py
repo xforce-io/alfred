@@ -94,13 +94,19 @@ class CronTickResult:
     results: List[TaskResult] = field(default_factory=list)
 
     @property
-    def user_visible_output(self) -> str:
-        """Aggregate user-visible output from all task results."""
+    def user_visible_output(self) -> Optional[str]:
+        """Aggregate user-visible output from all task results.
+
+        Jobs returning None are silent (e.g. routine bookkeeping with no
+        actionable content) and contribute nothing to the aggregate. When
+        every job is silent the property returns None, signalling the
+        caller to suppress delivery entirely.
+        """
         meaningful = [
             r.output for r in self.results
-            if r.output and r.status == "done"
+            if r.output is not None and r.status == "done"
         ]
-        return "; ".join(meaningful) if meaningful else "HEARTBEAT_OK"
+        return "; ".join(meaningful) if meaningful else None
 
 
 # ── Status markers (filtered from user output) ───────────────
@@ -544,21 +550,28 @@ class CronExecutor:
             self.routine_manager.flush(task_list)
             return TaskResult(task_id=task.id, status="failed", error=str(exc), execution_path=exec_path)
 
-    async def _run_isolated_task(self, task: Task, run_id: str, *, run_agent: Callable) -> str:
+    async def _run_isolated_task(self, task: Task, run_id: str, *, run_agent: Callable) -> Optional[str]:
         """Execute one isolated task.
 
         Routes by task type:
         - job tasks (task.job set): call _invoke_job() → Python module
         - agent tasks (no job): create agent session → LLM turn
 
-        Both paths use the delivery pipeline for result delivery.
+        Both paths use the delivery pipeline for result delivery. Job
+        tasks may return None to indicate silent completion.
         """
         if task.job:
             return await self._run_isolated_job(task, run_id)
         return await self._run_isolated_agent(task, run_id, run_agent=run_agent)
 
-    async def _run_isolated_job(self, task: Task, run_id: str) -> str:
-        """Execute an isolated job task via Python module, with delivery."""
+    async def _run_isolated_job(self, task: Task, run_id: str) -> Optional[str]:
+        """Execute an isolated job task via Python module, with delivery.
+
+        Silent jobs (return value None) skip every user-facing channel —
+        no mailbox event, no history injection, no realtime push. The
+        timeline ``task_done`` event written by the caller still records
+        the run for observability.
+        """
         task_title = str(task.title or "")
         scan_result = None  # isolated jobs don't carry scan_result from gate
         try:
@@ -566,6 +579,9 @@ class CronExecutor:
                 self._invoke_job(task, scan_result, run_id),
                 timeout=task.timeout_seconds,
             )
+
+            if result is None:
+                return None
 
             summary = f"{task_title or task.id} completed"
             await self.delivery.deposit_job_event(
@@ -576,9 +592,7 @@ class CronExecutor:
                 run_id=run_id,
             )
             await self.delivery.inject_to_history(result, run_id)
-            # Suppress realtime push for no-op results (e.g. "Evaluated 0/7 skills")
-            if not result.startswith(("Evaluated 0/", "LLM unavailable:")):
-                await self.delivery._emit_realtime(result, run_id)
+            await self.delivery._emit_realtime(result, run_id)
 
             return result
         except Exception as exc:
@@ -697,8 +711,14 @@ class CronExecutor:
 
     # ── Job execution ──────────────────────────────────────────
 
-    async def _invoke_job(self, task: Task, scan_result: Any, run_id: str) -> str:
-        """Execute a cron job task."""
+    async def _invoke_job(self, task: Task, scan_result: Any, run_id: str) -> Optional[str]:
+        """Execute a cron job task.
+
+        Returns the job's user-visible summary, or None when the job has
+        no user-facing output to surface (silent bookkeeping). Subscribers
+        to this return value (inline aggregator, isolated delivery path)
+        treat None as "do not surface to user".
+        """
         job_name = task.job
         start_ms = int(_time.time() * 1000)
 
@@ -727,7 +747,7 @@ class CronExecutor:
                 "job_completed", skill=job_name,
                 duration_ms=duration_ms, result=str(result)[:200],
             )
-            return str(result)
+            return None if result is None else str(result)
         except (LLMTransientError, LLMConfigError) as exc:
             duration_ms = int(_time.time() * 1000) - start_ms
             self._write_event(

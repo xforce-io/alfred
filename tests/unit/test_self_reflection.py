@@ -504,29 +504,34 @@ class TestSkillWithoutScanner:
         )
 
         result = await run(ctx)
-        # Should have found and processed the session (not returned "No sessions")
-        assert "No sessions to review" not in result
+        # Silent job — None always; verify processing actually ran by
+        # checking the watermark advanced (only set on successful completion).
+        from src.everbot.core.scanners.reflection_state import ReflectionState
+        assert result is None
+        assert ReflectionState.load(tmp_path).get_watermark("memory-review")
 
     @pytest.mark.asyncio
     async def test_memory_review_no_scan_result_empty_watermark(self, tmp_path, sessions_dir):
-        """memory_review with no scan_result and no sessions returns early."""
+        """memory_review with no scan_result and no sessions returns early without calling LLM."""
         from src.everbot.core.jobs.memory_review import run
         from src.everbot.core.runtime.skill_context import SkillContext
         from src.everbot.core.memory.manager import MemoryManager
 
         mm = MemoryManager(tmp_path / "MEMORY.md")
+        mock_llm = AsyncMock()
         ctx = SkillContext(
             sessions_dir=sessions_dir,
             workspace_path=tmp_path,
             agent_name="test-agent",
             memory_manager=mm,
             mailbox=AsyncMock(),
-            llm=AsyncMock(),
+            llm=mock_llm,
             scan_result=None,
         )
 
         result = await run(ctx)
-        assert result == "No sessions to review"
+        assert result is None
+        assert not mock_llm.complete.called
 
     @pytest.mark.asyncio
     async def test_task_discover_no_scan_result_queries_directly(self, tmp_path, sessions_dir):
@@ -552,7 +557,10 @@ class TestSkillWithoutScanner:
         )
 
         result = await run(ctx)
-        assert "No sessions to analyze" not in result
+        # Silent job — verify watermark advanced (proves completion).
+        from src.everbot.core.scanners.reflection_state import ReflectionState
+        assert result is None
+        assert ReflectionState.load(tmp_path).get_watermark("task-discover")
 
     @pytest.mark.asyncio
     async def test_skill_prefers_scan_result_when_available(self, tmp_path, sessions_dir):
@@ -593,7 +601,10 @@ class TestSkillWithoutScanner:
         )
 
         result = await run(ctx)
-        assert "No sessions to review" not in result
+        # Silent job — verify watermark advanced (proves completion).
+        from src.everbot.core.scanners.reflection_state import ReflectionState
+        assert result is None
+        assert ReflectionState.load(tmp_path).get_watermark("memory-review")
 
     @pytest.mark.asyncio
     async def test_task_discover_llm_error_raises_not_swallowed(self, tmp_path, sessions_dir):

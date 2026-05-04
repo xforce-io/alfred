@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..runtime.skill_context import SkillContext
 
@@ -82,8 +82,14 @@ class HealthState:
         tmp_path.replace(path)
 
 
-async def run(context: SkillContext) -> str:
-    """Execute health checks and alert on critical failures."""
+async def run(context: SkillContext) -> Optional[str]:
+    """Execute health checks and alert on critical failures.
+
+    Returns None when all checks pass — passing health is not worth a
+    user-facing notification. Failures still surface: critical ones via
+    direct Telegram alert (line 122), non-critical via mailbox deposit
+    (line 134), and a WARN summary as the inline aggregate string.
+    """
     state = HealthState.load(context.workspace_path)
     results: List[CheckResult] = []
 
@@ -139,7 +145,8 @@ async def run(context: SkillContext) -> str:
     ok_count = sum(1 for r in results if r.ok)
     total = len(results)
     if not failures:
-        return f"Health OK ({ok_count}/{total} checks passed)"
+        logger.info("Health OK (%d/%d checks passed)", ok_count, total)
+        return None
     return f"Health WARN: {len(failures)}/{total} failed — " + "; ".join(
         f"{r.name}: {r.message}" for r in failures
     )

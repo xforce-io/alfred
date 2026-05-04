@@ -551,8 +551,8 @@ class TestExecuteStructuredTasksErrors:
         result = await runner._execute_structured_tasks(
             fake_agent, hb_content, "run_test"
         )
-        # TASK_TIMEOUT: prefix is filtered from user-visible output
-        assert result == "HEARTBEAT_OK"
+        # Timeout produces no user-visible output → silent (None)
+        assert result is None
         # Verify update_task_state was called with FAILED: the task re-arms
         # as pending because it has retries left and a schedule, so we check
         # that error_message was set (indicating timeout was handled).
@@ -591,8 +591,8 @@ class TestExecuteStructuredTasksErrors:
         result = await runner._execute_structured_tasks(
             fake_agent, hb_content, "run_test"
         )
-        # TASK_FAILED: prefix is filtered from user-visible output
-        assert result == "HEARTBEAT_OK"
+        # Failure produces no user-visible output → silent (None)
+        assert result is None
         # Verify error was recorded on the task (re-armed as pending due to retries/schedule)
         task = runner._task_list.tasks[0]
         assert task.error_message == "agent crashed"

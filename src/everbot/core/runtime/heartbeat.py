@@ -468,15 +468,20 @@ If not, reply with `HEARTBEAT_OK`.
         return self._reflection.compute_file_hashes()
 
 
-    def _should_deliver(self, response: str) -> bool:
+    def _should_deliver(self, response: Optional[str]) -> bool:
         """判断心跳结果是否应推送给用户。
 
         规则（参考 OpenClaw HEARTBEAT_OK 机制）：
+        - None / 空串 → 不投递（silent job 已在源头返回 None）
         - 不含 HEARTBEAT_OK → deliver
         - HEARTBEAT_OK 在开头或结尾，且剩余内容 ≤ ACK_MAX_CHARS → suppress
         - HEARTBEAT_OK 在开头或结尾，但剩余内容 > ACK_MAX_CHARS → deliver
         """
+        if response is None:
+            return False
         stripped = response.strip()
+        if not stripped:
+            return False
         token = "HEARTBEAT_OK"
 
         if token not in stripped:
@@ -493,7 +498,7 @@ If not, reply with `HEARTBEAT_OK`.
 
         return len(remaining) > self.ack_max_chars
 
-    def _should_skip_response(self, response: str) -> bool:
+    def _should_skip_response(self, response: Optional[str]) -> bool:
         """判断是否静默处理（向后兼容，内部调用 _should_deliver）"""
         return not self._should_deliver(response)
 
@@ -826,7 +831,7 @@ If not, reply with `HEARTBEAT_OK`.
                 agent = await self._get_or_create_agent()
 
                 if self._file_mgr.heartbeat_mode == "structured_due" and self._file_mgr.task_list is not None:
-                    result = await self._execute_structured_tasks(
+                    structured_result = await self._execute_structured_tasks(
                         agent,
                         heartbeat_content,
                         run_id,
@@ -835,8 +840,14 @@ If not, reply with `HEARTBEAT_OK`.
                     )
                     # Buffer deliverable results so the inspector can attach
                     # them as delivery_detail alongside the push_message.
-                    if self._should_deliver(result):
-                        self._pending_delivery_details.append(result)
+                    # None means every job ran silently — _should_deliver
+                    # returns False and the buffer stays empty.
+                    if self._should_deliver(structured_result):
+                        self._pending_delivery_details.append(structured_result)
+                    # Normalize to HEARTBEAT_OK so downstream type contract
+                    # (_run_locked_body -> str) holds; _should_deliver will
+                    # then suppress this ack-only value.
+                    result = structured_result if structured_result is not None else "HEARTBEAT_OK"
                 elif self._file_mgr.heartbeat_mode == "structured_reflect":
                     inspection = await self._inspector.inspect(
                         heartbeat_content=heartbeat_content,
@@ -1280,11 +1291,15 @@ If not, reply with `HEARTBEAT_OK`.
         *,
         include_inline: bool = True,
         include_isolated: bool = True,
-    ) -> str:
-        """Execute due structured tasks — delegates to CronExecutor."""
+    ) -> Optional[str]:
+        """Execute due structured tasks — delegates to CronExecutor.
+
+        Returns None when every job ran silently (or no tasks were due);
+        the caller treats None as "nothing to deliver".
+        """
         task_list = self._file_mgr.task_list
         if task_list is None:
-            return "HEARTBEAT_OK"
+            return None
 
         tick_result = await self._cron.tick(
             task_list,

@@ -1,6 +1,8 @@
 """Task discovery skill — find actionable tasks from conversation history.
 
 Notification strategy: notifies user via mailbox when new tasks are found.
+The job's return value is always None — surfacing details to the user
+is the mailbox deposit's job, not the inline tick aggregator's.
 """
 
 import json
@@ -9,7 +11,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from ..runtime.skill_context import SkillContext
 from ..scanners.session_scanner import SessionScanner
@@ -91,8 +93,14 @@ class TaskDiscoverState:
                 pass
 
 
-async def run(context: SkillContext) -> str:
-    """Execute task discovery from recent sessions."""
+async def run(context: SkillContext) -> Optional[str]:
+    """Execute task discovery from recent sessions.
+
+    Always returns None: when new tasks are found, their detail is
+    delivered through ``context.mailbox.deposit`` (the [SLM] channel).
+    The inline tick aggregator must not duplicate that delivery, so
+    this job is silent in the aggregate path.
+    """
     scanner = SessionScanner(context.sessions_dir)
     state = ReflectionState.load(context.workspace_path)
 
@@ -103,7 +111,7 @@ async def run(context: SkillContext) -> str:
     else:
         sessions = scanner.get_reviewable_sessions(skill_wm, agent_name=context.agent_name)
     if not sessions:
-        return "No sessions to analyze"
+        return None
 
     digests = []
     last_successful_session = None
@@ -116,7 +124,7 @@ async def run(context: SkillContext) -> str:
             continue
 
     if not digests:
-        return "All sessions failed to extract"
+        return None
 
     # LLM analysis
     task_state = TaskDiscoverState.load(context.workspace_path)
@@ -139,7 +147,7 @@ async def run(context: SkillContext) -> str:
         state.set_watermark("task-discover", last_successful_session.updated_at)
         state.save(context.workspace_path)
 
-    return f"Discovered {len(new_tasks)} tasks"
+    return None
 
 
 async def _discover_tasks(llm, digests: List[str], existing_titles: List[str]) -> List[DiscoveredTask]:

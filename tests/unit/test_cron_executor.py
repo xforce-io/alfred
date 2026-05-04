@@ -55,7 +55,7 @@ def _seed_task(tmp_path: Path, **task_overrides) -> RoutineManager:
 class TestCronTickResult:
     def test_user_visible_output_no_results(self):
         r = CronTickResult()
-        assert r.user_visible_output == "HEARTBEAT_OK"
+        assert r.user_visible_output is None
 
     def test_user_visible_output_with_done_results(self):
         r = CronTickResult(
@@ -66,9 +66,21 @@ class TestCronTickResult:
                 TaskResult(task_id="c", status="done", output="result C"),
             ],
         )
+        assert r.user_visible_output is not None
         assert "result A" in r.user_visible_output
         assert "result C" in r.user_visible_output
         assert "err" not in r.user_visible_output
+
+    def test_user_visible_output_all_silent(self):
+        """Done jobs returning None contribute nothing — aggregate stays None."""
+        r = CronTickResult(
+            executed=2,
+            results=[
+                TaskResult(task_id="a", status="done", output=None),
+                TaskResult(task_id="b", status="done", output=None),
+            ],
+        )
+        assert r.user_visible_output is None
 
 
 class TestDeterministicExecution:
