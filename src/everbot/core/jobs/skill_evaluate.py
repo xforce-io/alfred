@@ -19,6 +19,7 @@ from ..slm.judge import evaluate_skill
 from ..slm.models import EvaluationSegment, EvalReport, VersionStatus
 from ..slm.segment_logger import SegmentLogger
 from ..slm.version_manager import VersionManager
+from ..slm._atomic_io import skill_lock
 
 logger = logging.getLogger(__name__)
 _SKILL_EVALUATION_TIMEOUT_SECONDS = 120
@@ -170,9 +171,25 @@ async def _evaluate_one(
         raise LLMTransientError(
             f"Request timed out during skill evaluation for {skill_id}"
         ) from exc
-    ver_mgr.save_eval_report(skill_id, target_version, report)
+    lock_path = ver_mgr._eval_dir(skill_id) / ".lock"
+    with skill_lock(lock_path):
+        existing = ver_mgr.get_eval_report(skill_id, target_version)
+        if existing and existing.segment_count >= len(segments):
+            return None
 
-    await _post_evaluate(context, ver_mgr, seg_logger, skill_id, target_version, report)
+        ver_mgr.save_eval_report(skill_id, target_version, report)
+
+        pointer = ver_mgr.get_pointer(skill_id)
+        if pointer is None or pointer.current_version != target_version:
+            logger.info(
+                "Skipping post-evaluate for stale %s v%s; current is %s",
+                skill_id,
+                target_version,
+                pointer.current_version if pointer else None,
+            )
+            return None
+
+        await _post_evaluate(context, ver_mgr, seg_logger, skill_id, target_version, report)
 
     return (
         f"v{target_version}: {report.segment_count} segments, "

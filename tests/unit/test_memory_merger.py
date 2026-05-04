@@ -83,7 +83,7 @@ class TestDecay:
             score=0.8,
             last_activated=(now - timedelta(days=5)).isoformat(),
         )
-        merger.apply_decay([entry], now=now)
+        merger.apply_profile_decay([entry], now=now)
         assert entry.score == 0.8  # No change within 7 days
 
     def test_decay_after_protection_period(self):
@@ -93,7 +93,7 @@ class TestDecay:
             score=0.8,
             last_activated=(now - timedelta(days=17)).isoformat(),
         )
-        merger.apply_decay([entry], now=now)
+        merger.apply_profile_decay([entry], now=now)
         # 10 days of decay: 0.8 * 0.99^10 ≈ 0.7234
         expected = 0.8 * (0.99 ** 10)
         assert abs(entry.score - expected) < 0.001
@@ -105,7 +105,7 @@ class TestDecay:
             score=0.8,
             last_activated=(now - timedelta(days=7)).isoformat(),
         )
-        merger.apply_decay([entry], now=now)
+        merger.apply_profile_decay([entry], now=now)
         # Exactly 7 days: no decay (days > 7, not >=)
         assert entry.score == 0.8
 
@@ -116,9 +116,117 @@ class TestDecay:
             score=0.3,
             last_activated=(now - timedelta(days=200)).isoformat(),
         )
-        merger.apply_decay([entry], now=now)
+        merger.apply_profile_decay([entry], now=now)
         # 193 days of decay: 0.3 * 0.99^193 ≈ 0.043 < 0.05
         assert entry.score < 0.05
+
+
+def _make_event(
+    *,
+    id: str = "evt001",
+    score: float = 0.6,
+    category: str = "decision",
+    event_at: str = "2026-05-01T00:00:00+00:00",
+    due_at: str | None = None,
+) -> MemoryEntry:
+    return MemoryEntry(
+        id=id,
+        content="测试事件",
+        category=category,
+        score=score,
+        created_at=event_at,
+        last_activated=event_at,
+        activation_count=1,
+        source_session="s1",
+        kind="event",
+        event_at=event_at,
+        due_at=due_at,
+    )
+
+
+class TestEventDecay:
+    """30-day half-life decay anchored on event_at (or due_at for todos)."""
+
+    def test_recent_event_no_decay(self):
+        merger = MemoryMerger()
+        now = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        entry = _make_event(score=0.6, event_at=(now - timedelta(hours=2)).isoformat())
+        merger.apply_event_decay([entry], now=now)
+        # ~2 hours → near-zero decay
+        assert abs(entry.score - 0.6) < 0.005
+
+    def test_thirty_day_event_halved(self):
+        merger = MemoryMerger()
+        now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        entry = _make_event(score=0.6, event_at=(now - timedelta(days=30)).isoformat())
+        merger.apply_event_decay([entry], now=now)
+        assert abs(entry.score - 0.3) < 0.005
+
+    def test_sixty_day_event_quartered(self):
+        merger = MemoryMerger()
+        now = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        entry = _make_event(score=0.6, event_at=(now - timedelta(days=60)).isoformat())
+        merger.apply_event_decay([entry], now=now)
+        assert abs(entry.score - 0.15) < 0.005
+
+    def test_todo_before_due_at_protected(self):
+        merger = MemoryMerger()
+        now = datetime(2026, 5, 15, tzinfo=timezone.utc)
+        entry = _make_event(
+            category="todo",
+            score=0.6,
+            event_at=(now - timedelta(days=60)).isoformat(),  # event is old
+            due_at=(now + timedelta(days=3)).isoformat(),     # but due in future
+        )
+        merger.apply_event_decay([entry], now=now)
+        assert entry.score == 0.6  # protected because due_at is in future
+
+    def test_todo_after_due_at_decays_from_due(self):
+        merger = MemoryMerger()
+        now = datetime(2026, 6, 15, tzinfo=timezone.utc)
+        entry = _make_event(
+            category="todo",
+            score=0.6,
+            event_at=(now - timedelta(days=120)).isoformat(),  # event very old
+            due_at=(now - timedelta(days=30)).isoformat(),     # but due was 30 days ago
+        )
+        merger.apply_event_decay([entry], now=now)
+        # Decay anchor is due_at (30d ago), not event_at (120d ago)
+        assert abs(entry.score - 0.3) < 0.005
+
+    def test_profile_entries_unaffected(self):
+        merger = MemoryMerger()
+        now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        # Profile entry with stale last_activated — apply_event_decay
+        # must leave it alone even when called on a mixed list.
+        profile = _make_entry(
+            score=0.6,
+            last_activated=(now - timedelta(days=60)).isoformat(),
+        )
+        event = _make_event(score=0.6, event_at=(now - timedelta(days=30)).isoformat())
+        merger.apply_event_decay([profile, event], now=now)
+        assert profile.score == 0.6  # unchanged
+        assert abs(event.score - 0.3) < 0.005
+
+    def test_unparseable_event_at_skipped(self):
+        merger = MemoryMerger()
+        now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        entry = _make_event(score=0.6, event_at="not-a-date")
+        merger.apply_event_decay([entry], now=now)
+        assert entry.score == 0.6
+
+    def test_unparseable_due_at_falls_back_to_event_at(self):
+        merger = MemoryMerger()
+        now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        entry = _make_event(
+            category="todo",
+            score=0.6,
+            event_at=(now - timedelta(days=30)).isoformat(),
+            due_at="garbage",
+        )
+        merger.apply_event_decay([entry], now=now)
+        # Falls back to event_at → 30d half-life
+        assert abs(entry.score - 0.3) < 0.005
 
 
 class TestTokenSimilarity:

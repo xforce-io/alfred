@@ -1,9 +1,9 @@
-"""Tests for MemoryStore — parsing, saving, round-trip, fault tolerance."""
+"""Tests for ProfileStore — parsing, saving, round-trip, fault tolerance."""
 
 from pathlib import Path
 
 from src.everbot.core.memory.models import MemoryEntry
-from src.everbot.core.memory.store import MemoryStore
+from src.everbot.core.memory.profile_store import ProfileStore
 
 
 def _make_entry(**overrides) -> MemoryEntry:
@@ -21,7 +21,7 @@ def _make_entry(**overrides) -> MemoryEntry:
     return MemoryEntry(**defaults)
 
 
-class TestMemoryStoreLoad:
+class TestProfileStoreLoad:
     """Parsing MEMORY.md into entries."""
 
     def test_load_normal(self, tmp_path: Path):
@@ -35,7 +35,7 @@ class TestMemoryStoreLoad:
             "主要使用 Python 开发\n\n",
             encoding="utf-8",
         )
-        store = MemoryStore(md)
+        store = ProfileStore(md)
         entries = store.load()
         assert len(entries) == 2
         assert entries[0].id == "abc123"
@@ -47,12 +47,12 @@ class TestMemoryStoreLoad:
     def test_load_empty_file(self, tmp_path: Path):
         md = tmp_path / "MEMORY.md"
         md.write_text("", encoding="utf-8")
-        store = MemoryStore(md)
+        store = ProfileStore(md)
         assert store.load() == []
 
     def test_load_file_not_exist(self, tmp_path: Path):
         md = tmp_path / "MEMORY.md"
-        store = MemoryStore(md)
+        store = ProfileStore(md)
         assert store.load() == []
 
     def test_load_tolerates_corrupt_entries(self, tmp_path: Path):
@@ -66,7 +66,7 @@ class TestMemoryStoreLoad:
             "另一条有效记忆\n\n",
             encoding="utf-8",
         )
-        store = MemoryStore(md)
+        store = ProfileStore(md)
         entries = store.load()
         assert len(entries) == 2
 
@@ -79,18 +79,18 @@ class TestMemoryStoreLoad:
             "有内容的记忆\n",
             encoding="utf-8",
         )
-        store = MemoryStore(md)
+        store = ProfileStore(md)
         entries = store.load()
         assert len(entries) == 1
         assert entries[0].id == "def456"
 
 
-class TestMemoryStoreSave:
+class TestProfileStoreSave:
     """Writing entries to MEMORY.md."""
 
     def test_save_creates_file(self, tmp_path: Path):
         md = tmp_path / "MEMORY.md"
-        store = MemoryStore(md)
+        store = ProfileStore(md)
         store.save([_make_entry()])
         assert md.exists()
         content = md.read_text(encoding="utf-8")
@@ -100,7 +100,7 @@ class TestMemoryStoreSave:
     def test_save_creates_backup(self, tmp_path: Path):
         md = tmp_path / "MEMORY.md"
         md.write_text("old content", encoding="utf-8")
-        store = MemoryStore(md)
+        store = ProfileStore(md)
         store.save([_make_entry()])
         bak = tmp_path / "MEMORY.md.bak"
         assert bak.exists()
@@ -108,7 +108,7 @@ class TestMemoryStoreSave:
 
     def test_save_partitions_active_and_archived(self, tmp_path: Path):
         md = tmp_path / "MEMORY.md"
-        store = MemoryStore(md)
+        store = ProfileStore(md)
         entries = [
             _make_entry(id="hi", score=0.9),
             _make_entry(id="lo", score=0.15),
@@ -123,7 +123,7 @@ class TestMemoryStoreSave:
 
     def test_save_discards_very_low_score(self, tmp_path: Path):
         md = tmp_path / "MEMORY.md"
-        store = MemoryStore(md)
+        store = ProfileStore(md)
         entries = [
             _make_entry(id="keep", score=0.3),
             _make_entry(id="drop", score=0.04),
@@ -135,7 +135,7 @@ class TestMemoryStoreSave:
 
     def test_save_sorts_by_score_descending(self, tmp_path: Path):
         md = tmp_path / "MEMORY.md"
-        store = MemoryStore(md)
+        store = ProfileStore(md)
         entries = [
             _make_entry(id="low", score=0.5),
             _make_entry(id="high", score=0.9),
@@ -146,12 +146,12 @@ class TestMemoryStoreSave:
         assert content.index("[high]") < content.index("[mid]") < content.index("[low]")
 
 
-class TestMemoryStoreRoundTrip:
+class TestProfileStoreRoundTrip:
     """Save then load should preserve data."""
 
     def test_round_trip(self, tmp_path: Path):
         md = tmp_path / "MEMORY.md"
-        store = MemoryStore(md)
+        store = ProfileStore(md)
         original = [
             _make_entry(id="aaa111", content="记忆 A", score=0.9),
             _make_entry(id="bbb222", content="记忆 B", score=0.6),
@@ -166,3 +166,48 @@ class TestMemoryStoreRoundTrip:
             orig = next(e for e in original if e.id == entry.id)
             assert entry.content == orig.content
             assert abs(entry.score - orig.score) < 0.01
+
+
+class TestMemoryEntryKind:
+    """MEMORY.md is profile-only — all entries loaded from it carry kind='profile'."""
+
+    def test_default_kind_is_profile(self):
+        entry = _make_entry()
+        assert entry.kind == "profile"
+        assert entry.event_at is None
+
+    def test_load_assigns_profile_kind(self, tmp_path: Path):
+        md = tmp_path / "MEMORY.md"
+        md.write_text(
+            "### [abc123] preference | 0.80 | 2026-02-20 | 5\n"
+            "用户喜欢简洁代码\n",
+            encoding="utf-8",
+        )
+        entries = ProfileStore(md).load()
+        assert len(entries) == 1
+        assert entries[0].kind == "profile"
+        assert entries[0].event_at is None
+
+    def test_round_trip_preserves_kind(self, tmp_path: Path):
+        md = tmp_path / "MEMORY.md"
+        store = ProfileStore(md)
+        store.save([_make_entry(id="aaa111")])
+        loaded = store.load()
+        assert loaded[0].kind == "profile"
+
+    def test_from_dict_accepts_event_kind(self):
+        """Forward-compat: EventStore (Step 3) will pass kind='event' explicitly."""
+        entry = MemoryEntry.from_dict({
+            "id": "evt001",
+            "content": "用户决定切到 deepseek-chat",
+            "category": "decision",
+            "score": 0.8,
+            "created_at": "2026-05-01T00:00:00+00:00",
+            "last_activated": "2026-05-01T00:00:00+00:00",
+            "activation_count": 1,
+            "source_session": "s1",
+            "kind": "event",
+            "event_at": "2026-05-01T10:30:00+00:00",
+        })
+        assert entry.kind == "event"
+        assert entry.event_at == "2026-05-01T10:30:00+00:00"

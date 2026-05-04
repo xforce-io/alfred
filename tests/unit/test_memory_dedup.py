@@ -17,11 +17,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from src.everbot.core.memory.manager import MemoryManager
 from src.everbot.core.memory.merger import MemoryMerger
 from src.everbot.core.memory.models import MemoryEntry
-from src.everbot.core.memory.store import MemoryStore
+from src.everbot.core.memory.profile_store import ProfileStore
+
+
+@pytest.fixture(autouse=True)
+def _silence_event_extractor():
+    """Make EventExtractor produce zero events without calling a real LLM."""
+    with patch(
+        "src.everbot.core.memory.event_extractor.EventExtractor._call_llm",
+        new_callable=AsyncMock,
+        return_value='{"new_events": []}',
+    ):
+        yield
 
 
 def _seed_memory(md_path: Path, entries_data: list[dict]) -> None:
-    store = MemoryStore(md_path)
+    store = ProfileStore(md_path)
     entries = [MemoryEntry.from_dict(d) for d in entries_data]
     store.save(entries)
 
@@ -226,7 +237,7 @@ class TestEndToEndDuplicateAccumulation:
         )
 
         with patch(
-            "src.everbot.core.memory.extractor.MemoryExtractor._call_llm",
+            "src.everbot.core.memory.profile_extractor.ProfileExtractor._call_llm",
             new_callable=AsyncMock,
             return_value=s1_response,
         ):
@@ -236,7 +247,7 @@ class TestEndToEndDuplicateAccumulation:
                 "session_1",
             )
 
-        entries_s1 = MemoryStore(md).load()
+        entries_s1 = ProfileStore(md).load()
         assert len(entries_s1) == 1
 
         # Session 2: LLM returns a rephrased version instead of reinforcing
@@ -251,7 +262,7 @@ class TestEndToEndDuplicateAccumulation:
         )
 
         with patch(
-            "src.everbot.core.memory.extractor.MemoryExtractor._call_llm",
+            "src.everbot.core.memory.profile_extractor.ProfileExtractor._call_llm",
             new_callable=AsyncMock,
             return_value=s2_response,
         ):
@@ -272,7 +283,7 @@ class TestEndToEndDuplicateAccumulation:
         )
 
         with patch(
-            "src.everbot.core.memory.extractor.MemoryExtractor._call_llm",
+            "src.everbot.core.memory.profile_extractor.ProfileExtractor._call_llm",
             new_callable=AsyncMock,
             return_value=s3_response,
         ):
@@ -282,7 +293,7 @@ class TestEndToEndDuplicateAccumulation:
                 "session_3",
             )
 
-        final_entries = MemoryStore(md).load()
+        final_entries = ProfileStore(md).load()
 
         # DESIRED: all three should collapse into one reinforced entry
         assert len(final_entries) == 1, (

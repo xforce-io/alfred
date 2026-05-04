@@ -1,4 +1,12 @@
-"""Markdown-based memory store — parse and persist MEMORY.md."""
+"""Profile memory store — parse and persist MEMORY.md.
+
+Profile memories describe **who the user is** (preferences, facts, workflows).
+They are evergreen, score-decayed, and partitioned into Active/Archived
+sections within a single MEMORY.md file per agent.
+
+Event memories live in a separate ``event_store`` module — they are
+time-anchored, append-only, and stored under ``events/YYYY-MM.md``.
+"""
 
 import logging
 import re
@@ -17,8 +25,8 @@ _HEADER_RE = re.compile(
 _META_PROCESSED_RE = re.compile(r"<!--\s*last_processed_count:\s*(\d+)\s*-->")
 
 
-class MemoryStore:
-    """Read / write structured memory entries from MEMORY.md."""
+class ProfileStore:
+    """Read / write profile memory entries from MEMORY.md."""
 
     def __init__(self, memory_path: Path):
         self.memory_path = Path(memory_path)
@@ -65,6 +73,7 @@ class MemoryStore:
                     "score": float(m.group(3)),
                     "last_activated": m.group(4),
                     "activation_count": int(m.group(5)),
+                    "kind": "profile",
                 }
                 content_lines = []
             elif current_entry is not None:

@@ -1,4 +1,9 @@
-"""Tests for MemoryManager — end-to-end with mocked LLM."""
+"""Tests for MemoryManager — end-to-end with mocked LLM.
+
+These tests focus on the **profile** pipeline. The event extractor is
+silenced via an autouse fixture so its LLM calls don't interfere — event
+behavior has its own dedicated test file (``test_memory_manager_events.py``).
+"""
 
 import json
 import pytest
@@ -7,12 +12,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.everbot.core.memory.manager import MemoryManager
 from src.everbot.core.memory.models import MemoryEntry
-from src.everbot.core.memory.store import MemoryStore
+from src.everbot.core.memory.profile_store import ProfileStore
+
+
+@pytest.fixture(autouse=True)
+def _silence_event_extractor():
+    """Make EventExtractor produce zero events without calling a real LLM."""
+    with patch(
+        "src.everbot.core.memory.event_extractor.EventExtractor._call_llm",
+        new_callable=AsyncMock,
+        return_value='{"new_events": []}',
+    ):
+        yield
 
 
 def _seed_memory(md_path: Path, entries_data: list[dict]) -> None:
     """Write seed entries directly to MEMORY.md."""
-    store = MemoryStore(md_path)
+    store = ProfileStore(md_path)
     entries = [MemoryEntry.from_dict(d) for d in entries_data]
     store.save(entries)
 
@@ -43,7 +59,7 @@ class TestProcessSessionEnd:
             reinforced_ids=[],
         )
 
-        with patch("src.everbot.core.memory.extractor.MemoryExtractor._call_llm", new_callable=AsyncMock) as mock_llm:
+        with patch("src.everbot.core.memory.profile_extractor.ProfileExtractor._call_llm", new_callable=AsyncMock) as mock_llm:
             mock_llm.return_value = llm_response
             mm = MemoryManager(md, ctx)
             messages = [
@@ -52,11 +68,11 @@ class TestProcessSessionEnd:
             ]
             stats = await mm.process_session_end(messages, "session_001")
 
-        assert stats["new_count"] == 2
-        assert stats["total"] == 2
+        assert stats["profile"]["new_count"] == 2
+        assert stats["profile"]["total"] == 2
 
         # Verify persisted
-        entries = MemoryStore(md).load()
+        entries = ProfileStore(md).load()
         assert len(entries) == 2
 
     @pytest.mark.asyncio
@@ -76,15 +92,15 @@ class TestProcessSessionEnd:
             reinforced_ids=["aaa111"],
         )
 
-        with patch("src.everbot.core.memory.extractor.MemoryExtractor._call_llm", new_callable=AsyncMock) as mock_llm:
+        with patch("src.everbot.core.memory.profile_extractor.ProfileExtractor._call_llm", new_callable=AsyncMock) as mock_llm:
             mock_llm.return_value = llm_response
             mm = MemoryManager(md, ctx)
             stats = await mm.process_session_end(
                 [{"role": "user", "content": "简洁最重要"}], "session_002"
             )
 
-        assert stats["updated_count"] == 1
-        entries = MemoryStore(md).load()
+        assert stats["profile"]["updated_count"] == 1
+        entries = ProfileStore(md).load()
         reinforced = next(e for e in entries if e.id == "aaa111")
         assert reinforced.score > 0.7
         assert reinforced.activation_count == 4
@@ -96,7 +112,7 @@ class TestProcessSessionEnd:
         stats = await mm.process_session_end(
             [{"role": "user", "content": "hello"}], "s1"
         )
-        assert stats["new_count"] == 0
+        assert stats["profile"]["new_count"] == 0
 
 
 class TestIncrementalExtraction:
@@ -134,11 +150,11 @@ class TestIncrementalExtraction:
                 return round1_response
             return round2_response
 
-        with patch("src.everbot.core.memory.extractor.MemoryExtractor._call_llm", new=_capture_llm):
+        with patch("src.everbot.core.memory.profile_extractor.ProfileExtractor._call_llm", new=_capture_llm):
             mm = MemoryManager(md, ctx)
             await mm.process_session_end(round1_messages, "session_001")
 
-        entries_after_r1 = MemoryStore(md).load()
+        entries_after_r1 = ProfileStore(md).load()
         assert len(entries_after_r1) == 1
 
         # -- Round 2: same 4 messages + 2 new ones (cumulative history) --
@@ -153,7 +169,7 @@ class TestIncrementalExtraction:
             reinforced_ids=[entries_after_r1[0].id],
         )
 
-        with patch("src.everbot.core.memory.extractor.MemoryExtractor._call_llm", new=_capture_llm):
+        with patch("src.everbot.core.memory.profile_extractor.ProfileExtractor._call_llm", new=_capture_llm):
             mm = MemoryManager(md, ctx)
             await mm.process_session_end(round2_messages, "session_001")
 
@@ -166,7 +182,7 @@ class TestIncrementalExtraction:
             "Round-2 new messages SHOULD appear in LLM prompt"
 
         # Should have 2 entries total, not duplicates
-        final_entries = MemoryStore(md).load()
+        final_entries = ProfileStore(md).load()
         assert len(final_entries) == 2
 
     @pytest.mark.asyncio
@@ -189,7 +205,7 @@ class TestIncrementalExtraction:
             captured_prompts.append(prompt)
             return response
 
-        with patch("src.everbot.core.memory.extractor.MemoryExtractor._call_llm", new=_capture_llm):
+        with patch("src.everbot.core.memory.profile_extractor.ProfileExtractor._call_llm", new=_capture_llm):
             mm = MemoryManager(md, ctx)
             await mm.process_session_end(messages, "s1")
 

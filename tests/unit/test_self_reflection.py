@@ -204,8 +204,8 @@ class TestApplyReview:
         return tmp_path / "MEMORY.md"
 
     def _create_memory_file(self, memory_path, entries):
-        from src.everbot.core.memory.store import MemoryStore
-        store = MemoryStore(memory_path)
+        from src.everbot.core.memory.profile_store import ProfileStore
+        store = ProfileStore(memory_path)
         store.save(entries)
 
     def _make_entry(self, entry_id, content="test", score=0.8):

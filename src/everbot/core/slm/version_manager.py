@@ -323,12 +323,28 @@ class VersionManager:
         if not current:
             raise ValueError(f"No current version for {skill_id}")
 
-        # Suspend the current version
+        # Determine rollback target first. If the current version is already
+        # the stable target, rollback is a no-op: do not suspend the only
+        # known-good fallback just because its latest evaluation was unhealthy.
+        if pointer.repo_baseline:
+            rolled_to = "baseline"
+        else:
+            stable = pointer.stable_version
+            if not stable:
+                raise ValueError(f"No stable version for {skill_id}")
+            rolled_to = stable
+
+        # Suspend only the version being abandoned. The stable target must
+        # remain ACTIVE, otherwise future rollbacks point at a suspended state.
         cur_meta = self.get_metadata(skill_id, current)
         if cur_meta:
-            cur_meta.status = VersionStatus.SUSPENDED
-            cur_meta.suspended_reason = reason
             cur_meta_path = self._version_dir(skill_id, current) / "metadata.json"
+            if current != rolled_to:
+                cur_meta.status = VersionStatus.SUSPENDED
+                cur_meta.suspended_reason = reason
+            elif cur_meta.status == VersionStatus.SUSPENDED:
+                cur_meta.status = VersionStatus.ACTIVE
+                cur_meta.suspended_reason = ""
             cur_meta_path.write_text(cur_meta.to_json(), encoding="utf-8")
 
         # Rollback
@@ -337,21 +353,16 @@ class VersionManager:
             skill_md = self._skill_md(skill_id)
             if skill_md.exists():
                 skill_md.unlink()
-            rolled_to = "baseline"
         else:
-            stable = pointer.stable_version
-            if not stable:
-                raise ValueError(f"No stable version for {skill_id}")
-            snapshot = self._version_dir(skill_id, stable) / "skill.md"
+            snapshot = self._version_dir(skill_id, rolled_to) / "skill.md"
             if not snapshot.exists():
-                raise ValueError(f"Stable snapshot missing: {skill_id} v{stable}")
+                raise ValueError(f"Stable snapshot missing: {skill_id} v{rolled_to}")
             skill_md = self._skill_md(skill_id)
             # Ensure the writable layer's <skills_dir>/<skill_id>/ exists.
             # With layered SLM, the writable dir is the agent workspace which
             # is typically empty until the first publish/rollback writes here.
             skill_md.parent.mkdir(parents=True, exist_ok=True)
             skill_md.write_text(snapshot.read_text(encoding="utf-8"), encoding="utf-8")
-            rolled_to = stable
 
         # Update pointer
         pointer.current_version = rolled_to

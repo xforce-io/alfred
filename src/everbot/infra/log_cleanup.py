@@ -45,17 +45,13 @@ def cleanup_alfred_logs(
 
 def _iter_text_logs(user_data: UserDataManager):
     """Yield plain-text and JSONL log files under ~/.alfred/logs."""
-    candidates = [
-        user_data.logs_dir / "everbot.out",
-        user_data.logs_dir / "heartbeat.log",
-        user_data.logs_dir / "heartbeat_events.jsonl",
-    ]
-    for path in candidates:
-        if path.exists() and path.is_file():
-            yield path
-        for rotated in sorted(path.parent.glob(f"{path.name}.*")):
-            if rotated.is_file() and ".bak_" not in rotated.name:
-                yield rotated
+    seen: set[Path] = set()
+    patterns = ("*.out*", "*.err*", "*.log*", "*.jsonl*")
+    for pattern in patterns:
+        for path in sorted(user_data.logs_dir.glob(pattern)):
+            if path.exists() and path.is_file() and path not in seen:
+                seen.add(path)
+                yield path
 
 
 def _iter_skill_log_dirs(user_data: UserDataManager, *, agent_name: str):
@@ -110,7 +106,8 @@ def _sanitize_text_file(path: Path, *, summary: CleanupSummary, dry_run: bool) -
     if dry_run:
         return
 
-    _backup_file(path, summary)
+    backup = _backup_file(path, summary)
+    backup.write_text("".join(rewritten_lines), encoding="utf-8")
     path.write_text("".join(rewritten_lines), encoding="utf-8")
 
 

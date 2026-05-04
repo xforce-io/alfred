@@ -12,19 +12,25 @@ from src.everbot.infra.user_data import UserDataManager
 def test_cleanup_redacts_historical_logs_and_creates_backup(tmp_path: Path):
     user_data = UserDataManager(alfred_home=tmp_path)
     user_data.ensure_directories()
-    log_file = user_data.logs_dir / "everbot.out"
-    log_file.write_text(
-        'HTTP Request: GET https://api.telegram.org/bot123:SECRET/getUpdates "HTTP/1.1 200 OK"\n',
-        encoding="utf-8",
-    )
+    out_log = user_data.logs_dir / "everbot.out"
+    err_log = user_data.logs_dir / "everbot.err"
+    old_backup = user_data.logs_dir / "everbot.out.bak_20260401"
+    secret_line = 'HTTP Request: GET https://api.telegram.org/bot123:SECRET/getUpdates "HTTP/1.1 200 OK"\n'
+    out_log.write_text(secret_line, encoding="utf-8")
+    err_log.write_text(secret_line, encoding="utf-8")
+    old_backup.write_text(secret_line, encoding="utf-8")
 
     summary = cleanup_alfred_logs(user_data=user_data, dry_run=False)
 
-    assert summary.files_updated >= 1
-    assert summary.lines_redacted == 1
-    assert "***REDACTED***" in log_file.read_text(encoding="utf-8")
+    assert summary.files_updated >= 3
+    assert summary.lines_redacted == 3
+    assert "***REDACTED***" in out_log.read_text(encoding="utf-8")
+    assert "***REDACTED***" in err_log.read_text(encoding="utf-8")
+    assert "***REDACTED***" in old_backup.read_text(encoding="utf-8")
     backups = list(user_data.logs_dir.glob("everbot.out.bak_*"))
     assert backups
+    for backup in backups:
+        assert "SECRET" not in backup.read_text(encoding="utf-8")
 
 
 def test_cleanup_migrates_legacy_skill_log_schema(tmp_path: Path):

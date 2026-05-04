@@ -371,6 +371,15 @@ class CronExecutor:
         # state), which would make the gate's min_execution_interval check
         # always fail.  Running the gate first sees the real previous run time.
         if task.job:
+            if not self._is_active_hour():
+                self._write_event("job_skipped", skill=task.job, reason="outside_active_hours")
+                self._rearm_job_task(task)
+                self.routine_manager.flush(task_list)
+                return TaskResult(
+                    task_id=task.id, status="skipped",
+                    execution_path="skill",
+                    error="outside_active_hours",
+                )
             verdict = self._check_job_gate(task)
             self._emit_gate_events(task, verdict)
             if not verdict.allowed:

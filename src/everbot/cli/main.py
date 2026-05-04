@@ -11,10 +11,12 @@ from pathlib import Path
 from ..infra.user_data import get_user_data_manager
 from ..infra.config import load_config, get_config, save_config, get_default_config
 from ..infra.log_cleanup import cleanup_alfred_logs
+from ..infra.logging_utils import configure_daemon_logging
 from .daemon import EverBotDaemon
 from .launch_agent import cmd_service_install, cmd_service_status, cmd_service_uninstall
 from ..core.runtime.control import get_local_status, run_heartbeat_once
 from .doctor import collect_doctor_report
+from .memory_cli import register_memory_cli
 from .skills_cli import register_skills_cli
 
 logger = logging.getLogger(__name__)
@@ -101,12 +103,8 @@ async def cmd_start_async(args):
 
 def cmd_start(args):
     """启动守护进程（由 bin/everbot 管理进程）"""
-    # 配置日志
     log_level = args.log_level or "INFO"
-    logging.basicConfig(
-        level=getattr(logging, log_level),
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    )
+    configure_daemon_logging(level=log_level)
 
     # 启动守护进程
     asyncio.run(cmd_start_async(args))
@@ -336,6 +334,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     parser_service_status = subparsers.add_parser("service-status", help="查看 macOS LaunchAgent 状态")
     parser_service_status.set_defaults(func=cmd_service_status)
+
+    # memory 命令（记忆系统观测）
+    register_memory_cli(subparsers)
 
     # skills 命令（技能管理）
     register_skills_cli(subparsers)

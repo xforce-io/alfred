@@ -311,6 +311,55 @@ async def test_unhealthy_triggers_rollback_and_evolve(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_unhealthy_active_stable_evolves_without_suspending_stable(tmp_path: Path):
+    """An unhealthy active stable version must remain an active rollback target."""
+    skills_dir = tmp_path / "skills"
+    logs_dir = tmp_path / "skill_logs"
+    eval_dir = tmp_path / "skill_eval"
+    for d in (skills_dir, logs_dir, eval_dir):
+        d.mkdir()
+
+    _write_skill_md(skills_dir, "paper-discovery", "2.0.0")
+    ver_mgr = VersionManager(skills_dir, eval_base_dir=eval_dir)
+    from src.everbot.core.slm.state_normalizer import ensure_registered
+    ensure_registered(ver_mgr, "paper-discovery", repo_skills_dir=None)
+
+    seg_logger = SegmentLogger(logs_dir)
+    for i in range(3):
+        seg_logger.append(EvaluationSegment(
+            skill_id="paper-discovery",
+            skill_version="2.0.0",
+            triggered_at=f"2026-04-26T0{i}:00:00+00:00",
+            context_before="user: find papers",
+            skill_output=f"bad output {i}",
+            context_after="user: this missed the requirement",
+            session_id=f"sess-{i}",
+        ))
+
+    context = MagicMock()
+    context.llm = AsyncMock()
+    context.llm.complete = AsyncMock(return_value=(
+        "---\nname: paper-discovery\nversion: \"2.0.0-evolve-fix\"\n---\nImproved content"
+    ))
+    context.mailbox = AsyncMock()
+    context.mailbox.deposit = AsyncMock(return_value=True)
+
+    unhealthy_report = _make_unhealthy_report("paper-discovery", "2.0.0")
+
+    with patch("src.everbot.core.jobs.skill_evaluate.evaluate_skill", new=AsyncMock(return_value=unhealthy_report)):
+        await _evaluate_one(context, seg_logger, ver_mgr, "paper-discovery", tmp_path / "sessions")
+
+    pointer = ver_mgr.get_pointer("paper-discovery")
+    assert pointer.stable_version == "2.0.0"
+    assert "evolve" in pointer.current_version
+    stable_meta = ver_mgr.get_metadata("paper-discovery", "2.0.0")
+    assert stable_meta.status == VersionStatus.ACTIVE
+    assert stable_meta.suspended_reason == ""
+    testing_meta = ver_mgr.get_metadata("paper-discovery", pointer.current_version)
+    assert testing_meta.status == VersionStatus.TESTING
+
+
+@pytest.mark.asyncio
 async def test_evolve_count_exceeded_suspends(tmp_path: Path):
     """Consecutive evolve > MAX -> suspend skill."""
     skills_dir = tmp_path / "skills"

@@ -1,4 +1,12 @@
-"""LLM-based memory extraction from conversation history."""
+"""LLM-based profile memory extraction from conversation history.
+
+Profile extractor produces user-portrait memories — preferences, facts,
+workflows, decisions, experiences. It is paired with ``ProfileStore`` to
+persist results to ``MEMORY.md``.
+
+Event extraction (time-anchored decisions, todos, incidents) lives in a
+separate ``event_extractor`` module.
+"""
 
 import json
 import logging
@@ -6,11 +14,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
+from . import _extractor_helpers as _helpers
 from .models import MemoryEntry
 
 logger = logging.getLogger(__name__)
 
-_EXTRACT_PROMPT = """\
+_PROFILE_PROMPT = """\
 你是一个记忆提取引擎。分析以下对话，提取**关于用户本人**的长期有价值信息。
 
 ## 核心原则
@@ -71,8 +80,8 @@ class ExtractResult:
     reinforced_ids: List[str] = field(default_factory=list)
 
 
-class MemoryExtractor:
-    """Extract structured memories from conversation using LLM."""
+class ProfileExtractor:
+    """Extract user-portrait memories from conversation using LLM."""
 
     def __init__(self, context: Any):
         self._context = context
@@ -104,12 +113,9 @@ class MemoryExtractor:
         else:
             existing_summary = "（暂无已有记忆）"
 
-        # Format messages
-        messages_text = _format_messages(messages)
-
-        prompt = _EXTRACT_PROMPT.format(
+        prompt = _PROFILE_PROMPT.format(
             existing_summary=existing_summary,
-            messages_text=messages_text,
+            messages_text=_helpers.format_messages(messages),
         )
 
         # Call LLM
@@ -121,63 +127,28 @@ class MemoryExtractor:
             return ExtractResult()
 
     async def _call_llm(self, prompt: str) -> str:
-        """Call LLM using Dolphin client pattern."""
-        from dolphin.core.llm.llm_client import LLMClient
-        from dolphin.core.common.enums import Messages as DolphinMessages, MessageRole
-
-        llm_client = LLMClient(self._context)
-        msgs = DolphinMessages()
-        msgs.append_message(MessageRole.USER, prompt)
-
-        config = self._context.get_config()
-        model = getattr(config, "default_model", None) or getattr(config, "fast_llm", None) or "deepseek-chat"
-
-        result = ""
-        async for chunk in llm_client.mf_chat_stream(
-            messages=msgs,
-            model=model,
-            temperature=0.3,
-            no_cache=True,
-        ):
-            result = chunk.get("content") or ""
-
-        # Dolphin LLMClient yields error messages as content when all retries
-        # are exhausted instead of raising.  Detect and treat as failure.
-        stripped = result.strip()
-        if stripped.startswith("❌") or stripped.startswith("failed to call LLM"):
-            raise RuntimeError(f"LLM call returned error: {stripped[:120]}")
-
-        return stripped
+        """Call Dolphin LLM. Kept as a method to preserve test patch surface."""
+        return await _helpers.call_dolphin_llm(self._context, prompt)
 
     def _parse_response(self, raw: str) -> ExtractResult:
-        """Parse LLM JSON response with fallback."""
-        # Try direct JSON parse
-        try:
-            data = json.loads(raw)
-            return self._build_result(data)
-        except json.JSONDecodeError:
-            pass
+        """Parse LLM JSON response with fallback strategies."""
+        data = _helpers.extract_json_object(raw)
 
-        # Try extracting JSON from markdown code block
-        m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
-        if m:
-            try:
-                data = json.loads(m.group(1))
-                return self._build_result(data)
-            except json.JSONDecodeError:
-                pass
+        if data is None:
+            # Profile-specific last resort: find any JSON object that
+            # mentions ``new_memories`` even if surrounded by prose.
+            m = re.search(r"\{[^{}]*\"new_memories\"[^{}]*\}", raw, re.DOTALL)
+            if m:
+                try:
+                    data = json.loads(m.group(0))
+                except json.JSONDecodeError:
+                    data = None
 
-        # Try finding any JSON object
-        m = re.search(r"\{[^{}]*\"new_memories\"[^{}]*\}", raw, re.DOTALL)
-        if m:
-            try:
-                data = json.loads(m.group(0))
-                return self._build_result(data)
-            except json.JSONDecodeError:
-                pass
+        if data is None:
+            logger.warning("Failed to parse profile extraction response")
+            return ExtractResult()
 
-        logger.warning("Failed to parse memory extraction response")
-        return ExtractResult()
+        return self._build_result(data)
 
     def _build_result(self, data: dict) -> ExtractResult:
         """Build ExtractResult from parsed JSON dict."""
@@ -198,21 +169,3 @@ class MemoryExtractor:
             new_memories=new_memories,
             reinforced_ids=reinforced_ids,
         )
-
-
-def _format_messages(messages: List[Dict[str, Any]], max_chars: int = 8000) -> str:
-    """Format messages for prompt, truncating if needed."""
-    lines = []
-    total = 0
-    for msg in messages:
-        role = "用户" if msg.get("role") == "user" else "助手"
-        content = str(msg.get("content", ""))
-        if len(content) > 500:
-            content = content[:500] + "..."
-        line = f"**{role}**: {content}"
-        total += len(line)
-        if total > max_chars:
-            lines.append("... (对话过长，已截断)")
-            break
-        lines.append(line)
-    return "\n\n".join(lines)

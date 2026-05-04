@@ -12,7 +12,7 @@ import logging
 import re
 import threading
 
-from dolphin.sdk import DolphinAgent, GlobalToolkits
+from dolphin.sdk import DolphinAgent, GlobalSkills as GlobalToolkits
 from dolphin.core.config.global_config import GlobalConfig
 from ...infra.dolphin_compat import (
     KEY_HISTORY_COMPACT_ON_PERSIST,

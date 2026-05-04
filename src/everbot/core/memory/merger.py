@@ -1,4 +1,17 @@
-"""Pure-logic memory merger — scoring, decay, and merge operations."""
+"""Pure-logic memory merger — scoring, decay, and merge operations.
+
+Decay strategies differ by memory kind:
+
+* **profile**: 7-day protection window, then 1% daily geometric decay
+  (``score *= 0.99^(days - 7)``). Anchored on ``last_activated``.
+* **event**: 30-day half-life from the event's natural anchor —
+  ``due_at`` for unfinished todos, otherwise ``event_at``. No protection
+  period because most decay-relevant events have months of useful life.
+
+The two strategies live as separate methods (``apply_profile_decay`` /
+``apply_event_decay``) because their inputs and curves are different
+enough that branching inside a single function would be confusing.
+"""
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -13,9 +26,12 @@ _IMPORTANCE_SCORES = {
     "low": 0.4,
 }
 
-# Decay parameters
-_PROTECTION_DAYS = 7
-_DECAY_RATE = 0.99
+# Profile decay parameters
+_PROFILE_PROTECTION_DAYS = 7
+_PROFILE_DECAY_RATE = 0.99
+
+# Event decay parameters
+_EVENT_HALF_LIFE_DAYS = 30.0
 
 # Dedup parameters
 _SIMILARITY_THRESHOLD = 0.35
@@ -95,27 +111,81 @@ class MemoryMerger:
         entry.last_activated = datetime.now(timezone.utc).isoformat()
         return entry
 
-    def apply_decay(
+    def apply_profile_decay(
         self, entries: List[MemoryEntry], now: Optional[datetime] = None
     ) -> List[MemoryEntry]:
-        """Apply time-based decay to all entries. 7-day protection period."""
+        """Apply profile decay — ``score *= 0.99^(days_since_activated - 7)``.
+
+        Anchored on ``last_activated``. Entries within the 7-day protection
+        window are unchanged. Entries with unparseable timestamps are
+        silently skipped (their score is left as-is).
+        """
         if now is None:
             now = datetime.now(timezone.utc)
 
         for entry in entries:
             try:
                 last = datetime.fromisoformat(entry.last_activated)
-                # Make timezone-aware if needed
                 if last.tzinfo is None:
                     last = last.replace(tzinfo=timezone.utc)
                 days = (now - last).total_seconds() / 86400.0
-                if days > _PROTECTION_DAYS:
-                    decay_days = days - _PROTECTION_DAYS
-                    entry.score = entry.score * (_DECAY_RATE ** decay_days)
+                if days > _PROFILE_PROTECTION_DAYS:
+                    decay_days = days - _PROFILE_PROTECTION_DAYS
+                    entry.score = entry.score * (_PROFILE_DECAY_RATE ** decay_days)
             except (ValueError, TypeError):
-                pass  # Skip entries with unparseable dates
+                pass
 
         return entries
+
+    def apply_event_decay(
+        self, entries: List[MemoryEntry], now: Optional[datetime] = None
+    ) -> List[MemoryEntry]:
+        """Apply event decay — 30-day half-life from each entry's anchor.
+
+        Anchor selection:
+          * todo with parseable ``due_at`` → ``due_at`` (decay starts only
+            after the deadline; before the deadline the entry stays at
+            full score, modeling "still pending, still relevant")
+          * everything else → ``event_at``
+
+        Profile entries (``kind != "event"``) are left untouched so this
+        method can be called on a mixed list without filtering first.
+        Entries whose anchor cannot be parsed are skipped silently.
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        for entry in entries:
+            if entry.kind != "event":
+                continue
+            anchor = self._event_decay_anchor(entry)
+            if anchor is None:
+                continue
+            days_past_anchor = (now - anchor).total_seconds() / 86400.0
+            if days_past_anchor <= 0:
+                continue  # protected: anchor is in the future
+            entry.score = entry.score * (0.5 ** (days_past_anchor / _EVENT_HALF_LIFE_DAYS))
+
+        return entries
+
+    @staticmethod
+    def _event_decay_anchor(entry: MemoryEntry) -> Optional[datetime]:
+        """Pick the timestamp that decay measures from."""
+        candidates: List[Optional[str]] = []
+        if entry.category == "todo" and entry.due_at:
+            candidates.append(entry.due_at)
+        candidates.append(entry.event_at)
+        for raw in candidates:
+            if not raw:
+                continue
+            try:
+                dt = datetime.fromisoformat(raw)
+            except ValueError:
+                continue
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        return None
 
     def merge(
         self,
