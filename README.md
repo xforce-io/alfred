@@ -39,7 +39,13 @@ source .venv/bin/activate        # 激活虚拟环境
 # 启动和管理
 ./bin/everbot start                       # 启动 daemon + web（后台）
 ./bin/everbot stop                        # 停止所有服务
+./bin/everbot restart                     # 重启（macOS 走 launchctl，避免与看门狗竞争）
 ./bin/everbot status                      # 查看状态
+
+# macOS 后台常驻（LaunchAgent）
+./bin/everbot service-install             # 安装 LaunchAgent，登录自启
+./bin/everbot service-uninstall           # 卸载 LaunchAgent
+./bin/everbot service-status              # 查看 LaunchAgent 状态
 
 # 其他
 ./bin/everbot list                        # 列出所有 Agent
@@ -49,6 +55,8 @@ source .venv/bin/activate        # 激活虚拟环境
 ./bin/everbot config --show               # 显示当前配置
 ./bin/everbot config --init               # 初始化默认配置
 ./bin/everbot migrate-agent --agent my_agent  # 迁移/修复 agent.dph
+./bin/everbot cleanup-logs                # 清理历史日志并迁移旧 skill_logs
+./bin/everbot memory stats --agent my_agent  # 查看 memory 系统统计
 
 # 技能管理
 ./bin/everbot skills list                 # 列出所有技能
@@ -225,10 +233,11 @@ EverBot Daemon
     │   ├── DecisionEngine (更新/回滚决策)
     │   └── VersionManager (版本追踪)
     │
-    ├── MemorySystem
-    │   ├── MemoryExtractor (LLM 提取关键事实)
-    │   ├── MemoryMerger (去重与合并)
-    │   └── MemoryStore (持久化到 MEMORY.md)
+    ├── MemorySystem (双层)
+    │   ├── ProfileExtractor + ProfileStore  (长期画像 → MEMORY.md)
+    │   ├── EventExtractor  + EventStore     (时点事件 → events/YYYY-MM.md，append-only)
+    │   ├── MemoryMerger (token 相似度去重、reinforce 上限 0.95、profile/event 双套衰减)
+    │   └── memory-review job (每 2h 跑：合并/弃用/压缩到 USER.md，带 entropy 约束)
     │
     ├── ChannelService
     │   ├── SessionResolver (渠道→Agent 映射)
@@ -249,7 +258,7 @@ EverBot Daemon
 - **UserDataManager**: 统一数据管理（工作区、配置、日志）
 - **WorkspaceLoader**: 工作区文件加载（AGENTS.md, HEARTBEAT.md, MEMORY.md, USER.md）
 - **SessionManager**: Session 管理（JSONL 持久化、并发锁、Session 恢复）
-- **MemoryManager**: 长期记忆管理（事实提取→去重→合并→归档）
+- **MemoryManager**: 双层记忆编排器（profile 画像 + event 时点事件并行抽取、token 去重、reinforce/decay、auto-review 周期收敛、USER.md 画像压缩）
 - **ChannelService**: 多渠道接入（Telegram Bot、Web UI）
 - **RoutineManager**: 任务调度（Cron 表达式、Interval、时区感知、夜间降频）
 - **HeartbeatRunner**: 心跳执行器（任务读取、上下文注入、结果持久化）

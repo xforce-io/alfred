@@ -39,7 +39,13 @@ source .venv/bin/activate        # Activate virtual environment
 # Start and manage
 ./bin/everbot start                       # Start daemon + web (background)
 ./bin/everbot stop                        # Stop all services
+./bin/everbot restart                     # Restart (macOS uses launchctl to avoid watchdog races)
 ./bin/everbot status                      # View status
+
+# macOS persistent background (LaunchAgent)
+./bin/everbot service-install             # Install LaunchAgent, auto-start on login
+./bin/everbot service-uninstall           # Uninstall LaunchAgent
+./bin/everbot service-status              # View LaunchAgent status
 
 # Other
 ./bin/everbot list                        # List all Agents
@@ -49,6 +55,8 @@ source .venv/bin/activate        # Activate virtual environment
 ./bin/everbot config --show               # Show current configuration
 ./bin/everbot config --init               # Initialize default configuration
 ./bin/everbot migrate-agent --agent my_agent  # Migrate/fix agent.dph
+./bin/everbot cleanup-logs                # Clean up old logs and migrate legacy skill_logs
+./bin/everbot memory stats --agent my_agent  # Inspect memory system stats
 
 # Skill management
 ./bin/everbot skills list                 # List all skills
@@ -225,10 +233,11 @@ EverBot Daemon
     │   ├── DecisionEngine (update/rollback decisions)
     │   └── VersionManager (version tracking)
     │
-    ├── MemorySystem
-    │   ├── MemoryExtractor (LLM-based key fact extraction)
-    │   ├── MemoryMerger (dedup & merge)
-    │   └── MemoryStore (persist to MEMORY.md)
+    ├── MemorySystem (two-layer)
+    │   ├── ProfileExtractor + ProfileStore  (long-lived portrait → MEMORY.md)
+    │   ├── EventExtractor  + EventStore     (time-anchored events → events/YYYY-MM.md, append-only)
+    │   ├── MemoryMerger (token-similarity dedup, reinforce capped at 0.95, separate profile/event decay)
+    │   └── memory-review job (runs every 2h: merge/deprecate/compress → USER.md, with entropy constraint)
     │
     ├── ChannelService
     │   ├── SessionResolver (channel → Agent mapping)
@@ -249,7 +258,7 @@ Core components:
 - **UserDataManager**: Unified data management (workspace, config, logs)
 - **WorkspaceLoader**: Workspace file loading (AGENTS.md, HEARTBEAT.md, MEMORY.md, USER.md)
 - **SessionManager**: Session management (JSONL persistence, concurrency locks, session recovery)
-- **MemoryManager**: Long-term memory management (fact extraction → dedup → merge → archive)
+- **MemoryManager**: Two-layer memory orchestrator (parallel profile + event extraction, token dedup, reinforce/decay, periodic auto-review consolidation, USER.md profile compression)
 - **ChannelService**: Multi-channel access (Telegram Bot, Web UI)
 - **RoutineManager**: Task scheduling (Cron expressions, Interval, timezone-aware, night throttling)
 - **HeartbeatRunner**: Heartbeat executor (task reading, context injection, result persistence)
