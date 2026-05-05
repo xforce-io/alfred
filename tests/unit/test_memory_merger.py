@@ -72,6 +72,21 @@ class TestReinforce:
         # 0.2 + (1.0 - 0.2) * 0.2 = 0.2 + 0.16 = 0.36
         assert abs(entry.score - 0.36) < 0.001
 
+    def test_reinforce_caps_at_ceiling(self):
+        # Without a cap, 0.94 + (1-0.94)*0.2 = 0.952. The cap pulls it back
+        # to 0.95 so review's deprecate (×0.3) can still meaningfully demote
+        # an entry that was reinforced from a wrong extraction.
+        merger = MemoryMerger()
+        entry = _make_entry(score=0.94, activation_count=5)
+        merger.reinforce(entry)
+        assert abs(entry.score - 0.95) < 0.001
+
+    def test_reinforce_idempotent_at_ceiling(self):
+        merger = MemoryMerger()
+        entry = _make_entry(score=0.95, activation_count=5)
+        merger.reinforce(entry)
+        assert abs(entry.score - 0.95) < 0.001
+
 
 class TestDecay:
     """Time-based decay with 7-day protection."""
