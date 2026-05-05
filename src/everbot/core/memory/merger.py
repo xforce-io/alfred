@@ -36,6 +36,12 @@ _EVENT_HALF_LIFE_DAYS = 30.0
 # Dedup parameters
 _SIMILARITY_THRESHOLD = 0.35
 
+# Reinforce ceiling: caps the unbounded climb so a wrongly-reinforced
+# entry stays demotable by review (×0.3 from 0.95 lands at 0.285, below
+# the 0.5 injection threshold; without the cap, scores reach 0.99+ and
+# review's deprecate can no longer push them out of the active set).
+_REINFORCE_CEILING = 0.95
+
 
 def _tokenize(text: str) -> Set[str]:
     """Tokenize text for similarity comparison.
@@ -106,7 +112,8 @@ class MemoryMerger:
 
     def reinforce(self, entry: MemoryEntry) -> MemoryEntry:
         """Reinforce an existing entry: boost score with diminishing returns."""
-        entry.score = entry.score + (1.0 - entry.score) * 0.2
+        boosted = entry.score + (1.0 - entry.score) * 0.2
+        entry.score = min(_REINFORCE_CEILING, boosted)
         entry.activation_count += 1
         entry.last_activated = datetime.now(timezone.utc).isoformat()
         return entry
