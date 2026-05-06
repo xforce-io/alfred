@@ -452,6 +452,8 @@ class Inspector:
                             # indefinitely (inspection_complete self-pollution bug).
                             if event.get("source") == "inspector":
                                 continue
+                            if event.get("agent") != self.agent_name:
+                                continue
                             ts = event.get("timestamp")
                             if ts:
                                 event_time = datetime.fromisoformat(ts)

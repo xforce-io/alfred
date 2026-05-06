@@ -730,23 +730,19 @@ Current time: $current_time
         lines = [
             "# 已安装技能",
             "",
-            "以下是当前可用的技能。你可以根据用户需求调用这些技能：",
+            "调用方式：先 `_load_resource_skill(\"名字\")` 加载文档，再按文档调用。",
+            "直接 `function.name=<名字>` 是不存在的工具。",
             "",
         ]
 
         for skill in skills:
-            lines.append(f"- **{skill['title']}** (`{skill['name']}`)")
-            if skill['description']:
-                lines.append(f"  {skill['description']}")
+            name = skill["name"]
+            desc = skill["description"] or skill["title"]
+            lines.append(f"- `_load_resource_skill(\"{name}\")` → {desc}")
 
         lines.append("")
-        lines.append("要使用技能，请调用 `_load_resource_skill(skill_name)` 加载详细说明。")
-        lines.append("")
-        lines.append("## 发现更多技能")
-        lines.append("")
         lines.append(
-            "技能注册表 `~/.alfred/skills-registry.json` 包含更多可安装的技能。"
-            "用 `_bash` 或 `_read_file` 读取该文件即可查看完整目录。"
+            "更多技能见注册表 `~/.alfred/skills-registry.json`（用 `_read_file` 读取）。"
         )
 
         return "\n".join(lines)
