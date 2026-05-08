@@ -194,6 +194,41 @@ class VersionManager:
     # Write
     # ------------------------------------------------------------------
 
+    def _propagate_upstream_assets(self, skill_id: str) -> None:
+        """Symlink upstream auxiliary entries into the writable skill dir.
+
+        Walks the read chain (excluding the writable layer itself) and, for
+        each top-level entry that the writable skill dir doesn't already
+        provide, creates a symlink pointing at the upstream entry. Skips
+        SKILL.md (publish manages it) and dotfiles/dotdirs (runtime state
+        like ``.invest/`` that agents must not share).
+        """
+        target = self._skill_dir(skill_id)
+        seen: set[str] = set()
+        # Names already in the writable layer count as "provided"
+        if target.exists():
+            for child in target.iterdir():
+                seen.add(child.name)
+        for read_dir in self._read_skill_dirs:
+            if read_dir == self._skills_dir:
+                continue
+            upstream = read_dir / skill_id
+            if not upstream.exists() or not upstream.is_dir():
+                continue
+            for child in upstream.iterdir():
+                name = child.name
+                if name == "SKILL.md" or name.startswith(".") or name in seen:
+                    continue
+                seen.add(name)
+                link = target / name
+                try:
+                    link.symlink_to(child.resolve())
+                except OSError as e:
+                    logger.warning(
+                        "Failed to symlink %s/%s into workspace: %s",
+                        skill_id, name, e,
+                    )
+
     def publish(self, skill_id: str, version: str, skill_content: str) -> None:
         """Publish a new version: write SKILL.md + create version snapshot.
 
@@ -224,6 +259,13 @@ class VersionManager:
         # 1. Write SKILL.md
         skill_md = self._skill_md(skill_id)
         skill_md.write_text(skill_content, encoding="utf-8")
+
+        # SLM only evolves SKILL.md; the per-agent override directory must
+        # still expose upstream auxiliary assets (scripts/, references/, …)
+        # or the evolved SKILL.md ends up referencing paths that don't exist
+        # in the writable layer. Symlink each top-level upstream entry that
+        # the workspace doesn't already provide.
+        self._propagate_upstream_assets(skill_id)
 
         # 2. Snapshot
         ver_dir = self._version_dir(skill_id, version)

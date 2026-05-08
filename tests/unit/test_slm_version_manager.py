@@ -419,3 +419,93 @@ class TestRollbackWithLayeredWritable:
         vm.rollback("p", reason="test")
         assert repo_md.read_text().startswith('---\nname: p\nversion: "1.0"'), \
             "repo file must NOT be modified by rollback"
+
+
+class TestPublishPropagatesUpstreamAssets:
+    """Regression: alice's invest broke at runtime because publish wrote
+    only SKILL.md to the per-agent override, shadowing the upstream symlink
+    that provided scripts/ and references/. The evolved SKILL.md still
+    referenced ``$SKILL_DIR/scripts/tools.py``, which now resolved into an
+    empty workspace dir.
+    """
+
+    def _setup_layered_skill_with_assets(self, tmp_path: Path):
+        repo = tmp_path / "repo"
+        global_dir = tmp_path / "global"
+        workspace = tmp_path / "workspace"
+        for d in (global_dir, workspace):
+            d.mkdir()
+        (repo / "demo").mkdir(parents=True)
+        (repo / "demo" / "SKILL.md").write_text(
+            '---\nname: demo\nversion: "1.0"\n---\nbase\n'
+        )
+        (repo / "demo" / "scripts").mkdir()
+        (repo / "demo" / "scripts" / "tools.py").write_text("print('tools')\n")
+        (repo / "demo" / "references").mkdir()
+        (repo / "demo" / "references" / "doc.md").write_text("# ref\n")
+        (global_dir / "demo").symlink_to(repo / "demo")
+
+        vm = VersionManager(
+            workspace, eval_base_dir=tmp_path / "eval",
+            read_skill_dirs=[workspace, global_dir],
+        )
+        return vm, workspace, repo
+
+    def test_publish_keeps_upstream_assets_reachable(self, tmp_path: Path):
+        vm, workspace, repo = self._setup_layered_skill_with_assets(tmp_path)
+
+        evolved = '---\nname: demo\nversion: "1.0-evolve"\n---\nimproved\n'
+        vm.publish("demo", "1.0-evolve", evolved)
+
+        # The exact path the SKILL.md tells the LLM to invoke:
+        tools_py = workspace / "demo" / "scripts" / "tools.py"
+        assert tools_py.exists(), \
+            "publish must propagate upstream auxiliary subdirs into workspace"
+        assert tools_py.read_text() == "print('tools')\n"
+
+        ref_md = workspace / "demo" / "references" / "doc.md"
+        assert ref_md.exists()
+        assert ref_md.read_text() == "# ref\n"
+
+        # Upstream stays untouched
+        assert (repo / "demo" / "scripts" / "tools.py").read_text() == "print('tools')\n"
+
+    def test_publish_does_not_clobber_existing_workspace_assets(self, tmp_path: Path):
+        vm, workspace, _ = self._setup_layered_skill_with_assets(tmp_path)
+
+        # User pre-populated their own scripts/ in workspace before publish
+        (workspace / "demo").mkdir()
+        (workspace / "demo" / "scripts").mkdir()
+        (workspace / "demo" / "scripts" / "tools.py").write_text("# overridden\n")
+
+        evolved = '---\nname: demo\nversion: "1.0-evolve"\n---\nimproved\n'
+        vm.publish("demo", "1.0-evolve", evolved)
+
+        # Existing override preserved, NOT replaced by upstream symlink
+        assert (workspace / "demo" / "scripts" / "tools.py").read_text() == "# overridden\n"
+
+    def test_publish_skips_dotdirs_and_skill_md(self, tmp_path: Path):
+        vm, workspace, repo = self._setup_layered_skill_with_assets(tmp_path)
+        # Add a hidden runtime-state dir upstream — agents must NOT inherit
+        (repo / "demo" / ".invest").mkdir()
+        (repo / "demo" / ".invest" / "graph.json").write_text("{}")
+
+        evolved = '---\nname: demo\nversion: "1.0-evolve"\n---\nimproved\n'
+        vm.publish("demo", "1.0-evolve", evolved)
+
+        # Static subdirs propagated
+        assert (workspace / "demo" / "scripts" / "tools.py").exists()
+        # Hidden state dir NOT propagated
+        assert not (workspace / "demo" / ".invest").exists()
+        # SKILL.md is the freshly written content (not a symlink to upstream)
+        skill_md = workspace / "demo" / "SKILL.md"
+        assert not skill_md.is_symlink()
+        assert "1.0-evolve" in skill_md.read_text()
+
+    def test_publish_without_upstream_assets_still_works(self, tmp_path: Path):
+        """Plain (no read-chain auxiliary content) publish path keeps working."""
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        vm = VersionManager(skills_dir)
+        vm.publish("plain", "1.0", '---\nname: plain\nversion: "1.0"\n---\nbody\n')
+        assert (skills_dir / "plain" / "SKILL.md").exists()
