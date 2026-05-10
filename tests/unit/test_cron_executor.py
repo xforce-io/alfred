@@ -698,3 +698,103 @@ class TestIsolatedAgentRetries:
         assert run_agent.await_count == 2
         executor.session_manager.save_session.assert_awaited()
         executor.session_manager.mark_session_archived.assert_awaited()
+
+
+class TestSkillLogRecording:
+    """Lock in: isolated-agent runs MUST record skill invocations to skill_logs.
+
+    Regression guard for the Apr 2026 cron.py refactor that silently dropped
+    this call site, leaving SLM evaluate/evolve starved of input for over a
+    month before being noticed.
+    """
+
+    def _write_trajectory(self, path: Path, skill_calls: list[dict]) -> None:
+        """Write a minimal trajectory JSON containing _load_resource_skill calls."""
+        import json as _json
+        trajectory = []
+        for call in skill_calls:
+            trajectory.append({
+                "role": "assistant",
+                "tool_calls": [{"function": {
+                    "name": "_load_resource_skill",
+                    "arguments": _json.dumps(call),
+                }}],
+            })
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps({"trajectory": trajectory}), encoding="utf-8")
+
+    def test_extract_skills_from_trajectory_dedupes_and_skips_unrelated(self, tmp_path):
+        executor = _make_executor(tmp_path)
+        traj_path = tmp_path / "trajectory_sess1.json"
+        self._write_trajectory(traj_path, [
+            {"skill_name": "paper-discovery", "mode": "full"},
+            {"skill_name": "paper-discovery", "mode": "lazy"},  # duplicate
+            {"skill_name": "web", "mode": "full"},
+        ])
+        udm = MagicMock()
+        udm.get_session_trajectory_path.return_value = traj_path
+        with patch("src.everbot.infra.user_data.get_user_data_manager", return_value=udm):
+            skills = executor._extract_skills_from_trajectory("sess1")
+        assert sorted(skills) == ["paper-discovery", "web"]
+
+    def test_extract_skills_from_trajectory_missing_file_returns_empty(self, tmp_path):
+        executor = _make_executor(tmp_path)
+        udm = MagicMock()
+        udm.get_session_trajectory_path.return_value = tmp_path / "nonexistent.json"
+        with patch("src.everbot.infra.user_data.get_user_data_manager", return_value=udm):
+            assert executor._extract_skills_from_trajectory("sess_missing") == []
+
+    def test_record_skill_log_invokes_recorder_per_unique_skill(self, tmp_path):
+        executor = _make_executor(tmp_path)
+        recorder = MagicMock()
+        executor._skill_log_recorder = recorder
+        traj_path = tmp_path / "trajectory_sess2.json"
+        self._write_trajectory(traj_path, [
+            {"skill_name": "paper-discovery", "mode": "full"},
+            {"skill_name": "web", "mode": "full"},
+        ])
+        udm = MagicMock()
+        udm.get_session_trajectory_path.return_value = traj_path
+        task = MagicMock(description="daily papers task")
+        with patch("src.everbot.infra.user_data.get_user_data_manager", return_value=udm):
+            executor._record_skill_log(task, "report content", "sess2")
+        # one record per unique skill, with task description as context_before
+        assert recorder.maybe_record.call_count == 2
+        recorded_skills = sorted(c.args[0] for c in recorder.maybe_record.call_args_list)
+        assert recorded_skills == ["paper-discovery", "web"]
+        for call in recorder.maybe_record.call_args_list:
+            assert call.kwargs["session_id"] == "sess2"
+            assert call.kwargs["skill_output"] == "report content"
+            assert call.kwargs["context_before"] == "daily papers task"
+
+    def test_record_skill_log_no_recorder_is_noop(self, tmp_path):
+        executor = _make_executor(tmp_path)
+        executor._skill_log_recorder = None
+        # Should not raise even if trajectory lookup would fail.
+        executor._record_skill_log(MagicMock(description=""), "out", "sess3")
+
+    @pytest.mark.asyncio
+    async def test_isolated_agent_success_calls_record_skill_log(self, tmp_path):
+        """End-to-end: successful isolated agent run must invoke _record_skill_log.
+
+        This is the exact wiring that was severed by commit 2c1da6f in Apr 2026.
+        """
+        mgr = _seed_task(tmp_path, title="Daily papers", execution_mode="isolated",
+                         description="generate daily paper digest")
+        executor = _make_executor(tmp_path, routine_manager=mgr)
+        task = mgr.load_task_list().tasks[0]
+
+        agent = MagicMock()
+        agent.executor.context = MagicMock()
+        executor._create_job_agent = AsyncMock(return_value=agent)
+        run_agent = AsyncMock(return_value="report content")
+
+        with patch.object(executor, "_build_job_system_prompt", return_value="sys"), \
+             patch.object(executor, "_record_skill_log") as mock_record:
+            result = await executor._run_isolated_agent(task, "run_xyz", run_agent=run_agent)
+
+        assert result == "report content"
+        mock_record.assert_called_once()
+        call_args = mock_record.call_args
+        assert call_args.args[0] is task
+        assert call_args.args[1] == "report content"
