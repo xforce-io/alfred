@@ -56,9 +56,6 @@ import json
 import subprocess
 
 
-PYTHON = "/Users/xupeng/dev/github/alfred/.venv/bin/python"
-
-
 def _seed_skill(skills_dir: Path, skill_id: str, content: str) -> Path:
     skill_dir = skills_dir / skill_id
     skill_dir.mkdir(parents=True)
@@ -81,7 +78,7 @@ class TestPrepareCli:
         _seed_skill(writable_skills, "target-skill", skill_md_content)
 
         result = subprocess.run(
-            [PYTHON, str(SCRIPT_PATH),
+            [sys.executable, str(SCRIPT_PATH),
              "--workspace", str(workspace),
              "--skill", "target-skill"],
             capture_output=True, text=True, env={"ALFRED_HOME": str(tmp_path)},
