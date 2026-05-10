@@ -50,3 +50,46 @@ class TestNewVersion:
         m = _load_module()
         v = m._new_version("2.0.0-evolve-202604260331", ts="202605101630")
         assert v == "2.0.0-userevolve-202605101630"
+
+
+import json
+import subprocess
+
+
+PYTHON = "/Users/xupeng/dev/github/alfred/.venv/bin/python"
+
+
+def _seed_skill(skills_dir: Path, skill_id: str, content: str) -> Path:
+    skill_dir = skills_dir / skill_id
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+    return skill_dir
+
+
+class TestPrepareCli:
+    def test_returns_json_with_required_keys(self, tmp_path: Path):
+        # Workspace at tmp_path/agents/test_agent
+        workspace = tmp_path / "agents" / "test_agent"
+        writable_skills = workspace / "skills"
+        skill_md_content = (
+            "---\n"
+            'name: target-skill\n'
+            'version: "1.5.0"\n'
+            "---\n\n"
+            "# Target Skill\n\nBody text.\n"
+        )
+        _seed_skill(writable_skills, "target-skill", skill_md_content)
+
+        result = subprocess.run(
+            [PYTHON, str(SCRIPT_PATH),
+             "--workspace", str(workspace),
+             "--skill", "target-skill"],
+            capture_output=True, text=True, env={"ALFRED_HOME": str(tmp_path)},
+        )
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+
+        assert payload["current_skill_md"] == skill_md_content
+        assert payload["new_version"].startswith("1.5.0-userevolve-")
+        assert payload["tmp_file"].endswith(".md")
+        assert "skill-evolver-target-skill-" in payload["tmp_file"]
