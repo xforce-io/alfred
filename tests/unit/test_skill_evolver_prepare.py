@@ -90,3 +90,17 @@ class TestPrepareCli:
         assert payload["new_version"].startswith("1.5.0-userevolve-")
         assert payload["tmp_file"].endswith(".md")
         assert "skill-evolver-target-skill-" in payload["tmp_file"]
+
+    def test_missing_skill_returns_error_json(self, tmp_path: Path):
+        workspace = tmp_path / "agents" / "test_agent"
+        workspace.mkdir(parents=True)
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH),
+             "--workspace", str(workspace),
+             "--skill", "nonexistent-skill"],
+            capture_output=True, text=True, env={"ALFRED_HOME": str(tmp_path)},
+        )
+        assert result.returncode != 0
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert "nonexistent-skill" in payload["error"]
