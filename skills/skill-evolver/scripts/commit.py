@@ -86,6 +86,10 @@ def main(argv: list[str] | None = None) -> int:
     lock_path = eval_base / args.skill / ".lock"
     with skill_lock(lock_path):
         try:
+            # VersionManager.publish constructs a fresh CurrentPointer, which
+            # implicitly resets consecutive_evolve_count to 0 — intentional for
+            # user-directed evolve (explicit user intent shouldn't inherit the
+            # auto-evolve failure history).
             vm.publish(args.skill, args.version, content)
         except Exception as e:
             _err(f"publish failed: {e}")
