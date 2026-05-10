@@ -115,3 +115,43 @@ class TestCommitCli:
         )
         assert pointer["current_version"] == new_version
         assert pointer["consecutive_evolve_count"] == 0
+
+    def test_missing_content_file_returns_error(self, tmp_path: Path):
+        workspace = _seed_workspace(
+            tmp_path, "test_agent", "target-skill",
+            '---\nname: target-skill\nversion: "1.0.0"\n---\n',
+        )
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH),
+             "--workspace", str(workspace),
+             "--skill", "target-skill",
+             "--version", "1.0.0-userevolve-202605101630",
+             "--content-file", str(tmp_path / "does-not-exist.md")],
+            capture_output=True, text=True, env={"ALFRED_HOME": str(tmp_path)},
+        )
+        assert result.returncode != 0
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert "content file not found" in payload["error"]
+
+    def test_version_mismatch_returns_error(self, tmp_path: Path):
+        baseline = '---\nname: target-skill\nversion: "1.0.0"\n---\n'
+        workspace = _seed_workspace(tmp_path, "test_agent", "target-skill", baseline)
+        bad_content = (
+            '---\nname: target-skill\nversion: "1.5.0"\n---\n\nbody\n'
+        )
+        content_file = tmp_path / "bad.md"
+        content_file.write_text(bad_content, encoding="utf-8")
+
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH),
+             "--workspace", str(workspace),
+             "--skill", "target-skill",
+             "--version", "1.0.0-userevolve-202605101630",
+             "--content-file", str(content_file)],
+            capture_output=True, text=True, env={"ALFRED_HOME": str(tmp_path)},
+        )
+        assert result.returncode != 0
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert "mismatch" in payload["error"]
