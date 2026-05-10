@@ -53,3 +53,65 @@ class TestValidateContent:
         )
         with pytest.raises(ValueError, match="version mismatch"):
             m._validate_content(content, expected_version="2.0.0-userevolve-202605101630")
+
+
+import json
+import subprocess
+
+
+def _seed_workspace(tmp_path: Path, agent_name: str, skill_id: str, baseline_content: str) -> Path:
+    """Create a minimal alfred home + agent workspace + writable skill dir."""
+    workspace = tmp_path / "agents" / agent_name
+    writable_skills = workspace / "skills" / skill_id
+    writable_skills.mkdir(parents=True)
+    (writable_skills / "SKILL.md").write_text(baseline_content, encoding="utf-8")
+    # Eval dir gets created lazily by VersionManager.publish.
+    return workspace
+
+
+class TestCommitCli:
+    def test_publish_writes_new_version_and_updates_pointer(self, tmp_path: Path):
+        baseline = (
+            '---\n'
+            'name: target-skill\n'
+            'version: "1.0.0"\n'
+            '---\n\n# Target\nbaseline body\n'
+        )
+        workspace = _seed_workspace(tmp_path, "test_agent", "target-skill", baseline)
+
+        new_version = "1.0.0-userevolve-202605101630"
+        new_content = (
+            '---\n'
+            'name: target-skill\n'
+            f'version: "{new_version}"\n'
+            '---\n\n# Target\nrewritten body\n'
+        )
+        content_file = tmp_path / "rewritten.md"
+        content_file.write_text(new_content, encoding="utf-8")
+
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH),
+             "--workspace", str(workspace),
+             "--skill", "target-skill",
+             "--version", new_version,
+             "--content-file", str(content_file)],
+            capture_output=True, text=True, env={"ALFRED_HOME": str(tmp_path)},
+        )
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "ok"
+        assert payload["version"] == new_version
+        assert payload["current_pointer"] == new_version
+
+        # SKILL.md is overwritten in the writable layer
+        live = workspace / "skills" / "target-skill" / "SKILL.md"
+        assert "rewritten body" in live.read_text(encoding="utf-8")
+
+        # Snapshot and pointer exist in skill_eval
+        snapshot = workspace / "skill_eval" / "target-skill" / "versions" / f"v{new_version}" / "skill.md"
+        assert snapshot.exists()
+        pointer = json.loads(
+            (workspace / "skill_eval" / "target-skill" / "current.json").read_text(encoding="utf-8")
+        )
+        assert pointer["current_version"] == new_version
+        assert pointer["consecutive_evolve_count"] == 0
