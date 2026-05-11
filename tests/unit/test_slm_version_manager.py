@@ -84,9 +84,33 @@ class TestVersionManager:
         assert ptr.current_version == "1.0"
         assert ptr.repo_baseline is True  # first version, no prior stable
 
-    def test_publish_second_version_promotes_stable(self, tmp_path):
+    def test_publish_second_testing_version_does_not_promote_previous_testing(self, tmp_path):
+        """Publishing a new TESTING version must not bless the previous one.
+
+        Regression: user-directed evolve can publish several candidate
+        versions in quick succession. A previous candidate is still TESTING
+        until Skill Evaluate calls activate(); publish() must not turn it into
+        ACTIVE or make it the rollback target just because another candidate
+        was published.
+        """
         mgr = self._make_mgr(tmp_path)
         mgr.publish("test-skill", "1.0", SKILL_CONTENT_V1)
+        mgr.publish("test-skill", "2.0", SKILL_CONTENT_V2)
+
+        ptr = mgr.get_pointer("test-skill")
+        assert ptr.current_version == "2.0"
+        assert ptr.stable_version == ""
+        assert ptr.repo_baseline is True
+
+        v1_meta = mgr.get_metadata("test-skill", "1.0")
+        assert v1_meta.status == VersionStatus.TESTING
+
+    def test_publish_preserves_existing_stable_version(self, tmp_path):
+        """Only activate() advances stable; later publish() preserves it."""
+        mgr = self._make_mgr(tmp_path)
+        mgr.publish("test-skill", "1.0", SKILL_CONTENT_V1)
+        mgr.activate("test-skill", "1.0")
+
         mgr.publish("test-skill", "2.0", SKILL_CONTENT_V2)
 
         ptr = mgr.get_pointer("test-skill")
@@ -94,9 +118,16 @@ class TestVersionManager:
         assert ptr.stable_version == "1.0"
         assert ptr.repo_baseline is False
 
+        v1_meta = mgr.get_metadata("test-skill", "1.0")
+        assert v1_meta.status == VersionStatus.ACTIVE
+
+        v2_meta = mgr.get_metadata("test-skill", "2.0")
+        assert v2_meta.status == VersionStatus.TESTING
+
     def test_rollback_to_stable(self, tmp_path):
         mgr = self._make_mgr(tmp_path)
         mgr.publish("test-skill", "1.0", SKILL_CONTENT_V1)
+        mgr.activate("test-skill", "1.0")
         mgr.publish("test-skill", "2.0", SKILL_CONTENT_V2)
 
         rolled = mgr.rollback("test-skill", reason="critical issues")

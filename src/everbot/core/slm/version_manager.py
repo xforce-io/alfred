@@ -235,8 +235,7 @@ class VersionManager:
         Steps:
         1. Write SKILL.md to ~/.alfred/skills/{skill_id}/
         2. Snapshot to .eval/versions/v{version}/
-        3. Update current.json
-        4. Set previous active version as stable (if exists)
+        3. Update current.json while preserving the existing stable target
 
         Refuses to operate on symlink-managed skills: writing to the live
         SKILL.md would resolve through the symlink and overwrite the
@@ -253,7 +252,9 @@ class VersionManager:
         skill_dir = self._skill_dir(skill_id)
         skill_dir.mkdir(parents=True, exist_ok=True)
 
-        # Determine previous pointer for stable promotion
+        # Determine previous pointer. Publishing creates a TESTING candidate;
+        # it must not promote any prior TESTING version to stable. Only
+        # activate() may advance stable_version after evaluation passes.
         old_pointer = self.get_pointer(skill_id)
 
         # 1. Write SKILL.md
@@ -280,7 +281,7 @@ class VersionManager:
         (ver_dir / "metadata.json").write_text(meta.to_json(), encoding="utf-8")
 
         # 3. Update pointer
-        stable = old_pointer.current_version if old_pointer else ""
+        stable = old_pointer.stable_version if old_pointer else ""
         repo_baseline = not bool(stable)
         pointer = CurrentPointer(
             current_version=version,
@@ -289,14 +290,6 @@ class VersionManager:
         )
         self._current_json(skill_id).parent.mkdir(parents=True, exist_ok=True)
         self._current_json(skill_id).write_text(pointer.to_json(), encoding="utf-8")
-
-        # 4. Promote previous current to stable (mark active)
-        if old_pointer and old_pointer.current_version:
-            old_meta = self.get_metadata(skill_id, old_pointer.current_version)
-            if old_meta and old_meta.status == VersionStatus.TESTING:
-                old_meta.status = VersionStatus.ACTIVE
-                old_meta_path = self._version_dir(skill_id, old_pointer.current_version) / "metadata.json"
-                old_meta_path.write_text(old_meta.to_json(), encoding="utf-8")
 
         logger.info("Published %s v%s", skill_id, version)
 
