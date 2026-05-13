@@ -52,29 +52,27 @@ class TestTelegramToolkitRegistration:
     def test_registers_telegram_toolkit_via_tool_api(self, tmp_path):
         ch = _make_channel(tmp_path)
         installed = MagicMock()
-        installed.hasTool.return_value = False
+        installed.hasSkill.return_value = False
         agent = SimpleNamespace(
-            global_toolkits=SimpleNamespace(installedToolSet=installed),
-            global_skills=None,
+            global_skills=SimpleNamespace(installedSkillset=installed),
         )
 
         ch._ensure_telegram_skillkit(agent)
 
-        installed.hasTool.assert_called_once_with("_tg_send_file")
-        installed.addToolkit.assert_called_once()
+        installed.hasSkill.assert_called_once_with("_tg_send_file")
+        installed.addSkillkit.assert_called_once()
 
     def test_skips_registration_when_tool_already_present(self, tmp_path):
         ch = _make_channel(tmp_path)
         installed = MagicMock()
-        installed.hasTool.return_value = True
+        installed.hasSkill.return_value = True
         agent = SimpleNamespace(
-            global_toolkits=SimpleNamespace(installedToolSet=installed),
-            global_skills=None,
+            global_skills=SimpleNamespace(installedSkillset=installed),
         )
 
         ch._ensure_telegram_skillkit(agent)
 
-        installed.addToolkit.assert_not_called()
+        installed.addSkillkit.assert_not_called()
 
 
 # ===========================================================================

@@ -31,8 +31,8 @@ def _build_global_skills(skill_names, with_meta=True):
     构造模拟的 GlobalSkills 运行时对象。
 
     模拟真实的 Dolphin SDK 对象图：
-      global_skills.installedToolSet
-        .getTool("_load_resource_skill")
+      global_skills.installedSkillset
+        .getSkill("_load_resource_skill")
           .owner_toolkit / owner_skillkit  →  ResourceSkillkit
             .get_available_skills() → [name, ...]
             .get_skill_meta(name) → SkillMeta
@@ -60,13 +60,13 @@ def _build_global_skills(skill_names, with_meta=True):
     loader_skill.owner_toolkit = resource_skillkit
     loader_skill.owner_skillkit = resource_skillkit
 
-    # installedToolSet
+    # installedSkillset
     installed_skillset = MagicMock()
-    installed_skillset.getTool.return_value = loader_skill
+    installed_skillset.getSkill.return_value = loader_skill
 
     # GlobalSkills（注意：没有 skillkits 属性，这是旧代码的错误假设）
     global_skills = SimpleNamespace(
-        installedToolSet=installed_skillset,
+        installedSkillset=installed_skillset,
     )
 
     return global_skills
@@ -87,7 +87,7 @@ class TestExtractRuntimeAvailableSkills:
         assert names == {"example-skill", "dev-browser", "paper-discovery"}
 
     def test_returns_empty_when_no_installed_skillset(self, factory):
-        """GlobalSkills 没有 installedToolSet 时返回空"""
+        """GlobalSkills 没有 installedSkillset 时返回空"""
         gs = SimpleNamespace()  # 无任何属性
 
         with patch.object(factory, "_load_disabled_skills", return_value=set()):
@@ -96,10 +96,10 @@ class TestExtractRuntimeAvailableSkills:
         assert result == []
 
     def test_returns_empty_when_loader_skill_not_found(self, factory):
-        """installedToolSet 中找不到 _load_resource_skill 时返回空"""
+        """installedSkillset 中找不到 _load_resource_skill 时返回空"""
         installed = MagicMock()
-        installed.getTool.return_value = None
-        gs = SimpleNamespace(installedToolSet=installed)
+        installed.getSkill.return_value = None
+        gs = SimpleNamespace(installedSkillset=installed)
 
         with patch.object(factory, "_load_disabled_skills", return_value=set()):
             result = factory._extract_runtime_available_skills(gs, "test-agent")
@@ -110,8 +110,8 @@ class TestExtractRuntimeAvailableSkills:
         """_load_resource_skill 没有 owner binding 时返回空"""
         loader_skill = SimpleNamespace()  # 无 owner_skillkit
         installed = MagicMock()
-        installed.getTool.return_value = loader_skill
-        gs = SimpleNamespace(installedToolSet=installed)
+        installed.getSkill.return_value = loader_skill
+        gs = SimpleNamespace(installedSkillset=installed)
 
         with patch.object(factory, "_load_disabled_skills", return_value=set()):
             result = factory._extract_runtime_available_skills(gs, "test-agent")
@@ -121,7 +121,7 @@ class TestExtractRuntimeAvailableSkills:
     def test_extracts_skills_via_owner_toolkit(self, factory):
         """兼容 Dolphin tool 命名：owner_toolkit 也应能提取 skills"""
         gs = _build_global_skills(["kweaver-code-review"])
-        loader_skill = gs.installedToolSet.getTool("_load_resource_skill")
+        loader_skill = gs.installedSkillset.getSkill("_load_resource_skill")
         del loader_skill.owner_skillkit
 
         with patch.object(factory, "_load_disabled_skills", return_value=set()):
@@ -147,7 +147,7 @@ class TestExtractRuntimeAvailableSkills:
         """超长 description 被截断到 150 字符 + ..."""
         gs = _build_global_skills(["long-desc"])
         # 替换 meta 的 description 为超长字符串（需要覆盖 side_effect）
-        skillkit = gs.installedToolSet.getTool("_load_resource_skill").owner_skillkit
+        skillkit = gs.installedSkillset.getSkill("_load_resource_skill").owner_skillkit
         long_desc = "A" * 200
         skillkit.get_skill_meta.side_effect = None
         skillkit.get_skill_meta.return_value = SimpleNamespace(
@@ -164,7 +164,7 @@ class TestExtractRuntimeAvailableSkills:
     def test_meta_exception_does_not_break(self, factory):
         """get_skill_meta 抛异常时不影响整体提取"""
         gs = _build_global_skills(["good-skill", "bad-skill"])
-        skillkit = gs.installedToolSet.getTool("_load_resource_skill").owner_skillkit
+        skillkit = gs.installedSkillset.getSkill("_load_resource_skill").owner_skillkit
 
         def flaky_meta(name):
             if name == "bad-skill":
@@ -208,7 +208,7 @@ class TestExtractRuntimeAvailableSkills:
     def test_home_path_replaced_with_tilde(self, factory):
         """base_path 中的 home 目录被替换为 ~"""
         gs = _build_global_skills(["my-skill"])
-        skillkit = gs.installedToolSet.getTool("_load_resource_skill").owner_skillkit
+        skillkit = gs.installedSkillset.getSkill("_load_resource_skill").owner_skillkit
         home = str(Path.home())
         skillkit.get_skill_meta.side_effect = None
         skillkit.get_skill_meta.return_value = SimpleNamespace(
@@ -236,7 +236,7 @@ class TestOldApiDoesNotWork:
         """
         gs = _build_global_skills(["example-skill", "dev-browser"])
 
-        # 验证我们构造的 mock 跟真实对象一样没有 skillkits
+        # 验证我们构造的 mock 跟真实对象一样没有 skillkits 属性
         assert not hasattr(gs, "skillkits")
 
         # 但 skills 仍然能被正确提取

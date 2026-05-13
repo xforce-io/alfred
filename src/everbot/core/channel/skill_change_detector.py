@@ -23,16 +23,16 @@ def get_current_resource_skills(agent: Any) -> Dict[str, str]:
     Returns:
         Mapping of skill_name → description (may be empty if ResourceSkillkit not loaded).
     """
-    global_toolkits = getattr(agent, "global_toolkits", None) or getattr(agent, "global_skills", None)
+    global_toolkits = getattr(agent, "global_skills", None)
     if global_toolkits is None:
         return {}
 
-    installed = getattr(global_toolkits, "installedToolSet", None)
+    installed = getattr(global_toolkits, "installedSkillset", None)
     if installed is None:
         return {}
 
     rsk = None
-    for skill in installed.getTools():
+    for skill in installed.getSkills():
         owner = getattr(skill, "owner_skillkit", None)
         if owner is not None and getattr(owner, "getName", lambda: "")() == "resource_skillkit":
             rsk = owner

@@ -24,21 +24,20 @@ def _build_agent_with_resource_skills(skills: dict[str, str]):
 
     loader_tool = SimpleNamespace(owner_skillkit=resource_skillkit)
     installed_toolset = MagicMock()
-    installed_toolset.getTools.return_value = [loader_tool]
+    installed_toolset.getSkills.return_value = [loader_tool]
 
     context = MagicMock()
     context.get_var_value.return_value = []
 
     agent = SimpleNamespace(
-        global_toolkits=SimpleNamespace(installedToolSet=installed_toolset),
-        global_skills=None,
+        global_skills=SimpleNamespace(installedSkillset=installed_toolset),
         executor=SimpleNamespace(context=context),
     )
     return agent, context
 
 
 def test_get_current_resource_skills_reads_installed_toolset():
-    """Current resource skills should be resolved from installedToolSet.getTools()."""
+    """Current resource skills should be resolved from installedSkillset.getSkills()."""
     agent, _ = _build_agent_with_resource_skills(
         {"example-skill": "Example description"}
     )

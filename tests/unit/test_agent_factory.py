@@ -91,8 +91,8 @@ async def test_agent_factory_preseeds_last_tools_from_dph():
         agent = await factory.create_agent("test_agent", agent_dir)
 
         context = agent.executor.context
-        assert hasattr(context, "get_last_tools")
-        assert context.get_last_tools() == expected_tools
+        assert hasattr(context, "get_last_skills")
+        assert context.get_last_skills() == expected_tools
 
 
 @pytest.mark.asyncio
@@ -251,8 +251,8 @@ class TestLoadCustomSkillkits:
 
         factory._load_custom_skillkits(agent, "cm")
 
-        # global_toolkits should never be accessed if no dirs configured
-        agent.global_toolkits._loadCustomToolkitsFromPath.assert_not_called()
+        # global_skills should never be accessed if no dirs configured
+        agent.global_skills._loadCustomToolkitsFromPath.assert_not_called()
 
     @patch("src.everbot.core.agent.factory.get_config")
     def test_loads_skillkit_dir(self, mock_get_config):
@@ -269,7 +269,7 @@ class TestLoadCustomSkillkits:
             factory = self._make_factory()
             gs = MagicMock()
             agent = MagicMock()
-            agent.global_toolkits = gs
+            agent.global_skills = gs
 
             factory._load_custom_skillkits(agent, "cm")
 
@@ -290,7 +290,7 @@ class TestLoadCustomSkillkits:
             factory = self._make_factory()
             gs = MagicMock()
             agent = MagicMock()
-            agent.global_toolkits = gs
+            agent.global_skills = gs
 
             factory._load_custom_skillkits(agent, "cm")
 
@@ -311,7 +311,7 @@ class TestLoadCustomSkillkits:
             factory = self._make_factory()
             gs = MagicMock()
             agent = MagicMock()
-            agent.global_toolkits = gs
+            agent.global_skills = gs
 
             factory._load_custom_skillkits(agent, "cm")
 
@@ -332,7 +332,7 @@ class TestLoadCustomSkillkits:
             factory = self._make_factory()
             gs = MagicMock()
             agent = MagicMock()
-            agent.global_toolkits = gs
+            agent.global_skills = gs
 
             factory._load_custom_skillkits(agent, "cm")
 
@@ -353,7 +353,7 @@ class TestLoadCustomSkillkits:
             factory = self._make_factory()
             gs = MagicMock()
             agent = MagicMock()
-            agent.global_toolkits = gs
+            agent.global_skills = gs
 
             factory._load_custom_skillkits(agent, "cm")
 
@@ -375,7 +375,7 @@ class TestLoadCustomSkillkits:
             factory = self._make_factory()
             gs = MagicMock()
             agent = MagicMock()
-            agent.global_toolkits = gs
+            agent.global_skills = gs
 
             factory._load_custom_skillkits(agent, "cm")
 
@@ -397,7 +397,7 @@ class TestLoadCustomSkillkits:
             gs = MagicMock()
             gs._loadCustomToolkitsFromPath.side_effect = RuntimeError("import failed")
             agent = MagicMock()
-            agent.global_toolkits = gs
+            agent.global_skills = gs
 
             # Should not raise
             factory._load_custom_skillkits(agent, "cm")
@@ -409,11 +409,11 @@ class TestLoadCustomSkillkits:
 
 
 class TestSyncAllToolsAfterCustomLoad:
-    """Custom skillkits must be visible in allTools, not just installedToolSet."""
+    """Custom skillkits must be visible in allSkills, not just installedSkillset."""
 
     @pytest.mark.asyncio
     async def test_create_agent_syncs_alltools_after_custom_load(self):
-        """After _load_custom_skillkits, _syncAllTools must be called so
+        """After _load_custom_skillkits, _syncAllSkills must be called so
         custom tools appear in context.all_skills (used by tools= filtering)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = UserDataManager(alfred_home=Path(tmpdir))
@@ -425,16 +425,16 @@ class TestSyncAllToolsAfterCustomLoad:
             workspace_path = manager.get_agent_dir("test_agent")
             agent = await factory.create_agent("test_agent", workspace_path)
 
-            # After creation, allTools should be in sync with installedToolSet
-            gs = getattr(agent, "global_toolkits", None)
+            # After creation, allSkills should be in sync with installedSkillset
+            gs = getattr(agent, "global_skills", None)
             if gs is not None:
-                installed_names = set(gs.installedToolSet.getToolNames())
-                all_names = set(gs.allTools.getToolNames())
-                # Every installed tool must be in allTools
+                installed_names = set(gs.installedSkillset.getSkillNames())
+                all_names = set(gs.allSkills.getSkillNames())
+                # Every installed skill must be in allSkills
                 missing = installed_names - all_names
                 assert not missing, (
-                    f"Tools in installedToolSet but not in allTools: {missing}. "
-                    f"_syncAllTools was not called after custom skillkit loading."
+                    f"Skills in installedSkillset but not in allSkills: {missing}. "
+                    f"_syncAllSkills was not called after custom skillkit loading."
                 )
 
 

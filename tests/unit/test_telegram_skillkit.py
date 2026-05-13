@@ -241,7 +241,7 @@ class TestTgSendPhoto:
 class TestCreateTools:
     def test_creates_two_tools(self):
         sk = TelegramSkillkit(bot_token="123:FAKE")
-        tools = sk.getTools()
+        tools = sk.getSkills()
         assert len(tools) == 2
         names = {s.get_function_name() for s in tools}
         assert "_tg_send_file" in names

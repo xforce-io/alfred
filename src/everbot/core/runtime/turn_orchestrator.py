@@ -603,7 +603,7 @@ class TurnOrchestrator:
                 cm = getattr(ctx, "context_manager", None) if ctx else None
                 if traj and cm and traj.is_enabled():
                     toolkit = getattr(ctx, "toolkit", None) or getattr(ctx, "skillkit", None)
-                    tools_schema = toolkit.getToolsSchema() if toolkit else []
+                    tools_schema = toolkit.getSkillsSchema() if toolkit else []
                     status = ctx.get_var_value("_status") or {}
                     stage_index = status.get("explore_time", 0)
                     model = ctx.get_last_model_name() if hasattr(ctx, "get_last_model_name") else None

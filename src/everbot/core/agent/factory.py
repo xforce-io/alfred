@@ -301,7 +301,7 @@ class AgentFactory:
             name=agent_name,
             file_path=str(agent_dph_path),
             global_config=agent_config,
-            global_toolkits=agent_toolkits,
+            global_skills=agent_toolkits,
             variables=variables,
             verbose=False,
         )
@@ -311,10 +311,10 @@ class AgentFactory:
         self._load_custom_skillkits(agent, agent_name)
 
         # 7.5 刷新 allTools — _loadCustomToolkitsFromPath 只写入
-        #     installedToolSet，不会自动同步到 allTools
-        gs = getattr(agent, "global_toolkits", None) or getattr(agent, "global_skills", None)
-        if gs is not None and hasattr(gs, "_syncAllTools"):
-            gs._syncAllTools()
+        #     installedSkillset，不会自动同步到 allSkills
+        gs = getattr(agent, "global_skills", None)
+        if gs is not None and hasattr(gs, "_syncAllSkills"):
+            gs._syncAllSkills()
 
         # 8. 初始化
         await agent.initialize()
@@ -325,9 +325,7 @@ class AgentFactory:
         agent.executor.context.init_trajectory(trajectory_path, overwrite=True)
         logger.info("Trajectory initialized: %s", trajectory_path)
 
-        runtime_global_toolkits = (
-            getattr(agent, "global_toolkits", None) or getattr(agent, "global_skills", None)
-        )
+        runtime_global_toolkits = getattr(agent, "global_skills", None)
         runtime_skills = self._extract_runtime_available_skills(runtime_global_toolkits, agent_name)
         if runtime_skills:
             skills_section = self._build_skills_prompt_section(runtime_skills)
@@ -359,12 +357,12 @@ class AgentFactory:
             context.set_last_model_name(actual_model)
             logger.info("Pre-seeded last_model_name: %s", actual_model)
 
-        # Pre-seed last_tools from DPH tools= so that continue_exploration
+        # Pre-seed last_skills from DPH tools= so that continue_exploration
         # (which bypasses DPH execution) inherits the tools filter.
         dph_skills = self._parse_dph_tools(agent_dph_path)
-        if dph_skills and hasattr(context, "set_last_tools"):
-            context.set_last_tools(dph_skills)
-            logger.info("Pre-seeded last_tools from DPH: %s", dph_skills)
+        if dph_skills and hasattr(context, "set_last_skills"):
+            context.set_last_skills(dph_skills)
+            logger.info("Pre-seeded last_skills from DPH: %s", dph_skills)
 
         # Clean up temporary heartbeat DPH after agent initialisation.
         if _tmp_dph is not None and _tmp_dph.exists():
@@ -603,7 +601,7 @@ Current time: $current_time
         if not skillkit_dirs:
             return
 
-        gs = getattr(agent, "global_toolkits", None) or getattr(agent, "global_skills", None)
+        gs = getattr(agent, "global_skills", None)
         if gs is None:
             return
 
@@ -815,9 +813,9 @@ Current time: $current_time
 
         # Locate the ResourceSkillkit via the owner binding on
         # the _load_resource_skill function that it registers.
-        installed = getattr(global_skills, "installedToolSet", None)
+        installed = getattr(global_skills, "installedSkillset", None)
         if installed is not None:
-            loader_skill = installed.getTool("_load_resource_skill") if hasattr(installed, "getTool") else None
+            loader_skill = installed.getSkill("_load_resource_skill") if hasattr(installed, "getSkill") else None
             if loader_skill is not None:
                 resource_skillkit = (
                     getattr(loader_skill, "owner_toolkit", None)
