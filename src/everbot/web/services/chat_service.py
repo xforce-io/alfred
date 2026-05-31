@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 from fastapi import WebSocket
-from dolphin.core.agent.agent_state import AgentState, PauseType
+from ...core.agent.provider import get_provider
 
 from .agent_service import AgentService
 from ...core.channel.core_service import ChannelCoreService
@@ -404,7 +404,7 @@ class ChatService:
                 # Call agent.interrupt() → wait for task to finish → context preserved
 
                 # Case 1: Agent is already PAUSED due to USER_INTERRUPT
-                if agent.state == AgentState.PAUSED and agent._pause_type == PauseType.USER_INTERRUPT:
+                if get_provider().is_user_interrupt_paused(agent):
                     logger.debug("Agent is paused due to user interrupt, using resume_with_input()")
                     try:
                         await agent.resume_with_input(message)
@@ -433,7 +433,7 @@ class ChatService:
                     except Exception as e:
                         logger.debug("Task finished with exception: %s", e)
 
-                    if agent.state == AgentState.PAUSED and agent._pause_type == PauseType.USER_INTERRUPT:
+                    if get_provider().is_user_interrupt_paused(agent):
                         try:
                             await agent.resume_with_input(message)
                         except Exception as e:
