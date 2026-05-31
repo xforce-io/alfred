@@ -10,7 +10,10 @@ import tempfile
 
 from src.everbot.infra.user_data import UserDataManager
 from src.everbot.core.agent.factory import AgentFactory, get_agent_factory
-import src.everbot.core.agent.factory as factory_module
+# Singleton state (_default_factory) lives in the real implementation module,
+# not the shim; reset it there.  Public API above is imported via the shim on
+# purpose to keep the backward-compat re-export covered.
+import src.everbot.core.agent.provider.dolphin.factory as factory_module
 
 
 @pytest.mark.asyncio
@@ -158,7 +161,7 @@ class TestGetAgentSkillsFilter:
         factory.global_config_path = config_path
         return factory
 
-    @patch("src.everbot.core.agent.factory.get_config")
+    @patch("src.everbot.core.agent.provider.dolphin.factory.get_config")
     def test_reads_alfred_config_not_dolphin(self, mock_get_config):
         """Must call get_config() (Alfred config), not get_config(self.global_config_path)."""
         mock_get_config.return_value = {"everbot": {"agents": {}}}
@@ -168,7 +171,7 @@ class TestGetAgentSkillsFilter:
 
         mock_get_config.assert_called_with()
 
-    @patch("src.everbot.core.agent.factory.get_config")
+    @patch("src.everbot.core.agent.provider.dolphin.factory.get_config")
     def test_include_mode(self, mock_get_config):
         mock_get_config.return_value = {
             "everbot": {"agents": {"cm": {"skills": {"include": ["example_skill", "invest"]}}}}
@@ -178,7 +181,7 @@ class TestGetAgentSkillsFilter:
         assert mode == "include"
         assert names == {"example_skill", "invest"}
 
-    @patch("src.everbot.core.agent.factory.get_config")
+    @patch("src.everbot.core.agent.provider.dolphin.factory.get_config")
     def test_exclude_mode(self, mock_get_config):
         mock_get_config.return_value = {
             "everbot": {"agents": {"cm": {"skills": {"exclude": ["debug_tool"]}}}}
@@ -188,7 +191,7 @@ class TestGetAgentSkillsFilter:
         assert mode == "exclude"
         assert names == {"debug_tool"}
 
-    @patch("src.everbot.core.agent.factory.get_config")
+    @patch("src.everbot.core.agent.provider.dolphin.factory.get_config")
     def test_no_filter_returns_all(self, mock_get_config):
         mock_get_config.return_value = {"everbot": {"agents": {"cm": {}}}}
         factory = self._make_factory()
@@ -196,7 +199,7 @@ class TestGetAgentSkillsFilter:
         assert mode == "all"
         assert names is None
 
-    @patch("src.everbot.core.agent.factory.get_config")
+    @patch("src.everbot.core.agent.provider.dolphin.factory.get_config")
     def test_both_include_and_exclude_raises(self, mock_get_config):
         mock_get_config.return_value = {
             "everbot": {"agents": {"cm": {"skills": {
@@ -208,7 +211,7 @@ class TestGetAgentSkillsFilter:
         with pytest.raises(ValueError, match="both"):
             factory._get_agent_skills_filter("cm")
 
-    @patch("src.everbot.core.agent.factory.get_config")
+    @patch("src.everbot.core.agent.provider.dolphin.factory.get_config")
     def test_unknown_agent_returns_all(self, mock_get_config):
         mock_get_config.return_value = {"everbot": {"agents": {}}}
         factory = self._make_factory()
@@ -230,7 +233,7 @@ class TestLoadCustomSkillkits:
         factory.global_config_path = config_path
         return factory
 
-    @patch("src.everbot.core.agent.factory.get_config")
+    @patch("src.everbot.core.agent.provider.dolphin.factory.get_config")
     def test_reads_alfred_config_not_dolphin(self, mock_get_config):
         """Must call get_config() (Alfred config), not get_config(self.global_config_path)."""
         mock_get_config.return_value = {"everbot": {"agents": {}}}
@@ -241,7 +244,7 @@ class TestLoadCustomSkillkits:
 
         mock_get_config.assert_called_with()
 
-    @patch("src.everbot.core.agent.factory.get_config")
+    @patch("src.everbot.core.agent.provider.dolphin.factory.get_config")
     def test_no_skillkit_dirs_is_noop(self, mock_get_config):
         mock_get_config.return_value = {
             "everbot": {"agents": {"cm": {}}}
@@ -254,7 +257,7 @@ class TestLoadCustomSkillkits:
         # global_skills should never be accessed if no dirs configured
         agent.global_skills._loadCustomToolkitsFromPath.assert_not_called()
 
-    @patch("src.everbot.core.agent.factory.get_config")
+    @patch("src.everbot.core.agent.provider.dolphin.factory.get_config")
     def test_loads_skillkit_dir(self, mock_get_config):
         """Configured skillkit_dirs should be passed to GlobalSkills."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -275,7 +278,7 @@ class TestLoadCustomSkillkits:
 
             gs._loadCustomToolkitsFromPath.assert_called_once_with(str(skillkit_dir))
 
-    @patch("src.everbot.core.agent.factory.get_config")
+    @patch("src.everbot.core.agent.provider.dolphin.factory.get_config")
     def test_include_filter_allows_matching_skillkit(self, mock_get_config):
         with tempfile.TemporaryDirectory() as tmpdir:
             skillkit_dir = Path(tmpdir) / "example-skill"
@@ -296,7 +299,7 @@ class TestLoadCustomSkillkits:
 
             gs._loadCustomToolkitsFromPath.assert_called_once()
 
-    @patch("src.everbot.core.agent.factory.get_config")
+    @patch("src.everbot.core.agent.provider.dolphin.factory.get_config")
     def test_include_filter_blocks_non_matching_skillkit(self, mock_get_config):
         with tempfile.TemporaryDirectory() as tmpdir:
             skillkit_dir = Path(tmpdir) / "debug-tools"
@@ -317,7 +320,7 @@ class TestLoadCustomSkillkits:
 
             gs._loadCustomToolkitsFromPath.assert_not_called()
 
-    @patch("src.everbot.core.agent.factory.get_config")
+    @patch("src.everbot.core.agent.provider.dolphin.factory.get_config")
     def test_exclude_filter_blocks_matching_skillkit(self, mock_get_config):
         with tempfile.TemporaryDirectory() as tmpdir:
             skillkit_dir = Path(tmpdir) / "example-skill"
@@ -338,7 +341,7 @@ class TestLoadCustomSkillkits:
 
             gs._loadCustomToolkitsFromPath.assert_not_called()
 
-    @patch("src.everbot.core.agent.factory.get_config")
+    @patch("src.everbot.core.agent.provider.dolphin.factory.get_config")
     def test_exclude_filter_allows_non_matching_skillkit(self, mock_get_config):
         with tempfile.TemporaryDirectory() as tmpdir:
             skillkit_dir = Path(tmpdir) / "example-skill"
@@ -359,7 +362,7 @@ class TestLoadCustomSkillkits:
 
             gs._loadCustomToolkitsFromPath.assert_called_once()
 
-    @patch("src.everbot.core.agent.factory.get_config")
+    @patch("src.everbot.core.agent.provider.dolphin.factory.get_config")
     def test_hyphen_underscore_normalization_in_filter(self, mock_get_config):
         """skills.include=['example-skill'] should match dir 'example_skill' and vice versa."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -381,7 +384,7 @@ class TestLoadCustomSkillkits:
 
             gs._loadCustomToolkitsFromPath.assert_called_once()
 
-    @patch("src.everbot.core.agent.factory.get_config")
+    @patch("src.everbot.core.agent.provider.dolphin.factory.get_config")
     def test_load_failure_does_not_propagate(self, mock_get_config):
         """_loadCustomToolkitsFromPath raising should be caught, not propagated."""
         with tempfile.TemporaryDirectory() as tmpdir:
