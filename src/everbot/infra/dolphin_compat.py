@@ -1,26 +1,29 @@
-"""
-Compatibility helpers for Dolphin runtime behaviors.
+"""Compatibility shim for Dolphin runtime behaviors.
+
+The canonical home for these helpers is now
+``everbot.core.agent.provider.dolphin.compat``.  This module re-exports the
+constants from there so existing import paths keep working.
+
+``flags`` and ``ensure_continue_chat_compatibility`` stay defined here because
+``tests/unit/test_dolphin_compat.py`` patches
+``src.everbot.infra.dolphin_compat.flags``.
 """
 
 from dolphin.core import flags
 
-# KEY_HISTORY was removed in kweaver-dolphin 0.2.4; the underlying variable
-# name is the plain string "history".
-try:
-    from dolphin.core.common.constants import KEY_HISTORY  # noqa: F401
-except ImportError:
-    KEY_HISTORY: str = "history"  # type: ignore[no-redef]
+from ..core.agent.provider.dolphin.compat import (
+    KEY_HISTORY,
+    KEY_HISTORY_COMPACT_ON_PERSIST,
+    KEY_HISTORY_COMPACT_RECENT_TURNS,
+)
 
-# KEY_HISTORY_COMPACT_* may also be removed in future versions.
-try:
-    from dolphin.core.common.constants import KEY_HISTORY_COMPACT_ON_PERSIST  # noqa: F401
-except ImportError:
-    KEY_HISTORY_COMPACT_ON_PERSIST: str = "_history_compact_on_persist"  # type: ignore[no-redef]
-
-try:
-    from dolphin.core.common.constants import KEY_HISTORY_COMPACT_RECENT_TURNS  # noqa: F401
-except ImportError:
-    KEY_HISTORY_COMPACT_RECENT_TURNS: str = "_history_compact_recent_turns"  # type: ignore[no-redef]
+__all__ = [
+    "flags",
+    "KEY_HISTORY",
+    "KEY_HISTORY_COMPACT_ON_PERSIST",
+    "KEY_HISTORY_COMPACT_RECENT_TURNS",
+    "ensure_continue_chat_compatibility",
+]
 
 
 def ensure_continue_chat_compatibility() -> bool:
