@@ -1,17 +1,13 @@
-"""provider 中立常量值必须与 dolphin 当前值一致。"""
-from src.everbot.core.agent.provider import (
-    KEY_HISTORY,
-    KEY_HISTORY_COMPACT_ON_PERSIST,
-    KEY_HISTORY_COMPACT_RECENT_TURNS,
-)
+"""provider/dolphin/compat 的常量必须与 infra/dolphin_compat（规范来源）一致。
+
+两者都从 dolphin 解析同一批常量；本测试防止两份 compat 垫片漂移。
+"""
 
 
-def test_key_history_matches_dolphin_compat():
-    from src.everbot.infra.dolphin_compat import KEY_HISTORY as DC_KEY_HISTORY
-    assert KEY_HISTORY == DC_KEY_HISTORY
-
-
-def test_compact_constants_match_dolphin_compat():
+def test_provider_compat_matches_infra():
+    from src.everbot.core.agent.provider.dolphin import compat as pc
     from src.everbot.infra import dolphin_compat as dc
-    assert KEY_HISTORY_COMPACT_ON_PERSIST == dc.KEY_HISTORY_COMPACT_ON_PERSIST
-    assert KEY_HISTORY_COMPACT_RECENT_TURNS == dc.KEY_HISTORY_COMPACT_RECENT_TURNS
+
+    assert pc.KEY_HISTORY == dc.KEY_HISTORY
+    assert pc.KEY_HISTORY_COMPACT_ON_PERSIST == dc.KEY_HISTORY_COMPACT_ON_PERSIST
+    assert pc.KEY_HISTORY_COMPACT_RECENT_TURNS == dc.KEY_HISTORY_COMPACT_RECENT_TURNS

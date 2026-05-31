@@ -1,13 +1,14 @@
-"""Neutral AgentProvider port. MUST NOT import dolphin."""
+"""Neutral AgentProvider port. MUST NOT import dolphin.
+
+This module defines only provider-neutral *capabilities* (the methods any
+agent runtime must offer).  Dolphin-specific storage details (e.g. the history
+variable key) intentionally do NOT live here — consumers that need them import
+from the allowlisted compat layer instead.
+"""
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Optional, Protocol, runtime_checkable
-
-# Neutral constants (values identical to dolphin's current values).
-KEY_HISTORY: str = "history"
-KEY_HISTORY_COMPACT_ON_PERSIST: str = "_history_compact_on_persist"
-KEY_HISTORY_COMPACT_RECENT_TURNS: str = "_history_compact_recent_turns"
 
 
 @runtime_checkable
