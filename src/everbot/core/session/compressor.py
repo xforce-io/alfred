@@ -168,9 +168,6 @@ class SessionCompressor:
     async def _generate_summary(
         self, old_summary: str, messages: List[Dict[str, Any]]
     ) -> str:
-        from dolphin.core.llm.llm_client import LLMClient
-        from dolphin.core.common.enums import Messages as DolphinMessages, MessageRole
-
         messages_text = _format_messages_for_prompt(messages)
         if old_summary:
             old_summary_block = f"之前的摘要：\n{old_summary}\n"
@@ -182,23 +179,11 @@ class SessionCompressor:
             messages_text=messages_text,
         )
 
-        llm_client = LLMClient(self._context)
-        msgs = DolphinMessages()
-        msgs.append_message(MessageRole.USER, prompt)
+        from ..agent.provider import get_provider
 
-        config = self._context.get_config()
-        model = getattr(config, "fast_llm", None) or "qwen-turbo"
-
-        result = ""
-        async for chunk in llm_client.mf_chat_stream(
-            messages=msgs,
-            model=model,
-            temperature=0.3,
-            no_cache=True,
-        ):
-            result = chunk.get("content") or ""
-
-        return result.strip()
+        return await get_provider().call_llm(
+            self._context, prompt, temperature=0.3, fast=True
+        )
 
 
 # ── Pure helpers (no LLM, no I/O) ────────────────────────────────────
