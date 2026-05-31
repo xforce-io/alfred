@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, Optional, Union
 
-from dolphin.core.agent.agent_state import AgentState
+from ..agent.provider import get_provider
 from ...infra.dolphin_compat import KEY_HISTORY
 
 from .models import OutboundMessage
@@ -277,7 +277,7 @@ class ChannelCoreService:
             self._bind_session_id_to_context(agent, session_id)
             self._init_session_trajectory(agent, agent_name, session_id, overwrite=False)
 
-            if agent.state != AgentState.PAUSED:
+            if not get_provider().is_paused(agent):
                 ctx.set_variable("query", effective_message)
             self._reload_workspace_instructions_if_missing(agent, agent_name)
             self._cache_runtime_workspace_instructions(agent_name, ctx)
@@ -289,13 +289,13 @@ class ChannelCoreService:
             history_messages = ctx.get_var_value(KEY_HISTORY)
             is_first_turn = (
                 (not isinstance(history_messages, list) or len(history_messages) == 0)
-                and agent.state != AgentState.PAUSED
+                and not get_provider().is_paused(agent)
             )
             response = ""
             llm_started = False
 
             async def _on_before_retry(attempt: int, exc: Exception):
-                if agent.state == AgentState.ERROR:
+                if get_provider().is_error(agent):
                     try:
                         await agent.initialize()
                     except Exception as e:
