@@ -14,14 +14,14 @@ import threading
 
 from dolphin.sdk import DolphinAgent, GlobalSkills as GlobalToolkits
 from dolphin.core.config.global_config import GlobalConfig
-from ...infra.dolphin_compat import (
+from .compat import (
     KEY_HISTORY_COMPACT_ON_PERSIST,
     KEY_HISTORY_COMPACT_RECENT_TURNS,
 )
 
-from ...infra.workspace import WorkspaceLoader
-from ...infra.user_data import get_user_data_manager
-from ...infra.config import get_config
+from .....infra.workspace import WorkspaceLoader
+from .....infra.user_data import get_user_data_manager
+from .....infra.config import get_config
 
 logger = logging.getLogger(__name__)
 
