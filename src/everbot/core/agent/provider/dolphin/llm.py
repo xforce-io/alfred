@@ -10,6 +10,7 @@ async def call_llm(
     prompt: str,
     temperature: float = 0.3,
     fast: bool = False,
+    raise_on_error: bool = True,
 ) -> str:
     """Single user-message LLM call via dolphin's LLMClient.
 
@@ -18,8 +19,12 @@ async def call_llm(
     ``fast=True``:  model = fast_llm or "qwen-turbo"
         (preserves the session-compressor model-selection semantics).
 
-    Raises ``RuntimeError`` if dolphin surfaced an error string as content
-    (it yields error strings as content when retries are exhausted).
+    ``raise_on_error=True`` (default): raise ``RuntimeError`` if dolphin
+        surfaced an error string as content (it yields error strings as
+        content when retries are exhausted) — the memory-extractor semantics.
+    ``raise_on_error=False``: return the raw content as-is even when it is an
+        error string — the session-compressor semantics (it used the error
+        string verbatim as the summary rather than failing the turn).
     """
     llm_client = LLMClient(context)
     msgs = DolphinMessages()
@@ -45,6 +50,8 @@ async def call_llm(
         result = chunk.get("content") or ""
 
     stripped = result.strip()
-    if stripped.startswith("❌") or stripped.startswith("failed to call LLM"):
+    if raise_on_error and (
+        stripped.startswith("❌") or stripped.startswith("failed to call LLM")
+    ):
         raise RuntimeError(f"LLM call returned error: {stripped[:120]}")
     return stripped

@@ -181,8 +181,11 @@ class SessionCompressor:
 
         from ..agent.provider import get_provider
 
+        # raise_on_error=False preserves the original compressor behavior:
+        # when the LLM surfaces an error string it is used verbatim as the
+        # summary rather than raising (callers degrade gracefully).
         return await get_provider().call_llm(
-            self._context, prompt, temperature=0.3, fast=True
+            self._context, prompt, temperature=0.3, fast=True, raise_on_error=False
         )
 
 

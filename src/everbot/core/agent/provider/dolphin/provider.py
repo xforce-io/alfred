@@ -44,8 +44,12 @@ class DolphinProvider:
         prompt: str,
         temperature: float = 0.3,
         fast: bool = False,
+        raise_on_error: bool = True,
     ) -> str:
-        return await _llm.call_llm(context, prompt, temperature=temperature, fast=fast)
+        return await _llm.call_llm(
+            context, prompt, temperature=temperature, fast=fast,
+            raise_on_error=raise_on_error,
+        )
 
     def ensure_chat_compatibility(self) -> bool:
         return ensure_continue_chat_compatibility()

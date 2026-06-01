@@ -80,3 +80,17 @@ async def test_call_llm_raises_on_error_prefix():
     with patch.object(mod, "LLMClient", return_value=fake_client):
         with pytest.raises(RuntimeError):
             await mod.call_llm(_FakeContext(_FakeConfig(default_model="m1")), "hi")
+
+
+@pytest.mark.asyncio
+async def test_call_llm_returns_error_string_when_raise_disabled():
+    """raise_on_error=False 还原 compressor 原语义：错误串原样返回，不抛。"""
+    from src.everbot.core.agent.provider.dolphin import llm as mod
+    fake_client = MagicMock()
+    fake_client.mf_chat_stream = _mk_stream([{"content": "❌ boom"}])
+    with patch.object(mod, "LLMClient", return_value=fake_client):
+        out = await mod.call_llm(
+            _FakeContext(_FakeConfig(fast_llm="ft")), "hi",
+            fast=True, raise_on_error=False,
+        )
+    assert out == "❌ boom"

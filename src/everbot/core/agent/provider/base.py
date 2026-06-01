@@ -41,6 +41,7 @@ class AgentProvider(Protocol):
         prompt: str,
         temperature: float = 0.3,
         fast: bool = False,
+        raise_on_error: bool = True,
     ) -> str: ...
 
     def ensure_chat_compatibility(self) -> bool: ...
