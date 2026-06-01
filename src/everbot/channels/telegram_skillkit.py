@@ -13,8 +13,7 @@ from typing import List
 
 import httpx
 
-from dolphin.core.skill.skillkit import Skillkit
-from dolphin.core.skill.skill_function import SkillFunction
+from ..core.agent.provider import SkillkitBase, SkillFunction
 
 from ..core.channel.session_resolver import ChannelSessionResolver
 from ..core.models.constants import TIMEOUT_UPLOAD, LIMIT_CAPTION
@@ -53,7 +52,7 @@ def _resolve_chat_id(props: dict | None) -> str:
     return chat_id
 
 
-class TelegramSkillkit(Skillkit):
+class TelegramSkillkit(SkillkitBase):
     """Dolphin Skillkit providing Telegram file/photo sending capabilities."""
 
     def __init__(self, bot_token: str) -> None:
