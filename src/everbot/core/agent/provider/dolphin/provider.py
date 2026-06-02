@@ -125,3 +125,16 @@ class DolphinProvider:
                 )
         except Exception as exc:
             logger.debug("finalize_trajectory_on_error failed (non-fatal): %s", exc)
+
+    # -- skillkit registration (收敛 global_skills.installedSkillset 裸访问) --
+
+    def has_skill(self, agent: Any, name: str) -> bool:
+        gs = getattr(agent, "global_skills", None)
+        installed = getattr(gs, "installedSkillset", None) if gs else None
+        return bool(installed and installed.hasSkill(name))
+
+    def register_skillkit(self, agent: Any, skillkit: Any) -> None:
+        gs = getattr(agent, "global_skills", None)
+        installed = getattr(gs, "installedSkillset", None) if gs else None
+        if installed is not None:
+            installed.addSkillkit(skillkit)
