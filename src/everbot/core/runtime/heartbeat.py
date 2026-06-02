@@ -504,10 +504,9 @@ If not, reply with `HEARTBEAT_OK`.
 
     def _bind_session_id_to_context(self, agent: Any) -> None:
         """Bind session id to context to keep context-engine logs traceable."""
-        context = agent.executor.context
-        context.set_variable("session_id", self.session_id)
-        if hasattr(context, "set_session_id"):
-            context.set_session_id(self.session_id)
+        from ..agent.provider import get_provider
+
+        get_provider().set_session_id(agent, self.session_id)
 
     def _record_timeline_event(self, event_type: str, run_id: str, **payload: Any) -> None:
         """Append heartbeat timeline event with source metadata."""
@@ -683,7 +682,9 @@ If not, reply with `HEARTBEAT_OK`.
         user_data = get_user_data_manager()
         trajectory_path = user_data.get_session_trajectory_path(self.agent_name, self.session_id)
         trajectory_path.parent.mkdir(parents=True, exist_ok=True)
-        agent.executor.context.init_trajectory(str(trajectory_path), overwrite=overwrite)
+        from ..agent.provider import get_provider
+
+        get_provider().init_trajectory(agent, str(trajectory_path), overwrite=overwrite)
 
     async def _emit_result(self, result: str) -> None:
         """Dispatch heartbeat result to callback supporting sync/async handlers."""
@@ -1012,16 +1013,16 @@ If not, reply with `HEARTBEAT_OK`.
 
     async def _create_job_agent(self, job_session_id: str) -> Any:
         """Create a fresh agent for isolated job execution."""
+        from ..agent.provider import get_provider
+
         agent = await self.agent_factory(self.agent_name, self.workspace_path)
-        context = agent.executor.context
-        context.set_variable("session_id", job_session_id)
-        if hasattr(context, "set_session_id"):
-            context.set_session_id(job_session_id)
-        context.set_variable("job_session_id", job_session_id)
+        provider = get_provider()
+        provider.set_session_id(agent, job_session_id)
+        provider.set_variable(agent, "job_session_id", job_session_id)
         user_data = get_user_data_manager()
         trajectory_path = user_data.get_session_trajectory_path(self.agent_name, job_session_id)
         trajectory_path.parent.mkdir(parents=True, exist_ok=True)
-        context.init_trajectory(str(trajectory_path), overwrite=True)
+        provider.init_trajectory(agent, str(trajectory_path), overwrite=True)
         return agent
 
     def _build_job_system_prompt(self, agent: Any, task: Any) -> str:
@@ -1406,13 +1407,15 @@ If not, reply with `HEARTBEAT_OK`.
     ) -> str:
         """Inject heartbeat context according to execution mode."""
         try:
-            context = agent.executor.context
+            from ..agent.provider import get_provider
+
+            provider = get_provider()
             self._bind_session_id_to_context(agent)
 
             parse_result = self._file_mgr.last_parse_result
-            context.set_variable("heartbeat_mode", mode)
-            context.set_variable("heartbeat_time", datetime.now().isoformat())
-            context.set_variable("heartbeat_corruption_detected", mode == "corrupted")
+            provider.set_variable(agent, "heartbeat_mode", mode)
+            provider.set_variable(agent, "heartbeat_time", datetime.now().isoformat())
+            provider.set_variable(agent, "heartbeat_corruption_detected", mode == "corrupted")
 
             header = f"[系统心跳 - {datetime.now().strftime('%Y-%m-%d %H:%M')}]"
             if mode == "corrupted":

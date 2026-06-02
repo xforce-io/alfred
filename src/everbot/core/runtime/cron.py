@@ -687,16 +687,16 @@ class CronExecutor:
         """Create a fresh agent for isolated job execution."""
         from ...infra.user_data import get_user_data_manager
 
+        from ..agent.provider import get_provider
+
         agent = await self.agent_factory(self.agent_name, self.workspace_path)
-        context = agent.executor.context
-        context.set_variable("session_id", job_session_id)
-        if hasattr(context, "set_session_id"):
-            context.set_session_id(job_session_id)
-        context.set_variable("job_session_id", job_session_id)
+        provider = get_provider()
+        provider.set_session_id(agent, job_session_id)
+        provider.set_variable(agent, "job_session_id", job_session_id)
         user_data = get_user_data_manager()
         trajectory_path = user_data.get_session_trajectory_path(self.agent_name, job_session_id)
         trajectory_path.parent.mkdir(parents=True, exist_ok=True)
-        context.init_trajectory(str(trajectory_path), overwrite=True)
+        provider.init_trajectory(agent, str(trajectory_path), overwrite=True)
         return agent
 
     @staticmethod

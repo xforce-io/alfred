@@ -274,19 +274,20 @@ class ChannelCoreService:
 
             # --- Turn execution via TurnOrchestrator ---
             ctx = agent.executor.context
+            provider = get_provider()
             self._bind_session_id_to_context(agent, session_id)
             self._init_session_trajectory(agent, agent_name, session_id, overwrite=False)
 
-            if not get_provider().is_paused(agent):
-                ctx.set_variable("query", effective_message)
+            if not provider.is_paused(agent):
+                provider.set_variable(agent, "query", effective_message)
             self._reload_workspace_instructions_if_missing(agent, agent_name)
             self._cache_runtime_workspace_instructions(agent_name, ctx)
             # Refresh current_time so the LLM always knows the actual time
-            ctx.set_variable("current_time", datetime.now().strftime("%Y-%m-%d %H:%M"))
+            provider.set_variable(agent, "current_time", datetime.now().strftime("%Y-%m-%d %H:%M"))
             system_prompt_override = self._build_turn_system_prompt(session_data, agent_name)
             ensure_continue_chat_compatibility()
 
-            history_messages = ctx.get_var_value(KEY_HISTORY)
+            history_messages = provider.get_variable(agent, KEY_HISTORY)
             is_first_turn = (
                 (not isinstance(history_messages, list) or len(history_messages) == 0)
                 and not get_provider().is_paused(agent)
@@ -701,15 +702,12 @@ class ChannelCoreService:
         """Initialize trajectory file isolated by session."""
         trajectory_path = self.user_data.get_session_trajectory_path(agent_name, session_id)
         trajectory_path.parent.mkdir(parents=True, exist_ok=True)
-        agent.executor.context.init_trajectory(str(trajectory_path), overwrite=overwrite)
+        get_provider().init_trajectory(agent, str(trajectory_path), overwrite=overwrite)
 
     @staticmethod
     def _bind_session_id_to_context(agent: Any, session_id: str) -> None:
         """Bind session_id into context variable and native context session when available."""
-        context = agent.executor.context
-        context.set_variable("session_id", session_id)
-        if hasattr(context, "set_session_id"):
-            context.set_session_id(session_id)
+        get_provider().set_session_id(agent, session_id)
 
     def _truncate_preview(self, text: str, max_chars: int) -> tuple[str, bool, int]:
         """Build a bounded preview text to keep UI payload and history readable."""

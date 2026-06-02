@@ -11,6 +11,7 @@ class FakeCtx:
     def __init__(self):
         self.vars = {}
         self.traj_calls = []
+        self.session_id_set = None
 
     def set_variable(self, k, v):
         self.vars[k] = v
@@ -20,6 +21,9 @@ class FakeCtx:
 
     def init_trajectory(self, path, overwrite=False):
         self.traj_calls.append((path, overwrite))
+
+    def set_session_id(self, sid):
+        self.session_id_set = sid
 
 
 class FakeExecutor:
@@ -59,3 +63,31 @@ def test_init_trajectory_default_no_overwrite():
     a = FakeAgent()
     DolphinProvider().init_trajectory(a, "/tmp/t.json")
     assert a.executor.context.traj_calls == [("/tmp/t.json", False)]
+
+
+def test_set_session_id_sets_variable_and_calls_setter():
+    a = FakeAgent()
+    DolphinProvider().set_session_id(a, "sess-1")
+    assert a.executor.context.vars["session_id"] == "sess-1"
+    assert a.executor.context.session_id_set == "sess-1"
+
+
+def test_set_session_id_tolerates_context_without_setter():
+    class CtxNoSetter:
+        def __init__(self):
+            self.vars = {}
+
+        def set_variable(self, k, v):
+            self.vars[k] = v
+
+    class Exec:
+        def __init__(self):
+            self.context = CtxNoSetter()
+
+    class Agent:
+        def __init__(self):
+            self.executor = Exec()
+
+    a = Agent()
+    DolphinProvider().set_session_id(a, "s2")  # 不应抛错
+    assert a.executor.context.vars["session_id"] == "s2"

@@ -91,3 +91,9 @@ class DolphinProvider:
 
     def init_trajectory(self, agent: Any, path: str, overwrite: bool = False) -> None:
         agent.executor.context.init_trajectory(path, overwrite=overwrite)
+
+    def set_session_id(self, agent: Any, session_id: str) -> None:
+        ctx = agent.executor.context
+        ctx.set_variable("session_id", session_id)
+        if hasattr(ctx, "set_session_id"):
+            ctx.set_session_id(session_id)
