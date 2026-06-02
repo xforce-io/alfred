@@ -1,12 +1,15 @@
 """DolphinProvider — 当前唯一的 AgentProvider 实现。"""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
 from . import state as _state
 from . import llm as _llm
 from .compat import ensure_continue_chat_compatibility
+
+logger = logging.getLogger(__name__)
 
 
 class DolphinProvider:
@@ -97,3 +100,28 @@ class DolphinProvider:
         ctx.set_variable("session_id", session_id)
         if hasattr(ctx, "set_session_id"):
             ctx.set_session_id(session_id)
+
+    def finalize_trajectory_on_error(self, agent: Any) -> None:
+        """Persist the explore-stage trajectory on early abort(行为搬自
+        turn_orchestrator._flush_trajectory,深访问 dolphin trajectory)。"""
+        try:
+            ctx = getattr(agent, "executor", None)
+            ctx = getattr(ctx, "context", None) if ctx else None
+            traj = getattr(ctx, "trajectory", None) if ctx else None
+            cm = getattr(ctx, "context_manager", None) if ctx else None
+            if traj and cm and traj.is_enabled():
+                toolkit = getattr(ctx, "toolkit", None) or getattr(ctx, "skillkit", None)
+                tools_schema = toolkit.getSkillsSchema() if toolkit else []
+                status = ctx.get_var_value("_status") or {}
+                stage_index = status.get("explore_time", 0)
+                model = ctx.get_last_model_name() if hasattr(ctx, "get_last_model_name") else None
+                traj.finalize_stage(
+                    stage_name="explore",
+                    stage_index=stage_index,
+                    context_manager=cm,
+                    tools=tools_schema,
+                    user_id=ctx.user_id or "",
+                    model=model,
+                )
+        except Exception as exc:
+            logger.debug("finalize_trajectory_on_error failed (non-fatal): %s", exc)

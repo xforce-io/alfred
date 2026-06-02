@@ -250,9 +250,9 @@ class ChatService:
                 logger.debug("Agent ready: %s", agent.name)
 
                 try:
-                    context = agent.executor.context
-                    ws_instr = context.get_var_value("workspace_instructions")
-                    model_var = context.get_var_value("model_name")
+                    provider = get_provider()
+                    ws_instr = provider.get_variable(agent, "workspace_instructions")
+                    model_var = provider.get_variable(agent, "model_name")
                     logger.debug("workspace_instructions length: %d, model_name: %s",
                                  len(ws_instr) if ws_instr else 0, model_var)
                 except Exception as e:
