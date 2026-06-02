@@ -16,7 +16,8 @@ from pathlib import Path
 import pytest
 
 import everbot.core.agent.provider as provider_pkg
-from everbot.core.agent.provider.milkie.provider import MilkieAgentHandle, MilkieProvider
+import everbot.infra.config as config_module
+from everbot.core.agent.provider.milkie.provider import MilkieProvider
 from everbot.core.agent.provider.milkie.sidecar import MilkieSidecar
 from everbot.core.runtime.turn_orchestrator import TurnOrchestrator
 from everbot.core.runtime.turn_policy import CHAT_POLICY, TurnEventType
@@ -104,15 +105,21 @@ async def test_milkie_drives_turn_via_orchestrator_end_to_end(tmp_path, fake_ope
         ready_timeout=20.0,
     )
     await sidecar.start()
+    # 经配置开关切到 milkie:config=milkie + base_url → get_provider() 自动返回 MilkieProvider
+    monkeypatch.setattr(
+        config_module,
+        "get_config",
+        lambda *a, **k: {"everbot": {"provider": "milkie", "milkie": {"base_url": sidecar.base_url}}},
+    )
+    provider_pkg.reset_provider()
     try:
-        # turn_orchestrator 经 provider 抽象拿到 MilkieProvider —— 与 dolphin 同路径
-        provider = MilkieProvider(sidecar.base_url)
-        monkeypatch.setattr(provider_pkg, "get_provider", lambda: provider)
-
-        handle = MilkieAgentHandle(sidecar.base_url, "smoke-ctx")
+        provider = provider_pkg.get_provider()
+        assert isinstance(provider, MilkieProvider)  # C3 配置开关生效
+        handle = await provider.create_agent("smoke", "/ws")
         orchestrator = TurnOrchestrator(CHAT_POLICY)
         events = [e async for e in orchestrator.run_turn(handle, "say hello")]
     finally:
+        provider_pkg.reset_provider()
         await sidecar.close()
 
     deltas = [e.content for e in events if e.type == TurnEventType.LLM_DELTA]

@@ -80,3 +80,14 @@ class DolphinProvider:
             )
         async for event in stream:
             yield event
+
+    # -- context access (收敛 agent.executor.context 裸访问) --------------
+
+    def set_variable(self, agent: Any, key: str, value: Any) -> None:
+        agent.executor.context.set_variable(key, value)
+
+    def get_variable(self, agent: Any, key: str) -> Any:
+        return agent.executor.context.get_var_value(key)
+
+    def init_trajectory(self, agent: Any, path: str, overwrite: bool = False) -> None:
+        agent.executor.context.init_trajectory(path, overwrite=overwrite)
