@@ -80,3 +80,58 @@ class MilkieProvider:
         finally:
             if owns_client:
                 await client.aclose()
+
+    # -- 状态查询:milkie 用 AgentResult.status;handle 暂不缓存,默认 False。
+    #    完整实现需 serve 暴露运行态查询(待 milkie 扩展)。
+    def is_paused(self, agent: Any) -> bool:
+        return False
+
+    def is_error(self, agent: Any) -> bool:
+        return False
+
+    def is_user_interrupt_paused(self, agent: Any) -> bool:
+        return False
+
+    def ensure_chat_compatibility(self) -> bool:
+        return False  # milkie 无 dolphin 的 EXPLORE_BLOCK_V2 flag
+
+    # -- milkie 自带机制,no-op --
+    def init_trajectory(self, agent: Any, path: str, overwrite: bool = False) -> None:
+        pass  # milkie 自带 event sourcing,无需外部 trajectory
+
+    def finalize_trajectory_on_error(self, agent: Any) -> None:
+        pass  # 同上
+
+    def set_session_id(self, agent: Any, session_id: str) -> None:
+        pass  # milkie 会话身份即 handle.context_id
+
+    def has_skill(self, agent: Any, name: str) -> bool:
+        return False  # Python skill 待 milkie#87
+
+    # -- 需 milkie serve 扩展,明确未实现(避免静默错误) --
+    def set_variable(self, agent: Any, key: str, value: Any) -> None:
+        raise NotImplementedError(
+            "MilkieProvider.set_variable 需 milkie serve 暴露 context var 端点(milkie#83);见 goal.md A2"
+        )
+
+    def get_variable(self, agent: Any, key: str) -> Any:
+        raise NotImplementedError(
+            "MilkieProvider.get_variable 需 milkie serve 暴露 context var 端点(milkie#83);见 goal.md A2"
+        )
+
+    def register_skillkit(self, agent: Any, skillkit: Any) -> None:
+        raise NotImplementedError(
+            "MilkieProvider.register_skillkit 需 milkie#87 跨语言工具桥;见 goal.md D"
+        )
+
+    async def call_llm(
+        self,
+        context: Any,
+        prompt: str,
+        temperature: float = 0.3,
+        fast: bool = False,
+        raise_on_error: bool = True,
+    ) -> str:
+        raise NotImplementedError(
+            "MilkieProvider.call_llm 需 milkie serve 暴露一次性 LLM 端点;见 goal.md"
+        )

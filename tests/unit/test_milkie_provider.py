@@ -93,3 +93,33 @@ async def test_self_built_client_disables_env_proxy():
         assert client.trust_env is False
     finally:
         await client.aclose()
+
+
+def test_safe_noop_methods_do_not_crash():
+    """milkie 自带机制的接口:no-op,不崩(turn 层可用的前提)。"""
+    p = MilkieProvider("http://x")
+    h = MilkieAgentHandle("http://x", "c")
+    p.init_trajectory(h, "/t", overwrite=True)
+    p.finalize_trajectory_on_error(h)
+    p.set_session_id(h, "s")
+    assert p.ensure_chat_compatibility() is False
+    assert p.is_paused(h) is False
+    assert p.is_error(h) is False
+    assert p.is_user_interrupt_paused(h) is False
+    assert p.has_skill(h, "x") is False
+
+
+async def test_unsupported_methods_raise_clearly():
+    """需 milkie serve 扩展的接口:明确 NotImplementedError(而非静默错误)。"""
+    import pytest
+
+    p = MilkieProvider("http://x")
+    h = MilkieAgentHandle("http://x", "c")
+    with pytest.raises(NotImplementedError):
+        p.set_variable(h, "k", "v")
+    with pytest.raises(NotImplementedError):
+        p.get_variable(h, "k")
+    with pytest.raises(NotImplementedError):
+        p.register_skillkit(h, object())
+    with pytest.raises(NotImplementedError):
+        await p.call_llm(None, "prompt")
