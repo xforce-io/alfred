@@ -8,7 +8,7 @@ from the allowlisted compat layer instead.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional, Protocol, runtime_checkable
+from typing import Any, AsyncIterator, Optional, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -45,3 +45,16 @@ class AgentProvider(Protocol):
     ) -> str: ...
 
     def ensure_chat_compatibility(self) -> bool: ...
+
+    def run_turn(
+        self,
+        agent: Any,
+        message: Any,
+        *,
+        system_prompt: str = "",
+        is_first_turn: bool = False,
+        stream_mode: str = "delta",
+    ) -> AsyncIterator[Any]:
+        """Drive one turn, yielding raw provider events (``{"_progress": [...]}``
+        for dolphin). turn_orchestrator applies provider-neutral policy on top."""
+        ...

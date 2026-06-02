@@ -1,42 +1,49 @@
-"""Map milkie native SSE events onto alfred :class:`TurnEvent`.
+"""Map milkie native SSE events onto dolphin ``_progress`` items(统一中立契约).
 
-垂直切片(纯文本对话)只需两类事件:
+A1 把 ``_progress`` 定为 provider 中立契约:turn_orchestrator 消费 ``_progress``
+并套 policy 产出 ``TurnEvent``。MilkieProvider 因此把 milkie 事件适配成
+``_progress`` item(而非直接产 TurnEvent),从而复用 turn_orchestrator 的全部
+policy(循环检测 / 预算 / 失败熔断 …)。
 
-* ``message_delta {text}``           → :attr:`TurnEventType.LLM_DELTA`
-* ``agent.run.completed {status,…}`` → 终态:
-    * ``completed`` / ``interrupted`` → :attr:`TurnEventType.TURN_COMPLETE`
-    * ``error``                       → :attr:`TurnEventType.TURN_ERROR`
+pid 合成:工具块用 milkie 的 ``toolCallId``(running/completed 配对);LLM 块
+milkie 无块级 id,固定用 ``"llm"`` —— turn_orchestrator 的 llm 分支不读 pid,
+其 fingerprint 含 delta 内容,不会误去重不同 token。
 
-其余事件(``error`` 帧、``agent.run.started``、``tool.*``、未知名…)在本切片
-里返回 ``None`` 优雅忽略 —— 终态的错误信息由 ``agent.run.completed`` 的
-``error`` 字段携带,无需 ``error`` 帧重复。pid 合成、stage 分类等更完整的映射
-留待后续阶段(见 xforce-io/alfred#32)。
+终态(``agent.run.completed`` / ``error`` 帧 / 起止 / 未知)返回 None:turn 的
+结束由 SSE 流自然结束表示(对齐 dolphin continue_chat 流结束即 turn 完成)。
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, Optional
 
-from everbot.core.runtime.turn_policy import TurnEvent, TurnEventType
 
-
-def milkie_event_to_turn_event(event: str, data: Dict[str, Any]) -> Optional[TurnEvent]:
+def milkie_event_to_progress(event: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if event == "message_delta":
-        return TurnEvent(type=TurnEventType.LLM_DELTA, content=data.get("text") or "")
+        return {"stage": "llm", "delta": data.get("text") or "", "answer": "", "id": "llm"}
 
-    if event == "agent.run.completed":
-        status = data.get("status") or ""
-        output = data.get("output") or ""
-        if status == "error":
-            return TurnEvent(
-                type=TurnEventType.TURN_ERROR,
-                error=data.get("error") or "",
-                status=status,
-                answer=output,
-            )
-        return TurnEvent(
-            type=TurnEventType.TURN_COMPLETE,
-            answer=output,
-            status=status,
-        )
+    if event == "tool.requested":
+        args = data.get("input")
+        if not isinstance(args, str):
+            args = json.dumps(args, ensure_ascii=False) if args is not None else ""
+        return {
+            "stage": "skill",
+            "status": "running",
+            "id": data.get("toolCallId") or "",
+            "skill_info": {"name": data.get("toolName") or "", "args": args},
+        }
+
+    if event == "tool.responded":
+        ok = data.get("status") == "ok"
+        out = data.get("output") if ok else (data.get("error") or "")
+        if not isinstance(out, str):
+            out = json.dumps(out, ensure_ascii=False)
+        return {
+            "stage": "skill",
+            "status": "completed" if ok else "failed",
+            "answer": out,
+            "id": data.get("toolCallId") or "",
+            "skill_info": {"name": data.get("toolName") or ""},
+        }
 
     return None

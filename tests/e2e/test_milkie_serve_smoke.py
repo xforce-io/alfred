@@ -1,11 +1,12 @@
-"""E2E 冒烟:真 spawn ``milkie serve`` + 本地 fake OpenAI 流式 server。
+"""E2E:turn_orchestrator + MilkieProvider(真 milkie serve)端到端替换验证。
 
-无 key、可重复。端到端证明 token 流透传:
-  fake OpenAI(多 content 帧) → milkie LLM stream → onModelEvent
-    → serve SSE(message_delta) → alfred MilkieProvider → 逐 LLM_DELTA + 终态
+无 key、可重复。证明**整个 turn 驱动 + policy 层能用 milkie 替代 dolphin**,
+产出与 dolphin 同构的 TurnEvent:
 
-同时覆盖验收报告里 runServeServer 的子进程行为(就绪信号 stdout + SIGTERM
-优雅退出)—— 即「子进程 e2e」缺口由 alfred 侧兜住。
+  fake OpenAI(多 content 帧) → milkie LLM stream → serve SSE(message_delta)
+    → MilkieProvider.run_turn(_progress) → turn_orchestrator policy → TurnEvent
+
+同时覆盖 milkie#86 验收指出的「子进程 e2e」缺口(就绪信号 + SIGTERM 退出)。
 """
 import json
 import threading
@@ -14,15 +15,16 @@ from pathlib import Path
 
 import pytest
 
-from everbot.core.agent.provider.milkie.provider import MilkieProvider
+import everbot.core.agent.provider as provider_pkg
+from everbot.core.agent.provider.milkie.provider import MilkieAgentHandle, MilkieProvider
 from everbot.core.agent.provider.milkie.sidecar import MilkieSidecar
-from everbot.core.runtime.turn_policy import TurnEventType
+from everbot.core.runtime.turn_orchestrator import TurnOrchestrator
+from everbot.core.runtime.turn_policy import CHAT_POLICY, TurnEventType
 
 _TOKENS = ["Hello", ", ", "world", "!"]
 
 
 def _milkie_cli() -> Path | None:
-    # alfred 与 milkie 是兄弟仓库:<github>/alfred 与 <github>/milkie
     cli = Path(__file__).resolve().parents[2].parent / "milkie" / "dist" / "cli" / "index.js"
     return cli if cli.exists() else None
 
@@ -52,7 +54,7 @@ class _FakeOpenAIHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, *args):  # silence
+    def log_message(self, *args):
         pass
 
 
@@ -90,7 +92,7 @@ def _write_agent(tmp_path: Path, fake_port: int) -> Path:
     return md
 
 
-async def test_milkie_serve_streams_tokens_end_to_end(tmp_path, fake_openai_port, monkeypatch):
+async def test_milkie_drives_turn_via_orchestrator_end_to_end(tmp_path, fake_openai_port, monkeypatch):
     cli = _milkie_cli()
     if cli is None:
         pytest.skip("milkie dist not built at ../milkie/dist/cli/index.js")
@@ -103,8 +105,13 @@ async def test_milkie_serve_streams_tokens_end_to_end(tmp_path, fake_openai_port
     )
     await sidecar.start()
     try:
+        # turn_orchestrator 经 provider 抽象拿到 MilkieProvider —— 与 dolphin 同路径
         provider = MilkieProvider(sidecar.base_url)
-        events = [e async for e in provider.run_turn("say hello", context_id="smoke-1")]
+        monkeypatch.setattr(provider_pkg, "get_provider", lambda: provider)
+
+        handle = MilkieAgentHandle(sidecar.base_url, "smoke-ctx")
+        orchestrator = TurnOrchestrator(CHAT_POLICY)
+        events = [e async for e in orchestrator.run_turn(handle, "say hello")]
     finally:
         await sidecar.close()
 
@@ -112,9 +119,8 @@ async def test_milkie_serve_streams_tokens_end_to_end(tmp_path, fake_openai_port
     assert len(deltas) >= 2, f"expected token-level streaming, got {deltas}"
     assert "".join(deltas) == "Hello, world!"
 
-    terminal = [e for e in events if e.type == TurnEventType.TURN_COMPLETE]
-    assert len(terminal) == 1
-    assert terminal[0].answer == "Hello, world!"
-    assert terminal[0].status == "completed"
+    completes = [e for e in events if e.type == TurnEventType.TURN_COMPLETE]
+    assert len(completes) == 1, f"expected exactly one TURN_COMPLETE, got {events}"
+    assert completes[0].answer == "Hello, world!"
 
     assert sidecar.returncode is not None  # SIGTERM 后子进程已退出

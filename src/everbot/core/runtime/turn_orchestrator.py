@@ -535,12 +535,16 @@ class TurnOrchestrator:
         # Always use continue_chat when a user message is present so it is
         # never silently discarded.  arun (autonomous mode) is reserved for
         # daemon-initiated turns where there is no user message.
-        if is_first_turn and hasattr(agent, "arun") and not message:
-            event_stream = agent.arun(run_mode=True, stream_mode=stream_mode, mode="tool_call")
-        else:
-            event_stream = agent.continue_chat(
-                message=message, stream_mode=stream_mode, mode="tool_call", system_prompt=system_prompt,
-            )
+        # Lazy import to avoid a module-load cycle (runtime ↔ agent.provider).
+        from ..agent.provider import get_provider
+
+        event_stream = get_provider().run_turn(
+            agent,
+            message,
+            system_prompt=system_prompt,
+            is_first_turn=is_first_turn,
+            stream_mode=stream_mode,
+        )
 
         # Optionally wrap with timeout
         if policy.timeout_seconds:

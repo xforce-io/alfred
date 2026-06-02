@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 from . import state as _state
 from . import llm as _llm
@@ -53,3 +53,30 @@ class DolphinProvider:
 
     def ensure_chat_compatibility(self) -> bool:
         return ensure_continue_chat_compatibility()
+
+    async def run_turn(
+        self,
+        agent: Any,
+        message: Any,
+        *,
+        system_prompt: str = "",
+        is_first_turn: bool = False,
+        stream_mode: str = "delta",
+    ) -> AsyncIterator[Any]:
+        """Drive one dolphin turn, yielding raw ``_progress``-style events.
+
+        有 message → ``continue_chat``(消息永不被丢弃);``is_first_turn`` 且无
+        message 且 agent 暴露 ``arun`` → ``arun``(自治模式)。事件格式即 dolphin
+        ``{"_progress": [...]}``,作为 provider 中立契约由 turn_orchestrator 消费。
+        """
+        if is_first_turn and hasattr(agent, "arun") and not message:
+            stream = agent.arun(run_mode=True, stream_mode=stream_mode, mode="tool_call")
+        else:
+            stream = agent.continue_chat(
+                message=message,
+                stream_mode=stream_mode,
+                mode="tool_call",
+                system_prompt=system_prompt,
+            )
+        async for event in stream:
+            yield event
