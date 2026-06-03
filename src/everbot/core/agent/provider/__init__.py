@@ -94,6 +94,27 @@ def get_provider_for_agent(agent_name: str) -> "AgentProvider":
     return cached
 
 
+async def shutdown_all_providers() -> None:
+    """Close sidecars on every constructed provider (global singleton + per-agent-name cache).
+
+    Agents are created via get_provider_for_agent → providers cached in _provider_by_name,
+    where the milkie sidecar pools actually live. The global _provider_singleton is a separate
+    instance. Shut down all of them (deduped by identity) so no milkie serve child leaks.
+    """
+    seen = set()
+    providers = []
+    if _provider_singleton is not None:
+        providers.append(_provider_singleton)
+    providers.extend(_provider_by_name.values())
+    for p in providers:
+        if id(p) in seen:
+            continue
+        seen.add(id(p))
+        shutdown = getattr(p, "shutdown_sidecars", None)
+        if shutdown is not None:
+            await shutdown()
+
+
 def reset_provider() -> None:
     """Clear the cached provider singleton (tests / config reload)."""
     global _provider_singleton
@@ -115,6 +136,7 @@ __all__ = [
     "AgentProvider",
     "get_provider",
     "get_provider_for_agent",
+    "shutdown_all_providers",
     "reset_provider",
     "SkillkitBase",
     "SkillFunction",

@@ -22,7 +22,7 @@ from ..core.session.session import SessionManager
 from ..infra.user_data import get_user_data_manager
 from ..infra.config import get_config
 from ..core.agent.factory import get_agent_factory
-from ..core.agent.provider import get_provider
+from ..core.agent.provider import shutdown_all_providers
 from ..infra.process import (
     DaemonLock,
     write_pid_file,
@@ -761,7 +761,7 @@ class EverBotDaemon:
         for runner in self.heartbeat_runners.values():
             runner.stop()
         try:
-            await get_provider().shutdown_sidecars()
+            await shutdown_all_providers()
         except Exception as exc:
             logger.warning("shutdown_sidecars error: %s", exc)
         logger.info("EverBot 守护进程已停止")

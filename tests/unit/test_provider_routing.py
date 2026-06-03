@@ -1,6 +1,10 @@
 import pytest
 
-from everbot.core.agent.provider import get_provider_for_agent, reset_provider
+from everbot.core.agent.provider import (
+    get_provider_for_agent,
+    reset_provider,
+    shutdown_all_providers,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -123,3 +127,21 @@ def test_singleton_identity_and_reset(monkeypatch):
     _cfg(monkeypatch, {"provider": "milkie", "agents": {}})  # reset 清了 _load 的 monkeypatch? 重设
     c = get_provider_for_agent("x")
     assert c is not a   # reset 后重建
+
+
+async def test_shutdown_all_providers_covers_per_agent_cache(monkeypatch):
+    import everbot.core.agent.provider as mod
+    reset_provider()
+    closed = []
+
+    class _FakeMilkie:
+        async def shutdown_sidecars(self):
+            closed.append("milkie")
+
+    # populate _provider_by_name via get_provider_for_agent with a milkie global
+    _cfg(monkeypatch, {"provider": "milkie", "agents": {}})
+    monkeypatch.setattr(mod, "_make_provider", lambda name: _FakeMilkie())
+    p = get_provider_for_agent("alice")   # caches a _FakeMilkie under "milkie"
+    await mod.shutdown_all_providers()
+    assert closed == ["milkie"]   # the cached per-agent provider WAS shut down
+    reset_provider()
