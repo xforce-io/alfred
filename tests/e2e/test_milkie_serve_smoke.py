@@ -273,3 +273,45 @@ async def test_session_history_persists_across_serve_restart(tmp_path, fake_open
         await sidecar2.close()
 
     assert hist2 == hist1, f"sqlite 持久化:重启后历史应完整保留\nhist1={hist1}\nhist2={hist2}"
+
+
+async def test_generated_agent_md_loads_and_runs_in_real_serve(tmp_path, fake_openai_port, monkeypatch):
+    """sidecar 产品化奠基:agent_spec 生成的 agent.md(dolphin model 配置→milkie 两档)
+    能被真 milkie serve 加载并跑 turn —— 端到端证明生成器结构正确、model 路由可用。"""
+    from everbot.core.agent.provider.milkie.agent_spec import (
+        build_milkie_model_tiers,
+        build_milkie_agent_md,
+    )
+
+    cli = _milkie_cli()
+    if cli is None:
+        pytest.skip("milkie dist not built at ../milkie/dist/cli/index.js")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-smoke")
+
+    base = f"http://127.0.0.1:{fake_openai_port}/v1"
+    llms = {"fake": {"cloud": "fc", "model_name": "fake-model", "type_api": "openai"}}
+    clouds = {"fc": {"api": base, "api_key": "sk-fake"}}
+    tiers = build_milkie_model_tiers(llms, clouds, default="fake", fast="fake")
+    agent_md = tmp_path / "generated.md"
+    agent_md.write_text(build_milkie_agent_md("gen-agent", "You are a generated agent.", tiers),
+                        encoding="utf-8")
+
+    sidecar = MilkieSidecar(
+        ["node", str(cli), "serve", "--agent", str(agent_md), "--port", "0"],
+        ready_timeout=20.0,
+    )
+    await sidecar.start()
+    try:
+        provider = MilkieProvider(sidecar.base_url)
+        handle = MilkieAgentHandle(sidecar.base_url, "gen-ctx")
+        events = [e async for e in provider.run_turn(handle, "say hello")]
+    finally:
+        await sidecar.close()
+
+    # 收到逐 token LLM delta = agent.md 被成功加载 + model 路由到 fake server。
+    deltas = [
+        item["delta"]
+        for e in events for item in e.get("_progress", [])
+        if item.get("stage") == "llm" and item.get("delta")
+    ]
+    assert "".join(deltas) == "Hello, world!", f"生成的 agent.md 应能跑通 turn,得 deltas={deltas}"
