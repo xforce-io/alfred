@@ -141,3 +141,6 @@ class DolphinProvider:
 
     def export_session(self, agent: Any) -> dict:
         return agent.snapshot.export_portable_session()
+
+    def needs_history_restore(self) -> bool:
+        return True  # dolphin 进程内,重启须把历史灌回 context

@@ -82,3 +82,11 @@ class AgentProvider(Protocol):
         用 sync httpx,与 set_variable/get_variable 一致)。
         """
         ...
+
+    def needs_history_restore(self) -> bool:
+        """是否需要 alfred 把存档历史灌回 agent。
+
+        dolphin(进程内)True;milkie(serve 自持久化,重启从 checkpoint 恢复)False。
+        ``restore_to_agent`` 据此 short-circuit。
+        """
+        ...

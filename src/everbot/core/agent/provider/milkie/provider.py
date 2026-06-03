@@ -174,6 +174,9 @@ class MilkieProvider:
             "variables": {},
         }
 
+    def needs_history_restore(self) -> bool:
+        return False  # serve 用 sqlite/jsonl 自持久化(#130),同 contextId 重启自动恢复
+
     async def call_llm(
         self,
         context: Any,

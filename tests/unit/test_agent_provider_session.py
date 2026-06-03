@@ -30,3 +30,24 @@ def test_dolphin_export_session_delegates_to_snapshot():
     out = DolphinProvider().export_session(a)
     assert out == portable
     assert a.snapshot.calls == 1
+
+
+def test_dolphin_needs_history_restore_true():
+    """dolphin 进程内 agent:重启后必须把存的 history 灌回 context。"""
+    assert DolphinProvider().needs_history_restore() is True
+
+
+async def test_restore_to_agent_short_circuits_when_provider_self_persists(tmp_path, monkeypatch):
+    """provider 自持久化(needs_history_restore=False,如 milkie)→ restore 跳过灌回,
+    完全不碰 agent(milkie handle 无 .executor/.snapshot,碰了会 AttributeError)。"""
+    from everbot.core.session.persistence import SessionPersistence
+    import everbot.core.agent.provider as provider_pkg
+
+    class _SelfPersistedProvider:
+        def needs_history_restore(self):
+            return False
+
+    monkeypatch.setattr(provider_pkg, "get_provider", lambda: _SelfPersistedProvider())
+    p = SessionPersistence(tmp_path)
+    # agent / session_data 都是裸 object:不 short-circuit 必 AttributeError。不抛即证明跳过。
+    await p.restore_to_agent(object(), object())

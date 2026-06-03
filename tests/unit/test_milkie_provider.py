@@ -264,6 +264,12 @@ def test_export_session_reads_history_and_translates_to_alfred_format():
     assert out["variables"] == {}
 
 
+def test_milkie_does_not_need_history_restore():
+    """milkie serve 用 sqlite/jsonl 自持久化(milkie#130),同 contextId 重启自动从
+    checkpoint 恢复 → alfred 不需灌回历史。"""
+    assert MilkieProvider("http://x").needs_history_restore() is False
+
+
 def test_export_session_empty_on_no_session():
     """无该 context(serve 404)→ 返回空历史,不抛(新会话场景)。"""
     def handler(request: httpx.Request) -> httpx.Response:

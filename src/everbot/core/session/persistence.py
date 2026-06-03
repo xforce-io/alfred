@@ -600,6 +600,12 @@ class SessionPersistence:
         but is no longer used.  Heartbeat results are now delivered exclusively
         via mailbox deposit and consumed as user-message prefix on the next turn.
         """
+        from ..agent.provider import get_provider  # local: avoid import cycle
+        if not get_provider().needs_history_restore():
+            # milkie 等自持久化 provider:serve 用 sqlite/jsonl 跨重启从 checkpoint
+            # 恢复(milkie#130),无需 alfred 把存档历史灌回进程内 agent。
+            logger.debug("provider 自持久化会话,跳过 restore history 灌回")
+            return
         try:
             # 0a. Strip bare empty assistant messages (content="" with no tool_calls).
             #     These are artifacts from failed/timed-out tool executions and will
