@@ -150,3 +150,6 @@ class DolphinProvider:
 
     async def resume(self, agent: Any, message: str) -> None:
         await agent.resume_with_input(message)
+
+    async def shutdown_sidecars(self) -> None:
+        return None  # dolphin 进程内,无 sidecar
