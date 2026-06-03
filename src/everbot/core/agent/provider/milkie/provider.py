@@ -152,9 +152,27 @@ class MilkieProvider:
         )
 
     def export_session(self, agent: Any) -> dict:
-        raise NotImplementedError(
-            "MilkieProvider.export_session 走 milkie#128 /session/history;Phase B 实现"
-        )
+        # 全量历史经 serve /session/history(milkie#128)取回 canonical Message[],
+        # 翻译成 alfred history 格式。variables 走 serve 自持久化,此处不导(milkie#130)。
+        client = self._sync_client or self._new_sync_client()
+        owns = self._sync_client is None
+        try:
+            resp = client.post(
+                f"{agent.base_url}/session/history",
+                json={"contextId": agent.context_id},
+            )
+            if resp.status_code == 404:
+                # 新会话,serve 尚无该 context → 空历史(不抛)。
+                return {"history_messages": [], "variables": {}}
+            resp.raise_for_status()
+            messages = resp.json().get("messages", [])
+        finally:
+            if owns:
+                client.close()
+        return {
+            "history_messages": _milkie_messages_to_history(messages),
+            "variables": {},
+        }
 
     async def call_llm(
         self,
@@ -191,3 +209,47 @@ class MilkieProvider:
         finally:
             if owns:
                 await client.aclose()
+
+
+def _milkie_messages_to_history(messages: list) -> list:
+    """milkie canonical ``Message[]`` → alfred history 格式(OpenAI 风格)。
+
+    - user/assistant 的 text 内容块拼成字符串 ``content``;
+    - assistant 的 ``tool_use`` 块 → ``tool_calls:[{id,type:function,function:{name,arguments}}]``
+      (arguments 为 input 的 JSON 串,对齐 dolphin/OpenAI 形态);
+    - tool message 的每个 ``tool_result`` → 一条 ``{role:tool,tool_call_id,content}``。
+    """
+    out: list = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content") or []
+        if role == "user":
+            text = "".join(c.get("text", "") for c in content if c.get("type") == "text")
+            out.append({"role": "user", "content": text})
+        elif role == "assistant":
+            text = "".join(c.get("text", "") for c in content if c.get("type") == "text")
+            tool_calls = [
+                {
+                    "id": c.get("id"),
+                    "type": "function",
+                    "function": {
+                        "name": c.get("name"),
+                        "arguments": json.dumps(c.get("input") or {}, ensure_ascii=False),
+                    },
+                }
+                for c in content
+                if c.get("type") == "tool_use"
+            ]
+            msg = {"role": "assistant", "content": text}
+            if tool_calls:
+                msg["tool_calls"] = tool_calls
+            out.append(msg)
+        elif role == "tool":
+            for c in content:
+                if c.get("type") == "tool_result":
+                    out.append({
+                        "role": "tool",
+                        "tool_call_id": c.get("tool_use_id"),
+                        "content": c.get("content", ""),
+                    })
+    return out

@@ -221,3 +221,58 @@ async def test_call_llm_returns_error_text_when_raise_disabled():
     finally:
         await client.aclose()
     assert "gateway boom" in out
+
+
+def test_export_session_reads_history_and_translates_to_alfred_format():
+    """export_session 走 /session/history(#128)→ canonical Message[] 翻成 alfred
+    history 格式:assistant tool_use→tool_calls、tool→tool_call_id、content 数组→字符串。"""
+    canonical = [
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "let me check"},
+            {"type": "tool_use", "id": "call_1", "name": "search", "input": {"q": "x"}},
+        ]},
+        {"role": "tool", "content": [
+            {"type": "tool_result", "tool_use_id": "call_1", "content": "result text"},
+        ]},
+        {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+    ]
+    cap: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cap["url"] = str(request.url)
+        cap["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"messages": canonical})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        p = MilkieProvider("http://x", sync_client=client)
+        out = p.export_session(MilkieAgentHandle("http://sidecar", "c1"))
+    finally:
+        client.close()
+    assert cap["url"].endswith("/session/history")
+    assert cap["body"] == {"contextId": "c1"}
+    assert out["history_messages"] == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "let me check", "tool_calls": [
+            {"id": "call_1", "type": "function",
+             "function": {"name": "search", "arguments": '{"q": "x"}'}},
+        ]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "result text"},
+        {"role": "assistant", "content": "done"},
+    ]
+    assert out["variables"] == {}
+
+
+def test_export_session_empty_on_no_session():
+    """无该 context(serve 404)→ 返回空历史,不抛(新会话场景)。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": 'No session for contextId "c"'})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        p = MilkieProvider("http://x", sync_client=client)
+        out = p.export_session(MilkieAgentHandle("http://sidecar", "c"))
+    finally:
+        client.close()
+    assert out == {"history_messages": [], "variables": {}}

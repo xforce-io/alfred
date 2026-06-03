@@ -227,3 +227,49 @@ async def test_call_llm_tier_routing_via_real_serve(tmp_path, fake_openai_port, 
     # fake server 把收到的 model 名回显进 content,故 output 暴露实际路由到的档。
     assert "default-model" in default_out, f"default tier 应路由到 default-model,得 {default_out!r}"
     assert "fast-model" in fast_out, f"fast tier 应路由到 fast-model,得 {fast_out!r}"
+
+
+async def test_session_history_persists_across_serve_restart(tmp_path, fake_openai_port, monkeypatch):
+    """#130 + #128 端到端:sqlite serve → run_turn 产历史 → export_session 翻译取回;
+    SIGTERM 重启(全新进程,同 data-dir)→ 同 contextId export_session 仍完整取回(sqlite 持久化)。
+    一并验证 sidecar 的 --state-store sqlite --data-dir 接线。"""
+    cli = _milkie_cli()
+    if cli is None:
+        pytest.skip("milkie dist not built at ../milkie/dist/cli/index.js")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-smoke")
+
+    agent_md = _write_agent(tmp_path, fake_openai_port)
+    data_dir = tmp_path / "milkie-data"
+    data_dir.mkdir(parents=True, exist_ok=True)  # serve 的 SQLiteStore 要求 dir 预存(sidecar 接线职责)
+    ctx = "persist-ctx"
+
+    def _cmd():
+        return ["node", str(cli), "serve", "--agent", str(agent_md), "--port", "0",
+                "--state-store", "sqlite", "--data-dir", str(data_dir)]
+
+    sidecar = MilkieSidecar(_cmd(), ready_timeout=20.0)
+    await sidecar.start()
+    try:
+        provider = MilkieProvider(sidecar.base_url)
+        handle = MilkieAgentHandle(sidecar.base_url, ctx)
+        _ = [e async for e in provider.run_turn(handle, "say hello")]
+        hist1 = provider.export_session(handle)["history_messages"]
+    finally:
+        await sidecar.close()
+
+    assert any(m["role"] == "user" and m["content"] == "say hello" for m in hist1), hist1
+    assert any(
+        m["role"] == "assistant" and "Hello, world!" in m.get("content", "") for m in hist1
+    ), hist1
+
+    # 重启:全新 serve 进程,指向同一 data-dir。
+    sidecar2 = MilkieSidecar(_cmd(), ready_timeout=20.0)
+    await sidecar2.start()
+    try:
+        provider2 = MilkieProvider(sidecar2.base_url)
+        handle2 = MilkieAgentHandle(sidecar2.base_url, ctx)
+        hist2 = provider2.export_session(handle2)["history_messages"]
+    finally:
+        await sidecar2.close()
+
+    assert hist2 == hist1, f"sqlite 持久化:重启后历史应完整保留\nhist1={hist1}\nhist2={hist2}"
