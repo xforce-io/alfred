@@ -94,6 +94,21 @@ def get_provider_for_agent(agent_name: str) -> "AgentProvider":
     return cached
 
 
+def oneshot_llm_provider() -> "AgentProvider":
+    """Provider for stateless one-shot ``call_llm`` (memory extraction / history compression).
+
+    ``call_llm`` is NOT agent-relative. These are dolphin in-process features (gated by
+    ``needs_history_restore``); milkie's ``call_llm`` needs a fixed serve that the per-agent
+    pool model does not provide, so one-shot LLM is routed to dolphin regardless of the
+    global ``everbot.provider``.
+    """
+    cached = _provider_by_name.get("dolphin")
+    if cached is None:
+        cached = _make_provider("dolphin")
+        _provider_by_name["dolphin"] = cached
+    return cached
+
+
 def provider_for(agent) -> "AgentProvider":
     """Return the provider that owns this agent OBJECT (dispatch by type).
 
@@ -153,6 +168,7 @@ __all__ = [
     "AgentProvider",
     "get_provider",
     "get_provider_for_agent",
+    "oneshot_llm_provider",
     "provider_for",
     "shutdown_all_providers",
     "reset_provider",

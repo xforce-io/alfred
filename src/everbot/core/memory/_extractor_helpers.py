@@ -64,8 +64,8 @@ async def call_dolphin_llm(context: Any, prompt: str, temperature: float = 0.3) 
 
     Raises ``RuntimeError`` if the provider surfaced an error message.
     """
-    from ..agent.provider import get_provider
+    from ..agent.provider import oneshot_llm_provider
 
-    return await get_provider().call_llm(
+    return await oneshot_llm_provider().call_llm(
         context, prompt, temperature=temperature, fast=False
     )

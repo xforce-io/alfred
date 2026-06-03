@@ -10,7 +10,11 @@ independent of the global ``everbot.provider`` config.
 """
 import pytest
 
-from everbot.core.agent.provider import provider_for, reset_provider
+from everbot.core.agent.provider import (
+    oneshot_llm_provider,
+    provider_for,
+    reset_provider,
+)
 from everbot.core.agent.provider.milkie.provider import MilkieAgentHandle
 
 
@@ -64,3 +68,25 @@ def test_dispatch_ignores_global_milkie_config(monkeypatch):
 
     handle = MilkieAgentHandle(name="a", base_url="u", context_id="c")
     assert type(provider_for(handle)).__name__ == "MilkieProvider"
+
+
+def test_oneshot_llm_provider_routes_to_dolphin_under_milkie(monkeypatch):
+    """One-shot ``call_llm`` (memory extraction / history compression) must go to
+    dolphin even when the global ``everbot.provider`` is milkie.
+
+    milkie's ``call_llm`` needs a fixed serve that the per-agent pool model does not
+    provide, so these dolphin in-process features always route to dolphin.
+    """
+    import everbot.infra.config as config_mod
+
+    monkeypatch.setattr(
+        config_mod, "get_config", lambda: {"everbot": {"provider": "milkie"}}
+    )
+    reset_provider()
+
+    assert type(oneshot_llm_provider()).__name__ == "DolphinProvider"
+
+
+def test_oneshot_llm_provider_caches_instance():
+    """Repeated calls return the same cached dolphin provider instance."""
+    assert oneshot_llm_provider() is oneshot_llm_provider()
