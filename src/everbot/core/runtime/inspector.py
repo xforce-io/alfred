@@ -594,7 +594,8 @@ class Inspector:
         # Route creation through the per-agent provider (milkie/dolphin
         # selection). No tools_override → full tool access, matching the
         # prior raw-factory behaviour which bypassed provider routing.
-        agent = await get_provider_for_agent(self.agent_name).create_agent(
+        provider = get_provider_for_agent(self.agent_name)
+        agent = await provider.create_agent(
             self.agent_name, self.workspace_path
         )
         answer = ""
@@ -603,10 +604,11 @@ class Inspector:
 
         async def _stream() -> None:
             nonlocal answer
-            async for event in agent.continue_chat(
-                message=prompt,
-                stream_mode="delta",
+            async for event in provider.run_turn(
+                agent,
+                prompt,
                 system_prompt=_REFLECT_SYSTEM_PROMPT,
+                stream_mode="delta",
             ):
                 if not isinstance(event, dict):
                     continue

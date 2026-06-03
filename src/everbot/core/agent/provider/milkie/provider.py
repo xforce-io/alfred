@@ -309,6 +309,11 @@ class MilkieProvider:
         fast: bool = False,
         raise_on_error: bool = True,
     ) -> str:
+        if not self._base_url:
+            raise RuntimeError(
+                "MilkieProvider.call_llm 需要配置的 base_url(everbot.milkie.base_url);"
+                "per-agent pool 模式下无固定 serve,call_llm 暂不支持(见 goal.md)"
+            )
         # 一次性 LLM 经 serve /llm 端点(milkie#124/#126);无状态,不需 contextId。
         client = self._client or self._new_client()
         owns = self._client is None

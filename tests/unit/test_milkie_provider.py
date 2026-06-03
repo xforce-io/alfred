@@ -348,6 +348,17 @@ async def test_create_agent_uses_pool_base_url(monkeypatch):
     assert stub.closed == 1
 
 
+async def test_call_llm_fails_loud_when_base_url_is_none():
+    """per-agent pool 模式下 provider 无固定 base_url(get_provider_for_agent
+    建出的 provider base_url=None)。call_llm 必须 fail-loud,而非静默 POST
+    到死端口。"""
+    prov = MilkieProvider.__new__(MilkieProvider)
+    prov._base_url = None
+    prov._client = None
+    with pytest.raises(RuntimeError, match="base_url"):
+        await prov.call_llm(None, "anything")
+
+
 def test_construction_does_no_config_io(monkeypatch):
     """构造 MilkieProvider 绝不触发 config/factory I/O:pool 惰性构建。
     monkeypatch _build_pool 让其一旦被调用就炸 → 构造不抛即证明 __init__ 未建 pool。"""
