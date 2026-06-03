@@ -60,8 +60,7 @@ class MilkieProvider:
             self._pool = self._build_pool()
         return self._pool
 
-    @staticmethod
-    def _build_pool():
+    def _build_pool(self):
         """装配 launcher + pool:从 alfred config(everbot.milkie)取 sidecar 运行参数,
         从 dolphin global config(llms/clouds/model 档)取模型路由,组成 SidecarPool。"""
         from .launcher import SidecarLauncher
@@ -99,7 +98,7 @@ class MilkieProvider:
 
         def _build(agent_name: str):
             spec = launcher.build(
-                agent_name, system_prompt=_default_system_prompt_loader(agent_name)
+                agent_name, system_prompt=self._system_prompt_loader(agent_name)
             )
             return spec.cmd, spec.env
 

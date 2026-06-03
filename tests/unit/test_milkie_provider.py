@@ -407,3 +407,53 @@ async def test_shutdown_sidecars_noop_when_pool_never_built(monkeypatch):
     p = mod.MilkieProvider("http://x")
     await p.shutdown_sidecars()  # must NOT raise
     assert p._pool is None
+
+
+def test_injected_system_prompt_loader_is_used(monkeypatch):
+    """注入的 system_prompt_loader 必须真正流到 launcher.build 的 system_prompt;
+    且模块级默认 loader 绝不被调用(回归 dead-seam:_build_pool 曾硬编码默认 loader)。"""
+    from pathlib import Path
+
+    import everbot.core.agent.provider.milkie.provider as mod
+    from everbot.core.agent.provider.milkie.launcher import LaunchSpec
+
+    captured_prompts: list = []
+
+    class _CapturingLauncher:
+        def build(self, agent_name, *, system_prompt):
+            captured_prompts.append(system_prompt)
+            return LaunchSpec(
+                cmd=["node"], env={}, data_dir=Path("/tmp"), agent_md=Path("/tmp/a.md")
+            )
+
+    # _build_pool 走 `from .launcher import SidecarLauncher`,故 patch 源模块属性
+    monkeypatch.setattr(
+        "everbot.core.agent.provider.milkie.launcher.SidecarLauncher",
+        lambda **kw: _CapturingLauncher(),
+    )
+    # config / dolphin factory 读取桩成无害:让 _build_pool 能跑到 _build 闭包。
+    # _build_pool 用本地 import `from .....infra.config import get_config`,故 patch 源模块。
+    monkeypatch.setattr(
+        "everbot.infra.config.get_config", lambda *a, **k: {}
+    )
+
+    class _FakeFactory:
+        global_config_path = None  # → 跳过 dolphin yaml 读取
+
+    monkeypatch.setattr(
+        "everbot.core.agent.provider.dolphin.factory.get_agent_factory",
+        lambda *a, **k: _FakeFactory(),
+    )
+
+    # 模块级默认 loader 一旦被调用就炸 → 证明注入版真正接通(而非静默走默认)
+    def _default_must_not_be_called(agent_name):
+        raise AssertionError("module-level _default_system_prompt_loader must NOT be called")
+
+    monkeypatch.setattr(mod, "_default_system_prompt_loader", _default_must_not_be_called)
+
+    prov = mod.MilkieProvider(system_prompt_loader=lambda name: f"PROMPT::{name}")
+    pool = prov._get_pool()
+    # 触发 build 闭包(pool 把闭包存为 self._build)
+    cmd, env = pool._build("alice")
+    assert captured_prompts == ["PROMPT::alice"]
+    assert cmd == ["node"]
