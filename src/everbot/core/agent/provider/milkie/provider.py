@@ -13,12 +13,20 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
 import httpx
 
 from .adapter import milkie_event_to_progress
 from .sse import SSEParser
+
+
+def _default_system_prompt_loader(agent_name: str) -> str:
+    """从 agent workspace 读 system prompt。占位实现:读 ~/.alfred/agents/<name>/agent.md
+    的内容;Task 8 据 dolphin factory 真实来源替换为确定 loader(届时缺失应 raise)。"""
+    p = Path(f"~/.alfred/agents/{agent_name}/agent.md").expanduser()
+    return p.read_text(encoding="utf-8") if p.exists() else ""
 
 
 @dataclass
@@ -32,14 +40,68 @@ class MilkieAgentHandle:
 class MilkieProvider:
     def __init__(
         self,
-        base_url: str,
+        base_url: Optional[str] = None,
         *,
         client: Optional[httpx.AsyncClient] = None,
         sync_client: Optional[httpx.Client] = None,
+        pool: Optional[Any] = None,
+        system_prompt_loader: Optional[Any] = None,
     ) -> None:
-        self._base_url = base_url.rstrip("/")
+        self._base_url = base_url.rstrip("/") if base_url else None
         self._client = client  # injected for tests; None → one client per turn
         self._sync_client = sync_client  # injected for tests; None → one client per call
+        self._pool = pool if pool is not None else self._build_pool()
+        self._system_prompt_loader = system_prompt_loader or _default_system_prompt_loader
+
+    @staticmethod
+    def _build_pool():
+        """装配 launcher + pool:从 alfred config(everbot.milkie)取 sidecar 运行参数,
+        从 dolphin global config(llms/clouds/model 档)取模型路由,组成 SidecarPool。"""
+        from .launcher import SidecarLauncher
+        from .pool import SidecarPool
+        from .sidecar import MilkieSidecar
+        from .....infra.config import get_config
+
+        cfg = (get_config() or {}).get("everbot", {}) or {}
+        milkie_cfg = cfg.get("milkie", {}) or {}
+        repo_root = Path(__file__).resolve().parents[6]   # …/alfred
+        dist_path = Path(
+            milkie_cfg.get("dist_path")
+            or (repo_root.parent / "milkie" / "dist" / "cli" / "index.js")
+        )
+        data_dir_root = Path(milkie_cfg.get("data_dir_root") or "~/.alfred/milkie").expanduser()
+        node_bin = milkie_cfg.get("node_bin") or "node"
+
+        from ..dolphin.factory import get_agent_factory
+        factory = get_agent_factory()
+        dolphin_path = getattr(factory, "global_config_path", None)
+        import yaml as _yaml
+        dolphin_cfg = {}
+        if dolphin_path and Path(dolphin_path).exists():
+            dolphin_cfg = _yaml.safe_load(Path(dolphin_path).read_text(encoding="utf-8")) or {}
+        llms = dolphin_cfg.get("llms", {}) or {}
+        clouds = dolphin_cfg.get("clouds", {}) or {}
+        default_model = dolphin_cfg.get("default_model") or next(iter(llms), "")
+        fast_model = dolphin_cfg.get("fast_llm") or default_model
+
+        launcher = SidecarLauncher(
+            dist_path=dist_path, data_dir_root=data_dir_root, node_bin=node_bin,
+            llms=llms, clouds=clouds, default_model=default_model, fast_model=fast_model,
+        )
+        ready_timeout = float(milkie_cfg.get("ready_timeout", 20.0))
+
+        def _build(agent_name: str):
+            spec = launcher.build(
+                agent_name, system_prompt=_default_system_prompt_loader(agent_name)
+            )
+            return spec.cmd, spec.env
+
+        return SidecarPool(
+            build=_build,
+            sidecar_factory=lambda cmd, env: MilkieSidecar(
+                cmd, env=env, ready_timeout=ready_timeout
+            ),
+        )
 
     @staticmethod
     def _new_client() -> httpx.AsyncClient:
@@ -60,11 +122,16 @@ class MilkieProvider:
         extra_variables: Optional[dict] = None,
         tools_override: Optional[list] = None,
     ) -> MilkieAgentHandle:
-        # milkie agent 由 serve --agent 决定;此处只分配一个会话句柄(contextId)。
+        # 经 pool 惰性 spawn/复用 per-agent 的 milkie serve;handle 携带该 serve 的
+        # base_url(动态端口),而非固定 config base_url。
+        sidecar = await self._pool.get_or_spawn(agent_name)
         return MilkieAgentHandle(
-            base_url=self._base_url,
+            base_url=sidecar.base_url,
             context_id=f"{agent_name}-{uuid.uuid4().hex[:8]}",
         )
+
+    async def shutdown_sidecars(self) -> None:
+        await self._pool.shutdown_all()
 
     async def run_turn(
         self,

@@ -29,14 +29,20 @@ def _provider(sse_text: str, capture: dict | None = None):
 
 
 async def test_create_agent_returns_handle():
-    p, client = _provider("")
-    try:
-        h = await p.create_agent("smoke", "/ws")
-        assert isinstance(h, MilkieAgentHandle)
-        assert h.base_url == "http://sidecar"
-        assert h.context_id  # 非空
-    finally:
-        await client.aclose()
+    # create_agent 现经 pool spawn/复用 per-agent serve,handle 携带该 serve 的
+    # base_url(动态端口),而非固定 config base_url。注入 fake pool 验证此契约。
+    class _Sidecar:
+        base_url = "http://sidecar"
+
+    class _Pool:
+        async def get_or_spawn(self, name):
+            return _Sidecar()
+
+    p = MilkieProvider("http://config-base", pool=_Pool())
+    h = await p.create_agent("smoke", "/ws")
+    assert isinstance(h, MilkieAgentHandle)
+    assert h.base_url == "http://sidecar"
+    assert h.context_id  # 非空
 
 
 async def test_run_turn_yields_llm_progress_deltas():
@@ -310,3 +316,43 @@ def test_export_session_empty_on_no_session():
     finally:
         client.close()
     assert out == {"history_messages": [], "variables": {}}
+
+
+import pytest
+
+from everbot.core.agent.provider.milkie.provider import MilkieProvider, MilkieAgentHandle
+
+
+class _FakeSidecarStub:
+    def __init__(self):
+        self.closed = 0
+    @property
+    def base_url(self):
+        return "http://127.0.0.1:19999"
+    async def close(self):
+        self.closed += 1
+
+
+async def test_create_agent_uses_pool_base_url(monkeypatch):
+    stub = _FakeSidecarStub()
+
+    class _FakePool:
+        async def get_or_spawn(self, name):
+            return stub
+        async def shutdown_all(self):
+            await stub.close()
+
+    prov = MilkieProvider.__new__(MilkieProvider)   # 跳过 __init__ 的 config 读取
+    prov._base_url = None
+    prov._client = None
+    prov._sync_client = None
+    prov._pool = _FakePool()
+    prov._system_prompt_loader = lambda name: "sys"
+
+    handle = await prov.create_agent("alice", workspace_path="/tmp")
+    assert isinstance(handle, MilkieAgentHandle)
+    assert handle.base_url == "http://127.0.0.1:19999"
+    assert handle.context_id.startswith("alice-")
+
+    await prov.shutdown_sidecars()
+    assert stub.closed == 1
