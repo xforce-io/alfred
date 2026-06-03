@@ -92,7 +92,7 @@ PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_agent_provider_*.py -q
 
 **剩余(去 dolphin 依赖的前置)**:
 - ~~`call_llm`~~ ✅ **已完成**:milkie #124(`/llm`)+ #126(`tier`+`temperature`)均交付;alfred `MilkieProvider.call_llm` 已对接(`fast`→tier、temperature、raise_on_error 双语义、HTTP 错误映射),含真 serve tier 路由跨进程 e2e。🔶 遗留:生产 spawn serve 时把 alfred config 的 default_model/fast_llm **写进 agent 文件两档 model**(目前仅 e2e 手写),属 sidecar 产品化范畴。
-- A2 会话持久化(history/portable session)— milkie `/session/export·import` 已交付(#124),待 **alfred session 层对接**。⚠️ 验证:#124 设计 §3.3 export 是「前向状态快照」非全量逐轮 transcript,需确认 SessionCompressor 够不够,不够则 milkie 补 by-context run 索引(follow-up)。
+- ~~A2 会话持久化~~ ✅ **已完成**:milkie #128(`/session/history` 全量逐条历史)+ #130(serve `--state-store sqlite --data-dir` 持久化,重启恢复)交付;alfred `export_session` 接口收敛(5 处调用点 → DolphinProvider 行为不变)+ `MilkieProvider.export_session` 走 #128 翻译 canonical `Message[]`→alfred history;restore **不灌回**靠 serve 自持久化。**重启恢复 e2e 绿**(sqlite serve→run_turn 产历史→SIGTERM 重启→同 contextId 完整取回)。🔶 遗留:sidecar 启动前需 mkdir data-dir(SQLiteStore 不自建)。
 - `register_skillkit` / D Python skill — 需 milkie#87 跨语言工具桥(双向 RPC,大功能,P2 条件性;仅当要在 milkie 下复用 telegram 等 Python skill 才需要)。
 - 去 dolphin 依赖 — 依赖以上全部。
 
@@ -122,6 +122,8 @@ tests/e2e/    test_milkie_serve_smoke.py   ← 真 spawn milkie serve + fake Ope
 
 - **milkie#86** 最小 `milkie serve`(HTTP+SSE,含 token 透传):✅ 已交付,alfred 验收通过(8/8 + 9/9 测试)。
 - **milkie#124** serve 端点增补(`/llm` 一次性 LLM + `/session/export·import` portable session):✅ 已交付,merge 进 main(23 jest passed)。顺手落地了 #83 context 端点的孤儿提交。
-- **milkie#126** `/llm` 加 `tier`(具名 model 档)+ `temperature`:🔲 待开发(milkie 自行),`call_llm` 完整保留 dolphin fast/default 分级语义的前置。
+- **milkie#126** `/llm` 加 `tier`(具名 model 档)+ `temperature`:✅ 已交付 merged,alfred `call_llm` 已对接。
+- **milkie#128** `/session/history` by-context 全量逐条历史导出(含 tool chain):✅ 已交付 merged,alfred `export_session` 已对接。
+- **milkie#130** serve 持久化 store(SQLite+Jsonl,sidecar 重启从 checkpoint 恢复):✅ 已交付 merged,重启恢复 e2e 已验证。
 - **milkie#87** 跨语言工具桥:🔲 P2,仅当 D 阶段要复用 Python skill 才需要。
 - milkie P0/P1(#80–#85)+ #124 均已 closed/merged。
