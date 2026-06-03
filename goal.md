@@ -141,7 +141,10 @@ tests/e2e/    test_milkie_serve_smoke.py   ← 真 spawn milkie serve + fake Ope
 - **运行/保存/变量/状态操作贯穿 per-agent provider**:新增 `provider_for(agent)`(按 agent 对象类型派发),替换**全部** agent 相关 `get_provider()`(turn_orchestrator/core_service/session/persistence/cron/heartbeat/skill_change_detector/context_manager + **web chat_service** 7 处 interrupt/resume/get_variable)。修复「创建路由对、操作回退全局 provider」的核心缺陷;dolphin 默认基线字节级不变。`needs_history_restore()` 守护亦按 agent 派发。
 - **`MilkieAgentHandle` 加 `name`**:修 `chat_service`/`persistence` 的 `agent.name` AttributeError(milkie agent 首连/保存即崩)。
 - **sidecar 就绪后持续 drain stdout**:防 pipe buffer 满导致子进程 write 阻塞(/chat 假死);`close()` 取消 drain task。
-- 完备性扫描:全 src 已无遗漏的全局 `get_provider()` agent 操作;1674 unit 绿 + 6 真 e2e 绿。
+- 完备性扫描:全 src 已无遗漏的全局 `get_provider()` agent 操作。
+- **sidecar start 失败不泄漏**:`pool.get_or_spawn` 在 `start()` 失败时 `await close()` 终止已 spawn 的子进程再 re-raise(ready 超时场景子进程已起来,旧码会留孤儿)。
+- **milkie HTTP 非 2xx 明确抛错**:`/chat`(run_turn)、`/resume`、`/interrupt`、`/context/set·get` 非 2xx → 抛 `RuntimeError`/`HTTPStatusError`(原先 500/404 被静默吞 → core_service 显示「(无响应)」)。`core_service` 宽 except 捕获 → 记 error timeline + 发用户可见错误消息。`call_llm`(dual raise_on_error)/`export_session`(404→空)语义不变。
+- 1680 unit 绿 + 6 真 e2e 绿。
 
 **评估**:#3 daemon 集成本 session 已完整交付(sidecar 池/生命周期/创建路径/resume/裸 context 收敛),全程 dolphin 行为零变化(1658 unit 绿)+ 真子进程 e2e 验证;#4 路由与回退就位,milkie 可经配置端到端跑通。去硬依赖待 milkie#87。
 
