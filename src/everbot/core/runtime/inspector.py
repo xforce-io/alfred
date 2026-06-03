@@ -589,7 +589,14 @@ class Inspector:
         system-prompt contamination, then sends the reflection prompt directly.
         """
         ensure_continue_chat_compatibility()
-        agent = await self.agent_factory(self.agent_name, self.workspace_path)
+        from ..agent.provider import get_provider_for_agent
+
+        # Route creation through the per-agent provider (milkie/dolphin
+        # selection). No tools_override → full tool access, matching the
+        # prior raw-factory behaviour which bypassed provider routing.
+        agent = await get_provider_for_agent(self.agent_name).create_agent(
+            self.agent_name, self.workspace_path
+        )
         answer = ""
         deltas: list[str] = []
         seen_progress: set[str] = set()

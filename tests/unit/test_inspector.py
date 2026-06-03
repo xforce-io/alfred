@@ -1,5 +1,6 @@
 """Unit tests for Inspector — heartbeat reflection observation engine."""
 
+import importlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1515,3 +1516,36 @@ class TestReflectFileHashPersistence:
         # Should have recomputed hashes (non-empty) rather than empty dict.
         assert inspector._reflection.last_reflect_file_hashes
         assert "MEMORY.md" in inspector._reflection.last_reflect_file_hashes
+
+
+class TestRunLlmProviderRouting:
+    """Inspector._run_llm must create its reflection agent via the per-agent
+    provider (milkie/dolphin selection), NOT the raw injected agent_factory.
+    """
+
+    @pytest.mark.asyncio
+    async def test_run_llm_routes_through_provider(self, tmp_path, monkeypatch):
+        async def _fake_stream(*args, **kwargs):
+            yield {"_progress": [{"stage": "llm", "answer": "reflection answer"}]}
+
+        agent = MagicMock()
+        agent.continue_chat = _fake_stream
+        create_agent = AsyncMock(return_value=agent)
+        provider = MagicMock(create_agent=create_agent)
+
+        provider_mod = importlib.import_module("src.everbot.core.agent.provider")
+        monkeypatch.setattr(
+            provider_mod, "get_provider_for_agent", lambda name: provider
+        )
+
+        raw_factory = AsyncMock(return_value=MagicMock())
+        inspector = _make_inspector(tmp_path, agent_factory=raw_factory)
+
+        result = await inspector._run_llm("reflect please")
+
+        assert result == "reflection answer"
+        # Routed through provider with name + workspace, no tools_override.
+        create_agent.assert_awaited_once_with("test_agent", tmp_path)
+        assert "tools_override" not in create_agent.await_args.kwargs
+        # Raw injected agent_factory must NOT be used for creation.
+        raw_factory.assert_not_awaited()

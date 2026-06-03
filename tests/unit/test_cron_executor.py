@@ -798,3 +798,61 @@ class TestSkillLogRecording:
         call_args = mock_record.call_args
         assert call_args.args[0] is task
         assert call_args.args[1] == "report content"
+
+
+class TestCreateJobAgentProviderRouting:
+    """CronExecutor._create_job_agent must route creation through the per-agent
+    provider (milkie/dolphin selection), NOT the raw injected agent_factory.
+    No tools_override → full tool access.
+    """
+
+    @pytest.mark.asyncio
+    async def test_routes_through_provider_full_access(self, tmp_path, monkeypatch):
+        import importlib
+
+        sentinel_agent = MagicMock()
+        create_agent = AsyncMock(return_value=sentinel_agent)
+        factory_provider = MagicMock(create_agent=create_agent)
+
+        # Provider used for set_session_id / init_trajectory side-effects.
+        runtime_provider = MagicMock(
+            set_session_id=MagicMock(),
+            set_variable=MagicMock(),
+            init_trajectory=MagicMock(),
+        )
+
+        # cron.py imports get_provider / get_provider_for_agent locally from
+        # the provider package at call time → patch on the package module.
+        provider_mod = importlib.import_module(
+            CronExecutor.__module__.rsplit(".", 2)[0] + ".agent.provider"
+        )
+        monkeypatch.setattr(
+            provider_mod, "get_provider_for_agent", lambda name: factory_provider
+        )
+        monkeypatch.setattr(provider_mod, "get_provider", lambda: runtime_provider)
+
+        # Neutralize user-data manager so trajectory init does not touch real paths.
+        user_data_mod = importlib.import_module("src.everbot.infra.user_data")
+        traj_path = tmp_path / "trajectory.jsonl"
+        user_data = MagicMock()
+        user_data.get_session_trajectory_path.return_value = traj_path
+        monkeypatch.setattr(
+            user_data_mod, "get_user_data_manager", lambda: user_data
+        )
+
+        raw_factory = AsyncMock(return_value=MagicMock())
+        executor = _make_executor(tmp_path, agent_factory=raw_factory)
+
+        result = await executor._create_job_agent("job_session_42")
+
+        assert result is sentinel_agent
+        # Routed through provider with name + workspace and NO tools_override.
+        create_agent.assert_awaited_once_with("test_agent", tmp_path)
+        assert "tools_override" not in create_agent.await_args.kwargs
+        # Raw injected agent_factory must NOT be used for creation.
+        raw_factory.assert_not_awaited()
+        # Session-scoping side-effects still applied via runtime provider.
+        runtime_provider.set_session_id.assert_called_once_with(
+            sentinel_agent, "job_session_42"
+        )
+        runtime_provider.init_trajectory.assert_called_once()
