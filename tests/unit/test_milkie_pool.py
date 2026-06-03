@@ -94,3 +94,86 @@ async def test_spawn_failure_not_cached():
         await pool.get_or_spawn("alice")
     s = await pool.get_or_spawn("alice")
     assert s.started == 1
+
+
+async def test_start_failure_after_spawn_closes_child_and_not_cached():
+    """start() 已 spawn 子进程后才失败(如 ready 超时)→ 子进程已存活但 start 抛错。
+    get_or_spawn 必须 close() 回收(防 orphan 泄漏),不入池,且支持后续重试。"""
+    spawned = []
+
+    class _SpawnThenFailSidecar:
+        def __init__(self, cmd, env=None, ready_timeout=10.0):
+            self.cmd = cmd
+            self.spawned = False
+            self.closed = 0
+            self.started = 0
+            self.port = 18500
+
+        @property
+        def base_url(self):
+            return f"http://127.0.0.1:{self.port}"
+
+        async def start(self):
+            self.spawned = True   # 子进程已 spawn(模拟 create_subprocess 成功)
+            raise RuntimeError("ready timeout after spawn")
+
+        async def close(self):
+            self.closed += 1
+
+    calls = {"n": 0}
+
+    def factory(cmd, env):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            s = _SpawnThenFailSidecar(cmd, env)
+            spawned.append(s)
+            return s
+        # 第二次重试:成功的 fake
+        return _FakeSidecar(cmd, env)
+
+    pool = SidecarPool(build=lambda name: (["c"], {}), sidecar_factory=factory)
+
+    with pytest.raises(RuntimeError, match="ready timeout after spawn"):
+        await pool.get_or_spawn("alice")
+
+    failed = spawned[0]
+    assert failed.spawned is True
+    assert failed.closed == 1            # close() 被调一次(回收 orphan 子进程)
+    assert "alice" not in pool._sidecars  # 失败不入池
+
+    # 后续重试可成功(失败的 sidecar 不残留)
+    retry = await pool.get_or_spawn("alice")
+    assert retry is not failed
+    assert retry.started == 1
+    assert pool._sidecars["alice"] is retry
+
+
+async def test_start_failure_swallows_close_errors_and_reraises_original():
+    """close() 自身抛错时(best-effort)不掩盖原始 start 异常。"""
+    class _BadCloseSidecar:
+        def __init__(self, cmd, env=None, ready_timeout=10.0):
+            self.closed = 0
+
+        @property
+        def base_url(self):
+            return "http://127.0.0.1:18600"
+
+        async def start(self):
+            raise RuntimeError("original start failure")
+
+        async def close(self):
+            self.closed += 1
+            raise OSError("close blew up")
+
+    instances = []
+
+    def factory(cmd, env):
+        s = _BadCloseSidecar(cmd, env)
+        instances.append(s)
+        return s
+
+    pool = SidecarPool(build=lambda name: (["c"], {}), sidecar_factory=factory)
+    with pytest.raises(RuntimeError, match="original start failure"):
+        await pool.get_or_spawn("alice")
+    assert instances[0].closed == 1
+    assert "alice" not in pool._sidecars

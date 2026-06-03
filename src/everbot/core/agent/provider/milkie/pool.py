@@ -43,7 +43,17 @@ class SidecarPool:
                 return existing
             cmd, env = self._build(agent_name)
             sidecar = self._factory(cmd, env)
-            await sidecar.start()
+            try:
+                await sidecar.start()
+            except BaseException:
+                # start() 已 spawn 子进程后才失败(如 ready 超时)→ 子进程已存活
+                # 但未入池。必须 close() 回收,否则 orphan milkie serve 泄漏。
+                # close 错误吞掉(best-effort),re-raise 原始异常。
+                try:
+                    await sidecar.close()
+                except BaseException:
+                    pass
+                raise
             self._sidecars[agent_name] = sidecar
             return sidecar
 

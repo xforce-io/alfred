@@ -317,6 +317,72 @@ async def test_interrupt_posts_to_interrupt_endpoint():
     assert cap["body"] == {"contextId": "c1"}
 
 
+async def test_run_turn_raises_on_chat_server_error():
+    """/chat 返回 500 → 迭代 run_turn 必须抛 RuntimeError(含状态码+body 片段),
+    否则无事件 → core_service 显示「(无响应)」,错误被静默吞。"""
+    import pytest
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="internal boom")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    p = MilkieProvider("http://sidecar", client=client)
+    try:
+        with pytest.raises(RuntimeError, match="500"):
+            async for _ in p.run_turn(MilkieAgentHandle("http://sidecar", "c"), "hi"):
+                pass
+    finally:
+        await client.aclose()
+
+
+async def test_interrupt_raises_on_server_error():
+    """/interrupt 非2xx → interrupt() 必须抛错,不静默吞。"""
+    import pytest
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "no such context"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    p = MilkieProvider("http://x", client=client)
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            await p.interrupt(MilkieAgentHandle("http://sidecar", "c1"))
+    finally:
+        await client.aclose()
+
+
+def test_set_variable_raises_on_server_error():
+    """/context/set 非2xx → set_variable() 必须抛错。"""
+    import pytest
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "boom"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        p = MilkieProvider("http://x", sync_client=client)
+        with pytest.raises(httpx.HTTPStatusError):
+            p.set_variable(MilkieAgentHandle("http://sidecar", "c1"), "k", "v")
+    finally:
+        client.close()
+
+
+def test_get_variable_raises_on_server_error():
+    """/context/get 非2xx → get_variable() 必须抛错(而非静默返回 None)。"""
+    import pytest
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "boom"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        p = MilkieProvider("http://x", sync_client=client)
+        with pytest.raises(httpx.HTTPStatusError):
+            p.get_variable(MilkieAgentHandle("http://sidecar", "c1"), "k")
+    finally:
+        client.close()
+
+
 def test_milkie_does_not_need_history_restore():
     """milkie serve 用 sqlite/jsonl 自持久化(milkie#130),同 contextId 重启自动从
     checkpoint 恢复 → alfred 不需灌回历史。"""

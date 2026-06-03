@@ -36,9 +36,9 @@ async def test_resume_posts_to_resume_and_consumes_stream():
     await client.aclose()
 
 
-async def test_resume_does_not_raise_on_server_error():
-    """实现不调用 raise_for_status()(与 run_turn 流式一致),非 2xx 响应被
-    drain 而不抛 → resume() 不抛错。"""
+async def test_resume_raises_on_server_error():
+    """非2xx 不能静默吞:/resume 返回 500 → resume() 必须抛 RuntimeError(含状态码),
+    否则中断/续跑失败被掩盖,用户看不到错误。"""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             500,
@@ -55,5 +55,6 @@ async def test_resume_does_not_raise_on_server_error():
     prov._pool = None
 
     handle = MilkieAgentHandle(base_url="http://x", context_id="alice-1")
-    await prov.resume(handle, "go")  # must not raise
+    with pytest.raises(RuntimeError, match="500"):
+        await prov.resume(handle, "go")
     await client.aclose()

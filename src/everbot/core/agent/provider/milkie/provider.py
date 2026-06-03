@@ -184,6 +184,14 @@ class MilkieProvider:
         payload = {"contextId": handle.context_id, "input": text, "goal": text}
         try:
             async with client.stream("POST", f"{handle.base_url}/chat", json=payload) as resp:
+                if resp.status_code >= 400:
+                    # 非2xx 不能静默吞:不抛 → 无事件 → core_service 显示「(无响应)」。
+                    # 读 body 并抛清晰 RuntimeError(headers 此时已就绪,可读 status)。
+                    body = await resp.aread()
+                    raise RuntimeError(
+                        f"milkie /chat failed: HTTP {resp.status_code}: "
+                        f"{body.decode('utf-8', 'replace')[:500]}"
+                    )
                 async for chunk in resp.aiter_text():
                     for event, data_str in parser.feed(chunk):
                         item = milkie_event_to_progress(event, json.loads(data_str))
@@ -226,10 +234,11 @@ class MilkieProvider:
         client = self._sync_client or self._new_sync_client()
         owns = self._sync_client is None
         try:
-            client.post(
+            resp = client.post(
                 f"{agent.base_url}/context/set",
                 json={"contextId": agent.context_id, "name": key, "value": value},
             )
+            resp.raise_for_status()  # 非2xx 不能静默吞,明确抛错
         finally:
             if owns:
                 client.close()
@@ -242,6 +251,7 @@ class MilkieProvider:
                 f"{agent.base_url}/context/get",
                 json={"contextId": agent.context_id, "name": key},
             )
+            resp.raise_for_status()  # 非2xx 不能静默返回 None,明确抛错
             return resp.json().get("value")
         finally:
             if owns:
@@ -283,10 +293,11 @@ class MilkieProvider:
         client = self._client or self._new_client()
         owns = self._client is None
         try:
-            await client.post(
+            resp = await client.post(
                 f"{agent.base_url}/interrupt",
                 json={"contextId": agent.context_id},
             )
+            resp.raise_for_status()  # 非2xx 不能静默吞,明确抛错
         finally:
             if owns:
                 await client.aclose()
@@ -302,6 +313,12 @@ class MilkieProvider:
                 "POST", f"{handle.base_url}/resume",
                 json={"contextId": handle.context_id, "input": message},
             ) as resp:
+                if resp.status_code >= 400:
+                    body = await resp.aread()
+                    raise RuntimeError(
+                        f"milkie /resume failed: HTTP {resp.status_code}: "
+                        f"{body.decode('utf-8', 'replace')[:500]}"
+                    )
                 async for _ in resp.aiter_text():
                     pass   # 排空流,确保 serve 续跑完成
         finally:
