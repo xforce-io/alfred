@@ -109,14 +109,22 @@ tests/e2e/    test_milkie_serve_smoke.py   ← 真 spawn milkie serve + fake Ope
   → MilkieProvider → 逐 `LLM_DELTA` + `TURN_COMPLETE(output="Hello, world!")`。
 - 子进程 e2e 缺口(milkie#86 验收指出)由此兜住:就绪信号 + SIGTERM 优雅退出。
 
-## 6. 诚实现状:尚未替换
+## 6. 诚实现状:数据面已通,控制面收敛中
 
-- `get_provider()` 仍**硬编码** `DolphinProvider`。
-- **17 处** `import dolphin`(在 `provider/dolphin/*`、`infra/dolphin_compat`)。
-- `requirements.txt` 仍依赖 dolphin;主干所有对话仍 100% 走 dolphin。
-- `MilkieProvider` 主干**零引用**(只在自己包 + 测试里)。
+**已对接(provider 抽象,DolphinProvider 行为零变化全程回归绿)**:
+- `call_llm` → `/llm`(tier+temperature);`export_session` 收敛(5 调用点)+ `MilkieProvider` 走 `/session/history`;`restore` 收敛(`needs_history_restore`,milkie 靠 serve 自持久化跳过灌回);`interrupt/resume` 收敛(chat_service 去裸调用)。
+- sidecar 产品化**奠基**:`agent_spec`(dolphin model 配置→milkie 两档 ModelConfig + agent.md 生成),真 serve 加载 e2e 绿。
+- **3 个真 e2e 端到端验证 milkie 路径核心**:① tier 路由(`/llm`)② 重启恢复(sqlite serve+SIGTERM 重启+export)③ 生成 agent.md 跑 turn。
 
-**第0步只证明了「路通」,车还没开过去。**
+**关键修正**:主干对 dolphin agent 对象的真实裸耦合 **~17 处**(此前 60 是把 `import everbot.core.agent.factory/provider` 模块路径、`"agent.dph"` 文件名误判)。大头 `agent.executor.context`(多在 dolphin-only 持久化层,milkie 已 short-circuit/收敛)。
+
+**剩余(去 dolphin 的核心大块 = #3 daemon 集成)**:
+- **agent 创建路径切换**:`get_or_create_agent`/`AgentFactory` 在 milkie 模式返回 `MilkieAgentHandle` + spawn sidecar;需 sidecar **launcher**(串 agent_spec + sqlite/data-dir/mkdir/key env)+ **sidecar 池**(每 alfred agent 一个 serve)+ daemon startup/shutdown 生命周期 + 解决 async spawn vs 同步 `get_provider`。
+- 剩余 context 裸访问收敛(workspace_instructions 等 turn 周边)+ `continue_chat` else fallback(policy=None 分支)。
+- 切默认 `get_provider` + 去 17 处 `import dolphin` + requirements。
+- milkie 侧 gap:`createGateway` per-model apiKey 注入(两档跨 cloud 时;后续 milkie issue)。
+
+**评估**:#3 daemon 集成是独立大架构(多 sidecar 池/生命周期/async-sync/主干切换),应单独阶段做;本 session 已把**所有跨进程数据面契约 + provider 收敛 + sidecar 奠基**打通并端到端验证。
 
 ## 7. milkie 侧依赖
 
