@@ -20,13 +20,32 @@ import httpx
 
 from .adapter import milkie_event_to_progress
 from .sse import SSEParser
+from .....infra.user_data import get_user_data_manager
+
+
+def _resolve_agent_workspace(agent_name: str) -> Path:
+    """解析 agent 工作区目录(= ``~/.alfred/agents/<name>``)。
+
+    经 user-data manager 的 ``get_agent_dir`` 取确定路径;独立成函数以便测试
+    monkeypatch,无需真实 ~/.alfred。"""
+    return get_user_data_manager().get_agent_dir(agent_name)
 
 
 def _default_system_prompt_loader(agent_name: str) -> str:
-    """从 agent workspace 读 system prompt。占位实现:读 ~/.alfred/agents/<name>/agent.md
-    的内容;Task 8 据 dolphin factory 真实来源替换为确定 loader(届时缺失应 raise)。"""
-    p = Path(f"~/.alfred/agents/{agent_name}/agent.md").expanduser()
-    return p.read_text(encoding="utf-8") if p.exists() else ""
+    """构建 milkie agent 的 system prompt —— 真实来源。
+
+    经 :class:`WorkspaceLoader` 读取并合并 agent 工作区的 SOUL/AGENTS/SKILLS/
+    USER/MEMORY.md(同 dolphin agent 的 ``$workspace_instructions``,但不耦合
+    dolphin factory)。workspace 不存在即 bug,fail loud(raise),绝不静默返回 ""。
+    """
+    from .....infra.workspace import WorkspaceLoader
+
+    workspace = _resolve_agent_workspace(agent_name)
+    if not workspace.exists():
+        raise FileNotFoundError(
+            f"agent workspace not found for '{agent_name}': {workspace}"
+        )
+    return WorkspaceLoader(workspace).build_system_prompt()
 
 
 @dataclass
