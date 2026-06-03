@@ -50,10 +50,16 @@ def _default_system_prompt_loader(agent_name: str) -> str:
 
 @dataclass
 class MilkieAgentHandle:
-    """A milkie conversation handle: which sidecar + which session(contextId)."""
+    """A milkie conversation handle: which sidecar + which session(contextId)。
+
+    ``name`` 携带 agent 名:trunk(web chat_service / session persistence)以
+    ``agent.name`` 取值,milkie handle 必须提供,否则 AttributeError 崩溃。
+    默认 ""(置 context_id 之后,保持既有 2-arg 位置构造 base_url/context_id 不破)。
+    """
 
     base_url: str
     context_id: str
+    name: str = ""
 
 
 class MilkieProvider:
@@ -153,6 +159,7 @@ class MilkieProvider:
         return MilkieAgentHandle(
             base_url=sidecar.base_url,
             context_id=f"{agent_name}-{uuid.uuid4().hex[:8]}",
+            name=agent_name,
         )
 
     async def shutdown_sidecars(self) -> None:

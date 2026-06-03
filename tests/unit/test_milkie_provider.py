@@ -45,6 +45,35 @@ async def test_create_agent_returns_handle():
     assert h.context_id  # 非空
 
 
+async def test_create_agent_handle_carries_agent_name():
+    """handle.name 必须 = agent_name:trunk(web chat_service / session persistence)
+    以 agent.name 取值,milkie handle 缺它会 AttributeError 崩溃(web 连接/会话保存)。"""
+    class _Sidecar:
+        base_url = "http://sidecar"
+
+    class _Pool:
+        async def get_or_spawn(self, name):
+            return _Sidecar()
+
+    p = MilkieProvider("http://config-base", pool=_Pool())
+    h = await p.create_agent("alice", "/ws")
+    assert h.name == "alice"
+    assert h.base_url == "http://sidecar"
+    assert h.context_id.startswith("alice-")
+
+
+def test_handle_accepts_name_field():
+    """MilkieAgentHandle 直接以 name 关键字构造可用;name 默认 "" 不破既有 2-arg 位置构造。"""
+    h = MilkieAgentHandle(name="bob", base_url="http://x", context_id="ctx")
+    assert h.name == "bob"
+    assert h.base_url == "http://x"
+    assert h.context_id == "ctx"
+    # 既有位置构造(base_url, context_id)仍合法,name 默认 ""
+    h2 = MilkieAgentHandle("http://y", "c2")
+    assert h2.name == ""
+    assert (h2.base_url, h2.context_id) == ("http://y", "c2")
+
+
 async def test_run_turn_yields_llm_progress_deltas():
     sse = _sse(
         ("agent.run.started", {"contextId": "c"}),

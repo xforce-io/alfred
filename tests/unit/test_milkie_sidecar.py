@@ -83,6 +83,105 @@ async def test_close_is_idempotent():
     await sc.close()  # 二次调用不应抛错
 
 
+class _FakeStdout:
+    """可控的 async readline:先吐 queued 行,耗尽后保持 pending(模拟子进程仍在跑、
+    随时可能再写 stdout —— 真实 pipe 不会 EOF,直到进程退出)。"""
+
+    def __init__(self, lines: list[bytes]):
+        self._queue = asyncio.Queue()
+        for ln in lines:
+            self._queue.put_nowait(ln)
+        self.read_count = 0
+
+    async def readline(self) -> bytes:
+        self.read_count += 1
+        # 队列空 → await 永久挂起(直到任务被 cancel),绝不返回 EOF。
+        return await self._queue.get()
+
+
+class _FakeProc:
+    def __init__(self, stdout):
+        self.stdout = stdout
+        self.returncode = None
+        self.terminated = 0
+
+    def terminate(self):
+        self.terminated += 1
+        self.returncode = 0
+
+    def kill(self):
+        self.returncode = -9
+
+    async def wait(self):
+        return self.returncode
+
+
+async def test_drain_consumes_stdout_after_ready_and_close_cancels_it(monkeypatch):
+    """就绪后 start() 返回(即便 stdout 后续还有更多行),且后台 drain 任务持续消费这些
+    额外行(防 pipe 阻塞);close() 干净取消 drain 任务,无挂死。"""
+    ready = b"MILKIE_SERVE_READY 7777\n"
+    extra = [b"request log 1\n", b"request log 2\n", b"request log 3\n"]
+    stdout = _FakeStdout([ready, *extra])
+    proc = _FakeProc(stdout)
+
+    async def fake_exec(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+
+    sc = MilkieSidecar(["node", "x"], ready_timeout=2.0)
+    await sc.start()
+    # (a) 就绪解析成功,即便 stdout 仍有更多行排队
+    assert sc.port == 7777
+
+    # (b) 额外行被 drain 任务消费:让出事件循环直到队列被排空
+    for _ in range(50):
+        if stdout._queue.empty():
+            break
+        await asyncio.sleep(0)
+    assert stdout._queue.empty(), "drain 任务应消费完所有额外 stdout 行"
+    # readline 调用数 = ready(1) + 3 额外行 + 1 次正挂起的下一行
+    assert stdout.read_count >= 1 + len(extra)
+    assert sc._drain_task is not None and not sc._drain_task.done()
+
+    # (c) close() 干净取消 drain 任务,不挂死
+    await asyncio.wait_for(sc.close(), 2.0)
+    assert sc._drain_task is None
+    assert proc.terminated == 1
+
+
+async def test_close_robust_when_never_started():
+    """从未 start(无 _drain_task / 无 proc)→ close() no-op 不抛。"""
+    sc = MilkieSidecar(["node", "x"])
+    assert sc._drain_task is None
+    await sc.close()  # must NOT raise
+
+
+async def test_drain_ends_naturally_on_stdout_eof(monkeypatch):
+    """子进程退出 → stdout EOF(readline 返回 b"")→ drain 任务自然结束(非靠 cancel)。"""
+    class _EofStdout:
+        def __init__(self):
+            self._q = asyncio.Queue()
+            self._q.put_nowait(b"MILKIE_SERVE_READY 5555\n")
+            self._q.put_nowait(b"one more line\n")
+            self._q.put_nowait(b"")  # EOF
+        async def readline(self):
+            return await self._q.get()
+
+    proc = _FakeProc(_EofStdout())
+
+    async def fake_exec(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    sc = MilkieSidecar(["node", "x"], ready_timeout=2.0)
+    await sc.start()
+    assert sc.port == 5555
+    await asyncio.wait_for(sc._drain_task, 2.0)  # EOF → 自然结束
+    assert sc._drain_task.done()
+    await sc.close()
+
+
 async def test_sidecar_passes_env(monkeypatch):
     captured = {}
 
