@@ -58,14 +58,22 @@ def _make_runner(workspace_path: Path = Path("."), **overrides) -> HeartbeatRunn
 
 
 @pytest.mark.asyncio
-async def test_restricted_agent_factory_keeps_resource_skill_tools(tmp_path: Path):
-    """Heartbeat runner should preserve resource skill loaders in restricted mode."""
-    agent_factory = AsyncMock(return_value=object())
-    runner = _make_runner(workspace_path=tmp_path, agent_factory=agent_factory)
+async def test_restricted_agent_factory_keeps_resource_skill_tools(tmp_path: Path, monkeypatch):
+    """Heartbeat runner should route creation through the per-agent provider while
+    preserving resource skill loaders in restricted mode."""
+    create_agent = AsyncMock(return_value=object())
+    provider = SimpleNamespace(create_agent=create_agent)
+    import importlib
+    provider_mod = importlib.import_module(
+        HeartbeatRunner.__module__.rsplit(".", 2)[0] + ".agent.provider"
+    )
+    monkeypatch.setattr(provider_mod, "get_provider_for_agent", lambda name: provider)
+
+    runner = _make_runner(workspace_path=tmp_path, agent_factory=AsyncMock(return_value=object()))
 
     await runner._restricted_agent_factory("demo_agent", tmp_path)
 
-    agent_factory.assert_awaited_once_with(
+    create_agent.assert_awaited_once_with(
         "demo_agent",
         tmp_path,
         tools_override=[

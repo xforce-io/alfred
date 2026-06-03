@@ -254,11 +254,13 @@ If not, reply with `HEARTBEAT_OK`.
         ]
 
         async def _restricted_agent_factory(name: str, workspace: Any) -> Any:
-            try:
-                return await agent_factory(name, workspace, tools_override=_HEARTBEAT_TOOLS)
-            except TypeError:
-                # Fallback: factory doesn't support tools_override yet
-                return await agent_factory(name, workspace)
+            # Route creation through the per-agent provider (milkie/dolphin
+            # selection) while preserving the restricted heartbeat tool set.
+            from ..agent.provider import get_provider_for_agent
+
+            return await get_provider_for_agent(name).create_agent(
+                name, workspace, tools_override=_HEARTBEAT_TOOLS
+            )
 
         self._restricted_agent_factory = _restricted_agent_factory
 
