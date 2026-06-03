@@ -266,11 +266,21 @@ class MilkieProvider:
                 await client.aclose()
 
     async def resume(self, agent: Any, message: str) -> None:
-        # milkie /resume 是流式(产新 turn 事件流),语义与 dolphin resume_with_input
-        # 「注入并内部续」不同,待单独设计(应作为新一轮 run_turn 消费事件)。
-        raise NotImplementedError(
-            "MilkieProvider.resume:milkie /resume 流式语义待设计,见 goal.md"
-        )
+        # milkie /resume 是流式(产新一轮 turn 事件);此处把消息注入并消费完整个流
+        # (调用方语义只需「续跑」,不消费事件 → 排空即可)。
+        handle: MilkieAgentHandle = agent
+        client = self._client or self._new_client()
+        owns = self._client is None
+        try:
+            async with client.stream(
+                "POST", f"{handle.base_url}/resume",
+                json={"contextId": handle.context_id, "input": message},
+            ) as resp:
+                async for _ in resp.aiter_text():
+                    pass   # 排空流,确保 serve 续跑完成
+        finally:
+            if owns:
+                await client.aclose()
 
     async def call_llm(
         self,
