@@ -47,3 +47,34 @@ def test_build_unknown_model_fails_fast(tmp_path):
     )
     with pytest.raises(KeyError):
         launcher.build("alice", system_prompt="x")
+
+
+def test_build_no_api_key_skips_env_injection(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    launcher = SidecarLauncher(
+        dist_path=tmp_path / "milkie" / "dist" / "cli" / "index.js",
+        data_dir_root=tmp_path / "data",
+        node_bin="node",
+        llms={"main": {"cloud": "oa", "model_name": "gpt-x", "type_api": "openai"},
+              "fast": {"cloud": "oa", "model_name": "gpt-fast", "type_api": "openai"}},
+        clouds={"oa": {"api": "https://api.oa/v1"}},  # 无 api_key
+        default_model="main",
+        fast_model="fast",
+    )
+    spec = launcher.build("alice", system_prompt="x")
+    assert "OPENAI_API_KEY" not in spec.env
+
+
+def test_build_single_tier_agent_md_when_fast_equals_default(tmp_path):
+    launcher = SidecarLauncher(
+        dist_path=tmp_path / "milkie" / "dist" / "cli" / "index.js",
+        data_dir_root=tmp_path / "data",
+        node_bin="node",
+        llms={"main": {"cloud": "oa", "model_name": "gpt-x", "type_api": "openai"}},
+        clouds={"oa": {"api": "https://api.oa/v1", "api_key": "sk-real"}},
+        default_model="main",
+        fast_model="main",  # fast == default
+    )
+    spec = launcher.build("alice", system_prompt="x")
+    assert spec.agent_md.exists()
+    assert "gpt-x" in spec.agent_md.read_text(encoding="utf-8")
