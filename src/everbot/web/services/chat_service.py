@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 from fastapi import WebSocket
-from ...core.agent.provider import get_provider
+from ...core.agent.provider import provider_for
 
 from .agent_service import AgentService
 from ...core.channel.core_service import ChannelCoreService
@@ -250,7 +250,7 @@ class ChatService:
                 logger.debug("Agent ready: %s", agent.name)
 
                 try:
-                    provider = get_provider()
+                    provider = provider_for(agent)
                     ws_instr = provider.get_variable(agent, "workspace_instructions")
                     model_var = provider.get_variable(agent, "model_name")
                     logger.debug("workspace_instructions length: %d, model_name: %s",
@@ -374,7 +374,7 @@ class ChatService:
                     if current_task and not current_task.done():
                         logger.debug("User interrupt requested for %s", agent_name)
                         try:
-                            await get_provider().interrupt(agent)
+                            await provider_for(agent).interrupt(agent)
                             try:
                                 await asyncio.wait_for(asyncio.shield(current_task), timeout=2.0)
                             except asyncio.TimeoutError:
@@ -404,10 +404,11 @@ class ChatService:
                 # Call agent.interrupt() → wait for task to finish → context preserved
 
                 # Case 1: Agent is already PAUSED due to USER_INTERRUPT
-                if get_provider().is_user_interrupt_paused(agent):
+                provider = provider_for(agent)
+                if provider.is_user_interrupt_paused(agent):
                     logger.debug("Agent is paused due to user interrupt, using resume_with_input()")
                     try:
-                        await get_provider().resume(agent, message)
+                        await provider.resume(agent, message)
                     except Exception as e:
                         logger.debug("resume_with_input failed: %s, will start fresh", e)
 
@@ -415,7 +416,7 @@ class ChatService:
                 elif current_task and not current_task.done():
                     logger.debug("User intervention while agent is RUNNING, triggering interrupt()")
                     try:
-                        await get_provider().interrupt(agent)
+                        await provider.interrupt(agent)
                     except Exception as e:
                         logger.debug("interrupt() failed: %s", e)
 
@@ -433,9 +434,9 @@ class ChatService:
                     except Exception as e:
                         logger.debug("Task finished with exception: %s", e)
 
-                    if get_provider().is_user_interrupt_paused(agent):
+                    if provider.is_user_interrupt_paused(agent):
                         try:
-                            await get_provider().resume(agent, message)
+                            await provider.resume(agent, message)
                         except Exception as e:
                             logger.debug("resume_with_input failed: %s", e)
 
