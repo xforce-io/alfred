@@ -81,3 +81,17 @@ async def test_close_is_idempotent():
     await sc.start()
     await sc.close()
     await sc.close()  # 二次调用不应抛错
+
+
+async def test_sidecar_passes_env(monkeypatch):
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    sc = MilkieSidecar(["node", "x"], env={"OPENAI_API_KEY": "sk"})
+    with pytest.raises(RuntimeError):
+        await sc.start()
+    assert captured["env"] == {"OPENAI_API_KEY": "sk"}

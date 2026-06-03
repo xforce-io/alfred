@@ -24,8 +24,15 @@ def parse_ready_signal(line: str) -> Optional[int]:
 class MilkieSidecar:
     """A spawned ``milkie serve`` process whose lifecycle is bound to ours."""
 
-    def __init__(self, cmd: List[str], *, ready_timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        cmd: List[str],
+        *,
+        env: Optional[dict] = None,
+        ready_timeout: float = 10.0,
+    ) -> None:
         self._cmd = cmd
+        self._env = env
         self._ready_timeout = ready_timeout
         self._proc: Optional[asyncio.subprocess.Process] = None
         self.port: Optional[int] = None
@@ -43,6 +50,7 @@ class MilkieSidecar:
             *self._cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
+            env=self._env,
         )
         self.port = await asyncio.wait_for(self._await_ready(), self._ready_timeout)
 
