@@ -145,3 +145,40 @@ async def test_shutdown_all_providers_covers_per_agent_cache(monkeypatch):
     await mod.shutdown_all_providers()
     assert closed == ["milkie"]   # the cached per-agent provider WAS shut down
     reset_provider()
+
+
+async def test_shutdown_all_providers_dedups_same_instance(monkeypatch):
+    import everbot.core.agent.provider as mod
+    reset_provider()
+    calls = []
+
+    class _P:
+        async def shutdown_sidecars(self):
+            calls.append(1)
+
+    inst = _P()
+    mod._provider_singleton = inst
+    mod._provider_by_name["milkie"] = inst   # same identity in both caches
+    await mod.shutdown_all_providers()
+    assert calls == [1]   # awaited once, not twice
+    reset_provider()
+
+
+async def test_shutdown_all_providers_skips_provider_without_method(monkeypatch):
+    import everbot.core.agent.provider as mod
+    reset_provider()
+
+    class _NoMethod:
+        pass
+
+    closed = []
+
+    class _Has:
+        async def shutdown_sidecars(self):
+            closed.append("has")
+
+    mod._provider_by_name["dolphin"] = _NoMethod()   # no shutdown_sidecars
+    mod._provider_by_name["milkie"] = _Has()
+    await mod.shutdown_all_providers()   # must not raise
+    assert closed == ["has"]
+    reset_provider()
