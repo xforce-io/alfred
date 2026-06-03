@@ -356,3 +356,54 @@ async def test_create_agent_uses_pool_base_url(monkeypatch):
 
     await prov.shutdown_sidecars()
     assert stub.closed == 1
+
+
+def test_construction_does_no_config_io(monkeypatch):
+    """构造 MilkieProvider 绝不触发 config/factory I/O:pool 惰性构建。
+    monkeypatch _build_pool 让其一旦被调用就炸 → 构造不抛即证明 __init__ 未建 pool。"""
+    import everbot.core.agent.provider.milkie.provider as mod
+
+    def _boom():
+        raise AssertionError("config/factory I/O during construction")
+
+    monkeypatch.setattr(mod.MilkieProvider, "_build_pool", staticmethod(_boom))
+    p = mod.MilkieProvider("http://x")  # must NOT raise
+    assert p is not None
+    assert p._pool is None  # 仍未装配
+
+
+async def test_pool_built_lazily_on_first_create_agent(monkeypatch):
+    """pool 首次 create_agent 时才装配,且只建一次(复用)。"""
+    import everbot.core.agent.provider.milkie.provider as mod
+
+    calls = {"n": 0}
+    stub = _FakeSidecarStub()
+
+    class _FakePool:
+        async def get_or_spawn(self, name):
+            return stub
+
+    def _fake_build():
+        calls["n"] += 1
+        return _FakePool()
+
+    monkeypatch.setattr(mod.MilkieProvider, "_build_pool", staticmethod(_fake_build))
+    p = mod.MilkieProvider("http://x")
+    assert calls["n"] == 0  # 构造未建
+    await p.create_agent("a", "/ws")
+    assert calls["n"] == 1  # 首次 create_agent 才建
+    await p.create_agent("b", "/ws")
+    assert calls["n"] == 1  # 复用,不重建
+
+
+async def test_shutdown_sidecars_noop_when_pool_never_built(monkeypatch):
+    """从未 spawn → shutdown_sidecars 不为关停而强行建 pool(no-op)。"""
+    import everbot.core.agent.provider.milkie.provider as mod
+
+    def _boom():
+        raise AssertionError("should not build pool just to shut down")
+
+    monkeypatch.setattr(mod.MilkieProvider, "_build_pool", staticmethod(_boom))
+    p = mod.MilkieProvider("http://x")
+    await p.shutdown_sidecars()  # must NOT raise
+    assert p._pool is None

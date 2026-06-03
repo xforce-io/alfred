@@ -50,8 +50,15 @@ class MilkieProvider:
         self._base_url = base_url.rstrip("/") if base_url else None
         self._client = client  # injected for tests; None → one client per turn
         self._sync_client = sync_client  # injected for tests; None → one client per call
-        self._pool = pool if pool is not None else self._build_pool()
+        # 惰性:构造不做任何 config/factory I/O。pool 首次实际使用(create_agent)时才装配。
+        self._pool = pool
         self._system_prompt_loader = system_prompt_loader or _default_system_prompt_loader
+
+    def _get_pool(self):
+        """惰性装配 pool:首次 create_agent 时才读 config + dolphin.yaml + factory。"""
+        if self._pool is None:
+            self._pool = self._build_pool()
+        return self._pool
 
     @staticmethod
     def _build_pool():
@@ -124,14 +131,16 @@ class MilkieProvider:
     ) -> MilkieAgentHandle:
         # 经 pool 惰性 spawn/复用 per-agent 的 milkie serve;handle 携带该 serve 的
         # base_url(动态端口),而非固定 config base_url。
-        sidecar = await self._pool.get_or_spawn(agent_name)
+        sidecar = await self._get_pool().get_or_spawn(agent_name)
         return MilkieAgentHandle(
             base_url=sidecar.base_url,
             context_id=f"{agent_name}-{uuid.uuid4().hex[:8]}",
         )
 
     async def shutdown_sidecars(self) -> None:
-        await self._pool.shutdown_all()
+        # pool 从未装配 → 什么也没 spawn,no-op(不为关停而强行 _build_pool)。
+        if self._pool is not None:
+            await self._pool.shutdown_all()
 
     async def run_turn(
         self,
