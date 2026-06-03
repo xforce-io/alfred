@@ -138,3 +138,6 @@ class DolphinProvider:
         installed = getattr(gs, "installedSkillset", None) if gs else None
         if installed is not None:
             installed.addSkillkit(skillkit)
+
+    def export_session(self, agent: Any) -> dict:
+        return agent.snapshot.export_portable_session()

@@ -340,7 +340,8 @@ class SessionManager:
         # only captures turn-1's count.  Estimate from history instead.
         if trace.get("estimated_output_tokens", -1) == 0:
             try:
-                portable = agent.snapshot.export_portable_session()
+                from ..agent.provider import get_provider  # local: avoid import cycle
+                portable = get_provider().export_session(agent)
                 history = portable.get("history_messages", [])
                 estimated = 0
                 for msg in history:
@@ -534,7 +535,8 @@ class SessionManager:
                     from ...infra.user_data import get_user_data_manager
                     memory_path = get_user_data_manager().get_agent_dir(agent_name) / "MEMORY.md"
                     mm = MemoryManager(memory_path, context)
-                    portable = agent.snapshot.export_portable_session()
+                    from ..agent.provider import get_provider  # local: avoid import cycle
+                    portable = get_provider().export_session(agent)
                     history = portable.get("history_messages", [])
                     await asyncio.wait_for(
                         mm.process_session_end(history, session_id),
@@ -562,7 +564,8 @@ class SessionManager:
             return
 
         context = agent.executor.context
-        portable = agent.snapshot.export_portable_session()
+        from ..agent.provider import get_provider  # local: avoid import cycle
+        portable = get_provider().export_session(agent)
         serializable_history = portable.get("history_messages", [])
         exported_variables = portable.get("variables", {})
         exported_variables.pop("_history", None)  # avoid duplicating history_messages

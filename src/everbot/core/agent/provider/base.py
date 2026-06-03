@@ -74,3 +74,11 @@ class AgentProvider(Protocol):
     def has_skill(self, agent: Any, name: str) -> bool: ...
 
     def register_skillkit(self, agent: Any, skillkit: Any) -> None: ...
+
+    def export_session(self, agent: Any) -> dict:
+        """会话可移植导出 ``{history_messages, variables}``。
+
+        同步(其中一处调用点在同步函数 ``_extract_context_trace`` 里;MilkieProvider
+        用 sync httpx,与 set_variable/get_variable 一致)。
+        """
+        ...

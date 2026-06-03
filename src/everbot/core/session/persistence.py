@@ -267,7 +267,8 @@ class SessionPersistence:
         """
         try:
             context = agent.executor.context
-            portable = agent.snapshot.export_portable_session()
+            from ..agent.provider import get_provider  # local: avoid import cycle
+            portable = get_provider().export_session(agent)
             serializable_history = portable.get("history_messages", [])
             if trailing_messages:
                 # Trim any trailing orphan assistant tool_calls before appending

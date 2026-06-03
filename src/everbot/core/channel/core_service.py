@@ -607,7 +607,7 @@ class ChannelCoreService:
                         # mailbox prefix).
                         _dolphin_has_msg = False
                         try:
-                            _exported = agent.snapshot.export_portable_session()
+                            _exported = get_provider().export_session(agent)
                             _hist = _exported.get("history_messages", [])
                             _candidates = {message_text, effective_message if isinstance(effective_message, str) else message_text}
                             for _m in reversed(_hist[-4:]):

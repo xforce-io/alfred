@@ -151,6 +151,11 @@ class MilkieProvider:
             "MilkieProvider.register_skillkit 需 milkie#87 跨语言工具桥;见 goal.md D"
         )
 
+    def export_session(self, agent: Any) -> dict:
+        raise NotImplementedError(
+            "MilkieProvider.export_session 走 milkie#128 /session/history;Phase B 实现"
+        )
+
     async def call_llm(
         self,
         context: Any,
