@@ -1387,3 +1387,102 @@ async def test_execute_once_recovery_notification(tmp_path):
     runner._delivery.deliver_result.assert_called_once()
     call_args = runner._delivery.deliver_result.call_args
     assert "LLM 已恢复" in call_args[0][0]
+
+
+class TestRunHeartbeatTurnMilkieSafe:
+    """_run_heartbeat_turn must NOT crash on a milkie handle (no .executor).
+
+    dolphin: reads ctx via _get_workspace_instructions (unchanged).
+    milkie: routes workspace_instructions through provider.get_variable
+    (may be None — tolerated, cached as "").
+    """
+
+    def _patch_provider(self, monkeypatch, provider):
+        import importlib
+        provider_mod = importlib.import_module(
+            HeartbeatRunner.__module__.rsplit(".", 2)[0] + ".agent.provider"
+        )
+        monkeypatch.setattr(provider_mod, "get_provider", lambda: provider)
+
+    def _patch_turn(self, monkeypatch, runner):
+        # Neutralize heavy turn machinery: stub executor + emit + compat.
+        import src.everbot.core.runtime.heartbeat as hb
+        monkeypatch.setattr(hb, "ensure_continue_chat_compatibility", lambda: None)
+
+        async def _emit(*a, **k):
+            return None
+
+        import src.everbot.core.runtime.events as ev
+        monkeypatch.setattr(ev, "emit", _emit)
+
+        turn_result = SimpleNamespace(events=[{"type": "complete", "data": "ok"}])
+        runner._turn_executor = SimpleNamespace(
+            execute_turn=AsyncMock(return_value=turn_result)
+        )
+        runner._skill_log_recorder = None
+        monkeypatch.setattr(
+            runner, "_extract_llm_result", lambda events: "RESULT"
+        )
+
+    @pytest.mark.asyncio
+    async def test_milkie_handle_no_attribute_error(self, tmp_path, monkeypatch):
+        handle = SimpleNamespace(base_url="http://x", context_id="c1")
+
+        class _MilkieProvider:
+            def needs_history_restore(self):
+                return False
+
+            def get_variable(self, agent, key):
+                assert agent is handle
+                assert key == "workspace_instructions"
+                return "MILKIE WS"
+
+        self._patch_provider(monkeypatch, _MilkieProvider())
+        runner = _make_runner(workspace_path=tmp_path)
+        self._patch_turn(monkeypatch, runner)
+
+        out = await runner._run_heartbeat_turn(handle, "ping")
+
+        assert out == "RESULT"
+        assert runner._runtime_workspace_instructions == "MILKIE WS"
+
+    @pytest.mark.asyncio
+    async def test_milkie_handle_tolerates_none(self, tmp_path, monkeypatch):
+        handle = SimpleNamespace(base_url="http://x", context_id="c1")
+
+        class _MilkieProvider:
+            def needs_history_restore(self):
+                return False
+
+            def get_variable(self, agent, key):
+                return None
+
+        self._patch_provider(monkeypatch, _MilkieProvider())
+        runner = _make_runner(workspace_path=tmp_path)
+        self._patch_turn(monkeypatch, runner)
+
+        out = await runner._run_heartbeat_turn(handle, "ping")
+
+        assert out == "RESULT"
+        # None must be coerced to "" (not crash, not None).
+        assert runner._runtime_workspace_instructions == ""
+
+    @pytest.mark.asyncio
+    async def test_dolphin_path_reads_context(self, tmp_path, monkeypatch):
+        ctx = SimpleNamespace(
+            get_var_value=lambda k: "DOLPHIN WS" if k == "workspace_instructions" else None
+        )
+        agent = SimpleNamespace(executor=SimpleNamespace(context=ctx))
+
+        class _DolphinProvider:
+            def needs_history_restore(self):
+                return True
+
+        self._patch_provider(monkeypatch, _DolphinProvider())
+        runner = _make_runner(workspace_path=tmp_path)
+        self._patch_turn(monkeypatch, runner)
+
+        out = await runner._run_heartbeat_turn(agent, "ping")
+
+        assert out == "RESULT"
+        assert runner._runtime_workspace_instructions == "DOLPHIN WS"

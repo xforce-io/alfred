@@ -266,9 +266,9 @@ class SessionPersistence:
             model_name: 模型名称
         """
         try:
-            context = agent.executor.context
             from ..agent.provider import get_provider  # local: avoid import cycle
-            portable = get_provider().export_session(agent)
+            provider = get_provider()
+            portable = provider.export_session(agent)
             serializable_history = portable.get("history_messages", [])
             if trailing_messages:
                 # Trim any trailing orphan assistant tool_calls before appending
@@ -285,7 +285,7 @@ class SessionPersistence:
             previous = await self.load(session_id)
             next_revision = ((previous.revision if previous else 0) or 0) + 1
             created_at = (
-                context.get_var_value("session_created_at")
+                provider.get_variable(agent, "session_created_at")
                 or (previous.created_at if previous and previous.created_at else None)
                 or datetime.now(timezone.utc).isoformat()
             )
@@ -309,7 +309,9 @@ class SessionPersistence:
             )
 
             # Compress history for long-lived sessions before persisting.
-            if data.session_type in ("primary", "channel"):
+            if data.session_type in ("primary", "channel") and provider.needs_history_restore():
+                # dolphin: 进程内 history 压缩(需 context)。
+                # milkie: serve 返回全量 history,无 in-process 压缩(由 serve 端负责)。
                 try:
                     compressor = SessionCompressor(agent.executor.context)
                     data.history_messages = await compressor.compress_history(

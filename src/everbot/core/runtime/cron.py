@@ -707,12 +707,19 @@ class CronExecutor:
     @staticmethod
     def _build_job_system_prompt(agent: Any, task: Task) -> str:
         """Build isolated job system prompt from base workspace + task description."""
-        context = agent.executor.context
+        from ..agent.provider import get_provider
+
         base = ""
-        if hasattr(context, "workspace_instructions"):
-            base = str(context.workspace_instructions or "")
-        elif hasattr(context, "get_variable"):
-            base = str(context.get_variable("workspace_instructions") or "")
+        if get_provider().needs_history_restore():
+            # dolphin: 进程内 context,行为保持不变(优先属性,回退 get_variable)
+            context = agent.executor.context
+            if hasattr(context, "workspace_instructions"):
+                base = str(context.workspace_instructions or "")
+            elif hasattr(context, "get_variable"):
+                base = str(context.get_variable("workspace_instructions") or "")
+        else:
+            # milkie: 无 .executor;workspace_instructions 走 serve /context/get(可能为 None)
+            base = str(get_provider().get_variable(agent, "workspace_instructions") or "")
         task_description = str(task.description or "").strip()
         if not task_description:
             return base

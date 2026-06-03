@@ -1410,8 +1410,16 @@ If not, reply with `HEARTBEAT_OK`.
     async def _run_heartbeat_turn(self, agent: Any, message: str) -> str:
         """Run heartbeat turn via TurnExecutor and runtime context strategies."""
         try:
-            ctx = agent.executor.context
-            self._runtime_workspace_instructions = self._get_workspace_instructions(ctx)
+            from ..agent.provider import get_provider
+
+            if get_provider().needs_history_restore():
+                # dolphin: 进程内 context,行为保持不变
+                ctx = agent.executor.context
+                self._runtime_workspace_instructions = self._get_workspace_instructions(ctx)
+            else:
+                # milkie: 无 .executor;workspace_instructions 走 serve(可能为 None)
+                value = get_provider().get_variable(agent, "workspace_instructions")
+                self._runtime_workspace_instructions = value if isinstance(value, str) else ""
             ensure_continue_chat_compatibility()
 
             from .events import emit

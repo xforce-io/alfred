@@ -273,7 +273,6 @@ class ChannelCoreService:
             )
 
             # --- Turn execution via TurnOrchestrator ---
-            ctx = agent.executor.context
             provider = get_provider()
             self._bind_session_id_to_context(agent, session_id)
             self._init_session_trajectory(agent, agent_name, session_id, overwrite=False)
@@ -281,7 +280,7 @@ class ChannelCoreService:
             if not provider.is_paused(agent):
                 provider.set_variable(agent, "query", effective_message)
             self._reload_workspace_instructions_if_missing(agent, agent_name)
-            self._cache_runtime_workspace_instructions(agent_name, ctx)
+            self._cache_runtime_workspace_instructions(agent, agent_name)
             # Refresh current_time so the LLM always knows the actual time
             provider.set_variable(agent, "current_time", datetime.now().strftime("%Y-%m-%d %H:%M"))
             system_prompt_override = self._build_turn_system_prompt(session_data, agent_name)
@@ -805,6 +804,10 @@ class ChannelCoreService:
         the missing variable and rebuilds fresh instructions from the workspace
         files on disk (AGENTS.md, HEARTBEAT.md, MEMORY.md, etc.).
         """
+        if not get_provider().needs_history_restore():
+            # milkie: workspace_instructions 已 bake 进 agent.md;serve 自持久化,无 in-process
+            # context 可回灌 → reload-if-missing 是 dolphin-only 概念,直接返回。
+            return
         ctx = agent.executor.context
         get_var = getattr(ctx, "get_var_value", None)
         if not callable(get_var):
@@ -837,13 +840,20 @@ class ChannelCoreService:
                 exc_info=True,
             )
 
-    def _cache_runtime_workspace_instructions(self, agent_name: str, context: Any) -> None:
+    def _cache_runtime_workspace_instructions(self, agent: Any, agent_name: str) -> None:
         """Cache workspace instructions from agent context for strategy lookup."""
         self._ensure_runtime_context_strategy()
-        get_var = getattr(context, "get_var_value", None)
-        if not callable(get_var):
-            return
-        value = get_var("workspace_instructions")
+        if get_provider().needs_history_restore():
+            # dolphin: 进程内 context,行为保持不变
+            context = agent.executor.context
+            get_var = getattr(context, "get_var_value", None)
+            if not callable(get_var):
+                return
+            value = get_var("workspace_instructions")
+        else:
+            # milkie: 无 .executor;workspace_instructions 已 bake 进 agent.md,
+            # 经 serve /context/get 取回(可能为 None)。
+            value = get_provider().get_variable(agent, "workspace_instructions")
         if isinstance(value, str):
             self._runtime_workspace_instructions_by_agent[agent_name] = value
 

@@ -526,7 +526,10 @@ class SessionManager:
         # Extract structured memories for primary / channel sessions.
         # Fire-and-forget with timeout so it never blocks session persistence.
         session_type = SessionManager.infer_session_type(session_id)
-        if session_type in ("primary", "channel"):
+        from ..agent.provider import get_provider  # local: avoid import cycle
+        if session_type in ("primary", "channel") and get_provider().needs_history_restore():
+            # dolphin: 进程内 context 驱动 session-end 记忆抽取。
+            # milkie: in-process memory extraction needs #87 bridge; skip for now
             try:
                 agent_name = getattr(agent, "name", "")
                 if agent_name:
@@ -535,7 +538,6 @@ class SessionManager:
                     from ...infra.user_data import get_user_data_manager
                     memory_path = get_user_data_manager().get_agent_dir(agent_name) / "MEMORY.md"
                     mm = MemoryManager(memory_path, context)
-                    from ..agent.provider import get_provider  # local: avoid import cycle
                     portable = get_provider().export_session(agent)
                     history = portable.get("history_messages", [])
                     await asyncio.wait_for(
@@ -563,18 +565,23 @@ class SessionManager:
             logger.debug("Session persisted.")
             return
 
-        context = agent.executor.context
-        from ..agent.provider import get_provider  # local: avoid import cycle
-        portable = get_provider().export_session(agent)
+        provider = get_provider()
+        portable = provider.export_session(agent)
         serializable_history = portable.get("history_messages", [])
         exported_variables = portable.get("variables", {})
         exported_variables.pop("_history", None)  # avoid duplicating history_messages
-        created_at_hint = context.get_var_value("session_created_at")
+        # session_created_at: dolphin 读 context;milkie 走 serve(可能为 None,容忍)。
+        created_at_hint = provider.get_variable(agent, "session_created_at")
 
         # Compress history for long-lived sessions before entering the lock.
-        if SessionManager.infer_session_type(session_id) in ("primary", "channel"):
+        if (
+            SessionManager.infer_session_type(session_id) in ("primary", "channel")
+            and provider.needs_history_restore()
+        ):
+            # dolphin: 进程内 history 压缩(需 context)。
+            # milkie: serve 返回全量 history,无 in-process 压缩。
             try:
-                compressor = SessionCompressor(context)
+                compressor = SessionCompressor(agent.executor.context)
                 serializable_history = await compressor.compress_history(serializable_history)
             except Exception:
                 logger.warning("History compression failed; saving uncompressed", exc_info=True)

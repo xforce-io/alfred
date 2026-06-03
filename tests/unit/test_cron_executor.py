@@ -3,6 +3,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -856,3 +857,70 @@ class TestCreateJobAgentProviderRouting:
             sentinel_agent, "job_session_42"
         )
         runtime_provider.init_trajectory.assert_called_once()
+
+
+class TestBuildJobSystemPromptMilkieSafe:
+    """_build_job_system_prompt must NOT crash on a milkie handle (no .executor).
+
+    dolphin: reads context.workspace_instructions (unchanged).
+    milkie: routes through provider.get_variable (may be None — tolerated).
+    """
+
+    def _patch_provider(self, monkeypatch, provider):
+        import importlib
+        provider_mod = importlib.import_module(
+            CronExecutor.__module__.rsplit(".", 2)[0] + ".agent.provider"
+        )
+        monkeypatch.setattr(provider_mod, "get_provider", lambda: provider)
+
+    def test_milkie_handle_routes_through_get_variable(self, monkeypatch):
+        from src.everbot.core.tasks.task_manager import Task
+
+        # Milkie handle: bare object WITHOUT .executor.
+        handle = SimpleNamespace(base_url="http://x", context_id="c1")
+
+        class _MilkieProvider:
+            def needs_history_restore(self):
+                return False
+
+            def get_variable(self, agent, key):
+                assert agent is handle
+                assert key == "workspace_instructions"
+                return "WS BASE"
+
+        self._patch_provider(monkeypatch, _MilkieProvider())
+        task = Task(id="t1", title="T", description="do the thing")
+        out = CronExecutor._build_job_system_prompt(handle, task)
+        assert out == "WS BASE\n\ndo the thing"
+
+    def test_milkie_handle_tolerates_none_workspace(self, monkeypatch):
+        from src.everbot.core.tasks.task_manager import Task
+
+        handle = SimpleNamespace(base_url="http://x", context_id="c1")
+
+        class _MilkieProvider:
+            def needs_history_restore(self):
+                return False
+
+            def get_variable(self, agent, key):
+                return None  # serve has no var set yet
+
+        self._patch_provider(monkeypatch, _MilkieProvider())
+        task = Task(id="t2", title="T", description="just task")
+        out = CronExecutor._build_job_system_prompt(handle, task)
+        assert out == "just task"
+
+    def test_dolphin_path_reads_context_attribute(self, monkeypatch):
+        from src.everbot.core.tasks.task_manager import Task
+
+        ctx = SimpleNamespace(workspace_instructions="DOLPHIN WS")
+        agent = SimpleNamespace(executor=SimpleNamespace(context=ctx))
+
+        class _DolphinProvider:
+            def needs_history_restore(self):
+                return True
+
+        self._patch_provider(monkeypatch, _DolphinProvider())
+        task = Task(id="t3", title="T", description="cron job")
+        out = CronExecutor._build_job_system_prompt(agent, task)
+        assert out == "DOLPHIN WS\n\ncron job"
