@@ -1,0 +1,127 @@
+# Epic:用 milkie 跨进程替换 dolphin agent provider
+
+> 本文件是该替换工作的**单一事实源(SSOT)**。GitHub 不另建 epic issue;阶段性
+> 工作可各自开分支 / PR。关联:milkie#86(最小 serve)、milkie#87(跨语言工具桥)、
+> alfred#32(AgentProvider 抽象,已 merged)。
+
+## 1. 目标
+
+把 alfred 的 agent runtime 从 `dolphin`(Python,进程内 SDK)替换为 `milkie`
+(TypeScript,事件溯源 + 确定性 replay + checkpoint,能力更强),最终拆除对
+dolphin 的依赖。
+
+## 2. 核心约束:跨语言
+
+milkie 是 **TS/Node 库**,alfred + dolphin 是 **Python**。Python 无法 `import`
+milkie。因此替换形态固定为**跨进程 sidecar**:
+
+```
+alfred(Python) ──spawn──▶ milkie serve(Node,HTTP+SSE,生命周期绑定 alfred)
+        │  POST /chat(响应体即 SSE)         │
+        │◀── message_delta / tool.* / 终态 ──┘
+   MilkieProvider 适配层(事件映射)
+```
+
+- milkie 自己**不绑死 alfred 协议**:serve 透出 milkie 原生事件名,事件映射
+  (pid 合成、stage 分类、字段翻译到 `TurnEvent`)是 alfred 适配层的职责。
+- alfred **自托管** sidecar(spawn + 等就绪信号 + SIGTERM),不依赖中心化常驻服务。
+
+## 3. 关键事实与坑(已核实,勿重新踩)
+
+- **pid ≠ toolCallId**:dolphin `progress.id` 是 StageInstance 自生成 uuid(llm/
+  skill 块都有);milkie `toolCallId` 仅覆盖工具调用配对。适配层需自己合成 pid
+  (工具块用 toolCallId,LLM 块自生成 —— turn_orchestrator 的 llm 分支本就不读 pid)。
+- **token 流不进持久化 EventStore**:milkie `message_delta` 是非持久化、仅走
+  `onModelEvent` 回调;serve 在 handler 闭包里把它写进同一条 SSE。
+- **终态由 serve 合成**:`agent.run.completed` 从广播白名单排除,改由 `AgentResult`
+  合成(status + output),保证终态唯一、不受广播时序影响。这是「省 /status」的前提。
+- **连本地 sidecar 必须 `trust_env=False`**:环境有 `http_proxy` 时 httpx 会把
+  127.0.0.1 也代理掉 → /chat 502。e2e 实测踩到,已在 `MilkieProvider._new_client` 修复。
+- **milkie 无独立 think/reasoning 事件**:alfred 的「think-only 轮」循环检测退化为
+  当空轮处理即可,不影响功能。
+
+## 4. 阶段路线
+
+每阶段独立分支 / PR;A 阶段全程保持现有测试绿(仍用 DolphinProvider 实现),风险隔离。
+
+| 阶段 | 范围 | 状态 |
+|---|---|---|
+| **第0步 垂直切片 PoC** | 真 `milkie serve` + sidecar 管理 + SSE/adapter,证明 token 流端到端透传 | ✅ **已完成** |
+| **A 接口收敛** | 扩 `AgentProvider`(run_turn 中立事件契约 / context / trajectory / skillkit);turn_orchestrator 改吃中立事件。仍用 DolphinProvider,行为不变 | ✅ **接口收敛完成**:A1 run_turn + A2a/A2b 干净点 context(workflow/skill_change_detector/cron/heartbeat/core_service/chat_service)+ A3 trajectory + A4 skillkit,全部 DolphinProvider 实现,**1585 全量回归绿**。🔶 剩余 A2b 点 = session/persistence 的 dolphin 快照层(snapshot/portable_session/_history/SessionCompressor),本质即 A2 会话持久化。**milkie 侧端点已交付(#124 `/session/export·import` merged)**,待 alfred session 层对接 |
+| **C MilkieProvider 接入** | 接进 `get_provider` + 配置开关;sidecar 产品化;状态/会话映射 | ✅ **turn 层端到端 + C3 配置开关 + MilkieProvider 完整 AgentProvider 契约 done**(两 provider 均满足 runtime_checkable);🔶 set_variable/get_variable 已走 #83 `/context/*` 端点实现;**call_llm 已对接 #126 `/llm`(fast→tier、temperature、raise_on_error 双语义,真 serve tier 路由 e2e 绿)**;register_skillkit 待 milkie#87 |
+| **D Python skill 桥** | telegram 等 Python skill 在 milkie 下可用(对应 milkie#87) | ⬜ 待办(P2,条件性) |
+| **去 dolphin 依赖** | 切默认 provider、拆 `import dolphin` 与依赖声明 | ⬜ 最后 |
+
+### 验证方法(环境前置 + 命令)
+
+**环境前置(关键,易踩)**:
+- 必须 `PYTHONPATH=src`:pyproject 的 `pythonpath=["."]` 指不到 src layout,现有 CI 即用此方式。
+- 用 `.venv/bin/python -m pytest`;`asyncio_mode=auto`,async 测试无需标记。
+- e2e 需 node + milkie 已 build:`cd ../milkie && npm run build`(serve 进 dist);**未 build 时 e2e 自动 skip**(不算失败)。
+
+**第0步 验证命令(可复现)**:
+```bash
+# 1) 单元:快、确定、无外部依赖 → 28 passed
+PYTHONPATH=src .venv/bin/python -m pytest \
+  tests/unit/test_milkie_sse.py tests/unit/test_milkie_adapter.py \
+  tests/unit/test_milkie_sidecar.py tests/unit/test_milkie_provider.py -q
+
+# 2) e2e 冒烟:真 spawn `milkie serve` + 本地 fake OpenAI 流式 server(无 key)→ 1 passed
+PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_milkie_serve_smoke.py -q
+#    断言:收到 ≥2 个 LLM_DELTA(证明逐 token,非整段),拼成 "Hello, world!"
+#         + 唯一 TURN_COMPLETE(status=completed) + 子进程 SIGTERM 后已退出
+
+# 3) 回归 + 边界守护(主干不得 import dolphin)→ 10 passed
+PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_agent_provider_*.py -q
+```
+
+**各阶段验收标准**:
+- **第0步**:上述三组命令全绿 = token 流端到端 + 子进程托管 + 不破坏现有。✅
+- **A 接口收敛**:扩 `AgentProvider` 后**现有全部测试仍绿**(行为零变化是硬标准);新接口有契约/单元测试;turn_orchestrator 改吃中立事件后其现有测试绿。
+- **C 接入**:配置开关切 milkie 后一条真实对话端到端通(复用 e2e 模式);切回 dolphin 仍绿(双 provider 并存验证)。
+- **D skill 桥**:telegram 等 Python skill 在 milkie 下被调用的 e2e。
+- **去依赖**:边界守护反转(主干 + provider 均不得 import dolphin);全套回归绿。
+
+## 5. 当前进度
+
+**已完成(本 session,TDD 全程红绿,alfred 全量 1585 passed)**:
+- **alfred**:第0步 PoC、A1 run_turn、A2a/A2b context 收敛、A3 trajectory、A4 skillkit(接口收敛 100%)、C1/C2 MilkieProvider 走 `_progress`、C 端到端 + C3 配置开关、MilkieProvider 完整 AgentProvider 契约 + **context var 经 serve 端点跨进程**。
+- **milkie**:serve 暴露 `/context/set·get·list`(#83)+ `/llm` 一次性 LLM + `/session/export·import`(#124,已 merge 进 main)端点。
+- **端到端验证**:① config 切 milkie → turn_orchestrator → 真 serve → 同构 TurnEvent;② context var 跨进程往返(MilkieProvider ↔ 真 serve)。
+- 提交:alfred(`0e5ef8d`…`e47f056`,分支 `feat/34-milkie-provider-poc`);milkie(`05c2169`,分支 `feat/86-milkie-serve`)。
+
+**剩余(去 dolphin 依赖的前置)**:
+- ~~`call_llm`~~ ✅ **已完成**:milkie #124(`/llm`)+ #126(`tier`+`temperature`)均交付;alfred `MilkieProvider.call_llm` 已对接(`fast`→tier、temperature、raise_on_error 双语义、HTTP 错误映射),含真 serve tier 路由跨进程 e2e。🔶 遗留:生产 spawn serve 时把 alfred config 的 default_model/fast_llm **写进 agent 文件两档 model**(目前仅 e2e 手写),属 sidecar 产品化范畴。
+- A2 会话持久化(history/portable session)— milkie `/session/export·import` 已交付(#124),待 **alfred session 层对接**。⚠️ 验证:#124 设计 §3.3 export 是「前向状态快照」非全量逐轮 transcript,需确认 SessionCompressor 够不够,不够则 milkie 补 by-context run 索引(follow-up)。
+- `register_skillkit` / D Python skill — 需 milkie#87 跨语言工具桥(双向 RPC,大功能,P2 条件性;仅当要在 milkie 下复用 telegram 等 Python skill 才需要)。
+- 去 dolphin 依赖 — 依赖以上全部。
+
+**第0步垂直切片 PoC 已完成(TDD,含真 e2e)**:
+
+```
+src/everbot/core/agent/provider/milkie/
+  __init__.py / sse.py / adapter.py / sidecar.py / provider.py
+tests/unit/   test_milkie_{sse,adapter,sidecar,provider}.py
+tests/e2e/    test_milkie_serve_smoke.py   ← 真 spawn milkie serve + fake OpenAI 流式 server
+```
+
+- 验证:fake OpenAI 多 content 帧 → milkie LLM stream → onModelEvent → serve SSE
+  → MilkieProvider → 逐 `LLM_DELTA` + `TURN_COMPLETE(output="Hello, world!")`。
+- 子进程 e2e 缺口(milkie#86 验收指出)由此兜住:就绪信号 + SIGTERM 优雅退出。
+
+## 6. 诚实现状:尚未替换
+
+- `get_provider()` 仍**硬编码** `DolphinProvider`。
+- **17 处** `import dolphin`(在 `provider/dolphin/*`、`infra/dolphin_compat`)。
+- `requirements.txt` 仍依赖 dolphin;主干所有对话仍 100% 走 dolphin。
+- `MilkieProvider` 主干**零引用**(只在自己包 + 测试里)。
+
+**第0步只证明了「路通」,车还没开过去。**
+
+## 7. milkie 侧依赖
+
+- **milkie#86** 最小 `milkie serve`(HTTP+SSE,含 token 透传):✅ 已交付,alfred 验收通过(8/8 + 9/9 测试)。
+- **milkie#124** serve 端点增补(`/llm` 一次性 LLM + `/session/export·import` portable session):✅ 已交付,merge 进 main(23 jest passed)。顺手落地了 #83 context 端点的孤儿提交。
+- **milkie#126** `/llm` 加 `tier`(具名 model 档)+ `temperature`:🔲 待开发(milkie 自行),`call_llm` 完整保留 dolphin fast/default 分级语义的前置。
+- **milkie#87** 跨语言工具桥:🔲 P2,仅当 D 阶段要复用 Python skill 才需要。
+- milkie P0/P1(#80–#85)+ #124 均已 closed/merged。

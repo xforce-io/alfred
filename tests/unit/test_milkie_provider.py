@@ -148,5 +148,76 @@ async def test_still_unsupported_methods_raise_clearly():
     h = MilkieAgentHandle("http://x", "c")
     with pytest.raises(NotImplementedError):
         p.register_skillkit(h, object())
-    with pytest.raises(NotImplementedError):
-        await p.call_llm(None, "prompt")
+
+
+def _llm_provider(handler):
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return MilkieProvider("http://x", client=client), client
+
+
+async def test_call_llm_posts_canonical_request_and_returns_output():
+    """prompt → POST /llm,canonical Message[] + 默认 tier/temperature;返回 strip 后 output。"""
+    cap: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cap["url"] = str(request.url)
+        cap["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"output": "  summary text  "})
+
+    p, client = _llm_provider(handler)
+    try:
+        out = await p.call_llm(None, "compress this")
+    finally:
+        await client.aclose()
+    assert cap["url"].endswith("/llm")
+    assert cap["body"]["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "compress this"}]}
+    ]
+    assert cap["body"]["tier"] == "default"
+    assert cap["body"]["temperature"] == 0.3
+    assert out == "summary text"
+
+
+async def test_call_llm_fast_selects_fast_tier_and_temperature_passes():
+    """fast=True → tier='fast'(命中 serve 的便宜快档);temperature 透传。"""
+    cap: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cap["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"output": "ok"})
+
+    p, client = _llm_provider(handler)
+    try:
+        await p.call_llm(None, "p", temperature=0.1, fast=True)
+    finally:
+        await client.aclose()
+    assert cap["body"]["tier"] == "fast"
+    assert cap["body"]["temperature"] == 0.1
+
+
+async def test_call_llm_raises_on_error_when_serve_errors():
+    """raise_on_error=True(默认):serve 非200 → RuntimeError(含错误信息),不静默吞。"""
+    import pytest
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "gateway boom"})
+
+    p, client = _llm_provider(handler)
+    try:
+        with pytest.raises(RuntimeError, match="gateway boom"):
+            await p.call_llm(None, "p")
+    finally:
+        await client.aclose()
+
+
+async def test_call_llm_returns_error_text_when_raise_disabled():
+    """raise_on_error=False(compressor 语义):serve 非200 → 返回错误串当结果,不抛。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "gateway boom"})
+
+    p, client = _llm_provider(handler)
+    try:
+        out = await p.call_llm(None, "p", raise_on_error=False)
+    finally:
+        await client.aclose()
+    assert "gateway boom" in out

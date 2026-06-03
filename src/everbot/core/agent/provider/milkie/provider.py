@@ -159,6 +159,30 @@ class MilkieProvider:
         fast: bool = False,
         raise_on_error: bool = True,
     ) -> str:
-        raise NotImplementedError(
-            "MilkieProvider.call_llm 需 milkie serve 暴露一次性 LLM 端点;见 goal.md"
-        )
+        # 一次性 LLM 经 serve /llm 端点(milkie#124/#126);无状态,不需 contextId。
+        client = self._client or self._new_client()
+        owns = self._client is None
+        try:
+            resp = await client.post(
+                f"{self._base_url}/llm",
+                json={
+                    "messages": [
+                        {"role": "user", "content": [{"type": "text", "text": prompt}]}
+                    ],
+                    "tier": "fast" if fast else "default",
+                    "temperature": temperature,
+                },
+            )
+            if resp.status_code != 200:
+                # serve 把 gateway 异常映射成 4xx/5xx + {error}。dolphin 语义:
+                # raise_on_error=True(memory)→ 抛;False(compressor)→ 错误串当结果。
+                err = (resp.json().get("error") if resp.headers.get(
+                    "content-type", "").startswith("application/json") else None
+                ) or resp.text or f"HTTP {resp.status_code}"
+                if raise_on_error:
+                    raise RuntimeError(f"LLM call failed: {err}")
+                return err
+            return (resp.json().get("output") or "").strip()
+        finally:
+            if owns:
+                await client.aclose()

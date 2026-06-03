@@ -35,16 +35,31 @@ class _FakeOpenAIHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("content-length", 0))
-        self.rfile.read(length)
+        req = json.loads(self.rfile.read(length) or "{}")
+        model = req.get("model", "fake")
+        if not req.get("stream"):
+            # 非流式(/llm 走 gateway.complete):回显收到的 model 名,验证 tier 路由。
+            payload = json.dumps({
+                "id": "c", "object": "chat.completion", "created": 0, "model": model,
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": f"echo:{model}"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }).encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         frames = [
             "data: " + json.dumps({
-                "id": "c", "object": "chat.completion.chunk", "created": 0, "model": "fake",
+                "id": "c", "object": "chat.completion.chunk", "created": 0, "model": model,
                 "choices": [{"index": 0, "delta": {"content": t}, "finish_reason": None}],
             })
             for t in _TOKENS
         ]
         frames.append("data: " + json.dumps({
-            "id": "c", "object": "chat.completion.chunk", "created": 0, "model": "fake",
+            "id": "c", "object": "chat.completion.chunk", "created": 0, "model": model,
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
         }))
         frames.append("data: [DONE]")
@@ -155,3 +170,60 @@ async def test_context_var_roundtrip_via_real_serve(tmp_path, monkeypatch):
         assert provider.get_variable(handle, "missing") is None
     finally:
         await sidecar.close()
+
+
+def _write_agent_tiers(tmp_path: Path, fake_port: int) -> Path:
+    """agent.md 配两档 model:default 与 fast 各指向不同 model 名(验证 tier 路由)。"""
+    base = f"http://127.0.0.1:{fake_port}/v1"
+    md = tmp_path / "tiers.md"
+    md.write_text(
+        "---\n"
+        "agentId: tiers\n"
+        "version: 1.0.0\n"
+        "fsm:\n"
+        "  states:\n"
+        "    - name: react\n"
+        "      type: llm\n"
+        "      instructions: respond\n"
+        "model:\n"
+        "  provider: openai\n"
+        "  model: default-model\n"
+        "  adapter: openai-compatible\n"
+        f"  baseUrl: {base}\n"
+        "models:\n"
+        "  fast:\n"
+        "    provider: openai\n"
+        "    model: fast-model\n"
+        "    adapter: openai-compatible\n"
+        f"    baseUrl: {base}\n"
+        "---\n"
+        "You are a tier-routing test agent.\n",
+        encoding="utf-8",
+    )
+    return md
+
+
+async def test_call_llm_tier_routing_via_real_serve(tmp_path, fake_openai_port, monkeypatch):
+    """跨进程一次性 LLM:MilkieProvider.call_llm → 真 serve /llm(非流式)→ gateway.complete。
+    fast=False 命中 default 档、fast=True 命中 fast 档(milkie#126 tier 路由端到端)。"""
+    cli = _milkie_cli()
+    if cli is None:
+        pytest.skip("milkie dist not built at ../milkie/dist/cli/index.js")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-smoke")
+
+    agent_md = _write_agent_tiers(tmp_path, fake_openai_port)
+    sidecar = MilkieSidecar(
+        ["node", str(cli), "serve", "--agent", str(agent_md), "--port", "0"],
+        ready_timeout=20.0,
+    )
+    await sidecar.start()
+    try:
+        provider = MilkieProvider(sidecar.base_url)
+        default_out = await provider.call_llm(None, "summarize", fast=False)
+        fast_out = await provider.call_llm(None, "summarize", fast=True)
+    finally:
+        await sidecar.close()
+
+    # fake server 把收到的 model 名回显进 content,故 output 暴露实际路由到的档。
+    assert "default-model" in default_out, f"default tier 应路由到 default-model,得 {default_out!r}"
+    assert "fast-model" in fast_out, f"fast tier 应路由到 fast-model,得 {fast_out!r}"
