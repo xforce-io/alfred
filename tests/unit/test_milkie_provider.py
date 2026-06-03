@@ -288,16 +288,6 @@ async def test_interrupt_posts_to_interrupt_endpoint():
     assert cap["body"] == {"contextId": "c1"}
 
 
-async def test_resume_not_implemented_pending_design():
-    """milkie /resume 是流式(产新 turn 事件),语义与 dolphin resume_with_input 不同,
-    待单独设计;当前明确 NotImplementedError 而非静默错误。"""
-    import pytest
-
-    p = MilkieProvider("http://x")
-    with pytest.raises(NotImplementedError):
-        await p.resume(MilkieAgentHandle("http://x", "c"), "msg")
-
-
 def test_milkie_does_not_need_history_restore():
     """milkie serve 用 sqlite/jsonl 自持久化(milkie#130),同 contextId 重启自动从
     checkpoint 恢复 → alfred 不需灌回历史。"""

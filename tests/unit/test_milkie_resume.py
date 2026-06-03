@@ -34,3 +34,26 @@ async def test_resume_posts_to_resume_and_consumes_stream():
     assert seen["json"]["contextId"] == "alice-1"
     assert seen["json"]["input"] == "continue please"
     await client.aclose()
+
+
+async def test_resume_does_not_raise_on_server_error():
+    """实现不调用 raise_for_status()(与 run_turn 流式一致),非 2xx 响应被
+    drain 而不抛 → resume() 不抛错。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            500,
+            text='event: error\ndata: {"error":"boom"}\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    prov = MilkieProvider.__new__(MilkieProvider)
+    prov._base_url = "http://x"
+    prov._client = client
+    prov._sync_client = None
+    prov._pool = None
+
+    handle = MilkieAgentHandle(base_url="http://x", context_id="alice-1")
+    await prov.resume(handle, "go")  # must not raise
+    await client.aclose()
