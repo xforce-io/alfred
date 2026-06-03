@@ -504,9 +504,9 @@ If not, reply with `HEARTBEAT_OK`.
 
     def _bind_session_id_to_context(self, agent: Any) -> None:
         """Bind session id to context to keep context-engine logs traceable."""
-        from ..agent.provider import get_provider
+        from ..agent.provider import provider_for
 
-        get_provider().set_session_id(agent, self.session_id)
+        provider_for(agent).set_session_id(agent, self.session_id)
 
     def _record_timeline_event(self, event_type: str, run_id: str, **payload: Any) -> None:
         """Append heartbeat timeline event with source metadata."""
@@ -682,9 +682,9 @@ If not, reply with `HEARTBEAT_OK`.
         user_data = get_user_data_manager()
         trajectory_path = user_data.get_session_trajectory_path(self.agent_name, self.session_id)
         trajectory_path.parent.mkdir(parents=True, exist_ok=True)
-        from ..agent.provider import get_provider
+        from ..agent.provider import provider_for
 
-        get_provider().init_trajectory(agent, str(trajectory_path), overwrite=overwrite)
+        provider_for(agent).init_trajectory(agent, str(trajectory_path), overwrite=overwrite)
 
     async def _emit_result(self, result: str) -> None:
         """Dispatch heartbeat result to callback supporting sync/async handlers."""
@@ -1264,9 +1264,9 @@ If not, reply with `HEARTBEAT_OK`.
     ) -> str:
         """Inject heartbeat context according to execution mode."""
         try:
-            from ..agent.provider import get_provider
+            from ..agent.provider import provider_for
 
-            provider = get_provider()
+            provider = provider_for(agent)
             self._bind_session_id_to_context(agent)
 
             parse_result = self._file_mgr.last_parse_result
@@ -1410,15 +1410,16 @@ If not, reply with `HEARTBEAT_OK`.
     async def _run_heartbeat_turn(self, agent: Any, message: str) -> str:
         """Run heartbeat turn via TurnExecutor and runtime context strategies."""
         try:
-            from ..agent.provider import get_provider
+            from ..agent.provider import provider_for
 
-            if get_provider().needs_history_restore():
+            provider = provider_for(agent)
+            if provider.needs_history_restore():
                 # dolphin: 进程内 context,行为保持不变
                 ctx = agent.executor.context
                 self._runtime_workspace_instructions = self._get_workspace_instructions(ctx)
             else:
                 # milkie: 无 .executor;workspace_instructions 走 serve(可能为 None)
-                value = get_provider().get_variable(agent, "workspace_instructions")
+                value = provider.get_variable(agent, "workspace_instructions")
                 self._runtime_workspace_instructions = value if isinstance(value, str) else ""
             ensure_continue_chat_compatibility()
 

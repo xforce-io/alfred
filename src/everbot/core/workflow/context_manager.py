@@ -27,15 +27,15 @@ class PhaseContextManager:
 
     def clear_history(self) -> None:
         """Clear the agent's conversation history."""
-        from ..agent.provider import get_provider
+        from ..agent.provider import provider_for
 
-        get_provider().set_variable(self._agent, KEY_HISTORY, [])
+        provider_for(self._agent).set_variable(self._agent, KEY_HISTORY, [])
 
     def estimate_history_tokens(self) -> int:
         """Rough estimate of current history size in tokens."""
-        from ..agent.provider import get_provider
+        from ..agent.provider import provider_for
 
-        history = get_provider().get_variable(self._agent, KEY_HISTORY) or []
+        history = provider_for(self._agent).get_variable(self._agent, KEY_HISTORY) or []
         total_chars = 0
         for msg in history:
             if isinstance(msg, dict):

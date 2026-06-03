@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, Optional, Union
 
-from ..agent.provider import get_provider
+from ..agent.provider import provider_for
 from ...infra.dolphin_compat import KEY_HISTORY
 
 from .models import OutboundMessage
@@ -273,7 +273,7 @@ class ChannelCoreService:
             )
 
             # --- Turn execution via TurnOrchestrator ---
-            provider = get_provider()
+            provider = provider_for(agent)
             self._bind_session_id_to_context(agent, session_id)
             self._init_session_trajectory(agent, agent_name, session_id, overwrite=False)
 
@@ -289,13 +289,13 @@ class ChannelCoreService:
             history_messages = provider.get_variable(agent, KEY_HISTORY)
             is_first_turn = (
                 (not isinstance(history_messages, list) or len(history_messages) == 0)
-                and not get_provider().is_paused(agent)
+                and not provider.is_paused(agent)
             )
             response = ""
             llm_started = False
 
             async def _on_before_retry(attempt: int, exc: Exception):
-                if get_provider().is_error(agent):
+                if provider.is_error(agent):
                     try:
                         await agent.initialize()
                     except Exception as e:
@@ -606,7 +606,7 @@ class ChannelCoreService:
                         # mailbox prefix).
                         _dolphin_has_msg = False
                         try:
-                            _exported = get_provider().export_session(agent)
+                            _exported = provider_for(agent).export_session(agent)
                             _hist = _exported.get("history_messages", [])
                             _candidates = {message_text, effective_message if isinstance(effective_message, str) else message_text}
                             for _m in reversed(_hist[-4:]):
@@ -701,12 +701,12 @@ class ChannelCoreService:
         """Initialize trajectory file isolated by session."""
         trajectory_path = self.user_data.get_session_trajectory_path(agent_name, session_id)
         trajectory_path.parent.mkdir(parents=True, exist_ok=True)
-        get_provider().init_trajectory(agent, str(trajectory_path), overwrite=overwrite)
+        provider_for(agent).init_trajectory(agent, str(trajectory_path), overwrite=overwrite)
 
     @staticmethod
     def _bind_session_id_to_context(agent: Any, session_id: str) -> None:
         """Bind session_id into context variable and native context session when available."""
-        get_provider().set_session_id(agent, session_id)
+        provider_for(agent).set_session_id(agent, session_id)
 
     def _truncate_preview(self, text: str, max_chars: int) -> tuple[str, bool, int]:
         """Build a bounded preview text to keep UI payload and history readable."""
@@ -804,7 +804,7 @@ class ChannelCoreService:
         the missing variable and rebuilds fresh instructions from the workspace
         files on disk (AGENTS.md, HEARTBEAT.md, MEMORY.md, etc.).
         """
-        if not get_provider().needs_history_restore():
+        if not provider_for(agent).needs_history_restore():
             # milkie: workspace_instructions 已 bake 进 agent.md;serve 自持久化,无 in-process
             # context 可回灌 → reload-if-missing 是 dolphin-only 概念,直接返回。
             return
@@ -843,7 +843,8 @@ class ChannelCoreService:
     def _cache_runtime_workspace_instructions(self, agent: Any, agent_name: str) -> None:
         """Cache workspace instructions from agent context for strategy lookup."""
         self._ensure_runtime_context_strategy()
-        if get_provider().needs_history_restore():
+        provider = provider_for(agent)
+        if provider.needs_history_restore():
             # dolphin: 进程内 context,行为保持不变
             context = agent.executor.context
             get_var = getattr(context, "get_var_value", None)
@@ -853,7 +854,7 @@ class ChannelCoreService:
         else:
             # milkie: 无 .executor;workspace_instructions 已 bake 进 agent.md,
             # 经 serve /context/get 取回(可能为 None)。
-            value = get_provider().get_variable(agent, "workspace_instructions")
+            value = provider.get_variable(agent, "workspace_instructions")
         if isinstance(value, str):
             self._runtime_workspace_instructions_by_agent[agent_name] = value
 

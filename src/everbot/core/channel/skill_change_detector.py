@@ -80,9 +80,9 @@ def inject_skill_updates_if_needed(
 
     # First turn (no previous record): just persist the baseline
     if not has_prev:
-        from ..agent.provider import get_provider
+        from ..agent.provider import provider_for
 
-        get_provider().set_variable(agent, SESSION_VAR_KNOWN_SKILLS, sorted(current_names))
+        provider_for(agent).set_variable(agent, SESSION_VAR_KNOWN_SKILLS, sorted(current_names))
         return
 
     added = sorted(current_names - prev_names)
@@ -104,9 +104,9 @@ def inject_skill_updates_if_needed(
     notification = "\n".join(parts)
 
     # Inject into agent history
-    from ..agent.provider import get_provider
+    from ..agent.provider import provider_for
 
-    provider = get_provider()
+    provider = provider_for(agent)
     history = provider.get_variable(agent, KEY_HISTORY)
     if not isinstance(history, list):
         history = []

@@ -536,9 +536,9 @@ class TurnOrchestrator:
         # never silently discarded.  arun (autonomous mode) is reserved for
         # daemon-initiated turns where there is no user message.
         # Lazy import to avoid a module-load cycle (runtime ↔ agent.provider).
-        from ..agent.provider import get_provider
+        from ..agent.provider import provider_for
 
-        event_stream = get_provider().run_turn(
+        event_stream = provider_for(agent).run_turn(
             agent,
             message,
             system_prompt=system_prompt,
@@ -598,9 +598,9 @@ class TurnOrchestrator:
             DolphinProvider persists the explore stage; MilkieProvider no-ops
             (milkie has its own event sourcing).
             """
-            from ..agent.provider import get_provider
+            from ..agent.provider import provider_for
 
-            get_provider().finalize_trajectory_on_error(agent)
+            provider_for(agent).finalize_trajectory_on_error(agent)
 
         def _check_round_text_loop() -> bool:
             """Detect degenerate loops: consecutive repeats OR alternating patterns.

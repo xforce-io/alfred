@@ -460,10 +460,11 @@ class TestWorkspaceInstructionsHelpersMilkieSafe:
     """
 
     def _patch_provider(self, monkeypatch, provider):
-        # core_service.py binds get_provider at module level → patch there.
+        # core_service.py now dispatches operations via provider_for(agent)
+        # (per-agent type routing) → patch that seam, not the global get_provider.
         import importlib
         cs_mod = importlib.import_module(ChannelCoreService.__module__)
-        monkeypatch.setattr(cs_mod, "get_provider", lambda: provider)
+        monkeypatch.setattr(cs_mod, "provider_for", lambda agent: provider)
 
     def test_reload_skips_for_milkie(self, monkeypatch):
         class _MilkieProvider:

@@ -94,6 +94,23 @@ def get_provider_for_agent(agent_name: str) -> "AgentProvider":
     return cached
 
 
+def provider_for(agent) -> "AgentProvider":
+    """Return the provider that owns this agent OBJECT (dispatch by type).
+
+    Operations (run_turn/export_session/variables/trajectory/state) MUST use the
+    provider matching the agent's actual backend, not the global default — otherwise
+    per-agent routing (explicit / telegram-fallback) breaks at the operation layer.
+    A ``MilkieAgentHandle`` → milkie; any other agent object → dolphin.
+    """
+    from .milkie.provider import MilkieAgentHandle
+    name = "milkie" if isinstance(agent, MilkieAgentHandle) else "dolphin"
+    cached = _provider_by_name.get(name)
+    if cached is None:
+        cached = _make_provider(name)
+        _provider_by_name[name] = cached
+    return cached
+
+
 async def shutdown_all_providers() -> None:
     """Close sidecars on every constructed provider (global singleton + per-agent-name cache).
 
@@ -136,6 +153,7 @@ __all__ = [
     "AgentProvider",
     "get_provider",
     "get_provider_for_agent",
+    "provider_for",
     "shutdown_all_providers",
     "reset_provider",
     "SkillkitBase",

@@ -830,7 +830,9 @@ class TestCreateJobAgentProviderRouting:
         monkeypatch.setattr(
             provider_mod, "get_provider_for_agent", lambda name: factory_provider
         )
-        monkeypatch.setattr(provider_mod, "get_provider", lambda: runtime_provider)
+        # Operations route via provider_for(agent) (per-agent type dispatch); the
+        # created agent is a MagicMock (not a milkie handle) so patch that seam.
+        monkeypatch.setattr(provider_mod, "provider_for", lambda agent: runtime_provider)
 
         # Neutralize user-data manager so trajectory init does not touch real paths.
         user_data_mod = importlib.import_module("src.everbot.infra.user_data")
@@ -871,7 +873,8 @@ class TestBuildJobSystemPromptMilkieSafe:
         provider_mod = importlib.import_module(
             CronExecutor.__module__.rsplit(".", 2)[0] + ".agent.provider"
         )
-        monkeypatch.setattr(provider_mod, "get_provider", lambda: provider)
+        # _build_job_system_prompt now dispatches via provider_for(agent).
+        monkeypatch.setattr(provider_mod, "provider_for", lambda agent: provider)
 
     def test_milkie_handle_routes_through_get_variable(self, monkeypatch):
         from src.everbot.core.tasks.task_manager import Task

@@ -65,7 +65,7 @@ async def test_restore_to_agent_short_circuits_when_provider_self_persists(tmp_p
         def needs_history_restore(self):
             return False
 
-    monkeypatch.setattr(provider_pkg, "get_provider", lambda: _SelfPersistedProvider())
+    monkeypatch.setattr(provider_pkg, "provider_for", lambda agent: _SelfPersistedProvider())
     p = SessionPersistence(tmp_path)
     # agent / session_data 都是裸 object:不 short-circuit 必 AttributeError。不抛即证明跳过。
     await p.restore_to_agent(object(), object())

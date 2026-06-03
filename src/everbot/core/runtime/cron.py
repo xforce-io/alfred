@@ -687,7 +687,7 @@ class CronExecutor:
         """Create a fresh agent for isolated job execution."""
         from ...infra.user_data import get_user_data_manager
 
-        from ..agent.provider import get_provider, get_provider_for_agent
+        from ..agent.provider import get_provider_for_agent, provider_for
 
         # Route creation through the per-agent provider (milkie/dolphin
         # selection). No tools_override → full tool access, matching the
@@ -695,7 +695,7 @@ class CronExecutor:
         agent = await get_provider_for_agent(self.agent_name).create_agent(
             self.agent_name, self.workspace_path
         )
-        provider = get_provider()
+        provider = provider_for(agent)
         provider.set_session_id(agent, job_session_id)
         provider.set_variable(agent, "job_session_id", job_session_id)
         user_data = get_user_data_manager()
@@ -707,10 +707,11 @@ class CronExecutor:
     @staticmethod
     def _build_job_system_prompt(agent: Any, task: Task) -> str:
         """Build isolated job system prompt from base workspace + task description."""
-        from ..agent.provider import get_provider
+        from ..agent.provider import provider_for
 
+        provider = provider_for(agent)
         base = ""
-        if get_provider().needs_history_restore():
+        if provider.needs_history_restore():
             # dolphin: 进程内 context,行为保持不变(优先属性,回退 get_variable)
             context = agent.executor.context
             if hasattr(context, "workspace_instructions"):
@@ -719,7 +720,7 @@ class CronExecutor:
                 base = str(context.get_variable("workspace_instructions") or "")
         else:
             # milkie: 无 .executor;workspace_instructions 走 serve /context/get(可能为 None)
-            base = str(get_provider().get_variable(agent, "workspace_instructions") or "")
+            base = str(provider.get_variable(agent, "workspace_instructions") or "")
         task_description = str(task.description or "").strip()
         if not task_description:
             return base

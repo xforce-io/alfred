@@ -1402,7 +1402,8 @@ class TestRunHeartbeatTurnMilkieSafe:
         provider_mod = importlib.import_module(
             HeartbeatRunner.__module__.rsplit(".", 2)[0] + ".agent.provider"
         )
-        monkeypatch.setattr(provider_mod, "get_provider", lambda: provider)
+        # _run_heartbeat_turn now dispatches via provider_for(agent).
+        monkeypatch.setattr(provider_mod, "provider_for", lambda agent: provider)
 
     def _patch_turn(self, monkeypatch, runner):
         # Neutralize heavy turn machinery: stub executor + emit + compat.

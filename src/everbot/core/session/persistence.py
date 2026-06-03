@@ -266,8 +266,8 @@ class SessionPersistence:
             model_name: 模型名称
         """
         try:
-            from ..agent.provider import get_provider  # local: avoid import cycle
-            provider = get_provider()
+            from ..agent.provider import provider_for  # local: avoid import cycle
+            provider = provider_for(agent)
             portable = provider.export_session(agent)
             serializable_history = portable.get("history_messages", [])
             if trailing_messages:
@@ -602,8 +602,8 @@ class SessionPersistence:
         but is no longer used.  Heartbeat results are now delivered exclusively
         via mailbox deposit and consumed as user-message prefix on the next turn.
         """
-        from ..agent.provider import get_provider  # local: avoid import cycle
-        if not get_provider().needs_history_restore():
+        from ..agent.provider import provider_for  # local: avoid import cycle
+        if not provider_for(agent).needs_history_restore():
             # milkie 等自持久化 provider:serve 用 sqlite/jsonl 跨重启从 checkpoint
             # 恢复(milkie#130),无需 alfred 把存档历史灌回进程内 agent。
             logger.debug("provider 自持久化会话,跳过 restore history 灌回")

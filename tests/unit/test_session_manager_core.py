@@ -1455,7 +1455,8 @@ class TestSaveSessionMilkieSafe:
         provider_pkg = importlib.import_module(
             SessionManager.__module__.rsplit(".", 2)[0] + ".agent.provider"
         )
-        monkeypatch.setattr(provider_pkg, "get_provider", lambda: provider)
+        # save_session now dispatches via provider_for(agent) (per-agent type routing).
+        monkeypatch.setattr(provider_pkg, "provider_for", lambda agent: provider)
 
     @pytest.mark.asyncio
     async def test_milkie_handle_no_attribute_error(self, tmp_path: Path, monkeypatch):
@@ -1561,7 +1562,8 @@ class TestPersistenceSaveMilkieSafe:
         provider_pkg = importlib.import_module(
             SessionPersistence.__module__.rsplit(".", 2)[0] + ".agent.provider"
         )
-        monkeypatch.setattr(provider_pkg, "get_provider", lambda: provider)
+        # save() now dispatches via provider_for(agent) (per-agent type routing).
+        monkeypatch.setattr(provider_pkg, "provider_for", lambda agent: provider)
 
     @pytest.mark.asyncio
     async def test_milkie_handle_save_no_attribute_error(self, tmp_path: Path, monkeypatch):

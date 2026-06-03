@@ -340,8 +340,8 @@ class SessionManager:
         # only captures turn-1's count.  Estimate from history instead.
         if trace.get("estimated_output_tokens", -1) == 0:
             try:
-                from ..agent.provider import get_provider  # local: avoid import cycle
-                portable = get_provider().export_session(agent)
+                from ..agent.provider import provider_for  # local: avoid import cycle
+                portable = provider_for(agent).export_session(agent)
                 history = portable.get("history_messages", [])
                 estimated = 0
                 for msg in history:
@@ -526,8 +526,9 @@ class SessionManager:
         # Extract structured memories for primary / channel sessions.
         # Fire-and-forget with timeout so it never blocks session persistence.
         session_type = SessionManager.infer_session_type(session_id)
-        from ..agent.provider import get_provider  # local: avoid import cycle
-        if session_type in ("primary", "channel") and get_provider().needs_history_restore():
+        from ..agent.provider import provider_for  # local: avoid import cycle
+        provider = provider_for(agent)
+        if session_type in ("primary", "channel") and provider.needs_history_restore():
             # dolphin: 进程内 context 驱动 session-end 记忆抽取。
             # milkie: in-process memory extraction needs #87 bridge; skip for now
             try:
@@ -538,7 +539,7 @@ class SessionManager:
                     from ...infra.user_data import get_user_data_manager
                     memory_path = get_user_data_manager().get_agent_dir(agent_name) / "MEMORY.md"
                     mm = MemoryManager(memory_path, context)
-                    portable = get_provider().export_session(agent)
+                    portable = provider.export_session(agent)
                     history = portable.get("history_messages", [])
                     await asyncio.wait_for(
                         mm.process_session_end(history, session_id),
@@ -565,7 +566,7 @@ class SessionManager:
             logger.debug("Session persisted.")
             return
 
-        provider = get_provider()
+        provider = provider_for(agent)
         portable = provider.export_session(agent)
         serializable_history = portable.get("history_messages", [])
         exported_variables = portable.get("variables", {})
