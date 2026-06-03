@@ -109,16 +109,43 @@ def test_safe_noop_methods_do_not_crash():
     assert p.has_skill(h, "x") is False
 
 
-async def test_unsupported_methods_raise_clearly():
-    """需 milkie serve 扩展的接口:明确 NotImplementedError(而非静默错误)。"""
+def test_set_variable_posts_to_context_set_endpoint():
+    cap: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cap["url"] = str(request.url)
+        cap["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        p = MilkieProvider("http://x", sync_client=client)
+        p.set_variable(MilkieAgentHandle("http://sidecar", "c1"), "model_name", "claude")
+    finally:
+        client.close()
+    assert cap["url"].endswith("/context/set")
+    assert cap["body"] == {"contextId": "c1", "name": "model_name", "value": "claude"}
+
+
+def test_get_variable_reads_from_context_get_endpoint():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"value": "claude"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        p = MilkieProvider("http://x", sync_client=client)
+        val = p.get_variable(MilkieAgentHandle("http://sidecar", "c1"), "model_name")
+    finally:
+        client.close()
+    assert val == "claude"
+
+
+async def test_still_unsupported_methods_raise_clearly():
+    """仍需 milkie 扩展的接口:明确 NotImplementedError(而非静默错误)。"""
     import pytest
 
     p = MilkieProvider("http://x")
     h = MilkieAgentHandle("http://x", "c")
-    with pytest.raises(NotImplementedError):
-        p.set_variable(h, "k", "v")
-    with pytest.raises(NotImplementedError):
-        p.get_variable(h, "k")
     with pytest.raises(NotImplementedError):
         p.register_skillkit(h, object())
     with pytest.raises(NotImplementedError):

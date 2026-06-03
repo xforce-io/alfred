@@ -30,15 +30,26 @@ class MilkieAgentHandle:
 
 
 class MilkieProvider:
-    def __init__(self, base_url: str, *, client: Optional[httpx.AsyncClient] = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        client: Optional[httpx.AsyncClient] = None,
+        sync_client: Optional[httpx.Client] = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._client = client  # injected for tests; None → one client per turn
+        self._sync_client = sync_client  # injected for tests; None → one client per call
 
     @staticmethod
     def _new_client() -> httpx.AsyncClient:
         # 连本地 sidecar 走回环,绝不能经系统代理(http_proxy 会把 127.0.0.1
         # 也代理掉 → /chat 502,e2e 实测踩到)。故 trust_env=False。
         return httpx.AsyncClient(timeout=None, trust_env=False)
+
+    @staticmethod
+    def _new_sync_client() -> httpx.Client:
+        return httpx.Client(timeout=None, trust_env=False)
 
     async def create_agent(
         self,
@@ -110,14 +121,30 @@ class MilkieProvider:
 
     # -- 需 milkie serve 扩展,明确未实现(避免静默错误) --
     def set_variable(self, agent: Any, key: str, value: Any) -> None:
-        raise NotImplementedError(
-            "MilkieProvider.set_variable 需 milkie serve 暴露 context var 端点(milkie#83);见 goal.md A2"
-        )
+        # 经 milkie serve 的 /context/set 端点跨进程写会话变量(milkie#83 HTTP 暴露)。
+        client = self._sync_client or self._new_sync_client()
+        owns = self._sync_client is None
+        try:
+            client.post(
+                f"{agent.base_url}/context/set",
+                json={"contextId": agent.context_id, "name": key, "value": value},
+            )
+        finally:
+            if owns:
+                client.close()
 
     def get_variable(self, agent: Any, key: str) -> Any:
-        raise NotImplementedError(
-            "MilkieProvider.get_variable 需 milkie serve 暴露 context var 端点(milkie#83);见 goal.md A2"
-        )
+        client = self._sync_client or self._new_sync_client()
+        owns = self._sync_client is None
+        try:
+            resp = client.post(
+                f"{agent.base_url}/context/get",
+                json={"contextId": agent.context_id, "name": key},
+            )
+            return resp.json().get("value")
+        finally:
+            if owns:
+                client.close()
 
     def register_skillkit(self, agent: Any, skillkit: Any) -> None:
         raise NotImplementedError(

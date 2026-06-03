@@ -17,7 +17,7 @@ import pytest
 
 import everbot.core.agent.provider as provider_pkg
 import everbot.infra.config as config_module
-from everbot.core.agent.provider.milkie.provider import MilkieProvider
+from everbot.core.agent.provider.milkie.provider import MilkieAgentHandle, MilkieProvider
 from everbot.core.agent.provider.milkie.sidecar import MilkieSidecar
 from everbot.core.runtime.turn_orchestrator import TurnOrchestrator
 from everbot.core.runtime.turn_policy import CHAT_POLICY, TurnEventType
@@ -131,3 +131,27 @@ async def test_milkie_drives_turn_via_orchestrator_end_to_end(tmp_path, fake_ope
     assert completes[0].answer == "Hello, world!"
 
     assert sidecar.returncode is not None  # SIGTERM 后子进程已退出
+
+
+async def test_context_var_roundtrip_via_real_serve(tmp_path, monkeypatch):
+    """跨进程 context var 端到端:MilkieProvider.set_variable → 真 serve /context/set →
+    get_variable 读回(milkie#83 HTTP 暴露 + alfred MilkieProvider sync client)。"""
+    cli = _milkie_cli()
+    if cli is None:
+        pytest.skip("milkie dist not built at ../milkie/dist/cli/index.js")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-smoke")
+
+    agent_md = _write_agent(tmp_path, 1)  # context var 不触发 LLM,baseUrl 不会被用到
+    sidecar = MilkieSidecar(
+        ["node", str(cli), "serve", "--agent", str(agent_md), "--port", "0"],
+        ready_timeout=20.0,
+    )
+    await sidecar.start()
+    try:
+        provider = MilkieProvider(sidecar.base_url)
+        handle = MilkieAgentHandle(sidecar.base_url, "ctx-rt")
+        provider.set_variable(handle, "model_name", "claude-x")
+        assert provider.get_variable(handle, "model_name") == "claude-x"
+        assert provider.get_variable(handle, "missing") is None
+    finally:
+        await sidecar.close()
