@@ -1,5 +1,6 @@
 """Unit tests for Inspector — heartbeat reflection observation engine."""
 
+import importlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -629,6 +630,63 @@ class TestInspect:
         assert second.skipped is False
         assert second.output == "HEARTBEAT_OK"
         assert run_agent.await_count == 2
+
+
+# ── _run_llm provider routing ──
+
+
+class TestRunLLMRoutesThroughProvider:
+    """_run_llm must drive the turn via provider.run_turn (neutral contract),
+    not agent.continue_chat — milkie MilkieAgentHandle has no continue_chat."""
+
+    @pytest.mark.asyncio
+    async def test_run_llm_consumes_provider_run_turn(self, tmp_path, monkeypatch):
+        inspector = _make_inspector(tmp_path)
+
+        fake_agent = MagicMock()
+        # agent must NOT be used directly — fail if continue_chat is reached.
+        fake_agent.continue_chat = MagicMock(
+            side_effect=AssertionError("must not call agent.continue_chat")
+        )
+
+        seen = {}
+
+        class _FakeProvider:
+            async def create_agent(self, name, workspace):
+                seen["create"] = (name, workspace)
+                return fake_agent
+
+            async def run_turn(self, agent, message, *, system_prompt="",
+                               is_first_turn=False, stream_mode="delta"):
+                seen["run_turn"] = dict(
+                    agent=agent,
+                    message=message,
+                    system_prompt=system_prompt,
+                    stream_mode=stream_mode,
+                )
+                yield {"_progress": [{"stage": "llm", "delta": "Hello "}]}
+                yield {"_progress": [{"stage": "llm", "delta": "world"}]}
+
+        import src.everbot.core.agent.provider as provider_mod
+
+        monkeypatch.setattr(
+            provider_mod, "get_provider_for_agent", lambda name: _FakeProvider()
+        )
+        monkeypatch.setattr(
+            "src.everbot.core.runtime.inspector.ensure_continue_chat_compatibility",
+            lambda: None,
+        )
+
+        result = await inspector._run_llm("reflect please", timeout_seconds=5.0)
+
+        assert result == "Hello world"
+        assert seen["create"][0] == "test_agent"
+        assert seen["run_turn"]["agent"] is fake_agent
+        assert seen["run_turn"]["message"] == "reflect please"
+        assert seen["run_turn"]["stream_mode"] == "delta"
+        # reflection system prompt threaded through, dolphin behaviour preserved
+        assert seen["run_turn"]["system_prompt"]
+        fake_agent.continue_chat.assert_not_called()
 
 
 # ── LLM exception propagation ──
@@ -1515,3 +1573,42 @@ class TestReflectFileHashPersistence:
         # Should have recomputed hashes (non-empty) rather than empty dict.
         assert inspector._reflection.last_reflect_file_hashes
         assert "MEMORY.md" in inspector._reflection.last_reflect_file_hashes
+
+
+class TestRunLlmProviderRouting:
+    """Inspector._run_llm must create its reflection agent via the per-agent
+    provider (milkie/dolphin selection), NOT the raw injected agent_factory.
+    """
+
+    @pytest.mark.asyncio
+    async def test_run_llm_routes_through_provider(self, tmp_path, monkeypatch):
+        # The turn is driven via provider.run_turn (neutral contract), NOT
+        # agent.continue_chat (milkie MilkieAgentHandle has no continue_chat).
+        async def _fake_run_turn(*args, **kwargs):
+            yield {"_progress": [{"stage": "llm", "answer": "reflection answer"}]}
+
+        agent = MagicMock()
+        agent.continue_chat = MagicMock(
+            side_effect=AssertionError("must not call agent.continue_chat")
+        )
+        create_agent = AsyncMock(return_value=agent)
+        provider = MagicMock(create_agent=create_agent, run_turn=_fake_run_turn)
+
+        provider_mod = importlib.import_module("src.everbot.core.agent.provider")
+        monkeypatch.setattr(
+            provider_mod, "get_provider_for_agent", lambda name: provider
+        )
+
+        raw_factory = AsyncMock(return_value=MagicMock())
+        inspector = _make_inspector(tmp_path, agent_factory=raw_factory)
+
+        result = await inspector._run_llm("reflect please")
+
+        assert result == "reflection answer"
+        # Routed through provider with name + workspace, no tools_override.
+        create_agent.assert_awaited_once_with("test_agent", tmp_path)
+        assert "tools_override" not in create_agent.await_args.kwargs
+        # Raw injected agent_factory must NOT be used for creation.
+        raw_factory.assert_not_awaited()
+        # The agent's continue_chat must never be reached.
+        agent.continue_chat.assert_not_called()

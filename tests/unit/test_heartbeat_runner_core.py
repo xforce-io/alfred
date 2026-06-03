@@ -58,14 +58,22 @@ def _make_runner(workspace_path: Path = Path("."), **overrides) -> HeartbeatRunn
 
 
 @pytest.mark.asyncio
-async def test_restricted_agent_factory_keeps_resource_skill_tools(tmp_path: Path):
-    """Heartbeat runner should preserve resource skill loaders in restricted mode."""
-    agent_factory = AsyncMock(return_value=object())
-    runner = _make_runner(workspace_path=tmp_path, agent_factory=agent_factory)
+async def test_restricted_agent_factory_keeps_resource_skill_tools(tmp_path: Path, monkeypatch):
+    """Heartbeat runner should route creation through the per-agent provider while
+    preserving resource skill loaders in restricted mode."""
+    create_agent = AsyncMock(return_value=object())
+    provider = SimpleNamespace(create_agent=create_agent)
+    import importlib
+    provider_mod = importlib.import_module(
+        HeartbeatRunner.__module__.rsplit(".", 2)[0] + ".agent.provider"
+    )
+    monkeypatch.setattr(provider_mod, "get_provider_for_agent", lambda name: provider)
+
+    runner = _make_runner(workspace_path=tmp_path, agent_factory=AsyncMock(return_value=object()))
 
     await runner._restricted_agent_factory("demo_agent", tmp_path)
 
-    agent_factory.assert_awaited_once_with(
+    create_agent.assert_awaited_once_with(
         "demo_agent",
         tmp_path,
         tools_override=[
@@ -753,7 +761,7 @@ class TestExecuteIsolatedClaimedTask:
         runner = _make_runner(workspace_path=tmp_path, session_manager=sm)
 
         execute_mock = AsyncMock()
-        monkeypatch.setattr(runner, "_execute_isolated_task", execute_mock)
+        monkeypatch.setattr(runner._cron, "_run_isolated_task", execute_mock)
 
         await runner.execute_isolated_claimed_task({"id": "", "title": "No ID"})
         execute_mock.assert_not_called()
@@ -927,7 +935,7 @@ class TestExecuteIsolatedE2ELockFailure:
         runner = _make_runner(workspace_path=tmp_path, session_manager=sm)
 
         monkeypatch.setattr(
-            runner, "_execute_isolated_task",
+            runner._cron, "_run_isolated_task",
             AsyncMock(return_value="result ok"),
         )
 
@@ -956,7 +964,7 @@ class TestExecuteIsolatedE2ELockFailure:
         runner = _make_runner(workspace_path=tmp_path, session_manager=sm)
 
         monkeypatch.setattr(
-            runner, "_execute_isolated_task",
+            runner._cron, "_run_isolated_task",
             AsyncMock(side_effect=RuntimeError("LLM crashed")),
         )
 
@@ -1372,10 +1380,110 @@ async def test_execute_once_recovery_notification(tmp_path):
     runner._file_mgr.task_list = []
     runner._delivery = MagicMock()
     runner._delivery.deliver_result = AsyncMock(return_value=True)
-    result = await runner._execute_once()
+    await runner._execute_once()
     # Recovery state cleared
     assert runner._llm_unavailable_since is None
     # Recovery notification sent
     runner._delivery.deliver_result.assert_called_once()
     call_args = runner._delivery.deliver_result.call_args
     assert "LLM 已恢复" in call_args[0][0]
+
+
+class TestRunHeartbeatTurnMilkieSafe:
+    """_run_heartbeat_turn must NOT crash on a milkie handle (no .executor).
+
+    dolphin: reads ctx via _get_workspace_instructions (unchanged).
+    milkie: routes workspace_instructions through provider.get_variable
+    (may be None — tolerated, cached as "").
+    """
+
+    def _patch_provider(self, monkeypatch, provider):
+        import importlib
+        provider_mod = importlib.import_module(
+            HeartbeatRunner.__module__.rsplit(".", 2)[0] + ".agent.provider"
+        )
+        # _run_heartbeat_turn now dispatches via provider_for(agent).
+        monkeypatch.setattr(provider_mod, "provider_for", lambda agent: provider)
+
+    def _patch_turn(self, monkeypatch, runner):
+        # Neutralize heavy turn machinery: stub executor + emit + compat.
+        import src.everbot.core.runtime.heartbeat as hb
+        monkeypatch.setattr(hb, "ensure_continue_chat_compatibility", lambda: None)
+
+        async def _emit(*a, **k):
+            return None
+
+        import src.everbot.core.runtime.events as ev
+        monkeypatch.setattr(ev, "emit", _emit)
+
+        turn_result = SimpleNamespace(events=[{"type": "complete", "data": "ok"}])
+        runner._turn_executor = SimpleNamespace(
+            execute_turn=AsyncMock(return_value=turn_result)
+        )
+        runner._skill_log_recorder = None
+        monkeypatch.setattr(
+            runner, "_extract_llm_result", lambda events: "RESULT"
+        )
+
+    @pytest.mark.asyncio
+    async def test_milkie_handle_no_attribute_error(self, tmp_path, monkeypatch):
+        handle = SimpleNamespace(base_url="http://x", context_id="c1")
+
+        class _MilkieProvider:
+            def needs_history_restore(self):
+                return False
+
+            def get_variable(self, agent, key):
+                assert agent is handle
+                assert key == "workspace_instructions"
+                return "MILKIE WS"
+
+        self._patch_provider(monkeypatch, _MilkieProvider())
+        runner = _make_runner(workspace_path=tmp_path)
+        self._patch_turn(monkeypatch, runner)
+
+        out = await runner._run_heartbeat_turn(handle, "ping")
+
+        assert out == "RESULT"
+        assert runner._runtime_workspace_instructions == "MILKIE WS"
+
+    @pytest.mark.asyncio
+    async def test_milkie_handle_tolerates_none(self, tmp_path, monkeypatch):
+        handle = SimpleNamespace(base_url="http://x", context_id="c1")
+
+        class _MilkieProvider:
+            def needs_history_restore(self):
+                return False
+
+            def get_variable(self, agent, key):
+                return None
+
+        self._patch_provider(monkeypatch, _MilkieProvider())
+        runner = _make_runner(workspace_path=tmp_path)
+        self._patch_turn(monkeypatch, runner)
+
+        out = await runner._run_heartbeat_turn(handle, "ping")
+
+        assert out == "RESULT"
+        # None must be coerced to "" (not crash, not None).
+        assert runner._runtime_workspace_instructions == ""
+
+    @pytest.mark.asyncio
+    async def test_dolphin_path_reads_context(self, tmp_path, monkeypatch):
+        ctx = SimpleNamespace(
+            get_var_value=lambda k: "DOLPHIN WS" if k == "workspace_instructions" else None
+        )
+        agent = SimpleNamespace(executor=SimpleNamespace(context=ctx))
+
+        class _DolphinProvider:
+            def needs_history_restore(self):
+                return True
+
+        self._patch_provider(monkeypatch, _DolphinProvider())
+        runner = _make_runner(workspace_path=tmp_path)
+        self._patch_turn(monkeypatch, runner)
+
+        out = await runner._run_heartbeat_turn(agent, "ping")
+
+        assert out == "RESULT"
+        assert runner._runtime_workspace_instructions == "DOLPHIN WS"

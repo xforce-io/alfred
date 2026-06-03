@@ -8,7 +8,7 @@ from the allowlisted compat layer instead.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional, Protocol, runtime_checkable
+from typing import Any, AsyncIterator, Optional, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -45,3 +45,60 @@ class AgentProvider(Protocol):
     ) -> str: ...
 
     def ensure_chat_compatibility(self) -> bool: ...
+
+    def run_turn(
+        self,
+        agent: Any,
+        message: Any,
+        *,
+        system_prompt: str = "",
+        is_first_turn: bool = False,
+        stream_mode: str = "delta",
+    ) -> AsyncIterator[Any]:
+        """Drive one turn, yielding raw provider events (``{"_progress": [...]}``
+        for dolphin). turn_orchestrator applies provider-neutral policy on top."""
+        ...
+
+    # -- context access (收敛 agent.executor.context 裸访问) --------------
+
+    def set_variable(self, agent: Any, key: str, value: Any) -> None: ...
+
+    def get_variable(self, agent: Any, key: str) -> Any: ...
+
+    def init_trajectory(self, agent: Any, path: str, overwrite: bool = False) -> None: ...
+
+    def set_session_id(self, agent: Any, session_id: str) -> None: ...
+
+    def finalize_trajectory_on_error(self, agent: Any) -> None: ...
+
+    def has_skill(self, agent: Any, name: str) -> bool: ...
+
+    def register_skillkit(self, agent: Any, skillkit: Any) -> None: ...
+
+    def export_session(self, agent: Any) -> dict:
+        """会话可移植导出 ``{history_messages, variables}``。
+
+        同步(其中一处调用点在同步函数 ``_extract_context_trace`` 里;MilkieProvider
+        用 sync httpx,与 set_variable/get_variable 一致)。
+        """
+        ...
+
+    def needs_history_restore(self) -> bool:
+        """是否需要 alfred 把存档历史灌回 agent。
+
+        dolphin(进程内)True;milkie(serve 自持久化,重启从 checkpoint 恢复)False。
+        ``restore_to_agent`` 据此 short-circuit。
+        """
+        ...
+
+    async def interrupt(self, agent: Any) -> None:
+        """中断 agent 当前运行(用户 stop / 介入)。"""
+        ...
+
+    async def resume(self, agent: Any, message: str) -> None:
+        """向已暂停(用户中断)的 agent 注入消息并继续。"""
+        ...
+
+    async def shutdown_sidecars(self) -> None:
+        """Close any spawned sidecar processes. No-op for in-process providers (dolphin)."""
+        ...

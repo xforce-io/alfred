@@ -687,27 +687,40 @@ class CronExecutor:
         """Create a fresh agent for isolated job execution."""
         from ...infra.user_data import get_user_data_manager
 
-        agent = await self.agent_factory(self.agent_name, self.workspace_path)
-        context = agent.executor.context
-        context.set_variable("session_id", job_session_id)
-        if hasattr(context, "set_session_id"):
-            context.set_session_id(job_session_id)
-        context.set_variable("job_session_id", job_session_id)
+        from ..agent.provider import get_provider_for_agent, provider_for
+
+        # Route creation through the per-agent provider (milkie/dolphin
+        # selection). No tools_override → full tool access, matching the
+        # isolated-job design (raw factory previously bypassed routing).
+        agent = await get_provider_for_agent(self.agent_name).create_agent(
+            self.agent_name, self.workspace_path
+        )
+        provider = provider_for(agent)
+        provider.set_session_id(agent, job_session_id)
+        provider.set_variable(agent, "job_session_id", job_session_id)
         user_data = get_user_data_manager()
         trajectory_path = user_data.get_session_trajectory_path(self.agent_name, job_session_id)
         trajectory_path.parent.mkdir(parents=True, exist_ok=True)
-        context.init_trajectory(str(trajectory_path), overwrite=True)
+        provider.init_trajectory(agent, str(trajectory_path), overwrite=True)
         return agent
 
     @staticmethod
     def _build_job_system_prompt(agent: Any, task: Task) -> str:
         """Build isolated job system prompt from base workspace + task description."""
-        context = agent.executor.context
+        from ..agent.provider import provider_for
+
+        provider = provider_for(agent)
         base = ""
-        if hasattr(context, "workspace_instructions"):
-            base = str(context.workspace_instructions or "")
-        elif hasattr(context, "get_variable"):
-            base = str(context.get_variable("workspace_instructions") or "")
+        if provider.needs_history_restore():
+            # dolphin: 进程内 context,行为保持不变(优先属性,回退 get_variable)
+            context = agent.executor.context
+            if hasattr(context, "workspace_instructions"):
+                base = str(context.workspace_instructions or "")
+            elif hasattr(context, "get_variable"):
+                base = str(context.get_variable("workspace_instructions") or "")
+        else:
+            # milkie: 无 .executor;workspace_instructions 走 serve /context/get(可能为 None)
+            base = str(provider.get_variable(agent, "workspace_instructions") or "")
         task_description = str(task.description or "").strip()
         if not task_description:
             return base

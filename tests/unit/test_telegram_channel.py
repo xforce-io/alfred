@@ -57,7 +57,7 @@ class TestTelegramToolkitRegistration:
             global_skills=SimpleNamespace(installedSkillset=installed),
         )
 
-        ch._ensure_telegram_skillkit(agent)
+        ch._ensure_telegram_skillkit(agent, "test_agent")
 
         installed.hasSkill.assert_called_once_with("_tg_send_file")
         installed.addSkillkit.assert_called_once()
@@ -70,9 +70,43 @@ class TestTelegramToolkitRegistration:
             global_skills=SimpleNamespace(installedSkillset=installed),
         )
 
-        ch._ensure_telegram_skillkit(agent)
+        ch._ensure_telegram_skillkit(agent, "test_agent")
 
         installed.addSkillkit.assert_not_called()
+
+    def test_routes_through_per_agent_provider_not_global(self, tmp_path, monkeypatch):
+        """#4 fallback: skillkit must follow get_provider_for_agent, not the
+        GLOBAL get_provider — otherwise a milkie global provider crashes a
+        dolphin-fallback agent on register_skillkit (NotImplementedError)."""
+        ch = _make_channel(tmp_path)
+        agent = SimpleNamespace()
+
+        fake_provider = MagicMock()
+        fake_provider.has_skill.return_value = False
+        fake_provider.register_skillkit = MagicMock()
+
+        seen = {}
+
+        def _fake_get_for_agent(name):
+            seen["name"] = name
+            return fake_provider
+
+        import src.everbot.core.agent.provider as provider_mod
+
+        monkeypatch.setattr(provider_mod, "get_provider_for_agent", _fake_get_for_agent)
+        # If anything reaches for the GLOBAL provider, fail loudly.
+        monkeypatch.setattr(
+            provider_mod,
+            "get_provider",
+            lambda: (_ for _ in ()).throw(AssertionError("must not use global provider")),
+        )
+
+        ch._ensure_telegram_skillkit(agent, "milkie_routed_agent")
+
+        assert seen["name"] == "milkie_routed_agent"
+        fake_provider.has_skill.assert_called_once_with(agent, "_tg_send_file")
+        fake_provider.register_skillkit.assert_called_once()
+        assert fake_provider.register_skillkit.call_args.args[0] is agent
 
 
 # ===========================================================================

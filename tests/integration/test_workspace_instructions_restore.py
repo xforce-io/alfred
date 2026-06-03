@@ -208,7 +208,8 @@ async def test_cache_runtime_workspace_instructions_empty_after_restore():
         core = _make_core_service(tmp_path)
 
         ctx = _DummyContext({})  # No workspace_instructions
-        core._cache_runtime_workspace_instructions("test_agent", ctx)
+        agent = _CallTrackingAgent(ctx)
+        core._cache_runtime_workspace_instructions(agent, "test_agent")
 
         # Should NOT cache an empty/None value
         assert core._runtime_workspace_instructions_by_agent.get("test_agent", "") == ""

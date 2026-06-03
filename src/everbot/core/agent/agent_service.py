@@ -11,7 +11,7 @@ from typing import Any, Dict
 
 from ..runtime.control import get_local_status, run_heartbeat_once
 from ...infra.user_data import get_user_data_manager
-from .factory import create_agent
+from .provider import get_provider_for_agent
 from ...infra.dolphin_compat import ensure_continue_chat_compatibility
 
 
@@ -54,5 +54,5 @@ class AgentService:
         # Keep runtime flags aligned for later continue_chat calls.
         ensure_continue_chat_compatibility()
 
-        agent = await create_agent(agent_name, agent_dir)
+        agent = await get_provider_for_agent(agent_name).create_agent(agent_name, agent_dir)
         return agent

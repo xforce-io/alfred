@@ -19,8 +19,6 @@ from . import RuntimeDeps, TurnExecutor
 from .heartbeat_file import HeartbeatFileManager
 from .reflection import ReflectionManager
 from .heartbeat_utils import (
-    build_isolated_task_prompt,
-    build_job_session_id,
     is_time_reminder_task,
     task_snapshot,
     try_deterministic_task,
@@ -254,11 +252,13 @@ If not, reply with `HEARTBEAT_OK`.
         ]
 
         async def _restricted_agent_factory(name: str, workspace: Any) -> Any:
-            try:
-                return await agent_factory(name, workspace, tools_override=_HEARTBEAT_TOOLS)
-            except TypeError:
-                # Fallback: factory doesn't support tools_override yet
-                return await agent_factory(name, workspace)
+            # Route creation through the per-agent provider (milkie/dolphin
+            # selection) while preserving the restricted heartbeat tool set.
+            from ..agent.provider import get_provider_for_agent
+
+            return await get_provider_for_agent(name).create_agent(
+                name, workspace, tools_override=_HEARTBEAT_TOOLS
+            )
 
         self._restricted_agent_factory = _restricted_agent_factory
 
@@ -504,10 +504,9 @@ If not, reply with `HEARTBEAT_OK`.
 
     def _bind_session_id_to_context(self, agent: Any) -> None:
         """Bind session id to context to keep context-engine logs traceable."""
-        context = agent.executor.context
-        context.set_variable("session_id", self.session_id)
-        if hasattr(context, "set_session_id"):
-            context.set_session_id(self.session_id)
+        from ..agent.provider import provider_for
+
+        provider_for(agent).set_session_id(agent, self.session_id)
 
     def _record_timeline_event(self, event_type: str, run_id: str, **payload: Any) -> None:
         """Append heartbeat timeline event with source metadata."""
@@ -683,7 +682,9 @@ If not, reply with `HEARTBEAT_OK`.
         user_data = get_user_data_manager()
         trajectory_path = user_data.get_session_trajectory_path(self.agent_name, self.session_id)
         trajectory_path.parent.mkdir(parents=True, exist_ok=True)
-        agent.executor.context.init_trajectory(str(trajectory_path), overwrite=overwrite)
+        from ..agent.provider import provider_for
+
+        provider_for(agent).init_trajectory(agent, str(trajectory_path), overwrite=overwrite)
 
     async def _emit_result(self, result: str) -> None:
         """Dispatch heartbeat result to callback supporting sync/async handlers."""
@@ -1006,149 +1007,6 @@ If not, reply with `HEARTBEAT_OK`.
     def _try_deterministic_task(self, task: Any) -> Optional[str]:
         return try_deterministic_task(task)
 
-    @staticmethod
-    def _build_job_session_id(task: Any) -> str:
-        return build_job_session_id(task)
-
-    async def _create_job_agent(self, job_session_id: str) -> Any:
-        """Create a fresh agent for isolated job execution."""
-        agent = await self.agent_factory(self.agent_name, self.workspace_path)
-        context = agent.executor.context
-        context.set_variable("session_id", job_session_id)
-        if hasattr(context, "set_session_id"):
-            context.set_session_id(job_session_id)
-        context.set_variable("job_session_id", job_session_id)
-        user_data = get_user_data_manager()
-        trajectory_path = user_data.get_session_trajectory_path(self.agent_name, job_session_id)
-        trajectory_path.parent.mkdir(parents=True, exist_ok=True)
-        context.init_trajectory(str(trajectory_path), overwrite=True)
-        return agent
-
-    def _build_job_system_prompt(self, agent: Any, task: Any) -> str:
-        """Build one isolated job system prompt from base workspace + task description."""
-        context = agent.executor.context
-        base = self._get_workspace_instructions(context)
-        task_description = str(getattr(task, "description", "") or "").strip()
-        if not task_description:
-            return base
-        if not base:
-            return task_description
-        return f"{base}\n\n{task_description}"
-
-    async def _deposit_job_event_to_primary_session(
-        self,
-        *,
-        event_type: str,
-        source_session_id: str,
-        summary: str,
-        detail: Optional[str],
-        run_id: str,
-    ) -> bool:
-        """Deposit isolated job result to primary mailbox."""
-        target_session = self.primary_session_id
-        event = build_system_event(
-            event_type=event_type,
-            source_session_id=source_session_id,
-            summary=summary[:self.SUMMARY_MAX_CHARS],
-            detail=detail,
-            artifacts=[],
-            priority=0,
-            suppress_if_stale=False,
-            dedupe_key=f"{event_type}:{self.agent_name}:{run_id}:{source_session_id}",
-        )
-        return await self.session_manager.deposit_mailbox_event(
-            target_session,
-            event,
-            timeout=5.0,
-            blocking=True,
-        )
-
-    async def _execute_isolated_task(self, task: Any, run_id: str) -> str:
-        """Execute one isolated task with a dedicated job session and agent."""
-        job_session_id = self._build_job_session_id(task)
-        self._record_runtime_metric("job_session_created")
-        task_title = str(getattr(task, "title", "") or "")
-        prompt = build_isolated_task_prompt(task)
-        agent = await self._create_job_agent(job_session_id)
-        job_system_prompt = self._build_job_system_prompt(agent, task)
-        try:
-            result = await asyncio.wait_for(
-                self._run_agent(agent, prompt, system_prompt_override=job_system_prompt),
-                timeout=getattr(task, "timeout_seconds", 120),
-            )
-            await self.session_manager.save_session(job_session_id, agent)
-            await self.session_manager.mark_session_archived(job_session_id)
-            summary = f"{task_title or getattr(task, 'id', 'task')} completed"
-            await self._deposit_job_event_to_primary_session(
-                event_type="job_completed",
-                source_session_id=job_session_id,
-                summary=summary,
-                detail=result,
-                run_id=run_id,
-            )
-            # Mailbox-only: job result is delivered via mailbox deposit above.
-            # No longer inject as fake assistant message into history.
-            # Emit heartbeat_delivery event so Telegram (and other
-            # subscribers) push the result in real time.
-            from .events import emit
-
-            await emit(
-                self.primary_session_id,
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": result,
-                    "summary": result[:self.SUMMARY_MAX_CHARS],
-                    "detail": result,
-                    "source_type": "heartbeat_delivery",
-                    "run_id": run_id,
-                    "deliver": True,
-                },
-                agent_name=self.agent_name,
-                **self._event_scope_kwargs(),
-                source_type="heartbeat_delivery",
-                run_id=run_id,
-            )
-            return result
-        except Exception as exc:
-            await self.session_manager.save_session(job_session_id, agent)
-            await self.session_manager.mark_session_archived(job_session_id)
-            summary = f"{task_title or getattr(task, 'id', 'task')} failed"
-            await self._deposit_job_event_to_primary_session(
-                event_type="job_failed",
-                source_session_id=job_session_id,
-                summary=summary,
-                detail=str(exc),
-                run_id=run_id,
-            )
-            # Emit heartbeat_delivery for the failure path too, so users
-            # get notified of task failures via Telegram.
-            from .events import emit
-
-            from ..tasks.task_manager import format_retry_hint
-            retry_hint = format_retry_hint(task)
-            _fail_msg = f"Task failed: {task_title or getattr(task, 'id', 'task')}\n{exc}"
-            if retry_hint:
-                _fail_msg += f"\n\n{retry_hint}"
-            await emit(
-                self.primary_session_id,
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": _fail_msg,
-                    "summary": _fail_msg[:self.SUMMARY_MAX_CHARS],
-                    "detail": _fail_msg,
-                    "source_type": "heartbeat_delivery",
-                    "run_id": run_id,
-                    "deliver": True,
-                },
-                agent_name=self.agent_name,
-                **self._event_scope_kwargs(),
-                source_type="heartbeat_delivery",
-                run_id=run_id,
-            )
-            raise
-
     # ── Skill task execution (reflection skills) ─────────────────
 
     def _get_scanner(self, scanner_type: Optional[str]) -> Optional[Any]:
@@ -1406,13 +1264,15 @@ If not, reply with `HEARTBEAT_OK`.
     ) -> str:
         """Inject heartbeat context according to execution mode."""
         try:
-            context = agent.executor.context
+            from ..agent.provider import provider_for
+
+            provider = provider_for(agent)
             self._bind_session_id_to_context(agent)
 
             parse_result = self._file_mgr.last_parse_result
-            context.set_variable("heartbeat_mode", mode)
-            context.set_variable("heartbeat_time", datetime.now().isoformat())
-            context.set_variable("heartbeat_corruption_detected", mode == "corrupted")
+            provider.set_variable(agent, "heartbeat_mode", mode)
+            provider.set_variable(agent, "heartbeat_time", datetime.now().isoformat())
+            provider.set_variable(agent, "heartbeat_corruption_detected", mode == "corrupted")
 
             header = f"[系统心跳 - {datetime.now().strftime('%Y-%m-%d %H:%M')}]"
             if mode == "corrupted":
@@ -1550,8 +1410,17 @@ If not, reply with `HEARTBEAT_OK`.
     async def _run_heartbeat_turn(self, agent: Any, message: str) -> str:
         """Run heartbeat turn via TurnExecutor and runtime context strategies."""
         try:
-            ctx = agent.executor.context
-            self._runtime_workspace_instructions = self._get_workspace_instructions(ctx)
+            from ..agent.provider import provider_for
+
+            provider = provider_for(agent)
+            if provider.needs_history_restore():
+                # dolphin: 进程内 context,行为保持不变
+                ctx = agent.executor.context
+                self._runtime_workspace_instructions = self._get_workspace_instructions(ctx)
+            else:
+                # milkie: 无 .executor;workspace_instructions 走 serve(可能为 None)
+                value = provider.get_variable(agent, "workspace_instructions")
+                self._runtime_workspace_instructions = value if isinstance(value, str) else ""
             ensure_continue_chat_compatibility()
 
             from .events import emit

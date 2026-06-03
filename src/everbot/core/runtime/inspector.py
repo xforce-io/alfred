@@ -589,17 +589,26 @@ class Inspector:
         system-prompt contamination, then sends the reflection prompt directly.
         """
         ensure_continue_chat_compatibility()
-        agent = await self.agent_factory(self.agent_name, self.workspace_path)
+        from ..agent.provider import get_provider_for_agent
+
+        # Route creation through the per-agent provider (milkie/dolphin
+        # selection). No tools_override → full tool access, matching the
+        # prior raw-factory behaviour which bypassed provider routing.
+        provider = get_provider_for_agent(self.agent_name)
+        agent = await provider.create_agent(
+            self.agent_name, self.workspace_path
+        )
         answer = ""
         deltas: list[str] = []
         seen_progress: set[str] = set()
 
         async def _stream() -> None:
             nonlocal answer
-            async for event in agent.continue_chat(
-                message=prompt,
-                stream_mode="delta",
+            async for event in provider.run_turn(
+                agent,
+                prompt,
                 system_prompt=_REFLECT_SYSTEM_PROMPT,
+                stream_mode="delta",
             ):
                 if not isinstance(event, dict):
                     continue

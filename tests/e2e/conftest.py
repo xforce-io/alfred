@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -61,6 +63,70 @@ def pytest_collection_modifyitems(
     for item in items:
         if "destructive" in item.keywords:
             item.add_marker(skip)
+
+
+# ---------------------------------------------------------------------------
+# Shared milkie e2e helpers: fake OpenAI streaming server
+# ---------------------------------------------------------------------------
+
+# 逐 content 帧驱动 milkie LLM stream → serve SSE(message_delta);共享给所有 milkie
+# serve e2e(serve smoke + daemon smoke)。
+_TOKENS = ["Hello", ", ", "world", "!"]
+
+
+class _FakeOpenAIHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("content-length", 0))
+        req = json.loads(self.rfile.read(length) or "{}")
+        model = req.get("model", "fake")
+        if not req.get("stream"):
+            # 非流式(/llm 走 gateway.complete):回显收到的 model 名,验证 tier 路由。
+            payload = json.dumps({
+                "id": "c", "object": "chat.completion", "created": 0, "model": model,
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": f"echo:{model}"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }).encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        frames = [
+            "data: " + json.dumps({
+                "id": "c", "object": "chat.completion.chunk", "created": 0, "model": model,
+                "choices": [{"index": 0, "delta": {"content": t}, "finish_reason": None}],
+            })
+            for t in _TOKENS
+        ]
+        frames.append("data: " + json.dumps({
+            "id": "c", "object": "chat.completion.chunk", "created": 0, "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        }))
+        frames.append("data: [DONE]")
+        body = ("\n\n".join(frames) + "\n\n").encode("utf-8")
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def fake_openai_port():
+    server = HTTPServer(("127.0.0.1", 0), _FakeOpenAIHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
 
 
 # ---------------------------------------------------------------------------

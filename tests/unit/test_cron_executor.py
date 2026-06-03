@@ -3,6 +3,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -529,7 +530,7 @@ class TestIsolatedJobExecution:
         ) as mock_invoke_job:
             mock_agent = MagicMock()
             mock_create_agent.return_value = mock_agent
-            result = await executor.tick(
+            await executor.tick(
                 task_list,
                 run_agent=run_agent,
                 inject_context=AsyncMock(),
@@ -798,3 +799,131 @@ class TestSkillLogRecording:
         call_args = mock_record.call_args
         assert call_args.args[0] is task
         assert call_args.args[1] == "report content"
+
+
+class TestCreateJobAgentProviderRouting:
+    """CronExecutor._create_job_agent must route creation through the per-agent
+    provider (milkie/dolphin selection), NOT the raw injected agent_factory.
+    No tools_override → full tool access.
+    """
+
+    @pytest.mark.asyncio
+    async def test_routes_through_provider_full_access(self, tmp_path, monkeypatch):
+        import importlib
+
+        sentinel_agent = MagicMock()
+        create_agent = AsyncMock(return_value=sentinel_agent)
+        factory_provider = MagicMock(create_agent=create_agent)
+
+        # Provider used for set_session_id / init_trajectory side-effects.
+        runtime_provider = MagicMock(
+            set_session_id=MagicMock(),
+            set_variable=MagicMock(),
+            init_trajectory=MagicMock(),
+        )
+
+        # cron.py imports get_provider / get_provider_for_agent locally from
+        # the provider package at call time → patch on the package module.
+        provider_mod = importlib.import_module(
+            CronExecutor.__module__.rsplit(".", 2)[0] + ".agent.provider"
+        )
+        monkeypatch.setattr(
+            provider_mod, "get_provider_for_agent", lambda name: factory_provider
+        )
+        # Operations route via provider_for(agent) (per-agent type dispatch); the
+        # created agent is a MagicMock (not a milkie handle) so patch that seam.
+        monkeypatch.setattr(provider_mod, "provider_for", lambda agent: runtime_provider)
+
+        # Neutralize user-data manager so trajectory init does not touch real paths.
+        user_data_mod = importlib.import_module("src.everbot.infra.user_data")
+        traj_path = tmp_path / "trajectory.jsonl"
+        user_data = MagicMock()
+        user_data.get_session_trajectory_path.return_value = traj_path
+        monkeypatch.setattr(
+            user_data_mod, "get_user_data_manager", lambda: user_data
+        )
+
+        raw_factory = AsyncMock(return_value=MagicMock())
+        executor = _make_executor(tmp_path, agent_factory=raw_factory)
+
+        result = await executor._create_job_agent("job_session_42")
+
+        assert result is sentinel_agent
+        # Routed through provider with name + workspace and NO tools_override.
+        create_agent.assert_awaited_once_with("test_agent", tmp_path)
+        assert "tools_override" not in create_agent.await_args.kwargs
+        # Raw injected agent_factory must NOT be used for creation.
+        raw_factory.assert_not_awaited()
+        # Session-scoping side-effects still applied via runtime provider.
+        runtime_provider.set_session_id.assert_called_once_with(
+            sentinel_agent, "job_session_42"
+        )
+        runtime_provider.init_trajectory.assert_called_once()
+
+
+class TestBuildJobSystemPromptMilkieSafe:
+    """_build_job_system_prompt must NOT crash on a milkie handle (no .executor).
+
+    dolphin: reads context.workspace_instructions (unchanged).
+    milkie: routes through provider.get_variable (may be None — tolerated).
+    """
+
+    def _patch_provider(self, monkeypatch, provider):
+        import importlib
+        provider_mod = importlib.import_module(
+            CronExecutor.__module__.rsplit(".", 2)[0] + ".agent.provider"
+        )
+        # _build_job_system_prompt now dispatches via provider_for(agent).
+        monkeypatch.setattr(provider_mod, "provider_for", lambda agent: provider)
+
+    def test_milkie_handle_routes_through_get_variable(self, monkeypatch):
+        from src.everbot.core.tasks.task_manager import Task
+
+        # Milkie handle: bare object WITHOUT .executor.
+        handle = SimpleNamespace(base_url="http://x", context_id="c1")
+
+        class _MilkieProvider:
+            def needs_history_restore(self):
+                return False
+
+            def get_variable(self, agent, key):
+                assert agent is handle
+                assert key == "workspace_instructions"
+                return "WS BASE"
+
+        self._patch_provider(monkeypatch, _MilkieProvider())
+        task = Task(id="t1", title="T", description="do the thing")
+        out = CronExecutor._build_job_system_prompt(handle, task)
+        assert out == "WS BASE\n\ndo the thing"
+
+    def test_milkie_handle_tolerates_none_workspace(self, monkeypatch):
+        from src.everbot.core.tasks.task_manager import Task
+
+        handle = SimpleNamespace(base_url="http://x", context_id="c1")
+
+        class _MilkieProvider:
+            def needs_history_restore(self):
+                return False
+
+            def get_variable(self, agent, key):
+                return None  # serve has no var set yet
+
+        self._patch_provider(monkeypatch, _MilkieProvider())
+        task = Task(id="t2", title="T", description="just task")
+        out = CronExecutor._build_job_system_prompt(handle, task)
+        assert out == "just task"
+
+    def test_dolphin_path_reads_context_attribute(self, monkeypatch):
+        from src.everbot.core.tasks.task_manager import Task
+
+        ctx = SimpleNamespace(workspace_instructions="DOLPHIN WS")
+        agent = SimpleNamespace(executor=SimpleNamespace(context=ctx))
+
+        class _DolphinProvider:
+            def needs_history_restore(self):
+                return True
+
+        self._patch_provider(monkeypatch, _DolphinProvider())
+        task = Task(id="t3", title="T", description="cron job")
+        out = CronExecutor._build_job_system_prompt(agent, task)
+        assert out == "DOLPHIN WS\n\ncron job"

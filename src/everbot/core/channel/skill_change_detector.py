@@ -80,8 +80,9 @@ def inject_skill_updates_if_needed(
 
     # First turn (no previous record): just persist the baseline
     if not has_prev:
-        ctx = agent.executor.context
-        ctx.set_variable(SESSION_VAR_KNOWN_SKILLS, sorted(current_names))
+        from ..agent.provider import provider_for
+
+        provider_for(agent).set_variable(agent, SESSION_VAR_KNOWN_SKILLS, sorted(current_names))
         return
 
     added = sorted(current_names - prev_names)
@@ -103,15 +104,17 @@ def inject_skill_updates_if_needed(
     notification = "\n".join(parts)
 
     # Inject into agent history
-    ctx = agent.executor.context
-    history = ctx.get_var_value(KEY_HISTORY)
+    from ..agent.provider import provider_for
+
+    provider = provider_for(agent)
+    history = provider.get_variable(agent, KEY_HISTORY)
     if not isinstance(history, list):
         history = []
     history.append({"role": "user", "content": notification})
-    ctx.set_variable(KEY_HISTORY, history)
+    provider.set_variable(agent, KEY_HISTORY, history)
 
     # Persist updated skill set for next comparison
-    ctx.set_variable(SESSION_VAR_KNOWN_SKILLS, sorted(current_names))
+    provider.set_variable(agent, SESSION_VAR_KNOWN_SKILLS, sorted(current_names))
 
     logger.info(
         "Skill update injected for session %s: +%s -%s",

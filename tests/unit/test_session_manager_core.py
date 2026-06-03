@@ -1434,3 +1434,175 @@ class TestFailureMemoryPersistence:
         loaded = await persistence.load(session_id)
         assert loaded is not None
         assert loaded.failure_memory == {}
+
+
+# ===========================================================================
+# 11. save_session milkie-safe (handle without .executor/.snapshot)
+# ===========================================================================
+
+class TestSaveSessionMilkieSafe:
+    """save_session must NOT crash on a milkie handle (no .executor/.snapshot).
+
+    - memory extraction (MemoryManager) is dolphin-only → skipped for milkie.
+    - history compression (SessionCompressor) is dolphin-only → skipped.
+    - export_session / session_created_at route through provider.
+    """
+
+    def _patch_provider(self, monkeypatch, provider):
+        import importlib
+        # session.py is imported as src.everbot.* in this test module, so its
+        # relative `..agent.provider` resolves to src.everbot.core.agent.provider.
+        provider_pkg = importlib.import_module(
+            SessionManager.__module__.rsplit(".", 2)[0] + ".agent.provider"
+        )
+        # save_session now dispatches via provider_for(agent) (per-agent type routing).
+        monkeypatch.setattr(provider_pkg, "provider_for", lambda agent: provider)
+
+    @pytest.mark.asyncio
+    async def test_milkie_handle_no_attribute_error(self, tmp_path: Path, monkeypatch):
+        from types import SimpleNamespace
+
+        manager = SessionManager(tmp_path)
+
+        # Milkie handle: NO .executor, NO .snapshot, NO get_execution_trace.
+        handle = SimpleNamespace(name="test_agent", base_url="http://x", context_id="c1")
+
+        export_calls = {"n": 0}
+
+        class _MilkieProvider:
+            def needs_history_restore(self):
+                return False
+
+            def export_session(self, agent):
+                export_calls["n"] += 1
+                return {"history_messages": [{"role": "user", "content": "hi"}], "variables": {}}
+
+            def get_variable(self, agent, key):
+                assert key == "session_created_at"
+                return None  # serve has nothing yet — tolerated
+
+        self._patch_provider(monkeypatch, _MilkieProvider())
+
+        captured = {}
+
+        async def fake_update_atomic(session_id, mutator, **kwargs):
+            data = _make_session_data(session_id)
+            mutator(data)
+            captured["data"] = data
+            return data
+
+        manager.update_atomic = fake_update_atomic
+
+        # primary session_type triggers both memory-extraction + compression guards.
+        await manager.save_session("web_session_test_agent", handle)
+
+        # No crash; export routed through provider; history persisted.
+        assert export_calls["n"] >= 1
+        assert captured["data"].history_messages == [{"role": "user", "content": "hi"}]
+
+    @pytest.mark.asyncio
+    async def test_milkie_skips_memory_extraction(self, tmp_path: Path, monkeypatch):
+        """MemoryManager (in-process) must NOT be constructed for milkie."""
+        import importlib
+        from types import SimpleNamespace
+        mm_mod = importlib.import_module(
+            SessionManager.__module__.rsplit(".", 2)[0] + ".memory.manager"
+        )
+
+        manager = SessionManager(tmp_path)
+        handle = SimpleNamespace(name="test_agent", base_url="http://x", context_id="c1")
+
+        class _MilkieProvider:
+            def needs_history_restore(self):
+                return False
+
+            def export_session(self, agent):
+                return {"history_messages": [], "variables": {}}
+
+            def get_variable(self, agent, key):
+                return None
+
+        self._patch_provider(monkeypatch, _MilkieProvider())
+
+        mm_built = {"n": 0}
+        orig_init = mm_mod.MemoryManager.__init__
+
+        def _spy_init(self, *a, **k):
+            mm_built["n"] += 1
+            return orig_init(self, *a, **k)
+
+        monkeypatch.setattr(mm_mod.MemoryManager, "__init__", _spy_init)
+
+        async def fake_update_atomic(session_id, mutator, **kwargs):
+            mutator(_make_session_data(session_id))
+            return _make_session_data(session_id)
+
+        manager.update_atomic = fake_update_atomic
+
+        await manager.save_session("web_session_test_agent", handle)
+
+        assert mm_built["n"] == 0, "MemoryManager must be skipped for milkie"
+
+
+# ===========================================================================
+# 12. SessionPersistence.save milkie-safe (handle without .executor/.snapshot)
+# ===========================================================================
+
+class TestPersistenceSaveMilkieSafe:
+    """SessionPersistence.save must NOT crash on a milkie handle.
+
+    - export_session routes through provider (serve /session/history).
+    - session_created_at routes through provider.get_variable.
+    - SessionCompressor (in-process) is guarded by needs_history_restore → skipped.
+    """
+
+    def _patch_provider(self, monkeypatch, provider):
+        import importlib
+        provider_pkg = importlib.import_module(
+            SessionPersistence.__module__.rsplit(".", 2)[0] + ".agent.provider"
+        )
+        # save() now dispatches via provider_for(agent) (per-agent type routing).
+        monkeypatch.setattr(provider_pkg, "provider_for", lambda agent: provider)
+
+    @pytest.mark.asyncio
+    async def test_milkie_handle_save_no_attribute_error(self, tmp_path: Path, monkeypatch):
+        from types import SimpleNamespace
+
+        compressor_built = {"n": 0}
+        import src.everbot.core.session.persistence as pmod
+        orig_compressor = pmod.SessionCompressor
+
+        class _SpyCompressor(orig_compressor):
+            def __init__(self, *a, **k):
+                compressor_built["n"] += 1
+                super().__init__(*a, **k)
+
+        monkeypatch.setattr(pmod, "SessionCompressor", _SpyCompressor)
+
+        class _MilkieProvider:
+            def needs_history_restore(self):
+                return False
+
+            def export_session(self, agent):
+                return {
+                    "history_messages": [{"role": "user", "content": "hi"}],
+                    "variables": {"foo": "bar"},
+                }
+
+            def get_variable(self, agent, key):
+                assert key == "session_created_at"
+                return None
+
+        self._patch_provider(monkeypatch, _MilkieProvider())
+
+        p = SessionPersistence(tmp_path)
+        # primary session_type → would normally compress (dolphin) — must skip for milkie.
+        handle = SimpleNamespace(name="test_agent", base_url="http://x", context_id="c1")
+
+        await p.save("web_session_test_agent", handle, model_name="m")
+
+        # No crash; compression skipped (milkie); data persisted with exported history.
+        assert compressor_built["n"] == 0, "SessionCompressor must be skipped for milkie"
+        loaded = await p.load("web_session_test_agent")
+        assert loaded is not None
+        assert loaded.history_messages == [{"role": "user", "content": "hi"}]

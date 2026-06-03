@@ -535,12 +535,16 @@ class TurnOrchestrator:
         # Always use continue_chat when a user message is present so it is
         # never silently discarded.  arun (autonomous mode) is reserved for
         # daemon-initiated turns where there is no user message.
-        if is_first_turn and hasattr(agent, "arun") and not message:
-            event_stream = agent.arun(run_mode=True, stream_mode=stream_mode, mode="tool_call")
-        else:
-            event_stream = agent.continue_chat(
-                message=message, stream_mode=stream_mode, mode="tool_call", system_prompt=system_prompt,
-            )
+        # Lazy import to avoid a module-load cycle (runtime ↔ agent.provider).
+        from ..agent.provider import provider_for
+
+        event_stream = provider_for(agent).run_turn(
+            agent,
+            message,
+            system_prompt=system_prompt,
+            is_first_turn=is_first_turn,
+            stream_mode=stream_mode,
+        )
 
         # Optionally wrap with timeout
         if policy.timeout_seconds:
@@ -590,33 +594,13 @@ class TurnOrchestrator:
         def _flush_trajectory() -> None:
             """Save trajectory before early return (loop/error abort).
 
-            When turn_orchestrator aborts mid-turn (REPEATED_TEXT_LOOP, etc.),
-            dolphin's explore_block.finally will call finalize_stage, but by
-            then intermediate messages have moved to the history bucket and
-            get filtered by dedup — losing the loop evidence.  Flushing here
-            captures the full conversation while messages are still fresh.
+            Delegates to the provider so turn_orchestrator stays provider-neutral:
+            DolphinProvider persists the explore stage; MilkieProvider no-ops
+            (milkie has its own event sourcing).
             """
-            try:
-                ctx = getattr(agent, "executor", None)
-                ctx = getattr(ctx, "context", None) if ctx else None
-                traj = getattr(ctx, "trajectory", None) if ctx else None
-                cm = getattr(ctx, "context_manager", None) if ctx else None
-                if traj and cm and traj.is_enabled():
-                    toolkit = getattr(ctx, "toolkit", None) or getattr(ctx, "skillkit", None)
-                    tools_schema = toolkit.getSkillsSchema() if toolkit else []
-                    status = ctx.get_var_value("_status") or {}
-                    stage_index = status.get("explore_time", 0)
-                    model = ctx.get_last_model_name() if hasattr(ctx, "get_last_model_name") else None
-                    traj.finalize_stage(
-                        stage_name="explore",
-                        stage_index=stage_index,
-                        context_manager=cm,
-                        tools=tools_schema,
-                        user_id=ctx.user_id or "",
-                        model=model,
-                    )
-            except Exception as exc:
-                logger.debug("_flush_trajectory failed (non-fatal): %s", exc)
+            from ..agent.provider import provider_for
+
+            provider_for(agent).finalize_trajectory_on_error(agent)
 
         def _check_round_text_loop() -> bool:
             """Detect degenerate loops: consecutive repeats OR alternating patterns.

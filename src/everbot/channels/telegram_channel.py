@@ -556,7 +556,7 @@ class TelegramChannel:
                 return
 
         # Register Telegram skillkit so the agent can send files/photos
-        self._ensure_telegram_skillkit(agent)
+        self._ensure_telegram_skillkit(agent, agent_name)
 
         # Start typing indicator
         typing_task = asyncio.create_task(self._typing_loop(chat_id))
@@ -876,21 +876,24 @@ class TelegramChannel:
     # Telegram Skillkit registration
     # ------------------------------------------------------------------
 
-    def _ensure_telegram_skillkit(self, agent: Any) -> None:
-        """Register TelegramSkillkit on the agent if not already present."""
-        gs = getattr(agent, "global_skills", None)
-        if gs is None:
-            return
-        installed = getattr(gs, "installedSkillset", None)
-        if installed is None:
-            return
-        if installed.hasSkill("_tg_send_file"):
+    def _ensure_telegram_skillkit(self, agent: Any, agent_name: str) -> None:
+        """Register TelegramSkillkit on the agent if not already present.
+
+        Routes through the *per-agent* provider (``get_provider_for_agent``) so
+        skillkit registration follows the same provider as the agent itself —
+        under ``everbot.provider=milkie`` + telegram, the agent is auto-fallen
+        back to dolphin, and skillkit registration must follow it (兑现 #4 回退).
+        """
+        from ..core.agent.provider import get_provider_for_agent
+
+        provider = get_provider_for_agent(agent_name)
+        if provider.has_skill(agent, "_tg_send_file"):
             return
 
         from .telegram_skillkit import TelegramSkillkit
 
         tg_skillkit = TelegramSkillkit(bot_token=self._bot_token)
-        installed.addSkillkit(tg_skillkit)
+        provider.register_skillkit(agent, tg_skillkit)
         logger.info("Registered TelegramSkillkit on agent")
 
     # ------------------------------------------------------------------

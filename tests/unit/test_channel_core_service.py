@@ -448,3 +448,79 @@ async def test_multimodal_message_skips_mailbox_ack_bug():
     assert "evt_hb" in ack_ids, (
         f"Heartbeat event should be acked even for multimodal messages, got {ack_ids}"
     )
+
+
+class TestWorkspaceInstructionsHelpersMilkieSafe:
+    """_reload_workspace_instructions_if_missing / _cache_runtime_workspace_instructions
+    must NOT crash on a milkie handle (no .executor).
+
+    dolphin: in-process context (unchanged).
+    milkie: workspace_instructions baked into agent.md; reload is a no-op,
+    cache routes through provider.get_variable (may be None).
+    """
+
+    def _patch_provider(self, monkeypatch, provider):
+        # core_service.py now dispatches operations via provider_for(agent)
+        # (per-agent type routing) → patch that seam, not the global get_provider.
+        import importlib
+        cs_mod = importlib.import_module(ChannelCoreService.__module__)
+        monkeypatch.setattr(cs_mod, "provider_for", lambda agent: provider)
+
+    def test_reload_skips_for_milkie(self, monkeypatch):
+        class _MilkieProvider:
+            def needs_history_restore(self):
+                return False
+
+        self._patch_provider(monkeypatch, _MilkieProvider())
+        with tempfile.TemporaryDirectory() as tmpdir:
+            core = _make_core_service(Path(tmpdir))
+            handle = SimpleNamespace(base_url="http://x", context_id="c1")  # no .executor
+            # Must not raise AttributeError; reload is dolphin-only.
+            core._reload_workspace_instructions_if_missing(handle, "test_agent")
+
+    def test_cache_routes_through_provider_for_milkie(self, monkeypatch):
+        class _MilkieProvider:
+            def needs_history_restore(self):
+                return False
+
+            def get_variable(self, agent, key):
+                assert key == "workspace_instructions"
+                return "MILKIE WS"
+
+        self._patch_provider(monkeypatch, _MilkieProvider())
+        with tempfile.TemporaryDirectory() as tmpdir:
+            core = _make_core_service(Path(tmpdir))
+            handle = SimpleNamespace(base_url="http://x", context_id="c1")  # no .executor
+            core._cache_runtime_workspace_instructions(handle, "test_agent")
+            assert core._runtime_workspace_instructions_by_agent.get("test_agent") == "MILKIE WS"
+
+    def test_cache_tolerates_none_for_milkie(self, monkeypatch):
+        class _MilkieProvider:
+            def needs_history_restore(self):
+                return False
+
+            def get_variable(self, agent, key):
+                return None
+
+        self._patch_provider(monkeypatch, _MilkieProvider())
+        with tempfile.TemporaryDirectory() as tmpdir:
+            core = _make_core_service(Path(tmpdir))
+            handle = SimpleNamespace(base_url="http://x", context_id="c1")
+            core._cache_runtime_workspace_instructions(handle, "test_agent")
+            # None must not be cached.
+            assert core._runtime_workspace_instructions_by_agent.get("test_agent", "") == ""
+
+    def test_cache_reads_context_for_dolphin(self, monkeypatch):
+        class _DolphinProvider:
+            def needs_history_restore(self):
+                return True
+
+        self._patch_provider(monkeypatch, _DolphinProvider())
+        with tempfile.TemporaryDirectory() as tmpdir:
+            core = _make_core_service(Path(tmpdir))
+            ctx = SimpleNamespace(
+                get_var_value=lambda k: "DOLPHIN WS" if k == "workspace_instructions" else None
+            )
+            agent = SimpleNamespace(executor=SimpleNamespace(context=ctx))
+            core._cache_runtime_workspace_instructions(agent, "test_agent")
+            assert core._runtime_workspace_instructions_by_agent.get("test_agent") == "DOLPHIN WS"
