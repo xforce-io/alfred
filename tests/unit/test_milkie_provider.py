@@ -264,6 +264,34 @@ def test_export_session_reads_history_and_translates_to_alfred_format():
     assert out["variables"] == {}
 
 
+async def test_interrupt_posts_to_interrupt_endpoint():
+    """MilkieProvider.interrupt 经 serve /interrupt 端点(contextId)跨进程发信号。"""
+    cap: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cap["url"] = str(request.url)
+        cap["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"contextId": "c1", "signaled": True})
+
+    p, client = _llm_provider(handler)
+    try:
+        await p.interrupt(MilkieAgentHandle("http://sidecar", "c1"))
+    finally:
+        await client.aclose()
+    assert cap["url"].endswith("/interrupt")
+    assert cap["body"] == {"contextId": "c1"}
+
+
+async def test_resume_not_implemented_pending_design():
+    """milkie /resume 是流式(产新 turn 事件),语义与 dolphin resume_with_input 不同,
+    待单独设计;当前明确 NotImplementedError 而非静默错误。"""
+    import pytest
+
+    p = MilkieProvider("http://x")
+    with pytest.raises(NotImplementedError):
+        await p.resume(MilkieAgentHandle("http://x", "c"), "msg")
+
+
 def test_milkie_does_not_need_history_restore():
     """milkie serve 用 sqlite/jsonl 自持久化(milkie#130),同 contextId 重启自动从
     checkpoint 恢复 → alfred 不需灌回历史。"""

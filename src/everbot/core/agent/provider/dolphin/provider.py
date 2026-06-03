@@ -144,3 +144,9 @@ class DolphinProvider:
 
     def needs_history_restore(self) -> bool:
         return True  # dolphin 进程内,重启须把历史灌回 context
+
+    async def interrupt(self, agent: Any) -> None:
+        await agent.interrupt()
+
+    async def resume(self, agent: Any, message: str) -> None:
+        await agent.resume_with_input(message)

@@ -374,7 +374,7 @@ class ChatService:
                     if current_task and not current_task.done():
                         logger.debug("User interrupt requested for %s", agent_name)
                         try:
-                            await agent.interrupt()
+                            await get_provider().interrupt(agent)
                             try:
                                 await asyncio.wait_for(asyncio.shield(current_task), timeout=2.0)
                             except asyncio.TimeoutError:
@@ -407,7 +407,7 @@ class ChatService:
                 if get_provider().is_user_interrupt_paused(agent):
                     logger.debug("Agent is paused due to user interrupt, using resume_with_input()")
                     try:
-                        await agent.resume_with_input(message)
+                        await get_provider().resume(agent, message)
                     except Exception as e:
                         logger.debug("resume_with_input failed: %s, will start fresh", e)
 
@@ -415,7 +415,7 @@ class ChatService:
                 elif current_task and not current_task.done():
                     logger.debug("User intervention while agent is RUNNING, triggering interrupt()")
                     try:
-                        await agent.interrupt()
+                        await get_provider().interrupt(agent)
                     except Exception as e:
                         logger.debug("interrupt() failed: %s", e)
 
@@ -435,7 +435,7 @@ class ChatService:
 
                     if get_provider().is_user_interrupt_paused(agent):
                         try:
-                            await agent.resume_with_input(message)
+                            await get_provider().resume(agent, message)
                         except Exception as e:
                             logger.debug("resume_with_input failed: %s", e)
 

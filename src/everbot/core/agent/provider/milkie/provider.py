@@ -177,6 +177,26 @@ class MilkieProvider:
     def needs_history_restore(self) -> bool:
         return False  # serve 用 sqlite/jsonl 自持久化(#130),同 contextId 重启自动恢复
 
+    async def interrupt(self, agent: Any) -> None:
+        # 经 serve /interrupt 端点跨进程发中断信号。
+        client = self._client or self._new_client()
+        owns = self._client is None
+        try:
+            await client.post(
+                f"{agent.base_url}/interrupt",
+                json={"contextId": agent.context_id},
+            )
+        finally:
+            if owns:
+                await client.aclose()
+
+    async def resume(self, agent: Any, message: str) -> None:
+        # milkie /resume 是流式(产新 turn 事件流),语义与 dolphin resume_with_input
+        # 「注入并内部续」不同,待单独设计(应作为新一轮 run_turn 消费事件)。
+        raise NotImplementedError(
+            "MilkieProvider.resume:milkie /resume 流式语义待设计,见 goal.md"
+        )
+
     async def call_llm(
         self,
         context: Any,

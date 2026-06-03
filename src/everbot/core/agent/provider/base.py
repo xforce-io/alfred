@@ -90,3 +90,11 @@ class AgentProvider(Protocol):
         ``restore_to_agent`` 据此 short-circuit。
         """
         ...
+
+    async def interrupt(self, agent: Any) -> None:
+        """中断 agent 当前运行(用户 stop / 介入)。"""
+        ...
+
+    async def resume(self, agent: Any, message: str) -> None:
+        """向已暂停(用户中断)的 agent 注入消息并继续。"""
+        ...

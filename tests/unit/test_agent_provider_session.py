@@ -37,6 +37,24 @@ def test_dolphin_needs_history_restore_true():
     assert DolphinProvider().needs_history_restore() is True
 
 
+async def test_dolphin_interrupt_and_resume_delegate_to_agent():
+    """收敛 chat_service 的裸 agent.interrupt()/resume_with_input():DolphinProvider
+    委托给 dolphin agent(行为不变),与已收敛的 is_user_interrupt_paused 保持一致。"""
+    calls = []
+
+    class _Agent:
+        async def interrupt(self):
+            calls.append("interrupt")
+
+        async def resume_with_input(self, message):
+            calls.append(("resume", message))
+
+    a = _Agent()
+    await DolphinProvider().interrupt(a)
+    await DolphinProvider().resume(a, "hello")
+    assert calls == ["interrupt", ("resume", "hello")]
+
+
 async def test_restore_to_agent_short_circuits_when_provider_self_persists(tmp_path, monkeypatch):
     """provider 自持久化(needs_history_restore=False,如 milkie)→ restore 跳过灌回,
     完全不碰 agent(milkie handle 无 .executor/.snapshot,碰了会 AttributeError)。"""
