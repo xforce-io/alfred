@@ -3,7 +3,7 @@ AgentProvider.export_session(agent)。DolphinProvider 委托给 dolphin snapshot
 (行为不变),后续逐个替换 5 处调用点。export_session 同步 —— 其中一个调用点
 (_extract_context_trace)在同步函数里,且 MilkieProvider 用 sync httpx(同 set_variable)。
 """
-from everbot.core.agent.provider.dolphin.provider import DolphinProvider
+from src.everbot.core.agent.provider.dolphin.provider import DolphinProvider
 
 
 class FakeSnapshot:
@@ -58,8 +58,8 @@ async def test_dolphin_interrupt_and_resume_delegate_to_agent():
 async def test_restore_to_agent_short_circuits_when_provider_self_persists(tmp_path, monkeypatch):
     """provider 自持久化(needs_history_restore=False,如 milkie)→ restore 跳过灌回,
     完全不碰 agent(milkie handle 无 .executor/.snapshot,碰了会 AttributeError)。"""
-    from everbot.core.session.persistence import SessionPersistence
-    import everbot.core.agent.provider as provider_pkg
+    from src.everbot.core.session.persistence import SessionPersistence
+    import src.everbot.core.agent.provider as provider_pkg
 
     class _SelfPersistedProvider:
         def needs_history_restore(self):

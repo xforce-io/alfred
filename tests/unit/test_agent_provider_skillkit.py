@@ -4,7 +4,7 @@ telegram_channel 裸访问 agent.global_skills.installedSkillset.hasSkill/addSki
 (dolphin 特定)。收成 provider.has_skill / register_skillkit;DolphinProvider 委托
 dolphin installedSkillset,MilkieProvider 将占位(Python skill 桥待 milkie#87)。
 """
-from everbot.core.agent.provider.dolphin.provider import DolphinProvider
+from src.everbot.core.agent.provider.dolphin.provider import DolphinProvider
 
 
 class FakeInstalled:

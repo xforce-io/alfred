@@ -11,7 +11,7 @@ import sys
 
 import pytest
 
-from everbot.core.agent.provider.milkie.sidecar import MilkieSidecar, parse_ready_signal
+from src.everbot.core.agent.provider.milkie.sidecar import MilkieSidecar, parse_ready_signal
 
 
 def _py(script: str) -> list[str]:

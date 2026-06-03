@@ -9,7 +9,7 @@ import json
 import httpx
 import pytest
 
-from everbot.core.agent.provider.milkie.provider import MilkieAgentHandle, MilkieProvider
+from src.everbot.core.agent.provider.milkie.provider import MilkieAgentHandle, MilkieProvider
 
 
 def _sse(*frames: tuple[str, dict]) -> str:
@@ -453,7 +453,7 @@ async def test_call_llm_fails_loud_when_base_url_is_none():
 def test_construction_does_no_config_io(monkeypatch):
     """构造 MilkieProvider 绝不触发 config/factory I/O:pool 惰性构建。
     monkeypatch _build_pool 让其一旦被调用就炸 → 构造不抛即证明 __init__ 未建 pool。"""
-    import everbot.core.agent.provider.milkie.provider as mod
+    import src.everbot.core.agent.provider.milkie.provider as mod
 
     def _boom():
         raise AssertionError("config/factory I/O during construction")
@@ -466,7 +466,7 @@ def test_construction_does_no_config_io(monkeypatch):
 
 async def test_pool_built_lazily_on_first_create_agent(monkeypatch):
     """pool 首次 create_agent 时才装配,且只建一次(复用)。"""
-    import everbot.core.agent.provider.milkie.provider as mod
+    import src.everbot.core.agent.provider.milkie.provider as mod
 
     calls = {"n": 0}
     stub = _FakeSidecarStub()
@@ -490,7 +490,7 @@ async def test_pool_built_lazily_on_first_create_agent(monkeypatch):
 
 async def test_shutdown_sidecars_noop_when_pool_never_built(monkeypatch):
     """从未 spawn → shutdown_sidecars 不为关停而强行建 pool(no-op)。"""
-    import everbot.core.agent.provider.milkie.provider as mod
+    import src.everbot.core.agent.provider.milkie.provider as mod
 
     def _boom():
         raise AssertionError("should not build pool just to shut down")
@@ -506,8 +506,8 @@ def test_injected_system_prompt_loader_is_used(monkeypatch):
     且模块级默认 loader 绝不被调用(回归 dead-seam:_build_pool 曾硬编码默认 loader)。"""
     from pathlib import Path
 
-    import everbot.core.agent.provider.milkie.provider as mod
-    from everbot.core.agent.provider.milkie.launcher import LaunchSpec
+    import src.everbot.core.agent.provider.milkie.provider as mod
+    from src.everbot.core.agent.provider.milkie.launcher import LaunchSpec
 
     captured_prompts: list = []
 
@@ -520,20 +520,20 @@ def test_injected_system_prompt_loader_is_used(monkeypatch):
 
     # _build_pool 走 `from .launcher import SidecarLauncher`,故 patch 源模块属性
     monkeypatch.setattr(
-        "everbot.core.agent.provider.milkie.launcher.SidecarLauncher",
+        "src.everbot.core.agent.provider.milkie.launcher.SidecarLauncher",
         lambda **kw: _CapturingLauncher(),
     )
     # config / dolphin factory 读取桩成无害:让 _build_pool 能跑到 _build 闭包。
     # _build_pool 用本地 import `from .....infra.config import get_config`,故 patch 源模块。
     monkeypatch.setattr(
-        "everbot.infra.config.get_config", lambda *a, **k: {}
+        "src.everbot.infra.config.get_config", lambda *a, **k: {}
     )
 
     class _FakeFactory:
         global_config_path = None  # → 跳过 dolphin yaml 读取
 
     monkeypatch.setattr(
-        "everbot.core.agent.provider.dolphin.factory.get_agent_factory",
+        "src.everbot.core.agent.provider.dolphin.factory.get_agent_factory",
         lambda *a, **k: _FakeFactory(),
     )
 

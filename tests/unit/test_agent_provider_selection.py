@@ -3,10 +3,10 @@
 `everbot.provider` 决定激活哪个 provider;缺省 dolphin(现有行为不变)。milkie
 时从 `everbot.milkie.base_url` 取 sidecar 地址。reset_provider() 供测试清单例。
 """
-import everbot.core.agent.provider as prov
-import everbot.infra.config as cfg
-from everbot.core.agent.provider.dolphin.provider import DolphinProvider
-from everbot.core.agent.provider.milkie.provider import MilkieProvider
+import src.everbot.core.agent.provider as prov
+import src.everbot.infra.config as cfg
+from src.everbot.core.agent.provider.dolphin.provider import DolphinProvider
+from src.everbot.core.agent.provider.milkie.provider import MilkieProvider
 
 
 def _patch_config(monkeypatch, conf: dict):

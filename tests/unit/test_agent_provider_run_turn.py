@@ -5,7 +5,7 @@ run_turn 产出 provider 原始 ``_progress`` 风格事件流(中立契约),turn
 - 有 message → continue_chat(message 永不被丢弃)
 - is_first_turn 且无 message 且 agent 有 arun → arun(自治模式)
 """
-from everbot.core.agent.provider.dolphin.provider import DolphinProvider
+from src.everbot.core.agent.provider.dolphin.provider import DolphinProvider
 
 
 class FakeAgent:

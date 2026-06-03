@@ -1,6 +1,6 @@
 # tests/unit/test_create_path_routing.py
 
-from everbot.core.agent.agent_service import AgentService
+from src.everbot.core.agent.agent_service import AgentService
 
 
 async def test_create_agent_instance_routes_through_provider(monkeypatch, tmp_path):
@@ -12,7 +12,7 @@ async def test_create_agent_instance_routes_through_provider(monkeypatch, tmp_pa
             called["ws"] = workspace_path
             return f"agent::{name}"
 
-    import everbot.core.agent.agent_service as svc
+    import src.everbot.core.agent.agent_service as svc
     monkeypatch.setattr(svc, "get_provider_for_agent", lambda name: _FakeProvider())
 
     service = AgentService()

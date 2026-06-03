@@ -1,7 +1,7 @@
 
 import pytest
 
-from everbot.core.agent.provider.milkie.launcher import SidecarLauncher, LaunchSpec
+from src.everbot.core.agent.provider.milkie.launcher import SidecarLauncher, LaunchSpec
 
 
 def _launcher(tmp_path):

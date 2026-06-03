@@ -4,7 +4,7 @@
 是 provider 抽象的泄漏点。先把这三类操作收进 provider 方法(DolphinProvider 委托
 给 dolphin context,行为不变),后续逐个替换调用点。
 """
-from everbot.core.agent.provider.dolphin.provider import DolphinProvider
+from src.everbot.core.agent.provider.dolphin.provider import DolphinProvider
 
 
 class FakeCtx:

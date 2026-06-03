@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from everbot.core.agent.provider.milkie.pool import SidecarPool
+from src.everbot.core.agent.provider.milkie.pool import SidecarPool
 
 
 class _FakeSidecar:

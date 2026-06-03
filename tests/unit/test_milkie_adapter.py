@@ -14,7 +14,7 @@ A1 把 ``_progress`` 定为 provider 中立契约,turn_orchestrator 在其上套
 """
 import json
 
-from everbot.core.agent.provider.milkie.adapter import milkie_event_to_progress
+from src.everbot.core.agent.provider.milkie.adapter import milkie_event_to_progress
 
 
 def test_message_delta_maps_to_llm_progress():

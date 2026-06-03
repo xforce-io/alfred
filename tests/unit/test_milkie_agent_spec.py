@@ -5,7 +5,7 @@ import pytest
 
 import yaml
 
-from everbot.core.agent.provider.milkie.agent_spec import (
+from src.everbot.core.agent.provider.milkie.agent_spec import (
     dolphin_model_to_milkie,
     build_milkie_model_tiers,
     build_milkie_agent_md,

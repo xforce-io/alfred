@@ -4,7 +4,7 @@
 context_manager / toolkit / finalize_stage)。收成 provider.finalize_trajectory_on_error
 (DolphinProvider 委托;MilkieProvider 将 no-op —— milkie 自带 event sourcing)。
 """
-from everbot.core.agent.provider.dolphin.provider import DolphinProvider
+from src.everbot.core.agent.provider.dolphin.provider import DolphinProvider
 
 
 class FakeTraj:

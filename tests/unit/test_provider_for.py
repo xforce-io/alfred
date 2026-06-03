@@ -10,12 +10,12 @@ independent of the global ``everbot.provider`` config.
 """
 import pytest
 
-from everbot.core.agent.provider import (
+from src.everbot.core.agent.provider import (
     oneshot_llm_provider,
     provider_for,
     reset_provider,
 )
-from everbot.core.agent.provider.milkie.provider import MilkieAgentHandle
+from src.everbot.core.agent.provider.milkie.provider import MilkieAgentHandle
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +56,7 @@ def test_dispatch_ignores_global_milkie_config(monkeypatch):
     operating on a dolphin agent OBJECT must go through DolphinProvider, and a
     milkie handle must go through MilkieProvider.
     """
-    import everbot.infra.config as config_mod
+    import src.everbot.infra.config as config_mod
 
     monkeypatch.setattr(
         config_mod, "get_config", lambda: {"everbot": {"provider": "milkie"}}
@@ -77,7 +77,7 @@ def test_oneshot_llm_provider_routes_to_dolphin_under_milkie(monkeypatch):
     milkie's ``call_llm`` needs a fixed serve that the per-agent pool model does not
     provide, so these dolphin in-process features always route to dolphin.
     """
-    import everbot.infra.config as config_mod
+    import src.everbot.infra.config as config_mod
 
     monkeypatch.setattr(
         config_mod, "get_config", lambda: {"everbot": {"provider": "milkie"}}

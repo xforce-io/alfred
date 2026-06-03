@@ -1,5 +1,5 @@
 
-from everbot.cli.daemon import EverBotDaemon
+from src.everbot.cli.daemon import EverBotDaemon
 
 
 async def test_stop_calls_provider_shutdown_sidecars(monkeypatch):
@@ -8,7 +8,7 @@ async def test_stop_calls_provider_shutdown_sidecars(monkeypatch):
     async def _fake_shutdown_all():
         closed["n"] += 1
 
-    import everbot.cli.daemon as dmod
+    import src.everbot.cli.daemon as dmod
     monkeypatch.setattr(dmod, "shutdown_all_providers", _fake_shutdown_all)
 
     daemon = EverBotDaemon.__new__(EverBotDaemon)

@@ -4,7 +4,7 @@ import json
 import httpx
 import pytest
 
-from everbot.core.agent.provider.milkie.provider import MilkieProvider, MilkieAgentHandle
+from src.everbot.core.agent.provider.milkie.provider import MilkieProvider, MilkieAgentHandle
 
 
 async def test_resume_posts_to_resume_and_consumes_stream():

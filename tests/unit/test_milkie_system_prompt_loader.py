@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from everbot.core.agent.provider.milkie.provider import _default_system_prompt_loader
+from src.everbot.core.agent.provider.milkie.provider import _default_system_prompt_loader
 
 
 def test_loader_builds_prompt_from_workspace(tmp_path, monkeypatch):
@@ -19,7 +19,7 @@ def test_loader_builds_prompt_from_workspace(tmp_path, monkeypatch):
     )
 
     # 让 loader 把 agent_name 解析到这个 workspace
-    import everbot.core.agent.provider.milkie.provider as mod
+    import src.everbot.core.agent.provider.milkie.provider as mod
     monkeypatch.setattr(
         mod, "_resolve_agent_workspace", lambda name: agent_dir, raising=True
     )
@@ -36,7 +36,7 @@ def test_loader_merges_multiple_instruction_files(tmp_path, monkeypatch):
     (agent_dir / "SOUL.md").write_text("Bob soul.", encoding="utf-8")
     (agent_dir / "AGENTS.md").write_text("Bob behavior.", encoding="utf-8")
 
-    import everbot.core.agent.provider.milkie.provider as mod
+    import src.everbot.core.agent.provider.milkie.provider as mod
     monkeypatch.setattr(
         mod, "_resolve_agent_workspace", lambda name: agent_dir, raising=True
     )
@@ -47,7 +47,7 @@ def test_loader_merges_multiple_instruction_files(tmp_path, monkeypatch):
 
 
 def test_loader_raises_on_missing_workspace(monkeypatch):
-    import everbot.core.agent.provider.milkie.provider as mod
+    import src.everbot.core.agent.provider.milkie.provider as mod
     monkeypatch.setattr(
         mod,
         "_resolve_agent_workspace",
@@ -60,7 +60,7 @@ def test_loader_raises_on_missing_workspace(monkeypatch):
 
 def test_resolve_agent_workspace_uses_user_data_manager(monkeypatch):
     """_resolve_agent_workspace 经 user-data manager 的 get_agent_dir 解析。"""
-    import everbot.core.agent.provider.milkie.provider as mod
+    import src.everbot.core.agent.provider.milkie.provider as mod
 
     expected = Path("/some/alfred/agents/carol")
 

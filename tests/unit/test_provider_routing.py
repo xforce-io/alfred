@@ -1,6 +1,6 @@
 import pytest
 
-from everbot.core.agent.provider import (
+from src.everbot.core.agent.provider import (
     get_provider_for_agent,
     reset_provider,
 )
@@ -14,7 +14,7 @@ def _reset():
 
 
 def _cfg(monkeypatch, everbot):
-    import everbot.core.agent.provider as mod
+    import src.everbot.core.agent.provider as mod
     monkeypatch.setattr(mod, "_load_everbot_cfg", lambda: everbot)
 
 
@@ -129,7 +129,7 @@ def test_singleton_identity_and_reset(monkeypatch):
 
 
 async def test_shutdown_all_providers_covers_per_agent_cache(monkeypatch):
-    import everbot.core.agent.provider as mod
+    import src.everbot.core.agent.provider as mod
     reset_provider()
     closed = []
 
@@ -147,7 +147,7 @@ async def test_shutdown_all_providers_covers_per_agent_cache(monkeypatch):
 
 
 async def test_shutdown_all_providers_dedups_same_instance(monkeypatch):
-    import everbot.core.agent.provider as mod
+    import src.everbot.core.agent.provider as mod
     reset_provider()
     calls = []
 
@@ -164,7 +164,7 @@ async def test_shutdown_all_providers_dedups_same_instance(monkeypatch):
 
 
 async def test_shutdown_all_providers_skips_provider_without_method(monkeypatch):
-    import everbot.core.agent.provider as mod
+    import src.everbot.core.agent.provider as mod
     reset_provider()
 
     class _NoMethod:
