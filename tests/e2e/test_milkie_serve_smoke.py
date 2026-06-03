@@ -8,9 +8,6 @@
 
 同时覆盖 milkie#86 验收指出的「子进程 e2e」缺口(就绪信号 + SIGTERM 退出)。
 """
-import json
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
@@ -22,67 +19,13 @@ from everbot.core.agent.provider.milkie.sidecar import MilkieSidecar
 from everbot.core.runtime.turn_orchestrator import TurnOrchestrator
 from everbot.core.runtime.turn_policy import CHAT_POLICY, TurnEventType
 
-_TOKENS = ["Hello", ", ", "world", "!"]
+# fake_openai_port fixture(及其 _FakeOpenAIHandler / _TOKENS)已移至 tests/e2e/conftest.py,
+# 与 test_milkie_daemon_smoke.py 共享。
 
 
 def _milkie_cli() -> Path | None:
     cli = Path(__file__).resolve().parents[2].parent / "milkie" / "dist" / "cli" / "index.js"
     return cli if cli.exists() else None
-
-
-class _FakeOpenAIHandler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-
-    def do_POST(self):  # noqa: N802
-        length = int(self.headers.get("content-length", 0))
-        req = json.loads(self.rfile.read(length) or "{}")
-        model = req.get("model", "fake")
-        if not req.get("stream"):
-            # 非流式(/llm 走 gateway.complete):回显收到的 model 名,验证 tier 路由。
-            payload = json.dumps({
-                "id": "c", "object": "chat.completion", "created": 0, "model": model,
-                "choices": [{"index": 0, "finish_reason": "stop",
-                             "message": {"role": "assistant", "content": f"echo:{model}"}}],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-            }).encode("utf-8")
-            self.send_response(200)
-            self.send_header("content-type", "application/json")
-            self.send_header("content-length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-            return
-        frames = [
-            "data: " + json.dumps({
-                "id": "c", "object": "chat.completion.chunk", "created": 0, "model": model,
-                "choices": [{"index": 0, "delta": {"content": t}, "finish_reason": None}],
-            })
-            for t in _TOKENS
-        ]
-        frames.append("data: " + json.dumps({
-            "id": "c", "object": "chat.completion.chunk", "created": 0, "model": model,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-        }))
-        frames.append("data: [DONE]")
-        body = ("\n\n".join(frames) + "\n\n").encode("utf-8")
-        self.send_response(200)
-        self.send_header("content-type", "text/event-stream")
-        self.send_header("content-length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args):
-        pass
-
-
-@pytest.fixture
-def fake_openai_port():
-    server = HTTPServer(("127.0.0.1", 0), _FakeOpenAIHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield server.server_address[1]
-    finally:
-        server.shutdown()
 
 
 def _write_agent(tmp_path: Path, fake_port: int) -> Path:
@@ -114,28 +57,38 @@ async def test_milkie_drives_turn_via_orchestrator_end_to_end(tmp_path, fake_ope
         pytest.skip("milkie dist not built at ../milkie/dist/cli/index.js")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-smoke")
 
+    # create_agent 现走 SidecarPool 真 spawn(T6/T8 收敛后不再用固定 base_url),
+    # 故注入一个 build 指向本测试的 agent.md(端口连 fake OpenAI),由 provider 自 spawn。
+    import os
+
     agent_md = _write_agent(tmp_path, fake_openai_port)
-    sidecar = MilkieSidecar(
-        ["node", str(cli), "serve", "--agent", str(agent_md), "--port", "0"],
-        ready_timeout=20.0,
-    )
-    await sidecar.start()
-    # 经配置开关切到 milkie:config=milkie + base_url → get_provider() 自动返回 MilkieProvider
+
+    def _build(name):
+        return (["node", str(cli), "serve", "--agent", str(agent_md), "--port", "0"],
+                {"OPENAI_API_KEY": "sk-fake-smoke", "PATH": os.environ.get("PATH", "")})
+
+    from everbot.core.agent.provider.milkie.pool import SidecarPool
+
+    pool = SidecarPool(build=_build)
+
+    # 经配置开关切到 milkie:config=milkie → get_provider() 自动返回 MilkieProvider(C3)。
     monkeypatch.setattr(
         config_module,
         "get_config",
-        lambda *a, **k: {"everbot": {"provider": "milkie", "milkie": {"base_url": sidecar.base_url}}},
+        lambda *a, **k: {"everbot": {"provider": "milkie", "milkie": {}}},
     )
     provider_pkg.reset_provider()
     try:
         provider = provider_pkg.get_provider()
         assert isinstance(provider, MilkieProvider)  # C3 配置开关生效
+        provider._pool = pool  # 注入测试 pool(避免读 dolphin 全局配置 + 真 workspace)
         handle = await provider.create_agent("smoke", "/ws")
+        sidecar = pool._sidecars["smoke"]
         orchestrator = TurnOrchestrator(CHAT_POLICY)
         events = [e async for e in orchestrator.run_turn(handle, "say hello")]
     finally:
         provider_pkg.reset_provider()
-        await sidecar.close()
+        await provider.shutdown_sidecars()
 
     deltas = [e.content for e in events if e.type == TurnEventType.LLM_DELTA]
     assert len(deltas) >= 2, f"expected token-level streaming, got {deltas}"

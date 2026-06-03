@@ -3,6 +3,15 @@
 everbot:
   enabled: true
 
+  # Agent 运行后端（provider）
+  # provider: dolphin       # 默认 dolphin（进程内）；可设为 milkie 切到 milkie serve sidecar 后端。
+  #                         # milkie 是软默认演进方向：未来全局默认会逐步切到 milkie。
+  # milkie:                 # provider=milkie（或任一 agent provider=milkie）时生效：
+  #   dist_path: ~/dev/github/milkie/dist/cli/index.js  # milkie serve CLI 入口；默认 ../milkie/dist/cli/index.js（相对 alfred 仓库）
+  #   data_dir_root: ~/.alfred/milkie  # 每个 agent 的 milkie 会话/状态持久化根目录
+  #   node_bin: node        # 启动 milkie serve 的 node 可执行（默认走 PATH 的 node）
+  #   ready_timeout: 20.0   # 等待 serve 打印 MILKIE_SERVE_READY 就绪信号的超时（秒）
+
   # Web UI 配置
   web:
     api_key: ""  # 留空则不启用认证；设置后所有 API 需携带此 key
@@ -26,6 +35,9 @@ everbot:
     # 示例 Agent: daily_insight
     daily_insight:
       workspace: ~/.alfred/agents/daily_insight
+      # provider: milkie    # 每 agent 覆盖全局 provider（dolphin/milkie）。
+      #                      # 注意：在全局 provider=milkie 下，绑定 telegram 频道的 agent 会自动
+      #                      # 回退到 dolphin（milkie 暂不支持 telegram serving，待 milkie#87）。
       heartbeat:
         enabled: true
         interval: 30          # 心跳间隔（分钟）
