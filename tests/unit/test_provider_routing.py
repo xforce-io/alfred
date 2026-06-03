@@ -3,7 +3,6 @@ import pytest
 from everbot.core.agent.provider import (
     get_provider_for_agent,
     reset_provider,
-    shutdown_all_providers,
 )
 
 
@@ -141,7 +140,7 @@ async def test_shutdown_all_providers_covers_per_agent_cache(monkeypatch):
     # populate _provider_by_name via get_provider_for_agent with a milkie global
     _cfg(monkeypatch, {"provider": "milkie", "agents": {}})
     monkeypatch.setattr(mod, "_make_provider", lambda name: _FakeMilkie())
-    p = get_provider_for_agent("alice")   # caches a _FakeMilkie under "milkie"
+    get_provider_for_agent("alice")   # caches a _FakeMilkie under "milkie"
     await mod.shutdown_all_providers()
     assert closed == ["milkie"]   # the cached per-agent provider WAS shut down
     reset_provider()

@@ -530,7 +530,7 @@ class TestIsolatedJobExecution:
         ) as mock_invoke_job:
             mock_agent = MagicMock()
             mock_create_agent.return_value = mock_agent
-            result = await executor.tick(
+            await executor.tick(
                 task_list,
                 run_agent=run_agent,
                 inject_context=AsyncMock(),

@@ -1461,7 +1461,6 @@ class TestSaveSessionMilkieSafe:
     @pytest.mark.asyncio
     async def test_milkie_handle_no_attribute_error(self, tmp_path: Path, monkeypatch):
         from types import SimpleNamespace
-        from unittest.mock import AsyncMock
 
         manager = SessionManager(tmp_path)
 

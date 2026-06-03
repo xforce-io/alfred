@@ -1380,7 +1380,7 @@ async def test_execute_once_recovery_notification(tmp_path):
     runner._file_mgr.task_list = []
     runner._delivery = MagicMock()
     runner._delivery.deliver_result = AsyncMock(return_value=True)
-    result = await runner._execute_once()
+    await runner._execute_once()
     # Recovery state cleared
     assert runner._llm_unavailable_since is None
     # Recovery notification sent

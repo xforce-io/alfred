@@ -7,6 +7,7 @@ turn_orchestrator 在其上套 policy。create_agent 返回 MilkieAgentHandle(ba
 import json
 
 import httpx
+import pytest
 
 from everbot.core.agent.provider.milkie.provider import MilkieAgentHandle, MilkieProvider
 
@@ -401,11 +402,6 @@ def test_export_session_empty_on_no_session():
     finally:
         client.close()
     assert out == {"history_messages": [], "variables": {}}
-
-
-import pytest
-
-from everbot.core.agent.provider.milkie.provider import MilkieProvider, MilkieAgentHandle
 
 
 class _FakeSidecarStub:

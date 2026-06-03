@@ -1,4 +1,3 @@
-import pytest
 
 from everbot.cli.daemon import EverBotDaemon
 

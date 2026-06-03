@@ -1,5 +1,4 @@
 # tests/unit/test_create_path_routing.py
-import pytest
 
 from everbot.core.agent.agent_service import AgentService
 
