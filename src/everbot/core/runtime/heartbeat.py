@@ -1015,9 +1015,14 @@ If not, reply with `HEARTBEAT_OK`.
 
     async def _create_job_agent(self, job_session_id: str) -> Any:
         """Create a fresh agent for isolated job execution."""
-        from ..agent.provider import get_provider
+        from ..agent.provider import get_provider, get_provider_for_agent
 
-        agent = await self.agent_factory(self.agent_name, self.workspace_path)
+        # Route creation through the per-agent provider (milkie/dolphin
+        # selection). No tools_override → full tool access, matching the
+        # isolated-job design noted around the heartbeat tool set above.
+        agent = await get_provider_for_agent(self.agent_name).create_agent(
+            self.agent_name, self.workspace_path
+        )
         provider = get_provider()
         provider.set_session_id(agent, job_session_id)
         provider.set_variable(agent, "job_session_id", job_session_id)

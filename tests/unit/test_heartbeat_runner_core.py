@@ -86,6 +86,48 @@ async def test_restricted_agent_factory_keeps_resource_skill_tools(tmp_path: Pat
     )
 
 
+@pytest.mark.asyncio
+async def test_create_job_agent_routes_through_provider_full_access(tmp_path: Path, monkeypatch):
+    """Isolated job agents must be created via the per-agent provider with NO
+    tools_override (full tool access)."""
+    sentinel_agent = object()
+    create_agent = AsyncMock(return_value=sentinel_agent)
+    factory_provider = SimpleNamespace(create_agent=create_agent)
+
+    # Provider used for set_session_id / init_trajectory side-effects after creation.
+    runtime_provider = SimpleNamespace(
+        set_session_id=MagicMock(),
+        set_variable=MagicMock(),
+        init_trajectory=MagicMock(),
+    )
+
+    import importlib
+    provider_mod = importlib.import_module(
+        HeartbeatRunner.__module__.rsplit(".", 2)[0] + ".agent.provider"
+    )
+    monkeypatch.setattr(provider_mod, "get_provider_for_agent", lambda name: factory_provider)
+    monkeypatch.setattr(provider_mod, "get_provider", lambda: runtime_provider)
+
+    # Neutralize user-data manager so trajectory init does not touch real paths.
+    runtime_mod = importlib.import_module(HeartbeatRunner.__module__)
+    traj_path = tmp_path / "trajectory.jsonl"
+    user_data = SimpleNamespace(
+        get_session_trajectory_path=lambda agent_name, job_session_id: traj_path
+    )
+    monkeypatch.setattr(runtime_mod, "get_user_data_manager", lambda: user_data)
+
+    runner = _make_runner(workspace_path=tmp_path, agent_factory=AsyncMock(return_value=object()))
+
+    result = await runner._create_job_agent("job_session_42")
+
+    assert result is sentinel_agent
+    # Routed through provider with name + workspace and NO tools_override (full access).
+    create_agent.assert_awaited_once_with("test_agent", tmp_path)
+    assert "tools_override" not in create_agent.await_args.kwargs
+    # Raw injected agent_factory must NOT be used for creation.
+    runner.agent_factory.assert_not_awaited()
+
+
 def _build_structured_md(tasks: list[dict] | None = None) -> str:
     """Build a valid HEARTBEAT.md string with optional task list."""
     task_list = {"version": 2, "tasks": tasks or []}
