@@ -98,3 +98,7 @@ class AgentProvider(Protocol):
     async def resume(self, agent: Any, message: str) -> None:
         """向已暂停(用户中断)的 agent 注入消息并继续。"""
         ...
+
+    async def shutdown_sidecars(self) -> None:
+        """Close any spawned sidecar processes. No-op for in-process providers (dolphin)."""
+        ...
