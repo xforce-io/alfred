@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from everbot.core.agent.provider.milkie.pool import SidecarPool
-from everbot.core.agent.provider.milkie.provider import MilkieProvider
-from everbot.core.agent.provider.milkie.agent_spec import build_milkie_model_tiers, build_milkie_agent_md
+from src.everbot.core.agent.provider.milkie.pool import SidecarPool
+from src.everbot.core.agent.provider.milkie.provider import MilkieProvider
+from src.everbot.core.agent.provider.milkie.agent_spec import build_milkie_model_tiers, build_milkie_agent_md
 
 CLI = Path(__file__).resolve().parents[2].parent / "milkie" / "dist" / "cli" / "index.js"
 

@@ -12,12 +12,12 @@ from pathlib import Path
 
 import pytest
 
-import everbot.core.agent.provider as provider_pkg
-import everbot.infra.config as config_module
-from everbot.core.agent.provider.milkie.provider import MilkieAgentHandle, MilkieProvider
-from everbot.core.agent.provider.milkie.sidecar import MilkieSidecar
-from everbot.core.runtime.turn_orchestrator import TurnOrchestrator
-from everbot.core.runtime.turn_policy import CHAT_POLICY, TurnEventType
+import src.everbot.core.agent.provider as provider_pkg
+import src.everbot.infra.config as config_module
+from src.everbot.core.agent.provider.milkie.provider import MilkieAgentHandle, MilkieProvider
+from src.everbot.core.agent.provider.milkie.sidecar import MilkieSidecar
+from src.everbot.core.runtime.turn_orchestrator import TurnOrchestrator
+from src.everbot.core.runtime.turn_policy import CHAT_POLICY, TurnEventType
 
 # fake_openai_port fixture(及其 _FakeOpenAIHandler / _TOKENS)已移至 tests/e2e/conftest.py,
 # 与 test_milkie_daemon_smoke.py 共享。
@@ -67,7 +67,7 @@ async def test_milkie_drives_turn_via_orchestrator_end_to_end(tmp_path, fake_ope
         return (["node", str(cli), "serve", "--agent", str(agent_md), "--port", "0"],
                 {"OPENAI_API_KEY": "sk-fake-smoke", "PATH": os.environ.get("PATH", "")})
 
-    from everbot.core.agent.provider.milkie.pool import SidecarPool
+    from src.everbot.core.agent.provider.milkie.pool import SidecarPool
 
     pool = SidecarPool(build=_build)
 
@@ -231,7 +231,7 @@ async def test_session_history_persists_across_serve_restart(tmp_path, fake_open
 async def test_generated_agent_md_loads_and_runs_in_real_serve(tmp_path, fake_openai_port, monkeypatch):
     """sidecar 产品化奠基:agent_spec 生成的 agent.md(dolphin model 配置→milkie 两档)
     能被真 milkie serve 加载并跑 turn —— 端到端证明生成器结构正确、model 路由可用。"""
-    from everbot.core.agent.provider.milkie.agent_spec import (
+    from src.everbot.core.agent.provider.milkie.agent_spec import (
         build_milkie_model_tiers,
         build_milkie_agent_md,
     )
