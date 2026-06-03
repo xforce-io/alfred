@@ -135,7 +135,13 @@ tests/e2e/    test_milkie_serve_smoke.py   ← 真 spawn milkie serve + fake Ope
 - 去 dolphin **硬依赖**:拆 `import dolphin` + requirements;依赖 milkie#87 + 保留 DolphinProvider 作 fallback,故置最后。
 - milkie 侧 gap:`createGateway` per-model apiKey 注入(两档跨 cloud 时;后续 milkie issue)。
 - **已知 corner(milkie#87 前)**:若用户**显式**把 telegram-serving agent 配成 milkie(`everbot.agents.<name>.provider=milkie`,绕过自动回退),该 agent 收到消息时 `register_skillkit` 抛 NotImplementedError → turn 被 `_chat_worker` 捕获记 log、**静默丢弃**(不崩进程,但用户无回复)。自动回退路径(未显式声明)不受影响。建议后续加启动期 config 校验或 fail-loud 用户提示。
-- `call_llm` 在 per-agent pool 模式(provider 经 `get_provider_for_agent` 构造,无固定 base_url)下 fail-loud(目前仅 dolphin 经 `needs_history_restore` 守护触达,milkie 不可达);milkie 原生 call_llm 待按需设计。
+- `call_llm` 在 per-agent pool 模式(provider 经 `get_provider_for_agent` 构造,无固定 base_url)下 fail-loud;milkie 原生 call_llm 待按需设计。一次性 `call_llm`(记忆抽取/历史压缩)经 `oneshot_llm_provider()` 显式路由 dolphin(dolphin 进程内特性,milkie pool 无固定 serve)。
+
+**PR review 接缝修复(#35 review 后,本轮补强)**:
+- **运行/保存/变量/状态操作贯穿 per-agent provider**:新增 `provider_for(agent)`(按 agent 对象类型派发),替换**全部** agent 相关 `get_provider()`(turn_orchestrator/core_service/session/persistence/cron/heartbeat/skill_change_detector/context_manager + **web chat_service** 7 处 interrupt/resume/get_variable)。修复「创建路由对、操作回退全局 provider」的核心缺陷;dolphin 默认基线字节级不变。`needs_history_restore()` 守护亦按 agent 派发。
+- **`MilkieAgentHandle` 加 `name`**:修 `chat_service`/`persistence` 的 `agent.name` AttributeError(milkie agent 首连/保存即崩)。
+- **sidecar 就绪后持续 drain stdout**:防 pipe buffer 满导致子进程 write 阻塞(/chat 假死);`close()` 取消 drain task。
+- 完备性扫描:全 src 已无遗漏的全局 `get_provider()` agent 操作;1674 unit 绿 + 6 真 e2e 绿。
 
 **评估**:#3 daemon 集成本 session 已完整交付(sidecar 池/生命周期/创建路径/resume/裸 context 收敛),全程 dolphin 行为零变化(1658 unit 绿)+ 真子进程 e2e 验证;#4 路由与回退就位,milkie 可经配置端到端跑通。去硬依赖待 milkie#87。
 
