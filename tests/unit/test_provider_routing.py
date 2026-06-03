@@ -59,3 +59,67 @@ def test_explicit_milkie_telegram_agent_respected(monkeypatch):
         "agents": {"alice": {"provider": "milkie"}},
     })
     assert type(get_provider_for_agent("alice")).__name__ == "MilkieProvider"
+
+
+def test_global_default_dolphin_when_unset(monkeypatch):
+    # 空配置:无 provider、无 explicit → 默认 dolphin
+    _cfg(monkeypatch, {})
+    assert type(get_provider_for_agent("alice")).__name__ == "DolphinProvider"
+
+
+def test_global_dolphin_explicit_telegram_no_fallback(monkeypatch):
+    # 全局 dolphin 时,telegram agent 不触发回退逻辑(本就 dolphin)
+    _cfg(monkeypatch, {"provider": "dolphin",
+                       "channels": {"telegram": {"enabled": True, "default_agent": "alice"}},
+                       "agents": {}})
+    assert type(get_provider_for_agent("alice")).__name__ == "DolphinProvider"
+
+
+def test_telegram_config_absent_uses_global_milkie(monkeypatch):
+    _cfg(monkeypatch, {"provider": "milkie", "agents": {}})
+    assert type(get_provider_for_agent("alice")).__name__ == "MilkieProvider"
+
+
+def test_telegram_none_does_not_crash(monkeypatch):
+    _cfg(monkeypatch, {"provider": "milkie", "channels": {"telegram": None}, "agents": {}})
+    assert type(get_provider_for_agent("alice")).__name__ == "MilkieProvider"
+
+
+def test_telegram_dict_disabled_no_fallback(monkeypatch):
+    # 单 bot enabled=False → 不算 telegram-serving → 用全局 milkie
+    _cfg(monkeypatch, {"provider": "milkie",
+                       "channels": {"telegram": {"enabled": False, "default_agent": "alice"}},
+                       "agents": {}})
+    assert type(get_provider_for_agent("alice")).__name__ == "MilkieProvider"
+
+
+def test_telegram_list_malformed_entries_ignored(monkeypatch):
+    # 非 dict 条目 / 缺 default_agent 的条目被忽略,不崩
+    _cfg(monkeypatch, {"provider": "milkie",
+                       "channels": {"telegram": ["not-a-dict", {"enabled": True}]},
+                       "agents": {}})
+    assert type(get_provider_for_agent("alice")).__name__ == "MilkieProvider"
+
+
+def test_fallback_warns_once_per_agent(monkeypatch, caplog):
+    import logging
+    _cfg(monkeypatch, {"provider": "milkie",
+                       "channels": {"telegram": {"enabled": True, "default_agent": "alice"}},
+                       "agents": {}})
+    with caplog.at_level(logging.WARNING):
+        get_provider_for_agent("alice")
+        get_provider_for_agent("alice")
+    # 只 warn 一次
+    warnings = [r for r in caplog.records if "自动回退 dolphin" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+def test_singleton_identity_and_reset(monkeypatch):
+    _cfg(monkeypatch, {"provider": "milkie", "agents": {}})
+    a = get_provider_for_agent("x")
+    b = get_provider_for_agent("y")
+    assert a is b   # 同 provider-name 共享一个实例
+    reset_provider()
+    _cfg(monkeypatch, {"provider": "milkie", "agents": {}})  # reset 清了 _load 的 monkeypatch? 重设
+    c = get_provider_for_agent("x")
+    assert c is not a   # reset 后重建

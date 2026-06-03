@@ -7,7 +7,8 @@ logger = logging.getLogger(__name__)
 _provider_singleton: "AgentProvider | None" = None
 
 _warned_fallback: set = set()
-_per_agent_singletons: dict = {}
+# provider-name → singleton; one MilkieProvider fans out to all agents via its internal per-agent sidecar pool
+_provider_by_name: dict = {}
 
 
 def get_provider() -> AgentProvider:
@@ -58,6 +59,8 @@ def _telegram_serving_agents(everbot_cfg: dict) -> set:
 def _make_provider(name: str) -> "AgentProvider":
     if name == "milkie":
         from .milkie.provider import MilkieProvider
+        # intentionally no base_url: per-agent base_url comes from the spawned
+        # sidecar; differs from legacy get_provider which passes a shared base_url
         return MilkieProvider()
     from .dolphin.provider import DolphinProvider
     return DolphinProvider()
@@ -84,10 +87,10 @@ def get_provider_for_agent(agent_name: str) -> "AgentProvider":
     else:
         chosen = global_name
 
-    cached = _per_agent_singletons.get(chosen)
+    cached = _provider_by_name.get(chosen)
     if cached is None:
         cached = _make_provider(chosen)
-        _per_agent_singletons[chosen] = cached
+        _provider_by_name[chosen] = cached
     return cached
 
 
@@ -95,7 +98,7 @@ def reset_provider() -> None:
     """Clear the cached provider singleton (tests / config reload)."""
     global _provider_singleton
     _provider_singleton = None
-    _per_agent_singletons.clear()
+    _provider_by_name.clear()
     _warned_fallback.clear()
 
 
