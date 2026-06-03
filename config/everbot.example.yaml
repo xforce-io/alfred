@@ -38,6 +38,8 @@ everbot:
       # provider: milkie    # 每 agent 覆盖全局 provider（dolphin/milkie）。
       #                      # 注意：在全局 provider=milkie 下，绑定 telegram 频道的 agent 会自动
       #                      # 回退到 dolphin（milkie 暂不支持 telegram serving，待 milkie#87）。
+      #                      # ⚠️ 不要对 telegram-serving agent 显式设 provider: milkie —— 会绕过
+      #                      #    自动回退,收到消息时 skillkit 注册失败 → turn 被静默丢弃(待 milkie#87)。
       heartbeat:
         enabled: true
         interval: 30          # 心跳间隔（分钟）
