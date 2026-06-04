@@ -64,6 +64,29 @@ def test_build_no_api_key_skips_env_injection(tmp_path, monkeypatch):
     assert "OPENAI_API_KEY" not in spec.env
 
 
+def test_build_scrubs_volcengine_token_for_non_volcengine_cloud(tmp_path, monkeypatch):
+    # 防 milkie GatewayFactory 的 VOLCENGINE_TOKEN 抢占目标 key(实测 401 坑)。
+    monkeypatch.setenv("VOLCENGINE_TOKEN", "volc-secret")
+    monkeypatch.setenv("VOLCENGINE_API_BASE", "https://volc/api")
+    spec = _launcher(tmp_path).build("alice", system_prompt="x")  # cloud=oa,非 volcengine
+    assert spec.env.get("OPENAI_API_KEY") == "sk-real"
+    assert "VOLCENGINE_TOKEN" not in spec.env
+    assert "VOLCENGINE_API_BASE" not in spec.env
+
+
+def test_build_keeps_volcengine_token_for_volcengine_cloud(tmp_path, monkeypatch):
+    monkeypatch.setenv("VOLCENGINE_TOKEN", "volc-secret")
+    launcher = SidecarLauncher(
+        dist_path=tmp_path / "milkie" / "dist" / "cli" / "index.js",
+        data_dir_root=tmp_path / "data", node_bin="node",
+        llms={"main": {"cloud": "volcengine", "model_name": "doubao", "type_api": "openai"}},
+        clouds={"volcengine": {"api": "https://volc/api", "api_key": "volc-secret"}},
+        default_model="main", fast_model="main",
+    )
+    spec = launcher.build("alice", system_prompt="x")
+    assert spec.env.get("VOLCENGINE_TOKEN") == "volc-secret"  # volcengine agent 保留
+
+
 def test_build_single_tier_agent_md_when_fast_equals_default(tmp_path):
     launcher = SidecarLauncher(
         dist_path=tmp_path / "milkie" / "dist" / "cli" / "index.js",

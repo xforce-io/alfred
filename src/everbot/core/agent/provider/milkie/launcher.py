@@ -61,4 +61,10 @@ class SidecarLauncher:
         api_key = self._clouds[default_cloud].get("api_key")
         if api_key:
             env["OPENAI_API_KEY"] = api_key
+        # milkie GatewayFactory 取 key 顺序 = VOLCENGINE_TOKEN ?? OPENAI_API_KEY。
+        # 若部署环境带 VOLCENGINE_TOKEN 而本 agent 不是 volcengine,它会抢占我们设的
+        # OPENAI_API_KEY → 拿错 key 打目标端点(401)。故非 volcengine 时清掉这俩。
+        if default_cloud != "volcengine":
+            env.pop("VOLCENGINE_TOKEN", None)
+            env.pop("VOLCENGINE_API_BASE", None)
         return LaunchSpec(cmd=cmd, env=env, data_dir=data_dir, agent_md=agent_md)
