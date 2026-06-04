@@ -1487,3 +1487,84 @@ class TestRunHeartbeatTurnMilkieSafe:
 
         assert out == "RESULT"
         assert runner._runtime_workspace_instructions == "DOLPHIN WS"
+
+
+class TestRunAgentWithOverrideMilkieSafe:
+    """_run_agent_with_override(cron/routine 隔离任务路径)必须 milkie-safe。
+
+    回归:milkie 下它仍直调 agent.continue_chat(dolphin 专有)→ AttributeError,
+    使所有 cron/routine 隔离任务失败(如「每日论文报告生成」)。
+    milkie 应走 orchestrator run_turn(带工具支持),并把 override 折进 message
+    (serve 丢弃 per-turn system_prompt);dolphin 仍用 continue_chat(system_prompt)。
+    """
+
+    def _patch(self, monkeypatch, provider):
+        import importlib
+        provider_mod = importlib.import_module(
+            HeartbeatRunner.__module__.rsplit(".", 2)[0] + ".agent.provider"
+        )
+        # heartbeat._run_agent_with_override 与 orchestrator._run_attempt 都经
+        # provider_for(agent) 取 provider(均为函数内惰性 import)→ 改模块属性即生效。
+        monkeypatch.setattr(provider_mod, "provider_for", lambda agent: provider)
+        import src.everbot.core.runtime.heartbeat as hb
+        monkeypatch.setattr(hb, "ensure_continue_chat_compatibility", lambda: None)
+
+        async def _emit(*a, **k):
+            return None
+
+        import src.everbot.core.runtime.events as ev
+        monkeypatch.setattr(ev, "emit", _emit)
+
+    @pytest.mark.asyncio
+    async def test_milkie_routes_through_orchestrator_no_continue_chat(self, tmp_path, monkeypatch):
+        captured = {}
+
+        class _MilkieProvider:
+            def needs_history_restore(self):
+                return False
+
+            async def run_turn(self, agent, message, *, system_prompt="",
+                               is_first_turn=False, stream_mode="delta"):
+                captured["message"] = message
+                # 模型纯文本产出(单轮)
+                yield {"_progress": [{"stage": "llm", "delta": "今日", "answer": "", "id": "llm"}]}
+                yield {"_progress": [{"stage": "llm", "delta": "论文报告", "answer": "", "id": "llm"}]}
+
+        # milkie handle:故意没有 continue_chat —— 若仍走老路径会 AttributeError。
+        handle = SimpleNamespace(base_url="http://x", context_id="c1")
+        self._patch(monkeypatch, _MilkieProvider())
+        runner = _make_runner(workspace_path=tmp_path)
+
+        out = await runner._run_agent_with_override(
+            handle, "请生成今天的论文报告", "SYSPROMPT-PERSONA\n\nTASK-DESC-论文"
+        )
+
+        assert out == "今日论文报告"
+        # override(含 task.description)必须经 message 触达模型(serve 丢 system_prompt)。
+        assert "TASK-DESC-论文" in captured["message"]
+        assert "请生成今天的论文报告" in captured["message"]
+
+    @pytest.mark.asyncio
+    async def test_dolphin_still_uses_continue_chat_with_override(self, tmp_path, monkeypatch):
+        seen = {}
+
+        async def _continue_chat(*, message, stream_mode, system_prompt):
+            seen["system_prompt"] = system_prompt
+            seen["message"] = message
+            yield {"_progress": [{"stage": "llm", "answer": "dolphin-report"}]}
+
+        agent = SimpleNamespace(continue_chat=_continue_chat)
+
+        class _DolphinProvider:
+            def needs_history_restore(self):
+                return True
+
+        self._patch(monkeypatch, _DolphinProvider())
+        runner = _make_runner(workspace_path=tmp_path)
+
+        out = await runner._run_agent_with_override(agent, "msg", "OVERRIDE")
+
+        assert out == "dolphin-report"
+        # dolphin 把 override 作为 per-turn system_prompt(进程内 context 支持)。
+        assert seen["system_prompt"] == "OVERRIDE"
+        assert seen["message"] == "msg"

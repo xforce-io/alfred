@@ -1471,9 +1471,20 @@ If not, reply with `HEARTBEAT_OK`.
         message: str,
         system_prompt_override: str,
     ) -> str:
-        """Run direct continue_chat path for explicit system-prompt override cases."""
+        """Run an agent turn with an explicit system-prompt override (cron/routine
+        isolated tasks). Provider-aware:
+
+        - dolphin: in-process context honours a per-turn system_prompt → ``continue_chat``.
+        - milkie: ``serve`` drops per-turn system_prompt (milkie#136), so the override
+          (job persona + ``task.description``) is folded into the message and the turn
+          runs through the orchestrator (JOB_POLICY) — keeping tool support
+          (run_command / skills, which routines need) and the turn guards. The agent's
+          baked agent.md systemPrompt (persona + skills section) is retained.
+        """
+        from ..agent.provider import provider_for
+
+        provider = provider_for(agent)
         try:
-            result = ""
             ensure_continue_chat_compatibility()
 
             from .events import emit
@@ -1481,20 +1492,15 @@ If not, reply with `HEARTBEAT_OK`.
                             source_type="heartbeat", run_id=getattr(self, '_current_run_id', None))
             await emit(self.primary_session_id, {"type": "status", "content": "后台心跳检查中..."}, **_emit_kw)
             try:
-                async for event in agent.continue_chat(
-                    message=message,
-                    stream_mode="delta",
-                    system_prompt=system_prompt_override,
-                ):
-                    if "_progress" in event:
-                        for progress in event["_progress"]:
-                            if progress.get("stage") == "llm":
-                                answer = progress.get("answer", "")
-                                if answer:
-                                    result = answer
+                if provider.needs_history_restore():
+                    return await self._override_via_continue_chat(
+                        agent, message, system_prompt_override
+                    )
+                return await self._override_via_orchestrator(
+                    agent, message, system_prompt_override
+                )
             finally:
                 await emit(self.primary_session_id, {"type": "status", "content": ""}, **_emit_kw)
-            return result
         except Exception as e:
             logger.error(
                 "Heartbeat agent execution failed: type=%s detail=%s",
@@ -1503,6 +1509,51 @@ If not, reply with `HEARTBEAT_OK`.
             )
             logger.error("执行 Agent 失败: %s", e)
             raise
+
+    @staticmethod
+    async def _override_via_continue_chat(
+        agent: Any, message: str, system_prompt_override: str,
+    ) -> str:
+        """dolphin: per-turn system_prompt override via ``continue_chat``."""
+        result = ""
+        async for event in agent.continue_chat(
+            message=message,
+            stream_mode="delta",
+            system_prompt=system_prompt_override,
+        ):
+            if "_progress" in event:
+                for progress in event["_progress"]:
+                    if progress.get("stage") == "llm":
+                        answer = progress.get("answer", "")
+                        if answer:
+                            result = answer
+        return result
+
+    async def _override_via_orchestrator(
+        self, agent: Any, message: str, system_prompt_override: str,
+    ) -> str:
+        """milkie: fold the override into the message and run via the orchestrator
+        (JOB_POLICY) so the job keeps tool support and turn guards."""
+        from .turn_orchestrator import JOB_POLICY, TurnEventType, TurnOrchestrator
+
+        combined = (
+            f"{system_prompt_override}\n\n{message}"
+            if system_prompt_override
+            else message
+        )
+        orchestrator = TurnOrchestrator(JOB_POLICY)
+        answer = ""
+        deltas: list[str] = []
+        async for ev in orchestrator.run_turn(
+            agent, combined, system_prompt=system_prompt_override, stream_mode="delta",
+        ):
+            if ev.type == TurnEventType.LLM_DELTA and ev.content:
+                deltas.append(ev.content)
+            elif ev.type == TurnEventType.TURN_COMPLETE:
+                answer = ev.answer or answer
+            elif ev.type == TurnEventType.TURN_ERROR:
+                raise RuntimeError(ev.error)
+        return answer or "".join(deltas)
 
     async def run_once(self):
         """执行一次心跳（带前置检查）"""
