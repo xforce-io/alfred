@@ -1,30 +1,24 @@
-"""Tests for ensure_continue_chat_compatibility."""
+"""dolphin_compat 纯化后的单测(#38:无 dolphin import)。
 
-from unittest.mock import patch
+ensure_continue_chat_compatibility 是 dolphin runtime flag 专属,dolphin 移除后恒 no-op;
+KEY_HISTORY* 是主干依赖的具体常量值。
+"""
+from src.everbot.infra import dolphin_compat as dc
 
-from src.everbot.infra.dolphin_compat import ensure_continue_chat_compatibility
+
+def test_ensure_continue_chat_compatibility_is_noop():
+    assert dc.ensure_continue_chat_compatibility() is False
 
 
-class TestEnsureContinueChatCompatibility:
+def test_history_constants_values():
+    assert dc.KEY_HISTORY == "_history"
+    assert dc.KEY_HISTORY_COMPACT_ON_PERSIST == "_history_compact_on_persist"
+    assert dc.KEY_HISTORY_COMPACT_RECENT_TURNS == "_history_compact_recent_turns"
 
-    @patch("src.everbot.infra.dolphin_compat.flags")
-    def test_returns_true_when_flag_enabled(self, mock_flags):
-        mock_flags.is_enabled.return_value = True
-        mock_flags.EXPLORE_BLOCK_V2 = "EXPLORE_BLOCK_V2"
 
-        result = ensure_continue_chat_compatibility()
-
-        assert result is True
-        mock_flags.is_enabled.assert_called_once_with("EXPLORE_BLOCK_V2")
-        mock_flags.set_flag.assert_called_once_with("EXPLORE_BLOCK_V2", False)
-
-    @patch("src.everbot.infra.dolphin_compat.flags")
-    def test_returns_false_when_flag_disabled(self, mock_flags):
-        mock_flags.is_enabled.return_value = False
-        mock_flags.EXPLORE_BLOCK_V2 = "EXPLORE_BLOCK_V2"
-
-        result = ensure_continue_chat_compatibility()
-
-        assert result is False
-        mock_flags.is_enabled.assert_called_once_with("EXPLORE_BLOCK_V2")
-        mock_flags.set_flag.assert_not_called()
+def test_module_has_no_dolphin_import():
+    import pathlib
+    import re
+    src = pathlib.Path(dc.__file__).read_text(encoding="utf-8")
+    # 只查真实 import 语句(行首),不误判 docstring 里的字样
+    assert not re.search(r"^\s*(?:from|import)\s+dolphin(?:\.|\s|$)", src, re.MULTILINE)

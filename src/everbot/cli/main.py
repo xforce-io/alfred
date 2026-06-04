@@ -179,41 +179,15 @@ def cmd_heartbeat(args):
 
 
 def cmd_migrate_agent(args):
-    """迁移/修复 agent.dph（将旧格式备份到 baks/，并确保使用标准 DPH）"""
-    from ..core.agent.factory import AgentFactory
-    from ..infra.workspace import WorkspaceLoader
+    """已废弃:迁移 agent.dph 是 dolphin 专属(#38 已移除 dolphin)。
 
-    user_data = get_user_data_manager()
-    agent_dir = user_data.get_agent_dir(args.agent)
-    if not agent_dir.exists():
-        print(f"Agent 不存在: {args.agent}")
-        return
-
-    factory = AgentFactory(
-        global_config_path=getattr(args, "dolphin_config", None),
-        default_model=None,
+    milkie runtime 不使用 .dph;agent 配置由 milkie agent.md(运行时生成)+ 工作区
+    SOUL/AGENTS/SKILLS/USER/MEMORY.md 描述,无需迁移。
+    """
+    print(
+        "migrate-agent 已废弃:dolphin 已移除(#38),milkie 不使用 agent.dph。\n"
+        "无需任何迁移动作。"
     )
-
-    loader = WorkspaceLoader(agent_dir)
-    workspace_instructions = loader.build_system_prompt()
-    workspace_instructions = factory._append_runtime_paths(
-        workspace_instructions=workspace_instructions,
-        workspace_path=agent_dir,
-    )
-
-    agent_dph_path = agent_dir / "agent.dph"
-    if not agent_dph_path.exists():
-        print(f"未找到 agent.dph: {agent_dph_path}")
-        return
-
-    factory._ensure_compatible_agent_dph(
-        agent_name=args.agent,
-        workspace_path=agent_dir,
-        agent_dph_path=agent_dph_path,
-        model_name="unused",
-        workspace_instructions=workspace_instructions,
-    )
-    print(f"迁移完成: {agent_dph_path}")
 
 
 def cmd_doctor(args):

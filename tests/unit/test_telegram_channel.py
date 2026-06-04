@@ -49,7 +49,9 @@ def _make_channel(tmp_path: Path, **kwargs) -> TelegramChannel:
 
 
 class TestTelegramToolkitRegistration:
-    def test_registers_telegram_toolkit_via_tool_api(self, tmp_path):
+    def test_ensure_skillkit_is_noop_under_milkie(self, tmp_path):
+        # #38:milkie register_skillkit 是优雅 no-op(telegram 文件发送走输出约定);
+        # _ensure_telegram_skillkit 不崩、不碰 dolphin 式 installedSkillset。
         ch = _make_channel(tmp_path)
         installed = MagicMock()
         installed.hasSkill.return_value = False
@@ -57,22 +59,9 @@ class TestTelegramToolkitRegistration:
             global_skills=SimpleNamespace(installedSkillset=installed),
         )
 
-        ch._ensure_telegram_skillkit(agent, "test_agent")
+        ch._ensure_telegram_skillkit(agent, "test_agent")  # 不抛
 
-        installed.hasSkill.assert_called_once_with("_tg_send_file")
-        installed.addSkillkit.assert_called_once()
-
-    def test_skips_registration_when_tool_already_present(self, tmp_path):
-        ch = _make_channel(tmp_path)
-        installed = MagicMock()
-        installed.hasSkill.return_value = True
-        agent = SimpleNamespace(
-            global_skills=SimpleNamespace(installedSkillset=installed),
-        )
-
-        ch._ensure_telegram_skillkit(agent, "test_agent")
-
-        installed.addSkillkit.assert_not_called()
+        installed.addSkillkit.assert_not_called()  # milkie 不走 dolphin 注册路径
 
     def test_routes_through_per_agent_provider_not_global(self, tmp_path, monkeypatch):
         """#4 fallback: skillkit must follow get_provider_for_agent, not the

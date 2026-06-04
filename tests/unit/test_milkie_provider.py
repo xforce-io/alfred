@@ -527,19 +527,12 @@ def test_injected_system_prompt_loader_is_used(monkeypatch):
         "src.everbot.core.agent.provider.milkie.launcher.SidecarLauncher",
         lambda **kw: _CapturingLauncher(),
     )
-    # config / dolphin factory 读取桩成无害:让 _build_pool 能跑到 _build 闭包。
-    # _build_pool 用本地 import `from .....infra.config import get_config`,故 patch 源模块。
+    # config 读取桩成无害:让 _build_pool 能跑到 _build 闭包。
     monkeypatch.setattr(
         "src.everbot.infra.config.get_config", lambda *a, **k: {}
     )
-
-    class _FakeFactory:
-        global_config_path = None  # → 跳过 dolphin yaml 读取
-
-    monkeypatch.setattr(
-        "src.everbot.core.agent.provider.dolphin.factory.get_agent_factory",
-        lambda *a, **k: _FakeFactory(),
-    )
+    # #38:_build_pool 现经 model_config.load_model_config 读模型路由(非 dolphin factory),
+    # 走真实 config/dolphin.yaml 即可;_CapturingLauncher 忽略 llms/clouds,无害。
 
     # 模块级默认 loader 一旦被调用就炸 → 证明注入版真正接通(而非静默走默认)
     def _default_must_not_be_called(agent_name):

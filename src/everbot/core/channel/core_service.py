@@ -820,9 +820,8 @@ class ChannelCoreService:
             workspace_path = self.user_data.get_agent_dir(agent_name)
             fresh = WorkspaceLoader(workspace_path).build_system_prompt()
             if fresh:
-                from ...core.agent.factory import AgentFactory
-                fresh = AgentFactory._append_runtime_paths(
-                    None,
+                from ...core.agent.agent_config import append_runtime_paths
+                fresh = append_runtime_paths(
                     workspace_instructions=fresh,
                     workspace_path=workspace_path,
                 )

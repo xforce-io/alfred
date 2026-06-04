@@ -10,8 +10,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from dolphin.core.agent.agent_state import AgentState
-from dolphin.core.common.constants import KEY_HISTORY
+from src.everbot.infra.dolphin_compat import KEY_HISTORY
+
+
+class AgentState:  # #38:dolphin 已移除;mock agent 状态本地桩
+    INITIALIZED = "initialized"
 
 from src.everbot.web.services.chat_service import ChatService
 

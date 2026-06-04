@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from dolphin.core.common.constants import KEY_HISTORY
+from src.everbot.infra.dolphin_compat import KEY_HISTORY
 from src.everbot.core.session.persistence import SessionPersistence
 from src.everbot.core.session.session import SessionManager
 

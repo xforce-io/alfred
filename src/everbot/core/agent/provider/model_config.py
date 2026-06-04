@@ -53,11 +53,14 @@ class ModelConfig:
     fast_model: str
 
     def route(self, *, fast: bool = False) -> ModelRoute:
-        """解析出某档的 {base_url, api_key, model}(env 占位符已展开)。"""
-        name = self.fast_model if fast else self.default_model
-        if name not in self.llms:
-            raise KeyError(f"model '{name}' not in llms config")
-        llm = self.llms[name]
+        """解析默认/快速档的 {base_url, api_key, model}(env 占位符已展开)。"""
+        return self.route_for(self.fast_model if fast else self.default_model)
+
+    def route_for(self, model_name: str) -> ModelRoute:
+        """解析指定 llm 名的 {base_url, api_key, model}。未知名 → KeyError。"""
+        if model_name not in self.llms:
+            raise KeyError(f"model '{model_name}' not in llms config")
+        llm = self.llms[model_name]
         cloud = self.clouds[llm["cloud"]]
         return ModelRoute(
             base_url=_expand(cloud["api"]).rstrip("/"),

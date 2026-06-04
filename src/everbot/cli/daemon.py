@@ -21,7 +21,6 @@ from ..core.runtime.heartbeat import HeartbeatRunner
 from ..core.session.session import SessionManager
 from ..infra.user_data import get_user_data_manager
 from ..infra.config import get_config
-from ..core.agent.factory import get_agent_factory
 from ..core.agent.provider import shutdown_all_providers
 from ..infra.process import (
     DaemonLock,
@@ -76,10 +75,11 @@ class EverBotDaemon:
         self._lifecycle_monitor_proc: Optional[subprocess.Popen] = None
         self._fault_log_handle = None
 
-        self.agent_factory = get_agent_factory(
-            global_config_path=global_config_path,
-            default_model=default_model,
-        )
+        # #38:dolphin 已移除。agent 创建经 get_provider_for_agent(milkie),不再需要
+        # dolphin AgentFactory。保留模型配置文件路径仅供 doctor 自检读 cloud/key 占位符。
+        from ..core.agent.provider.model_config import find_model_config_path
+        self.agent_factory = None
+        self._model_config_path = global_config_path or find_model_config_path()
 
         self._running = False
 
@@ -505,7 +505,7 @@ class EverBotDaemon:
                 "agent_name": agent_name,
                 "workspace_path": workspace_path,
                 "session_manager": self.session_manager,
-                "agent_factory": self.agent_factory.create_agent,
+                "agent_factory": None,  # 创建走 get_provider_for_agent(milkie),见 heartbeat._restricted_agent_factory
                 "interval_minutes": heartbeat_config.get("interval", 30),
                 "night_interval_minutes": heartbeat_config.get("night_interval"),
                 "inspect_interval_minutes": heartbeat_config.get("inspect_interval", 30),
@@ -631,16 +631,16 @@ class EverBotDaemon:
 
         _walk(self.config)
 
-        # 2. Check dolphin.yaml (LLM provider config)
-        dolphin_path = getattr(self.agent_factory, "global_config_path", None)
-        if dolphin_path and Path(dolphin_path).exists():
+        # 2. Check model config yaml (cloud/key 占位符自检)
+        model_cfg_path = getattr(self, "_model_config_path", None)
+        if model_cfg_path and Path(model_cfg_path).exists():
             try:
                 import yaml as _yaml
-                with open(dolphin_path, "r", encoding="utf-8") as f:
-                    dolphin_cfg = _yaml.safe_load(f) or {}
-                _walk(dolphin_cfg, "dolphin.yaml")
+                with open(model_cfg_path, "r", encoding="utf-8") as f:
+                    model_cfg = _yaml.safe_load(f) or {}
+                _walk(model_cfg, "dolphin.yaml")
             except Exception:
-                pass  # non-critical; dolphin SDK will report its own errors
+                pass  # non-critical
 
         if missing:
             details = "\n  ".join(missing)
