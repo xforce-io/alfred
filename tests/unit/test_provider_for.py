@@ -70,13 +70,9 @@ def test_dispatch_ignores_global_milkie_config(monkeypatch):
     assert type(provider_for(handle)).__name__ == "MilkieProvider"
 
 
-def test_oneshot_llm_provider_routes_to_dolphin_under_milkie(monkeypatch):
-    """One-shot ``call_llm`` (memory extraction / history compression) must go to
-    dolphin even when the global ``everbot.provider`` is milkie.
-
-    milkie's ``call_llm`` needs a fixed serve that the per-agent pool model does not
-    provide, so these dolphin in-process features always route to dolphin.
-    """
+def test_oneshot_llm_provider_is_dolphin_free(monkeypatch):
+    """#38:one-shot ``call_llm``(记忆抽取/历史压缩)改用 dolphin-free 的
+    OneshotLLMProvider(直连 OpenAI 兼容),不再路由 dolphin。"""
     import src.everbot.infra.config as config_mod
 
     monkeypatch.setattr(
@@ -84,9 +80,9 @@ def test_oneshot_llm_provider_routes_to_dolphin_under_milkie(monkeypatch):
     )
     reset_provider()
 
-    assert type(oneshot_llm_provider()).__name__ == "DolphinProvider"
+    assert type(oneshot_llm_provider()).__name__ == "OneshotLLMProvider"
 
 
 def test_oneshot_llm_provider_caches_instance():
-    """Repeated calls return the same cached dolphin provider instance."""
+    """Repeated calls return the same cached one-shot provider instance."""
     assert oneshot_llm_provider() is oneshot_llm_provider()

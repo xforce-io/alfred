@@ -132,21 +132,15 @@ class MilkieProvider:
         data_dir_root = Path(milkie_cfg.get("data_dir_root") or "~/.alfred/milkie").expanduser()
         node_bin = milkie_cfg.get("node_bin") or "node"
 
-        from ..dolphin.factory import get_agent_factory
-        factory = get_agent_factory()
-        dolphin_path = getattr(factory, "global_config_path", None)
-        import yaml as _yaml
-        dolphin_cfg = {}
-        if dolphin_path and Path(dolphin_path).exists():
-            dolphin_cfg = _yaml.safe_load(Path(dolphin_path).read_text(encoding="utf-8")) or {}
-        llms = dolphin_cfg.get("llms", {}) or {}
-        clouds = dolphin_cfg.get("clouds", {}) or {}
-        default_model = dolphin_cfg.get("default_model") or next(iter(llms), "")
-        fast_model = dolphin_cfg.get("fast_llm") or default_model
+        # 模型路由读 config/dolphin.yaml(纯 YAML),经 model_config 定位 —— 不再经
+        # dolphin factory 的 global_config_path(去 dolphin 耦合,#38)。
+        from ..model_config import load_model_config
+        mc = load_model_config()
 
         launcher = SidecarLauncher(
             dist_path=dist_path, data_dir_root=data_dir_root, node_bin=node_bin,
-            llms=llms, clouds=clouds, default_model=default_model, fast_model=fast_model,
+            llms=mc.llms, clouds=mc.clouds,
+            default_model=mc.default_model, fast_model=mc.fast_model,
         )
         ready_timeout = float(milkie_cfg.get("ready_timeout", 20.0))
 

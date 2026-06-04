@@ -89,15 +89,15 @@ def get_provider_for_agent(agent_name: str) -> "AgentProvider":
 def oneshot_llm_provider() -> "AgentProvider":
     """Provider for stateless one-shot ``call_llm`` (memory extraction / history compression).
 
-    ``call_llm`` is NOT agent-relative. These are dolphin in-process features (gated by
-    ``needs_history_restore``); milkie's ``call_llm`` needs a fixed serve that the per-agent
-    pool model does not provide, so one-shot LLM is routed to dolphin regardless of the
-    global ``everbot.provider``.
+    ``call_llm`` is NOT agent-relative(单 prompt → 单回复)。改用 dolphin-free 的
+    :class:`OneshotLLMProvider`(直连 OpenAI 兼容端点,模型路由读 config/dolphin.yaml),
+    去掉对 dolphin in-process LLMClient 的依赖(#38 去 dolphin)。
     """
-    cached = _provider_by_name.get("dolphin")
+    cached = _provider_by_name.get("oneshot")
     if cached is None:
-        cached = _make_provider("dolphin")
-        _provider_by_name["dolphin"] = cached
+        from .oneshot_llm import OneshotLLMProvider
+        cached = OneshotLLMProvider()
+        _provider_by_name["oneshot"] = cached
     return cached
 
 
