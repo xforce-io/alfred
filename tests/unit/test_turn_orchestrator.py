@@ -104,25 +104,18 @@ async def test_basic_llm_delta_flow():
 
 
 @pytest.mark.asyncio
-async def test_cumulative_progress_does_not_duplicate_llm_deltas():
-    """Cumulative `_progress` replays must not duplicate prior LLM output."""
+async def test_round_reset_discards_intermediate_round_text():
+    """Intermediate-round narration must not leak into the final answer.
+
+    The provider streams incrementally (each delta once). When a new tool call
+    follows LLM output, LLM_ROUND_RESET is emitted so channel consumers discard
+    the prior round's text; the final answer reflects only the last round.
+    """
     agent = _ScriptedAgent([
-        _progress_event(_llm_delta("Hello ", pid="llm1")),
-        _progress_event(
-            _llm_delta("Hello ", pid="llm1"),
-            _tool_call("_read_file", "/tmp/a.txt", pid="tc1"),
-        ),
-        _progress_event(
-            _llm_delta("Hello ", pid="llm1"),
-            _tool_call("_read_file", "/tmp/a.txt", pid="tc1"),
-            _tool_output("_read_file", "content", pid="to1"),
-        ),
-        _progress_event(
-            _llm_delta("Hello ", pid="llm1"),
-            _tool_call("_read_file", "/tmp/a.txt", pid="tc1"),
-            _tool_output("_read_file", "content", pid="to1"),
-            _llm_delta("world", pid="llm2"),
-        ),
+        _progress_event(_llm_delta("Hello ", pid="llm")),
+        _progress_event(_tool_call("_read_file", "/tmp/a.txt", pid="tc1")),
+        _progress_event(_tool_output("_read_file", "content", pid="to1")),
+        _progress_event(_llm_delta("world", pid="llm")),
     ])
     orch = TurnOrchestrator(TurnPolicy(max_attempts=1, max_tool_calls=10, max_consecutive_empty_llm_rounds=99))
     events: list[TurnEvent] = []
@@ -130,13 +123,44 @@ async def test_cumulative_progress_does_not_duplicate_llm_deltas():
         events.append(te)
 
     complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
-    # After round-reset fix: only the last round's text survives
+    # Only the last round's text survives as the answer.
     assert complete.answer == "world"
+    # Both deltas are forwarded verbatim (round_reset is a separate signal that
+    # tells the consumer to clear, it does not drop deltas from the stream).
     deltas = [e.content for e in events if e.type == TurnEventType.LLM_DELTA]
     assert deltas == ["Hello ", "world"]
-    # A round reset should have been emitted between rounds
+    # Exactly one round reset, emitted between the two rounds.
     resets = [e for e in events if e.type == TurnEventType.LLM_ROUND_RESET]
     assert len(resets) == 1
+
+
+@pytest.mark.asyncio
+async def test_incremental_repeated_token_deltas_are_not_deduped():
+    """milkie streams token-level deltas; identical token text recurs constantly
+    (spaces, digits, URL fragments, emoji, repeated words). Each delta is a
+    genuine increment and MUST pass through — content-based dedup would silently
+    drop the repeats and corrupt the text (regression: "共6篇"→"共篇",
+    ".../abs/2606.04923"→"abs93", papers merged together).
+    """
+    # A link-heavy answer where many tokens repeat verbatim, mimicking the
+    # paper-discovery output. pid is a constant "llm" exactly like milkie's
+    # adapter emits, so dedup cannot rely on pid to tell tokens apart.
+    tokens = [
+        "共", "6", "篇", "\n",
+        "🔗", " ", "链接", "：", "[arXiv](", "https://arxiv.org/", "abs", "/", "2606", ".", "04923", ")\n",
+        "🔗", " ", "链接", "：", "[arXiv](", "https://arxiv.org/", "abs", "/", "2605", ".", "27492", ")\n",
+    ]
+    agent = _ScriptedAgent([_progress_event(_llm_delta(t, pid="llm")) for t in tokens])
+    orch = TurnOrchestrator(TurnPolicy(max_attempts=1))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "papers", system_prompt="sys"):
+        events.append(te)
+
+    deltas = [e.content for e in events if e.type == TurnEventType.LLM_DELTA]
+    # Every emitted token must survive, in order — none dropped as "duplicate".
+    assert deltas == tokens
+    complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
+    assert complete.answer == "".join(tokens)
 
 
 @pytest.mark.asyncio

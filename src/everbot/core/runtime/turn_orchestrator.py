@@ -650,13 +650,22 @@ class TurnOrchestrator:
 
             non_progress_count = 0
             for progress in event.get("_progress", []):
-                progress_fp = _progress_fingerprint(progress)
-                if progress_fp in seen_progress_fingerprints:
-                    continue
-                seen_progress_fingerprints.add(progress_fp)
+                stage = progress.get("stage")
+                # LLM deltas are token-level increments: the provider streams each
+                # token exactly once, and identical token text (spaces, digits, URL
+                # fragments, emoji, repeated words) recurs constantly. Content-based
+                # dedup — meant for legacy providers that resent the full accumulated
+                # _progress list on every event — would silently drop those repeats
+                # and corrupt the streamed text (regression: "共6篇"→"共篇",
+                # ".../abs/2606.04923"→"abs93", papers merged). Never dedup llm deltas;
+                # round boundaries are handled by LLM_ROUND_RESET, not by fingerprints.
+                if stage != "llm":
+                    progress_fp = _progress_fingerprint(progress)
+                    if progress_fp in seen_progress_fingerprints:
+                        continue
+                    seen_progress_fingerprints.add(progress_fp)
                 pid = progress.get("id") or ""
                 status = progress.get("status") or ""
-                stage = progress.get("stage")
 
                 if stage == "llm":
                     delta = progress.get("delta", "")
