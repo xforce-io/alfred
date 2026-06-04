@@ -20,13 +20,17 @@ def dolphin_model_to_milkie(llms: Dict[str, Any], clouds: Dict[str, Any], llm_na
 
     未知 llm_name → KeyError(fail fast,不静默产出半配置)。
     """
+    from ..model_config import _expand  # 展开 ${ENV} + 未设 fail-fast(防字面占位符进 agent.md)
+
     llm = llms[llm_name]
     cloud = clouds[llm["cloud"]]
     return {
         "provider": llm["cloud"],
         "model": llm["model_name"],
         "adapter": "openai-compatible",  # dolphin type_api=openai → milkie openai-compatible
-        "baseUrl": cloud["api"],
+        # baseUrl 优先 llm 级 api 再回退 cloud(effective_api);展开 ${ENV}。api_key 不写进
+        # agent.md(密钥不落盘),milkie 从 env 读(launcher 注入 OPENAI_API_KEY)。
+        "baseUrl": _expand(llm.get("api") or cloud["api"]),
     }
 
 

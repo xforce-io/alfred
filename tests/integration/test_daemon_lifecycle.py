@@ -366,11 +366,6 @@ async def test_daemon_start_stop_updates_status_snapshot(monkeypatch, tmp_path: 
         lambda: UserDataManager(alfred_home=alfred_home),
     )
     monkeypatch.setattr(daemon_module, "HeartbeatRunner", _FakeRunner)
-    monkeypatch.setattr(
-        daemon_module,
-        "get_agent_factory",
-        lambda **kwargs: SimpleNamespace(create_agent=AsyncMock()),
-    )
     _FakeRunner.instances.clear()
 
     daemon = daemon_module.EverBotDaemon(config_path=str(config_path))
@@ -417,11 +412,6 @@ async def test_daemon_start_stop_updates_lifecycle_snapshot(monkeypatch, tmp_pat
         lambda: UserDataManager(alfred_home=alfred_home),
     )
     monkeypatch.setattr(daemon_module, "HeartbeatRunner", _FakeRunner)
-    monkeypatch.setattr(
-        daemon_module,
-        "get_agent_factory",
-        lambda **kwargs: SimpleNamespace(create_agent=AsyncMock()),
-    )
     _FakePopen.instances.clear()
     monkeypatch.setattr(daemon_module.subprocess, "Popen", _FakePopen)
     _FakeRunner.instances.clear()
@@ -473,11 +463,6 @@ async def test_daemon_reports_previous_unexpected_exit(monkeypatch, tmp_path: Pa
         lambda: UserDataManager(alfred_home=alfred_home),
     )
     monkeypatch.setattr(daemon_module, "HeartbeatRunner", _FakeRunner)
-    monkeypatch.setattr(
-        daemon_module,
-        "get_agent_factory",
-        lambda **kwargs: SimpleNamespace(create_agent=AsyncMock()),
-    )
     _FakePopen.instances.clear()
     monkeypatch.setattr(daemon_module.subprocess, "Popen", _FakePopen)
     _FakeRunner.instances.clear()
@@ -538,11 +523,6 @@ async def test_daemon_uses_unified_scheduler_when_runner_supports_tick_mode(monk
         lambda: UserDataManager(alfred_home=alfred_home),
     )
     monkeypatch.setattr(daemon_module, "HeartbeatRunner", _FakeTickRunner)
-    monkeypatch.setattr(
-        daemon_module,
-        "get_agent_factory",
-        lambda **kwargs: SimpleNamespace(create_agent=AsyncMock()),
-    )
     _FakeTickRunner.instances.clear()
 
     daemon = daemon_module.EverBotDaemon(config_path=str(config_path))
@@ -588,11 +568,6 @@ async def test_daemon_unified_scheduler_routes_isolated_tasks(monkeypatch, tmp_p
         lambda: UserDataManager(alfred_home=alfred_home),
     )
     monkeypatch.setattr(daemon_module, "HeartbeatRunner", _FakeSplitRunner)
-    monkeypatch.setattr(
-        daemon_module,
-        "get_agent_factory",
-        lambda **kwargs: SimpleNamespace(create_agent=AsyncMock()),
-    )
     _FakeSplitRunner.instances.clear()
 
     daemon = daemon_module.EverBotDaemon(config_path=str(config_path))
@@ -640,11 +615,6 @@ async def test_daemon_unified_scheduler_routes_inline_tasks(monkeypatch, tmp_pat
         lambda: UserDataManager(alfred_home=alfred_home),
     )
     monkeypatch.setattr(daemon_module, "HeartbeatRunner", _FakeInlineRunner)
-    monkeypatch.setattr(
-        daemon_module,
-        "get_agent_factory",
-        lambda **kwargs: SimpleNamespace(create_agent=AsyncMock()),
-    )
     _FakeInlineRunner.instances.clear()
 
     daemon = daemon_module.EverBotDaemon(config_path=str(config_path))
@@ -732,11 +702,6 @@ async def test_daemon_inspector_push_message_calls_emit(monkeypatch, tmp_path: P
         lambda: UserDataManager(alfred_home=alfred_home),
     )
     monkeypatch.setattr(daemon_module, "HeartbeatRunner", _FakeRunnerWithInspector)
-    monkeypatch.setattr(
-        daemon_module,
-        "get_agent_factory",
-        lambda **kwargs: SimpleNamespace(create_agent=AsyncMock()),
-    )
     _FakeRunnerWithInspector.instances.clear()
 
     emitted: list[str] = []

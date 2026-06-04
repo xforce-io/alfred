@@ -1,32 +1,21 @@
-"""硬约束：除 provider/dolphin/** 与 infra/dolphin_compat.py 外，
-src/everbot 主干代码不得 import dolphin。
+"""硬约束(#38 去 dolphin 后反转):src/everbot **任何** 文件都不得 import dolphin。
 
-这是 AgentProvider 抽象「把 dolphin 收敛到一个包」的可执行验收。
+dolphin 已彻底移除(provider/dolphin/ 包删除、dolphin_compat 纯化、oneshot/模型配置
+脱钩),不再有任何例外目录。这是「彻底删除 dolphin」的可执行验收。
 """
 import re
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "everbot"
-_ALLOW_PREFIXES = (
-    str(_SRC / "core" / "agent" / "provider" / "dolphin"),
-    str(_SRC / "infra" / "dolphin_compat.py"),
-)
 _PAT = re.compile(r"^\s*(?:from|import)\s+dolphin(?:\.|\s|$)", re.MULTILINE)
 
 
-def test_no_dolphin_imports_outside_provider():
+def test_no_dolphin_imports_anywhere():
     scanned = 0
     offenders = []
     for py in _SRC.rglob("*.py"):
-        sp = str(py)
         scanned += 1
-        if sp.startswith(_ALLOW_PREFIXES):
-            continue
-        text = py.read_text(encoding="utf-8")
-        if _PAT.search(text):
-            offenders.append(sp)
-    # Sanity: ensure the walk actually covered the package.
+        if _PAT.search(py.read_text(encoding="utf-8")):
+            offenders.append(str(py))
     assert scanned > 50, f"too few files scanned ({scanned}) — glob misconfigured"
-    assert not offenders, (
-        "Unexpected dolphin imports outside provider:\n" + "\n".join(offenders)
-    )
+    assert not offenders, "dolphin imports must be fully removed:\n" + "\n".join(offenders)

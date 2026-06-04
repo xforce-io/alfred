@@ -1,36 +1,17 @@
+"""历史变量名常量 + continue_chat 兼容(dolphin-free)。
+
+#38 起 dolphin 已彻底移除:本模块不再 import dolphin。``KEY_HISTORY*`` 是 milkie/alfred
+会话历史用的纯字符串常量(原与 dolphin 一致);``ensure_continue_chat_compatibility``
+是 dolphin runtime flag 专属调整,milkie 无对应 → 恒 no-op。保留模块名与符号以最小化
+主干 import 改动(core_service / session / skill_change_detector / context_manager 仍 import 它)。
 """
-Compatibility helpers for Dolphin runtime behaviors.
-"""
 
-from dolphin.core import flags
-
-# KEY_HISTORY was removed in kweaver-dolphin 0.2.4; the underlying variable
-# name is the plain string "history".
-try:
-    from dolphin.core.common.constants import KEY_HISTORY  # noqa: F401
-except ImportError:
-    KEY_HISTORY: str = "history"  # type: ignore[no-redef]
-
-# KEY_HISTORY_COMPACT_* may also be removed in future versions.
-try:
-    from dolphin.core.common.constants import KEY_HISTORY_COMPACT_ON_PERSIST  # noqa: F401
-except ImportError:
-    KEY_HISTORY_COMPACT_ON_PERSIST: str = "_history_compact_on_persist"  # type: ignore[no-redef]
-
-try:
-    from dolphin.core.common.constants import KEY_HISTORY_COMPACT_RECENT_TURNS  # noqa: F401
-except ImportError:
-    KEY_HISTORY_COMPACT_RECENT_TURNS: str = "_history_compact_recent_turns"  # type: ignore[no-redef]
+# 会话历史 context 变量名(沿用原 dolphin 常量值,主干 + 测试均依赖此具体值)。
+KEY_HISTORY: str = "_history"
+KEY_HISTORY_COMPACT_ON_PERSIST: str = "_history_compact_on_persist"
+KEY_HISTORY_COMPACT_RECENT_TURNS: str = "_history_compact_recent_turns"
 
 
 def ensure_continue_chat_compatibility() -> bool:
-    """
-    Ensure runtime flags are compatible with ``continue_chat``.
-
-    Returns:
-        True if a flag value was changed, otherwise False.
-    """
-    if flags.is_enabled(flags.EXPLORE_BLOCK_V2):
-        flags.set_flag(flags.EXPLORE_BLOCK_V2, False)
-        return True
+    """dolphin runtime flag 兼容动作;dolphin 已移除 → no-op,恒返回 False。"""
     return False

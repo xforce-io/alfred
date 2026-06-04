@@ -24,13 +24,15 @@ def test_explicit_agent_provider_wins(monkeypatch):
     assert type(get_provider_for_agent("alice")).__name__ == "MilkieProvider"
 
 
-def test_global_milkie_telegram_agent_falls_back_to_dolphin(monkeypatch):
+def test_global_milkie_telegram_agent_uses_milkie_no_fallback(monkeypatch):
+    # #38 telegram 原生化:撤掉了 telegram→dolphin 自动回退;telegram agent 现走 milkie
+    # (文件发送经 channel 输出约定提供)。
     _cfg(monkeypatch, {
         "provider": "milkie",
         "channels": {"telegram": {"enabled": True, "default_agent": "alice"}},
         "agents": {},
     })
-    assert type(get_provider_for_agent("alice")).__name__ == "DolphinProvider"
+    assert type(get_provider_for_agent("alice")).__name__ == "MilkieProvider"
 
 
 def test_global_milkie_non_telegram_agent_uses_milkie(monkeypatch):
@@ -42,7 +44,8 @@ def test_global_milkie_non_telegram_agent_uses_milkie(monkeypatch):
     assert type(get_provider_for_agent("bob")).__name__ == "MilkieProvider"
 
 
-def test_global_milkie_multibot_telegram_detection(monkeypatch):
+def test_global_milkie_multibot_all_use_milkie(monkeypatch):
+    # 多 bot 下 telegram agent 与非 telegram agent 全局 milkie 均走 milkie(无回退)。
     _cfg(monkeypatch, {
         "provider": "milkie",
         "channels": {"telegram": [
@@ -51,7 +54,7 @@ def test_global_milkie_multibot_telegram_detection(monkeypatch):
         ]},
         "agents": {},
     })
-    assert type(get_provider_for_agent("dev")).__name__ == "DolphinProvider"
+    assert type(get_provider_for_agent("dev")).__name__ == "MilkieProvider"
     assert type(get_provider_for_agent("other")).__name__ == "MilkieProvider"
 
 
@@ -64,18 +67,18 @@ def test_explicit_milkie_telegram_agent_respected(monkeypatch):
     assert type(get_provider_for_agent("alice")).__name__ == "MilkieProvider"
 
 
-def test_global_default_dolphin_when_unset(monkeypatch):
-    # 空配置:无 provider、无 explicit → 默认 dolphin
+def test_global_default_milkie_when_unset(monkeypatch):
+    # #38:dolphin 已移除,milkie 是唯一 runtime;空配置/未设 provider 也 → milkie。
     _cfg(monkeypatch, {})
-    assert type(get_provider_for_agent("alice")).__name__ == "DolphinProvider"
+    assert type(get_provider_for_agent("alice")).__name__ == "MilkieProvider"
 
 
-def test_global_dolphin_explicit_telegram_no_fallback(monkeypatch):
-    # 全局 dolphin 时,telegram agent 不触发回退逻辑(本就 dolphin)
+def test_legacy_dolphin_config_value_ignored_uses_milkie(monkeypatch):
+    # 旧配置写 provider: dolphin 也无害 → 仍 milkie(dolphin 已删,值被忽略)。
     _cfg(monkeypatch, {"provider": "dolphin",
                        "channels": {"telegram": {"enabled": True, "default_agent": "alice"}},
                        "agents": {}})
-    assert type(get_provider_for_agent("alice")).__name__ == "DolphinProvider"
+    assert type(get_provider_for_agent("alice")).__name__ == "MilkieProvider"
 
 
 def test_telegram_config_absent_uses_global_milkie(monkeypatch):
@@ -104,19 +107,6 @@ def test_telegram_list_malformed_entries_ignored(monkeypatch):
     assert type(get_provider_for_agent("alice")).__name__ == "MilkieProvider"
 
 
-def test_fallback_warns_once_per_agent(monkeypatch, caplog):
-    import logging
-    _cfg(monkeypatch, {"provider": "milkie",
-                       "channels": {"telegram": {"enabled": True, "default_agent": "alice"}},
-                       "agents": {}})
-    with caplog.at_level(logging.WARNING):
-        get_provider_for_agent("alice")
-        get_provider_for_agent("alice")
-    # 只 warn 一次
-    warnings = [r for r in caplog.records if "自动回退 dolphin" in r.getMessage()]
-    assert len(warnings) == 1
-
-
 def test_singleton_identity_and_reset(monkeypatch):
     _cfg(monkeypatch, {"provider": "milkie", "agents": {}})
     a = get_provider_for_agent("x")
@@ -139,7 +129,7 @@ async def test_shutdown_all_providers_covers_per_agent_cache(monkeypatch):
 
     # populate _provider_by_name via get_provider_for_agent with a milkie global
     _cfg(monkeypatch, {"provider": "milkie", "agents": {}})
-    monkeypatch.setattr(mod, "_make_provider", lambda name: _FakeMilkie())
+    monkeypatch.setattr(mod, "_make_provider", lambda *a, **k: _FakeMilkie())
     get_provider_for_agent("alice")   # caches a _FakeMilkie under "milkie"
     await mod.shutdown_all_providers()
     assert closed == ["milkie"]   # the cached per-agent provider WAS shut down

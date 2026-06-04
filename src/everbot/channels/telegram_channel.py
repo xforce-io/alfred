@@ -682,6 +682,17 @@ class TelegramChannel:
             extra = "\n".join(text_messages).strip()
             if extra:
                 full_reply = f"{full_reply}\n\n{extra}" if full_reply else extra
+
+        # Attachment output convention (#38 telegram 原生化):milkie agent 用
+        # <<<send_file: ...>>> 标记请求发文件;alfred(知道 chat_id)在此投递并剥离标记。
+        # dolphin agent 用 skillkit 工具、不产出标记 → 此处对其为 no-op。
+        from .attachment_directives import parse_attachment_directives
+        full_reply, _attach_directives = parse_attachment_directives(full_reply)
+        if _attach_directives:
+            await self._send_attachment_directives(chat_id, _attach_directives)
+            if not full_reply.strip():
+                full_reply = "(已发送附件)"
+
         if not full_reply:
             full_reply = "(no response)"
 
@@ -876,25 +887,48 @@ class TelegramChannel:
     # Telegram Skillkit registration
     # ------------------------------------------------------------------
 
-    def _ensure_telegram_skillkit(self, agent: Any, agent_name: str) -> None:
-        """Register TelegramSkillkit on the agent if not already present.
+    async def _send_attachment_directives(self, chat_id: str, directives: list) -> list:
+        """投递 <<<send_file/photo>>> 约定的附件(复用 TelegramSkillkit 发送辅助)。
 
-        Routes through the *per-agent* provider (``get_provider_for_agent``) so
-        skillkit registration follows the same provider as the agent itself —
-        under ``everbot.provider=milkie`` + telegram, the agent is auto-fallen
-        back to dolphin, and skillkit registration must follow it (兑现 #4 回退).
+        返回 [(path, ok), ...]。单个失败只记 log、不影响其余与文本回复。
+        """
+        from .telegram_skillkit import TelegramSkillkit
+
+        sk = TelegramSkillkit(bot_token=self._bot_token)
+        results = []
+        for d in directives:
+            try:
+                vpath = sk._validate_file(d.path)
+                if d.kind == "photo":
+                    res = await sk._send_photo_api(chat_id, vpath, d.caption)
+                    if not res.get("ok"):  # 大图/非图降级为 document
+                        res = await sk._send_document(chat_id, vpath, d.caption)
+                else:
+                    res = await sk._send_document(chat_id, vpath, d.caption)
+                ok = bool(res.get("ok"))
+                if not ok:
+                    logger.warning("send %s directive failed: %s", d.kind, res.get("description"))
+                results.append((d.path, ok))
+            except Exception as exc:
+                logger.warning("attachment directive failed for %s: %s", d.path, exc)
+                results.append((d.path, False))
+        return results
+
+    def _ensure_telegram_skillkit(self, agent: Any, agent_name: str) -> None:
+        """#38:milkie 下为优雅 no-op。
+
+        dolphin 已移除,milkie 是唯一 runtime;``register_skillkit`` 是 no-op,telegram
+        文件/图片发送改由输出约定(``<<<send_file: ...>>>``,见 attachment_directives)在
+        turn 后投递。此方法保留仅为兼容调用点,实际不再注册任何工具。
         """
         from ..core.agent.provider import get_provider_for_agent
 
         provider = get_provider_for_agent(agent_name)
         if provider.has_skill(agent, "_tg_send_file"):
             return
-
         from .telegram_skillkit import TelegramSkillkit
 
-        tg_skillkit = TelegramSkillkit(bot_token=self._bot_token)
-        provider.register_skillkit(agent, tg_skillkit)
-        logger.info("Registered TelegramSkillkit on agent")
+        provider.register_skillkit(agent, TelegramSkillkit(bot_token=self._bot_token))
 
     # ------------------------------------------------------------------
     # Typing indicator

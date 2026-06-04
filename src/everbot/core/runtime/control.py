@@ -9,7 +9,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from ..agent.factory import get_agent_factory
 from ...infra.config import get_config
 from .heartbeat import HeartbeatRunner
 from ...infra.process import is_pid_running, read_pid_file, remove_pid_file
@@ -69,11 +68,7 @@ async def run_heartbeat_once(
     if not workspace_path.exists():
         user_data.init_agent_workspace(agent_name)
 
-    agent_factory = get_agent_factory(
-        global_config_path=dolphin_config_path,
-        default_model=model,  # CLI --model override only; per-agent config resolved in factory
-    )
-
+    # #38:dolphin 已移除;创建走 get_provider_for_agent(milkie),见 heartbeat。
     session_manager = SessionManager(user_data.sessions_dir)
 
     async def on_result(name: str, result: str) -> None:
@@ -89,7 +84,7 @@ async def run_heartbeat_once(
         "agent_name": agent_name,
         "workspace_path": workspace_path,
         "session_manager": session_manager,
-        "agent_factory": agent_factory.create_agent,
+        "agent_factory": None,  # 创建走 get_provider_for_agent(milkie)
         "interval_minutes": int(heartbeat_config.get("interval", 30)),
         "active_hours": active_hours,
         "max_retries": int(heartbeat_config.get("max_retries", 3)),

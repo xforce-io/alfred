@@ -41,9 +41,13 @@ class SidecarLauncher:
         self._default_model = default_model
         self._fast_model = fast_model
 
-    def build(self, agent_name: str, *, system_prompt: str) -> LaunchSpec:
+    def build(self, agent_name: str, *, system_prompt: str, default_model: str | None = None) -> LaunchSpec:
+        # default_model:per-agent 模型覆盖(everbot.agents.<name>.model)。缺省回退全局默认。
+        # 不传则**所有 agent 用同一全局模型**——会无视 per-agent 配置(实测踩到:demo_agent
+        # 配 deepseek-volcengine 却被用成全局 kimi-code)。
+        default = default_model or self._default_model
         tiers = build_milkie_model_tiers(
-            self._llms, self._clouds, default=self._default_model, fast=self._fast_model
+            self._llms, self._clouds, default=default, fast=self._fast_model
         )  # 未知 model → KeyError(fail fast)
         data_dir = (self._data_dir_root / agent_name).expanduser()
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -57,8 +61,15 @@ class SidecarLauncher:
             "--state-store", "sqlite", "--data-dir", str(data_dir),
         ]
         env = dict(os.environ)
-        default_cloud = self._llms[self._default_model]["cloud"]
+        default_cloud = self._llms[default]["cloud"]  # per-agent 模型的 cloud(决定 key/VOLCENGINE 处理)
         api_key = self._clouds[default_cloud].get("api_key")
         if api_key:
-            env["OPENAI_API_KEY"] = api_key
+            # 展开 ${ENV}:原样写字面 ${...} 会让 milkie 拿到坏 key(非 volcengine cloud → 401)。
+            env["OPENAI_API_KEY"] = os.path.expandvars(api_key)
+        # milkie GatewayFactory 取 key 顺序 = VOLCENGINE_TOKEN ?? OPENAI_API_KEY。
+        # 若部署环境带 VOLCENGINE_TOKEN 而本 agent 不是 volcengine,它会抢占我们设的
+        # OPENAI_API_KEY → 拿错 key 打目标端点(401)。故非 volcengine 时清掉这俩。
+        if default_cloud != "volcengine":
+            env.pop("VOLCENGINE_TOKEN", None)
+            env.pop("VOLCENGINE_API_BASE", None)
         return LaunchSpec(cmd=cmd, env=env, data_dir=data_dir, agent_md=agent_md)

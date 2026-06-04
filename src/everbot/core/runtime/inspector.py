@@ -583,31 +583,28 @@ class Inspector:
         self._persist_state(state)
 
     async def _run_llm(self, prompt: str, timeout_seconds: float = 120.0) -> str:
-        """Create an independent agent and run the reflection LLM call.
+        """Run the reflection LLM call via the shared **reflector** agent.
 
-        Uses ``self.agent_factory`` to create a fresh agent with no heartbeat
-        system-prompt contamination, then sends the reflection prompt directly.
+        #34 C:milkie 丢弃 per-turn ``system_prompt``,复用业务 agent + override 会被业务
+        人设污染。改路由到共享 ``REFLECTOR_AGENT`` —— 其 agent.md systemPrompt 即
+        ``_REFLECT_SYSTEM_PROMPT``,reflection 上下文自包含在 ``prompt`` 消息里,无需业务
+        workspace;池内单例、contextId 隔离。
         """
         ensure_continue_chat_compatibility()
         from ..agent.provider import get_provider_for_agent
+        from ..agent.provider.milkie.provider import REFLECTOR_AGENT
 
-        # Route creation through the per-agent provider (milkie/dolphin
-        # selection). No tools_override → full tool access, matching the
-        # prior raw-factory behaviour which bypassed provider routing.
-        provider = get_provider_for_agent(self.agent_name)
-        agent = await provider.create_agent(
-            self.agent_name, self.workspace_path
-        )
+        provider = get_provider_for_agent(REFLECTOR_AGENT)
+        agent = await provider.create_agent(REFLECTOR_AGENT, self.workspace_path)
         answer = ""
         deltas: list[str] = []
-        seen_progress: set[str] = set()
 
         async def _stream() -> None:
             nonlocal answer
             async for event in provider.run_turn(
                 agent,
                 prompt,
-                system_prompt=_REFLECT_SYSTEM_PROMPT,
+                # reflector 的 agent.md systemPrompt 已是 _REFLECT_SYSTEM_PROMPT;无需(milkie 亦丢弃)override。
                 stream_mode="delta",
             ):
                 if not isinstance(event, dict):
@@ -620,10 +617,9 @@ class Inspector:
                         continue
                     if progress.get("stage") != "llm":
                         continue
-                    fp = json.dumps(progress, sort_keys=True, ensure_ascii=False)
-                    if fp in seen_progress:
-                        continue
-                    seen_progress.add(fp)
+                    # NB: do NOT content-dedup llm deltas — milkie streams each token
+                    # exactly once and identical token text recurs constantly; dedup
+                    # would drop the repeats and corrupt the reflection JSON.
                     delta = progress.get("delta")
                     if isinstance(delta, str) and delta:
                         deltas.append(delta)
@@ -681,21 +677,18 @@ class Inspector:
         # Build enriched reflection prompt
         reflect_prompt = self._build_reflect_prompt(ctx)
 
-        # Run LLM reflection via independent agent (方案C) or legacy path.
+        # Run LLM reflection. 默认走独立 agent 路径(``_run_llm``,经 get_provider_for_agent
+        # 自建隔离 agent,dolphin-free)。仅当调用方**显式**提供 legacy 回调
+        # (run_agent/inject_context/agent)时才走 legacy 路径(测试/特殊调用方)。
+        # #38:不再依赖 self.agent_factory(已随 dolphin 移除,恒 None)。
         try:
-            if self.agent_factory is not None:
+            if run_agent is not None and inject_context is not None and agent is not None:
+                user_message = await inject_context(agent, reflect_prompt, mode="reflect_json")
+                response = await run_agent(agent, user_message, system_prompt_override=_REFLECT_SYSTEM_PROMPT)
+            else:
                 # Independent agent: fresh agent with _REFLECT_SYSTEM_PROMPT,
                 # no heartbeat system-prompt contamination.
                 response = await self._run_llm(reflect_prompt)
-            else:
-                # Legacy fallback: reuse caller-provided agent and run_agent/inject_context.
-                if inject_context is None or run_agent is None or agent is None:
-                    raise RuntimeError(
-                        "agent_factory is not set but legacy callbacks (run_agent, inject_context, agent) "
-                        "were not provided to inspect()"
-                    )
-                user_message = await inject_context(agent, reflect_prompt, mode="reflect_json")
-                response = await run_agent(agent, user_message, system_prompt_override=_REFLECT_SYSTEM_PROMPT)
         except Exception as exc:
             logger.warning("LLM reflection failed: %s", exc)
             raise

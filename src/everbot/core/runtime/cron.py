@@ -238,15 +238,15 @@ class CronExecutor:
         (eval, reflection) are simple scoring tasks that don't need
         a reasoning model.  Falls back to agent model if 'fast' is unset.
         """
-        from ..agent.factory import AgentFactory
+        from ..agent.provider.model_config import load_model_config
+        from ..agent.agent_config import resolve_agent_model
         try:
-            global_config = AgentFactory()._get_global_config()
-            fast_model = global_config.fast
+            fast_model = load_model_config().fast_model
             if fast_model:
                 return fast_model
         except Exception:
             pass
-        return AgentFactory._resolve_agent_model(self.agent_name)
+        return resolve_agent_model(self.agent_name)
 
     # ── Scheduler-facing task listing ─────────────────────────
 

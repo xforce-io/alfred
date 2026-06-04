@@ -93,6 +93,33 @@ async def test_run_turn_yields_llm_progress_deltas():
     ]
 
 
+async def test_run_turn_raises_on_error_terminal():
+    """An ``agent.run.completed`` with status=error must raise (not be swallowed as
+    an empty turn) — e.g. an LLM-endpoint connection error. The message carries the
+    cause so retryable markers can drive a retry."""
+    sse = _sse(
+        ("agent.run.started", {"contextId": "c"}),
+        ("agent.run.completed", {"status": "error", "output": "Connection error."}),
+    )
+    p, client = _provider(sse)
+    try:
+        with pytest.raises(RuntimeError, match="Connection error"):
+            _ = [e async for e in p.run_turn(MilkieAgentHandle("http://sidecar", "c"), "hi")]
+    finally:
+        await client.aclose()
+
+
+async def test_run_turn_raises_on_error_frame():
+    """A milkie ``error`` SSE frame (thrown-exception path) must also surface."""
+    sse = _sse(("error", {"message": "model overloaded"}))
+    p, client = _provider(sse)
+    try:
+        with pytest.raises(RuntimeError, match="model overloaded"):
+            _ = [e async for e in p.run_turn(MilkieAgentHandle("http://sidecar", "c"), "hi")]
+    finally:
+        await client.aclose()
+
+
 async def test_run_turn_sends_contextid_and_input_to_chat():
     cap: dict = {}
     p, client = _provider(_sse(("agent.run.completed", {"status": "completed", "output": ""})), cap)
@@ -219,14 +246,19 @@ def test_is_user_interrupt_paused_false_when_not_paused():
     assert paused is False
 
 
-async def test_still_unsupported_methods_raise_clearly():
-    """仍需 milkie 扩展的接口:明确 NotImplementedError(而非静默错误)。"""
-    import pytest
-
+async def test_register_skillkit_is_graceful_noop():
+    """#38 telegram 原生化:register_skillkit 不再 NotImplementedError 阻断 telegram agent;
+    文件发送改由 channel 输出约定提供,故此处为优雅 no-op(不崩、不抛)。合并 #34:
+    register_skillkit 在 milkie 下不再抛 NotImplementedError。"""
     p = MilkieProvider("http://x")
     h = MilkieAgentHandle("http://x", "c")
-    with pytest.raises(NotImplementedError):
-        p.register_skillkit(h, object())
+
+    class _Kit:
+        def getName(self):
+            return "telegram_channel"
+
+    # 不抛异常即通过
+    p.register_skillkit(h, _Kit())
 
 
 def _llm_provider(handler):
@@ -341,6 +373,37 @@ def test_export_session_reads_history_and_translates_to_alfred_format():
         {"role": "assistant", "content": "done"},
     ]
     assert out["variables"] == {}
+
+
+def test_export_session_applies_history_hygiene_orphan_and_empty():
+    """A4 端到端:export_session 走 /session/history → 翻译 → **数据卫生**。
+    含中断轮的空 assistant + orphan tool(无配对 tool_use)的 milkie 历史,
+    export 出的 history_messages 必须已清洗(空 assistant 剔除、orphan 不残留)。"""
+    canonical = [
+        {"role": "user", "content": [{"type": "text", "text": "do x"}]},
+        {"role": "assistant", "content": []},  # 空 assistant(中断轮)
+        {"role": "tool", "content": [
+            {"type": "tool_result", "tool_use_id": "ghost", "content": "orphan output"},
+        ]},  # orphan:无配对 assistant tool_use
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"messages": canonical})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        p = MilkieProvider("http://x", sync_client=client)
+        hist = p.export_session(MilkieAgentHandle("http://sidecar", "c1"))["history_messages"]
+    finally:
+        client.close()
+
+    # 空 assistant 被剔除
+    assert not any(m["role"] == "assistant" and not (m.get("content") or "").strip()
+                   and not m.get("tool_calls") for m in hist)
+    # orphan tool 不残留
+    assert not any(m["role"] == "tool" and m.get("tool_call_id") == "ghost" for m in hist)
+    # orphan 内容并入 user 上下文(不丢)
+    assert any(m["role"] == "user" and "orphan output" in (m.get("content") or "") for m in hist)
 
 
 async def test_interrupt_posts_to_interrupt_endpoint():
@@ -555,7 +618,7 @@ def test_injected_system_prompt_loader_is_used(monkeypatch):
     captured_prompts: list = []
 
     class _CapturingLauncher:
-        def build(self, agent_name, *, system_prompt):
+        def build(self, agent_name, *, system_prompt, default_model=None):
             captured_prompts.append(system_prompt)
             return LaunchSpec(
                 cmd=["node"], env={}, data_dir=Path("/tmp"), agent_md=Path("/tmp/a.md")
@@ -566,19 +629,12 @@ def test_injected_system_prompt_loader_is_used(monkeypatch):
         "src.everbot.core.agent.provider.milkie.launcher.SidecarLauncher",
         lambda **kw: _CapturingLauncher(),
     )
-    # config / dolphin factory 读取桩成无害:让 _build_pool 能跑到 _build 闭包。
-    # _build_pool 用本地 import `from .....infra.config import get_config`,故 patch 源模块。
+    # config 读取桩成无害:让 _build_pool 能跑到 _build 闭包。
     monkeypatch.setattr(
         "src.everbot.infra.config.get_config", lambda *a, **k: {}
     )
-
-    class _FakeFactory:
-        global_config_path = None  # → 跳过 dolphin yaml 读取
-
-    monkeypatch.setattr(
-        "src.everbot.core.agent.provider.dolphin.factory.get_agent_factory",
-        lambda *a, **k: _FakeFactory(),
-    )
+    # #38:_build_pool 现经 model_config.load_model_config 读模型路由(非 dolphin factory),
+    # 走真实 config/dolphin.yaml 即可;_CapturingLauncher 忽略 llms/clouds,无害。
 
     # 模块级默认 loader 一旦被调用就炸 → 证明注入版真正接通(而非静默走默认)
     def _default_must_not_be_called(agent_name):

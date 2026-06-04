@@ -25,37 +25,22 @@ def _reset():
     reset_provider()
 
 
-class _FakeDolphinAgent:
-    """Any object that is NOT a MilkieAgentHandle → must route to dolphin."""
-
-
 def test_milkie_handle_routes_to_milkie_provider():
     handle = MilkieAgentHandle(name="a", base_url="u", context_id="c")
     provider = provider_for(handle)
     assert type(provider).__name__ == "MilkieProvider"
 
 
-def test_non_handle_routes_to_dolphin_provider():
-    provider = provider_for(_FakeDolphinAgent())
-    assert type(provider).__name__ == "DolphinProvider"
-
-
-def test_provider_for_caches_per_type():
+def test_provider_for_caches_singleton():
+    # #38:dolphin 已移除,milkie 是唯一 provider → provider_for 恒返回同一单例。
     h1 = MilkieAgentHandle(name="a", base_url="u", context_id="c")
     h2 = MilkieAgentHandle(name="b", base_url="u2", context_id="c2")
     assert provider_for(h1) is provider_for(h2)
 
-    a1, a2 = _FakeDolphinAgent(), _FakeDolphinAgent()
-    assert provider_for(a1) is provider_for(a2)
 
-
-def test_dispatch_ignores_global_milkie_config(monkeypatch):
-    """Global=milkie must NOT force a dolphin agent's operations onto milkie.
-
-    This is the mixed-routing guard: even when ``everbot.provider == "milkie"``,
-    operating on a dolphin agent OBJECT must go through DolphinProvider, and a
-    milkie handle must go through MilkieProvider.
-    """
+def test_oneshot_llm_provider_is_dolphin_free(monkeypatch):
+    """#38:one-shot ``call_llm``(记忆抽取/历史压缩)改用 dolphin-free 的
+    OneshotLLMProvider(直连 OpenAI 兼容),不再路由 dolphin。"""
     import src.everbot.infra.config as config_mod
 
     monkeypatch.setattr(
@@ -63,30 +48,9 @@ def test_dispatch_ignores_global_milkie_config(monkeypatch):
     )
     reset_provider()
 
-    dolphin_agent = _FakeDolphinAgent()
-    assert type(provider_for(dolphin_agent)).__name__ == "DolphinProvider"
-
-    handle = MilkieAgentHandle(name="a", base_url="u", context_id="c")
-    assert type(provider_for(handle)).__name__ == "MilkieProvider"
-
-
-def test_oneshot_llm_provider_routes_to_dolphin_under_milkie(monkeypatch):
-    """One-shot ``call_llm`` (memory extraction / history compression) must go to
-    dolphin even when the global ``everbot.provider`` is milkie.
-
-    milkie's ``call_llm`` needs a fixed serve that the per-agent pool model does not
-    provide, so these dolphin in-process features always route to dolphin.
-    """
-    import src.everbot.infra.config as config_mod
-
-    monkeypatch.setattr(
-        config_mod, "get_config", lambda: {"everbot": {"provider": "milkie"}}
-    )
-    reset_provider()
-
-    assert type(oneshot_llm_provider()).__name__ == "DolphinProvider"
+    assert type(oneshot_llm_provider()).__name__ == "OneshotLLMProvider"
 
 
 def test_oneshot_llm_provider_caches_instance():
-    """Repeated calls return the same cached dolphin provider instance."""
+    """Repeated calls return the same cached one-shot provider instance."""
     assert oneshot_llm_provider() is oneshot_llm_provider()

@@ -11,7 +11,6 @@ from .infra.workspace import WorkspaceLoader
 from .core.session.session import SessionManager, SessionData
 from .core.runtime.heartbeat import HeartbeatRunner
 from .cli.daemon import EverBotDaemon
-from .core.agent.factory import AgentFactory, get_agent_factory, create_agent
 from .core.tasks.routine_manager import RoutineManager
 
 __all__ = [
@@ -21,8 +20,5 @@ __all__ = [
     "SessionData",
     "HeartbeatRunner",
     "EverBotDaemon",
-    "AgentFactory",
-    "get_agent_factory",
-    "create_agent",
     "RoutineManager",
 ]

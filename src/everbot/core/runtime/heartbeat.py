@@ -1043,8 +1043,8 @@ If not, reply with `HEARTBEAT_OK`.
 
     def _create_skill_llm_client(self):
         """Create a lightweight LLM client for skill usage."""
-        from ..agent.factory import AgentFactory
-        model = AgentFactory._resolve_agent_model(self.agent_name)
+        from ..agent.agent_config import resolve_agent_model
+        model = resolve_agent_model(self.agent_name)
         return _SkillLLMClient(model=model)
 
     async def _probe_llm(self) -> bool:
@@ -1580,16 +1580,10 @@ If not, reply with `HEARTBEAT_OK`.
         logger.info("[%s] 心跳已停止", self.agent_name)
 
 
-def _get_skill_global_config():
-    """Load Dolphin GlobalConfig for skill LLM calls.
-
-    Reuses the same config discovery logic as AgentFactory so that skill LLM
-    calls route through the same cloud/model definitions (base_url, api_key,
-    model_name) instead of requiring litellm.
-    """
-    from ..agent.factory import AgentFactory
-    factory = AgentFactory()
-    return factory._get_global_config()
+def _resolve_skill_model_route(model_name: str):
+    """解析 skill LLM 的 {base_url, api_key, model}(dolphin-free,读 config/dolphin.yaml)。"""
+    from ..agent.provider.model_config import load_model_config
+    return load_model_config().route_for(model_name)
 
 
 # Re-export for patching in tests; actual import deferred to complete().
@@ -1618,11 +1612,10 @@ class _SkillLLMClient:
             import os
             model = os.environ.get("ALFRED_SKILL_MODEL", "deepseek-chat")
 
-        # Resolve model config from Dolphin GlobalConfig (base_url, api_key, model_name)
-        global_config = _get_skill_global_config()
-        model_cfg = global_config.get_model_config(model)
+        # 解析模型 endpoint/凭证(dolphin-free,读 config/dolphin.yaml)
+        route = _resolve_skill_model_route(model)
 
-        base_url = model_cfg.effective_api
+        base_url = route.base_url
         # AsyncOpenAI appends /chat/completions; strip it if already present
         if base_url.endswith("/chat/completions"):
             base_url = base_url.replace("/chat/completions", "")
@@ -1631,14 +1624,14 @@ class _SkillLLMClient:
 
         client = AsyncOpenAI(
             base_url=base_url,
-            api_key=model_cfg.api_key or "dummy",
-            default_headers=model_cfg.effective_headers or None,
+            api_key=route.api_key or "dummy",
+            default_headers=route.headers or None,  # 透传 cloud headers(如 kimi User-Agent)
             timeout=60.0,
         )
 
         call_kwargs = {
             "temperature": kwargs.get("temperature", 0.3),
-            "max_tokens": kwargs.get("max_tokens", model_cfg.max_tokens or 2000),
+            "max_tokens": kwargs.get("max_tokens", 8192),  # 恢复原 dolphin 默认上限(原 2000 会截断长输出)
         }
         # Pass through DPH-extracted params accepted by the OpenAI API
         for k, v in kwargs.items():
@@ -1649,7 +1642,7 @@ class _SkillLLMClient:
 
         try:
             response = await client.chat.completions.create(
-                model=model_cfg.model_name,
+                model=route.model,
                 messages=messages,
                 **call_kwargs,
             )

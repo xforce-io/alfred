@@ -11,6 +11,7 @@ prompt 由 agent.md 决定;serve 接 system_prompt override 待后续,见 milkie
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,8 @@ from .adapter import milkie_event_to_progress
 from .sse import SSEParser
 from .....infra.user_data import get_user_data_manager
 
+logger = logging.getLogger(__name__)
+
 
 def _resolve_agent_workspace(agent_name: str) -> Path:
     """解析 agent 工作区目录(= ``~/.alfred/agents/<name>``)。
@@ -31,6 +34,12 @@ def _resolve_agent_workspace(agent_name: str) -> Path:
     return get_user_data_manager().get_agent_dir(agent_name)
 
 
+# 共享 reflector agent 名(#34 C):milkie 丢弃 per-turn system_prompt,故自省不能复用业务
+# agent + override(会被业务人设污染),改路由到此独立 agent —— 其 agent.md 的 systemPrompt
+# 即 reflect-JSON 提示,池内单例(shutdown 自动回收)、contextId 隔离、上下文自包含在 message。
+REFLECTOR_AGENT = "_reflector"
+
+
 def _default_system_prompt_loader(agent_name: str) -> str:
     """构建 milkie agent 的 system prompt —— 真实来源。
 
@@ -38,14 +47,62 @@ def _default_system_prompt_loader(agent_name: str) -> str:
     USER/MEMORY.md(同 dolphin agent 的 ``$workspace_instructions``,但不耦合
     dolphin factory)。workspace 不存在即 bug,fail loud(raise),绝不静默返回 ""。
     """
+    if agent_name == REFLECTOR_AGENT:
+        # reflector 的 systemPrompt 即 reflect-JSON 提示;不读业务 workspace(无污染、无需 workspace)。
+        from ....runtime.inspector import _REFLECT_SYSTEM_PROMPT  # 延迟引,避免模块期循环
+        return _REFLECT_SYSTEM_PROMPT
+
     from .....infra.workspace import WorkspaceLoader
+    from .skills import build_milkie_skills_section, discover_skills
 
     workspace = _resolve_agent_workspace(agent_name)
     if not workspace.exists():
         raise FileNotFoundError(
             f"agent workspace not found for '{agent_name}': {workspace}"
         )
-    return WorkspaceLoader(workspace).build_system_prompt()
+    base = WorkspaceLoader(workspace).build_system_prompt()
+
+    # 动态发现 shell 型 skill 并注入(milkie 无 dolphin 的 ResourceSkillkit;agent 经
+    # 内建 run_command(milkie#134)读 SKILL.md 并跑脚本 —— 与 dolphin 能力对等)。
+    # per-agent allowlist:everbot.agents.<name>.skills.include/exclude(A3,对齐 dolphin)。
+    include, exclude = _agent_skill_filter(agent_name)
+    section = build_milkie_skills_section(
+        discover_skills(workspace, include=include, exclude=exclude), workspace
+    )
+    if section:
+        base = f"{base}\n\n---\n\n{section}" if base else section
+
+    # telegram-serving agent:注入附件输出约定指令(milkie 下文件发送靠 <<<send_file>>>
+    # 标记 + alfred channel 投递,见 attachment_directives / #38 telegram 原生化)。
+    if _is_telegram_serving(agent_name):
+        from .....channels.attachment_directives import ATTACHMENT_INSTRUCTION
+        base = f"{base}\n\n---\n\n{ATTACHMENT_INSTRUCTION}" if base else ATTACHMENT_INSTRUCTION
+    return base
+
+
+def _agent_skill_filter(agent_name: str):
+    """读 everbot.agents.<name>.skills.{include,exclude} → (include, exclude)。缺省 (None, None)。"""
+    try:
+        from .....infra.config import get_config
+
+        everbot_cfg = (get_config() or {}).get("everbot", {}) or {}
+        agent_cfg = (everbot_cfg.get("agents", {}) or {}).get(agent_name, {}) or {}
+        skills_cfg = agent_cfg.get("skills", {}) or {}
+        return skills_cfg.get("include"), skills_cfg.get("exclude")
+    except Exception:
+        return None, None
+
+
+def _is_telegram_serving(agent_name: str) -> bool:
+    """该 agent 是否绑定到某 telegram 频道(决定是否注入附件约定指令)。"""
+    try:
+        from .....infra.config import get_config
+        from .. import _telegram_serving_agents
+
+        everbot_cfg = (get_config() or {}).get("everbot", {}) or {}
+        return agent_name in _telegram_serving_agents(everbot_cfg)
+    except Exception:
+        return False
 
 
 @dataclass
@@ -103,27 +160,27 @@ class MilkieProvider:
         data_dir_root = Path(milkie_cfg.get("data_dir_root") or "~/.alfred/milkie").expanduser()
         node_bin = milkie_cfg.get("node_bin") or "node"
 
-        from ..dolphin.factory import get_agent_factory
-        factory = get_agent_factory()
-        dolphin_path = getattr(factory, "global_config_path", None)
-        import yaml as _yaml
-        dolphin_cfg = {}
-        if dolphin_path and Path(dolphin_path).exists():
-            dolphin_cfg = _yaml.safe_load(Path(dolphin_path).read_text(encoding="utf-8")) or {}
-        llms = dolphin_cfg.get("llms", {}) or {}
-        clouds = dolphin_cfg.get("clouds", {}) or {}
-        default_model = dolphin_cfg.get("default_model") or next(iter(llms), "")
-        fast_model = dolphin_cfg.get("fast_llm") or default_model
+        # 模型路由读 config/dolphin.yaml(纯 YAML),经 model_config 定位 —— 不再经
+        # dolphin factory 的 global_config_path(去 dolphin 耦合,#38)。
+        from ..model_config import load_model_config
+        mc = load_model_config()
 
         launcher = SidecarLauncher(
             dist_path=dist_path, data_dir_root=data_dir_root, node_bin=node_bin,
-            llms=llms, clouds=clouds, default_model=default_model, fast_model=fast_model,
+            llms=mc.llms, clouds=mc.clouds,
+            default_model=mc.default_model, fast_model=mc.fast_model,
         )
         ready_timeout = float(milkie_cfg.get("ready_timeout", 20.0))
 
         def _build(agent_name: str):
+            # per-agent 模型(everbot.agents.<name>.model > everbot.default_model),否则所有
+            # agent 都用全局默认模型(实测 bug:demo_agent 被用成 kimi-code 而非其配置的 volcengine)。
+            from ...agent_config import resolve_agent_model
+            per_agent_model = resolve_agent_model(agent_name) or None
             spec = launcher.build(
-                agent_name, system_prompt=self._system_prompt_loader(agent_name)
+                agent_name,
+                system_prompt=self._system_prompt_loader(agent_name),
+                default_model=per_agent_model,
             )
             return spec.cmd, spec.env
 
@@ -155,6 +212,14 @@ class MilkieProvider:
     ) -> MilkieAgentHandle:
         # 经 pool 惰性 spawn/复用 per-agent 的 milkie serve;handle 携带该 serve 的
         # base_url(动态端口),而非固定 config base_url。
+        if tools_override is not None:
+            # 已知限制(#38):milkie serve 的 agent 工具由 agent.md 的 FSM state 决定,
+            # 暂不支持 per-create 工具限权。heartbeat 的只读工具集限制在 milkie 下未生效
+            # (agent 仍持全量工具含 run_command)。待 milkie serve 支持运行时工具限权后落地。
+            logger.warning(
+                "MilkieProvider.create_agent: tools_override 暂不支持(milkie serve 无运行时工具限权);"
+                "agent '%s' 将使用 agent.md 定义的全量工具。", agent_name,
+            )
         sidecar = await self._get_pool().get_or_spawn(agent_name)
         return MilkieAgentHandle(
             base_url=sidecar.base_url,
@@ -194,7 +259,30 @@ class MilkieProvider:
                     )
                 async for chunk in resp.aiter_text():
                     for event, data_str in parser.feed(chunk):
-                        item = milkie_event_to_progress(event, json.loads(data_str))
+                        data = json.loads(data_str)
+                        # milkie surfaces failures via an ``error`` frame and/or an
+                        # ``agent.run.completed`` terminal with ``status=="error"``
+                        # (e.g. an LLM-endpoint connection error). The adapter maps
+                        # both to None (no _progress), so without this an agent/LLM
+                        # failure would masquerade as an empty turn — surfacing as
+                        # "(no response)" on chat or "LLM reflection returned empty
+                        # response" on heartbeat, with no retry. Raise instead: the
+                        # message carries retryable markers (e.g. "connection error")
+                        # so the orchestrator retries transient failures, and genuine
+                        # errors propagate their real cause instead of an empty string.
+                        if event == "error":
+                            raise RuntimeError(
+                                f"milkie agent error: {data.get('message') or data}"
+                            )
+                        if event == "agent.run.completed" and data.get("status") == "error":
+                            msg = (
+                                data.get("error")
+                                or data.get("output")
+                                or data.get("lastTextOutput")
+                                or "unknown error"
+                            )
+                            raise RuntimeError(f"milkie agent run failed: {msg}")
+                        item = milkie_event_to_progress(event, data)
                         if item is not None:
                             yield {"_progress": [item]}
         finally:
@@ -276,8 +364,14 @@ class MilkieProvider:
                 client.close()
 
     def register_skillkit(self, agent: Any, skillkit: Any) -> None:
-        raise NotImplementedError(
-            "MilkieProvider.register_skillkit 需 milkie#87 跨语言工具桥;见 goal.md D"
+        # #38 telegram 原生化:不再走"跨语言桥"。telegram 文件/图片发送改由 alfred
+        # channel 的输出约定(<<<send_file: ...>>>,见 attachment_directives)在 turn 后
+        # 投递 —— 能力不丢、不耦合 milkie。故此处对 milkie agent 是优雅 no-op(不再
+        # NotImplementedError 阻断 telegram-serving agent)。其它非约定型 Python skillkit
+        # 若将来要在 milkie 下原生可用,另行设计(非本任务)。
+        name = getattr(skillkit, "getName", lambda: type(skillkit).__name__)()
+        logger.debug(
+            "MilkieProvider.register_skillkit no-op for '%s'(milkie 经输出约定提供文件发送)", name
         )
 
     def export_session(self, agent: Any) -> dict:
@@ -426,4 +520,10 @@ def _milkie_messages_to_history(messages: list) -> list:
                         "tool_call_id": c.get("tool_use_id"),
                         "content": c.get("content", ""),
                     })
+    # A4 数据卫生:milkie 历史可能含中断轮留下的空 assistant / orphan tool(无配对
+    # tool_use),下游送 LLM 会 400。复用与 dolphin 保存路径同一套纯变换(惰性 import,
+    # persistence 顶层不引 milkie → 无循环)。
+    from ....session.persistence import SessionPersistence
+    out = SessionPersistence._filter_empty_assistant_messages(out)
+    out = SessionPersistence._heal_orphan_tool_messages(out)
     return out
