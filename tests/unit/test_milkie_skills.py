@@ -98,6 +98,27 @@ def test_system_prompt_loader_injects_discovered_skills(tmp_path, monkeypatch):
     assert "run_command" in prompt               # 面向 run_command 的调用说明在
 
 
+def test_telegram_agent_gets_attachment_instruction(tmp_path, monkeypatch):
+    """telegram-serving agent 的系统提示注入附件输出约定;非 telegram agent 不注入。"""
+    from src.everbot.core.agent.provider.milkie import provider as mprov
+    import src.everbot.infra.config as config_module
+
+    ws = tmp_path / "ws"
+    (ws / "skills").mkdir(parents=True)
+    (ws / "SOUL.md").write_text("身份", encoding="utf-8")
+    monkeypatch.setattr(mprov, "_resolve_agent_workspace", lambda _n: ws)
+    monkeypatch.setattr(msk, "resolve_skill_dirs", lambda _ws: [ws / "skills"])
+    monkeypatch.setattr(
+        config_module, "get_config",
+        lambda *a, **k: {"everbot": {"channels": {"telegram": {"enabled": True, "default_agent": "tg_agent"}}}},
+    )
+
+    tg_prompt = mprov._default_system_prompt_loader("tg_agent")
+    other_prompt = mprov._default_system_prompt_loader("other_agent")
+    assert "send_file" in tg_prompt          # telegram agent 有附件约定
+    assert "send_file" not in other_prompt   # 非 telegram agent 无
+
+
 def test_resolve_skill_dirs_orders_workspace_first_and_dedups(tmp_path, monkeypatch):
     ws = tmp_path / "ws"
     (ws / "skills").mkdir(parents=True)

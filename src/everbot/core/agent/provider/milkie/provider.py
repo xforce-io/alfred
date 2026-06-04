@@ -11,6 +11,7 @@ prompt 由 agent.md 决定;serve 接 system_prompt override 待后续,见 milkie
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,8 @@ import httpx
 from .adapter import milkie_event_to_progress
 from .sse import SSEParser
 from .....infra.user_data import get_user_data_manager
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_agent_workspace(agent_name: str) -> Path:
@@ -53,7 +56,25 @@ def _default_system_prompt_loader(agent_name: str) -> str:
     section = build_milkie_skills_section(discover_skills(workspace), workspace)
     if section:
         base = f"{base}\n\n---\n\n{section}" if base else section
+
+    # telegram-serving agent:注入附件输出约定指令(milkie 下文件发送靠 <<<send_file>>>
+    # 标记 + alfred channel 投递,见 attachment_directives / #38 telegram 原生化)。
+    if _is_telegram_serving(agent_name):
+        from .....channels.attachment_directives import ATTACHMENT_INSTRUCTION
+        base = f"{base}\n\n---\n\n{ATTACHMENT_INSTRUCTION}" if base else ATTACHMENT_INSTRUCTION
     return base
+
+
+def _is_telegram_serving(agent_name: str) -> bool:
+    """该 agent 是否绑定到某 telegram 频道(决定是否注入附件约定指令)。"""
+    try:
+        from .....infra.config import get_config
+        from .. import _telegram_serving_agents
+
+        everbot_cfg = (get_config() or {}).get("everbot", {}) or {}
+        return agent_name in _telegram_serving_agents(everbot_cfg)
+    except Exception:
+        return False
 
 
 @dataclass
@@ -266,8 +287,14 @@ class MilkieProvider:
                 client.close()
 
     def register_skillkit(self, agent: Any, skillkit: Any) -> None:
-        raise NotImplementedError(
-            "MilkieProvider.register_skillkit 需 milkie#87 跨语言工具桥;见 goal.md D"
+        # #38 telegram 原生化:不再走"跨语言桥"。telegram 文件/图片发送改由 alfred
+        # channel 的输出约定(<<<send_file: ...>>>,见 attachment_directives)在 turn 后
+        # 投递 —— 能力不丢、不耦合 milkie。故此处对 milkie agent 是优雅 no-op(不再
+        # NotImplementedError 阻断 telegram-serving agent)。其它非约定型 Python skillkit
+        # 若将来要在 milkie 下原生可用,另行设计(非本任务)。
+        name = getattr(skillkit, "getName", lambda: type(skillkit).__name__)()
+        logger.debug(
+            "MilkieProvider.register_skillkit no-op for '%s'(milkie 经输出约定提供文件发送)", name
         )
 
     def export_session(self, agent: Any) -> dict:

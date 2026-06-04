@@ -6,7 +6,6 @@ logger = logging.getLogger(__name__)
 
 _provider_singleton: "AgentProvider | None" = None
 
-_warned_fallback: set = set()
 # provider-name → singleton; one MilkieProvider fans out to all agents via its internal per-agent sidecar pool
 _provider_by_name: dict = {}
 
@@ -67,25 +66,18 @@ def _make_provider(name: str) -> "AgentProvider":
 
 
 def get_provider_for_agent(agent_name: str) -> "AgentProvider":
-    """Per-agent provider 路由:显式配置 > telegram 自动回退 > 全局。"""
+    """Per-agent provider 路由:显式配置 > 全局。
+
+    #38(telegram 原生化)后移除了"telegram-serving agent 在 milkie 下自动回退 dolphin"
+    的分支 —— telegram 文件发送已改由 alfred channel 的输出约定(``<<<send_file: ...>>>``)
+    提供,milkie 下 telegram agent 文本+文件均可用,不再需要回退兜底。
+    """
     everbot_cfg = _load_everbot_cfg()
     agent_cfg = (everbot_cfg.get("agents", {}) or {}).get(agent_name, {}) or {}
     explicit = agent_cfg.get("provider")
     global_name = everbot_cfg.get("provider") or "dolphin"
 
-    if explicit:
-        chosen = explicit
-    elif global_name == "milkie" and agent_name in _telegram_serving_agents(everbot_cfg):
-        chosen = "dolphin"
-        if agent_name not in _warned_fallback:
-            _warned_fallback.add(agent_name)
-            logger.warning(
-                "Agent '%s' 经 telegram 服务但 milkie 暂不支持 telegram skillkit"
-                "(待 milkie#87),自动回退 dolphin。如确需 milkie 请显式配置 "
-                "everbot.agents.%s.provider=milkie。", agent_name, agent_name,
-            )
-    else:
-        chosen = global_name
+    chosen = explicit if explicit else global_name
 
     cached = _provider_by_name.get(chosen)
     if cached is None:
@@ -152,7 +144,6 @@ def reset_provider() -> None:
     global _provider_singleton
     _provider_singleton = None
     _provider_by_name.clear()
-    _warned_fallback.clear()
 
 
 def __getattr__(name):

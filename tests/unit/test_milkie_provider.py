@@ -176,14 +176,18 @@ def test_get_variable_reads_from_context_get_endpoint():
     assert val == "claude"
 
 
-async def test_still_unsupported_methods_raise_clearly():
-    """仍需 milkie 扩展的接口:明确 NotImplementedError(而非静默错误)。"""
-    import pytest
-
+async def test_register_skillkit_is_graceful_noop():
+    """#38 telegram 原生化:register_skillkit 不再 NotImplementedError 阻断 telegram agent;
+    文件发送改由 channel 输出约定提供,故此处为优雅 no-op(不崩、不抛)。"""
     p = MilkieProvider("http://x")
     h = MilkieAgentHandle("http://x", "c")
-    with pytest.raises(NotImplementedError):
-        p.register_skillkit(h, object())
+
+    class _Kit:
+        def getName(self):
+            return "telegram_channel"
+
+    # 不抛异常即通过
+    p.register_skillkit(h, _Kit())
 
 
 def _llm_provider(handler):
