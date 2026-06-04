@@ -266,8 +266,7 @@ class MilkieProvider:
             if owns_client:
                 await client.aclose()
 
-    # -- 状态查询:milkie 用 AgentResult.status;handle 暂不缓存,默认 False。
-    #    完整实现需 serve 暴露运行态查询(待 milkie 扩展)。
+    # -- 运行态查询:is_paused/is_error 暂未由 serve 透出,默认 False(非本次范围)。
     def is_paused(self, agent: Any) -> bool:
         return False
 
@@ -275,7 +274,20 @@ class MilkieProvider:
         return False
 
     def is_user_interrupt_paused(self, agent: Any) -> bool:
-        return False
+        # milkie#137:经 serve /context/state 查运行态。paused ⇔ context 被 /interrupt
+        # 停在 FSM 保留态 paused、可 /resume 续跑;此前恒 False 使 resume gate 成死分支。
+        client = self._sync_client or self._new_sync_client()
+        owns = self._sync_client is None
+        try:
+            resp = client.post(
+                f"{agent.base_url}/context/state",
+                json={"contextId": agent.context_id},
+            )
+            resp.raise_for_status()  # 非2xx 不能静默返回 False,明确抛错
+            return bool(resp.json().get("paused", False))
+        finally:
+            if owns:
+                client.close()
 
     def ensure_chat_compatibility(self) -> bool:
         return False  # milkie 无 dolphin 的 EXPLORE_BLOCK_V2 flag
@@ -288,7 +300,13 @@ class MilkieProvider:
         pass  # 同上
 
     def set_session_id(self, agent: Any, session_id: str) -> None:
-        pass  # milkie 会话身份即 handle.context_id
+        # milkie 会话身份即 contextId,serve 按 contextId 在 sqlite 持久化历史。必须把
+        # contextId 对齐到稳定的 alfred session_id —— 否则每次 daemon 重启 create_agent 生成
+        # 新随机 contextId,重启前的历史成孤儿、接不上(#34 会话连续性)。同会话跨重启 →
+        # 同 session_id → 同 contextId → serve 历史续上。临时路径(reflector/cron)不调本方法,
+        # 保留随机 contextId 做隔离。
+        if session_id and getattr(agent, "context_id", None) != session_id:
+            agent.context_id = session_id
 
     def has_skill(self, agent: Any, name: str) -> bool:
         return False  # Python skill 待 milkie#87
