@@ -39,13 +39,21 @@ def _default_system_prompt_loader(agent_name: str) -> str:
     dolphin factory)。workspace 不存在即 bug,fail loud(raise),绝不静默返回 ""。
     """
     from .....infra.workspace import WorkspaceLoader
+    from .skills import build_milkie_skills_section, discover_skills
 
     workspace = _resolve_agent_workspace(agent_name)
     if not workspace.exists():
         raise FileNotFoundError(
             f"agent workspace not found for '{agent_name}': {workspace}"
         )
-    return WorkspaceLoader(workspace).build_system_prompt()
+    base = WorkspaceLoader(workspace).build_system_prompt()
+
+    # 动态发现 shell 型 skill 并注入(milkie 无 dolphin 的 ResourceSkillkit;agent 经
+    # 内建 run_command(milkie#134)读 SKILL.md 并跑脚本 —— 与 dolphin 能力对等)。
+    section = build_milkie_skills_section(discover_skills(workspace), workspace)
+    if section:
+        base = f"{base}\n\n---\n\n{section}" if base else section
+    return base
 
 
 @dataclass

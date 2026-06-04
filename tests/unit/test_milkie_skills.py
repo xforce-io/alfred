@@ -1,0 +1,108 @@
+"""milkie skill 发现单测(#38 E 能力层 alfred 侧)。"""
+from pathlib import Path
+
+from src.everbot.core.agent.provider.milkie import skills as msk
+
+
+def _make_skill(dir_: Path, name: str, title: str, desc: str) -> Path:
+    sd = dir_ / name
+    sd.mkdir(parents=True)
+    (sd / "SKILL.md").write_text(f"# {title}\n\n{desc}\n\n## 用法\n...", encoding="utf-8")
+    return sd
+
+
+def test_parse_skill_metadata_extracts_title_and_description(tmp_path):
+    sd = _make_skill(tmp_path, "ops", "Ops 工具", "运维巡检与诊断脚本集合。")
+    meta = msk.parse_skill_metadata(sd)
+    assert meta is not None
+    assert meta["name"] == "ops"
+    assert meta["title"] == "Ops 工具"
+    assert "运维巡检" in meta["description"]
+    assert meta["abs_path"] == str(sd.resolve())
+
+
+def test_parse_skill_metadata_no_skill_md_returns_none(tmp_path):
+    d = tmp_path / "not_a_skill"
+    d.mkdir()
+    assert msk.parse_skill_metadata(d) is None
+
+
+def test_parse_skill_metadata_truncates_long_description(tmp_path):
+    long_desc = "x" * 500
+    sd = _make_skill(tmp_path, "big", "Big", long_desc)
+    meta = msk.parse_skill_metadata(sd)
+    assert meta["description"].endswith("...")
+    assert len(meta["description"]) <= msk._MAX_DESC_CHARS + 3
+
+
+def test_discover_skills_dedups_with_priority(tmp_path, monkeypatch):
+    """同名 skill 高优先级目录(前者)胜出。"""
+    hi = tmp_path / "hi"
+    lo = tmp_path / "lo"
+    _make_skill(hi, "shared", "高优先级版", "workspace 版")
+    _make_skill(lo, "shared", "低优先级版", "全局版")
+    _make_skill(lo, "only_lo", "仅全局", "只在低优先级目录")
+
+    monkeypatch.setattr(msk, "resolve_skill_dirs", lambda _ws: [hi, lo])
+    found = msk.discover_skills(tmp_path)
+    by_name = {s["name"]: s for s in found}
+
+    assert set(by_name) == {"shared", "only_lo"}
+    assert by_name["shared"]["title"] == "高优先级版"  # hi 胜出
+    assert by_name["shared"]["abs_path"] == str((hi / "shared").resolve())
+
+
+def test_discover_skills_skips_dotdirs_and_non_skill_dirs(tmp_path, monkeypatch):
+    d = tmp_path / "d"
+    _make_skill(d, "good", "Good", "真 skill")
+    (d / ".hidden").mkdir()
+    (d / "plain").mkdir()  # 无 SKILL.md
+    monkeypatch.setattr(msk, "resolve_skill_dirs", lambda _ws: [d])
+    found = msk.discover_skills(tmp_path)
+    assert [s["name"] for s in found] == ["good"]
+
+
+def test_build_section_includes_run_command_and_paths(tmp_path):
+    skills = [
+        {"name": "ops", "title": "Ops", "description": "运维脚本", "abs_path": "/abs/ops"},
+        {"name": "web", "title": "Web", "description": "", "abs_path": "/abs/web"},
+    ]
+    section = msk.build_milkie_skills_section(skills, Path("/ws"))
+    assert "run_command" in section
+    assert "ops" in section and "/abs/ops" in section
+    # 空 description 退回 title
+    assert "Web" in section
+    assert "$WORKSPACE_ROOT" in section and "/ws" in section
+
+
+def test_build_section_empty_when_no_skills():
+    assert msk.build_milkie_skills_section([], Path("/ws")) == ""
+
+
+def test_system_prompt_loader_injects_discovered_skills(tmp_path, monkeypatch):
+    """_default_system_prompt_loader 把 workspace 指令 + 发现的 skill 都拼进系统提示。"""
+    from src.everbot.core.agent.provider.milkie import provider as mprov
+
+    ws = tmp_path / "agent_ws"
+    (ws / "skills").mkdir(parents=True)
+    (ws / "SOUL.md").write_text("我是测试 agent。", encoding="utf-8")
+    _make_skill(ws / "skills", "ops", "Ops", "运维巡检脚本")
+
+    monkeypatch.setattr(mprov, "_resolve_agent_workspace", lambda _n: ws)
+    # 隔离真实 ~/.alfred/skills 与仓库 skills/,只看 workspace/skills
+    monkeypatch.setattr(msk, "resolve_skill_dirs", lambda _ws: [ws / "skills"])
+
+    prompt = mprov._default_system_prompt_loader("whatever")
+    assert "我是测试 agent" in prompt          # workspace 指令在
+    assert "ops" in prompt                       # 发现的 skill 在
+    assert "run_command" in prompt               # 面向 run_command 的调用说明在
+
+
+def test_resolve_skill_dirs_orders_workspace_first_and_dedups(tmp_path, monkeypatch):
+    ws = tmp_path / "ws"
+    (ws / "skills").mkdir(parents=True)
+    dirs = msk.resolve_skill_dirs(ws)
+    # workspace/skills 必须在最前
+    assert dirs[0] == ws / "skills"
+    # 无重复
+    assert len(dirs) == len(set(str(d) for d in dirs))
