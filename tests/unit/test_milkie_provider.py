@@ -131,17 +131,25 @@ async def test_self_built_client_disables_env_proxy():
         await client.aclose()
 
 
+def test_set_session_id_aligns_context_id_for_cross_restart_continuity():
+    """#34:milkie 会话历史按 contextId 存于 serve sqlite;contextId 必须绑定到稳定的
+    session_id,否则每次 daemon 重启生成新随机 contextId → 历史接不上。set_session_id
+    把 handle.context_id 对齐到 session_id(同会话跨重启续历史)。"""
+    p = MilkieProvider("http://x")
+    h = MilkieAgentHandle("http://sidecar", "demo_agent-rand1234", name="demo_agent")
+    p.set_session_id(h, "demo_agent__primary__chat")
+    assert h.context_id == "demo_agent__primary__chat"  # 绑定稳定 session_id
+
+
 def test_safe_noop_methods_do_not_crash():
     """milkie 自带机制的接口:no-op,不崩(turn 层可用的前提)。"""
     p = MilkieProvider("http://x")
     h = MilkieAgentHandle("http://x", "c")
     p.init_trajectory(h, "/t", overwrite=True)
     p.finalize_trajectory_on_error(h)
-    p.set_session_id(h, "s")
     assert p.ensure_chat_compatibility() is False
     assert p.is_paused(h) is False
     assert p.is_error(h) is False
-    assert p.is_user_interrupt_paused(h) is False
     assert p.has_skill(h, "x") is False
 
 
@@ -174,6 +182,41 @@ def test_get_variable_reads_from_context_get_endpoint():
     finally:
         client.close()
     assert val == "claude"
+
+
+def test_is_user_interrupt_paused_queries_context_state():
+    """milkie#137:is_user_interrupt_paused 经 serve /context/state 查 paused。"""
+    cap: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cap["url"] = str(request.url)
+        cap["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"contextId": "c1", "exists": True, "paused": True, "resumable": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        p = MilkieProvider("http://x", sync_client=client)
+        paused = p.is_user_interrupt_paused(MilkieAgentHandle("http://sidecar", "c1"))
+    finally:
+        client.close()
+    assert paused is True
+    assert cap["url"].endswith("/context/state")
+    assert cap["body"] == {"contextId": "c1"}
+
+
+def test_is_user_interrupt_paused_false_when_not_paused():
+    """completed/running 的 context → paused False(resume gate 不触发)。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"contextId": "c1", "exists": True, "paused": False, "resumable": False})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        p = MilkieProvider("http://x", sync_client=client)
+        paused = p.is_user_interrupt_paused(MilkieAgentHandle("http://sidecar", "c1"))
+    finally:
+        client.close()
+    assert paused is False
 
 
 async def test_still_unsupported_methods_raise_clearly():
