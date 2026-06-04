@@ -22,6 +22,22 @@ _CLOUDS = {
 }
 
 
+def test_dolphin_model_to_milkie_expands_env_in_baseurl(monkeypatch):
+    # #38:baseUrl 含 ${ENV} 必须展开,否则 milkie 拿到字面 ${...} 坏 URL。
+    monkeypatch.setenv("MY_BASE_XYZ", "https://real.example/v3")
+    llms = {"m": {"cloud": "c", "model_name": "mm", "type_api": "openai"}}
+    clouds = {"c": {"api": "${MY_BASE_XYZ}", "api_key": "k"}}
+    assert dolphin_model_to_milkie(llms, clouds, "m")["baseUrl"] == "https://real.example/v3"
+
+
+def test_dolphin_model_to_milkie_unset_env_baseurl_fails_fast(monkeypatch):
+    monkeypatch.delenv("UNSET_BASE_XYZ", raising=False)
+    llms = {"m": {"cloud": "c", "model_name": "mm", "type_api": "openai"}}
+    clouds = {"c": {"api": "${UNSET_BASE_XYZ}", "api_key": "k"}}
+    with pytest.raises(ValueError, match="环境变量未设置"):
+        dolphin_model_to_milkie(llms, clouds, "m")
+
+
 def test_dolphin_model_to_milkie_maps_llm_and_cloud():
     assert dolphin_model_to_milkie(_LLMS, _CLOUDS, "qwen-turbo") == {
         "provider": "aliyun",

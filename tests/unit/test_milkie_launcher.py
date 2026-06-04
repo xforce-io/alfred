@@ -100,3 +100,36 @@ def test_build_single_tier_agent_md_when_fast_equals_default(tmp_path):
     spec = launcher.build("alice", system_prompt="x")
     assert spec.agent_md.exists()
     assert "gpt-x" in spec.agent_md.read_text(encoding="utf-8")
+
+
+def test_build_expands_env_in_api_key(tmp_path, monkeypatch):
+    # #38:cloud api_key 含 ${ENV} 必须展开进 OPENAI_API_KEY,否则 milkie 拿字面 ${...} → 401。
+    monkeypatch.setenv("MY_KEY_XYZ", "sk-real-expanded")
+    launcher = SidecarLauncher(
+        dist_path=tmp_path / "milkie" / "dist" / "cli" / "index.js",
+        data_dir_root=tmp_path / "data", node_bin="node",
+        llms={"main": {"cloud": "oa", "model_name": "gpt-x", "type_api": "openai"}},
+        clouds={"oa": {"api": "https://api.oa/v1", "api_key": "${MY_KEY_XYZ}"}},
+        default_model="main", fast_model="main",
+    )
+    spec = launcher.build("alice", system_prompt="x")
+    assert spec.env["OPENAI_API_KEY"] == "sk-real-expanded"
+
+
+def test_build_uses_per_agent_model_override(tmp_path):
+    # #38:default_model 覆盖 → agent.md 用该 agent 的模型,而非全局默认(实测 bug)。
+    launcher = SidecarLauncher(
+        dist_path=tmp_path / "milkie" / "dist" / "cli" / "index.js",
+        data_dir_root=tmp_path / "data", node_bin="node",
+        llms={"glob": {"cloud": "oa", "model_name": "global-model", "type_api": "openai"},
+              "mine": {"cloud": "vc", "model_name": "my-model", "type_api": "openai"}},
+        clouds={"oa": {"api": "https://oa/v1", "api_key": "k1"},
+                "vc": {"api": "https://vc/v1", "api_key": "k2"}},
+        default_model="glob", fast_model="glob",
+    )
+    spec = launcher.build("alice", system_prompt="x", default_model="mine")
+    import yaml
+    fm = yaml.safe_load(spec.agent_md.read_text(encoding="utf-8").split("---")[1])
+    assert fm["model"]["model"] == "my-model"        # 默认(chat)档用 per-agent 模型
+    assert spec.env["OPENAI_API_KEY"] == "k2"        # 用 per-agent 模型的 cloud key
+    assert fm["models"]["fast"]["model"] == "global-model"  # fast 档仍全局(单独 concern)

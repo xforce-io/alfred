@@ -547,7 +547,7 @@ def test_injected_system_prompt_loader_is_used(monkeypatch):
     captured_prompts: list = []
 
     class _CapturingLauncher:
-        def build(self, agent_name, *, system_prompt):
+        def build(self, agent_name, *, system_prompt, default_model=None):
             captured_prompts.append(system_prompt)
             return LaunchSpec(
                 cmd=["node"], env={}, data_dir=Path("/tmp"), agent_md=Path("/tmp/a.md")

@@ -162,8 +162,14 @@ class MilkieProvider:
         ready_timeout = float(milkie_cfg.get("ready_timeout", 20.0))
 
         def _build(agent_name: str):
+            # per-agent 模型(everbot.agents.<name>.model > everbot.default_model),否则所有
+            # agent 都用全局默认模型(实测 bug:demo_agent 被用成 kimi-code 而非其配置的 volcengine)。
+            from ...agent_config import resolve_agent_model
+            per_agent_model = resolve_agent_model(agent_name) or None
             spec = launcher.build(
-                agent_name, system_prompt=self._system_prompt_loader(agent_name)
+                agent_name,
+                system_prompt=self._system_prompt_loader(agent_name),
+                default_model=per_agent_model,
             )
             return spec.cmd, spec.env
 
