@@ -93,6 +93,33 @@ async def test_run_turn_yields_llm_progress_deltas():
     ]
 
 
+async def test_run_turn_raises_on_error_terminal():
+    """An ``agent.run.completed`` with status=error must raise (not be swallowed as
+    an empty turn) — e.g. an LLM-endpoint connection error. The message carries the
+    cause so retryable markers can drive a retry."""
+    sse = _sse(
+        ("agent.run.started", {"contextId": "c"}),
+        ("agent.run.completed", {"status": "error", "output": "Connection error."}),
+    )
+    p, client = _provider(sse)
+    try:
+        with pytest.raises(RuntimeError, match="Connection error"):
+            _ = [e async for e in p.run_turn(MilkieAgentHandle("http://sidecar", "c"), "hi")]
+    finally:
+        await client.aclose()
+
+
+async def test_run_turn_raises_on_error_frame():
+    """A milkie ``error`` SSE frame (thrown-exception path) must also surface."""
+    sse = _sse(("error", {"message": "model overloaded"}))
+    p, client = _provider(sse)
+    try:
+        with pytest.raises(RuntimeError, match="model overloaded"):
+            _ = [e async for e in p.run_turn(MilkieAgentHandle("http://sidecar", "c"), "hi")]
+    finally:
+        await client.aclose()
+
+
 async def test_run_turn_sends_contextid_and_input_to_chat():
     cap: dict = {}
     p, client = _provider(_sse(("agent.run.completed", {"status": "completed", "output": ""})), cap)

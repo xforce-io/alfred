@@ -598,7 +598,6 @@ class Inspector:
         agent = await provider.create_agent(REFLECTOR_AGENT, self.workspace_path)
         answer = ""
         deltas: list[str] = []
-        seen_progress: set[str] = set()
 
         async def _stream() -> None:
             nonlocal answer
@@ -618,10 +617,9 @@ class Inspector:
                         continue
                     if progress.get("stage") != "llm":
                         continue
-                    fp = json.dumps(progress, sort_keys=True, ensure_ascii=False)
-                    if fp in seen_progress:
-                        continue
-                    seen_progress.add(fp)
+                    # NB: do NOT content-dedup llm deltas — milkie streams each token
+                    # exactly once and identical token text recurs constantly; dedup
+                    # would drop the repeats and corrupt the reflection JSON.
                     delta = progress.get("delta")
                     if isinstance(delta, str) and delta:
                         deltas.append(delta)

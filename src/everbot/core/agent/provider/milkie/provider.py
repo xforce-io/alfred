@@ -259,7 +259,30 @@ class MilkieProvider:
                     )
                 async for chunk in resp.aiter_text():
                     for event, data_str in parser.feed(chunk):
-                        item = milkie_event_to_progress(event, json.loads(data_str))
+                        data = json.loads(data_str)
+                        # milkie surfaces failures via an ``error`` frame and/or an
+                        # ``agent.run.completed`` terminal with ``status=="error"``
+                        # (e.g. an LLM-endpoint connection error). The adapter maps
+                        # both to None (no _progress), so without this an agent/LLM
+                        # failure would masquerade as an empty turn — surfacing as
+                        # "(no response)" on chat or "LLM reflection returned empty
+                        # response" on heartbeat, with no retry. Raise instead: the
+                        # message carries retryable markers (e.g. "connection error")
+                        # so the orchestrator retries transient failures, and genuine
+                        # errors propagate their real cause instead of an empty string.
+                        if event == "error":
+                            raise RuntimeError(
+                                f"milkie agent error: {data.get('message') or data}"
+                            )
+                        if event == "agent.run.completed" and data.get("status") == "error":
+                            msg = (
+                                data.get("error")
+                                or data.get("output")
+                                or data.get("lastTextOutput")
+                                or "unknown error"
+                            )
+                            raise RuntimeError(f"milkie agent run failed: {msg}")
+                        item = milkie_event_to_progress(event, data)
                         if item is not None:
                             yield {"_progress": [item]}
         finally:
