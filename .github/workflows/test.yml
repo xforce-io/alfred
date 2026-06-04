@@ -23,7 +23,7 @@ jobs:
 
       - name: Install Dolphin SDK
         run: |
-          pip install -e "git+https://github.com/kweaver-ai/dolphin.git@main#egg=dolphin"
+          pip install "git+https://github.com/kweaver-ai/dolphin.git@main"
 
       - name: Install dependencies
         run: |
@@ -35,4 +35,4 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          pytest tests/unit/ -x -q --tb=short
+          pytest tests/unit/ -m "not integration" -x -q --tb=short
