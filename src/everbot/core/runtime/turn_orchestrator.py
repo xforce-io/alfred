@@ -708,18 +708,35 @@ class TurnOrchestrator:
                     fail_sig = None  # set in completed/failed branch below
 
                     if status in ("running", "processing"):
-                        # Empty-output loop detection
-                        err = self._check_empty_output_loop(
-                            llm_had_output_this_round, llm_had_think_this_round,
-                            tool_execution_count,
-                            consecutive_empty_llm_rounds, consecutive_think_only_rounds,
-                            response,
-                            tool_call_count, tool_names_executed, failed_tool_outputs,
-                        )
-                        if err:
-                            _flush_trajectory()
-                            yield err
-                            return
+                        # A *novel* tool call means the round made progress: tool-use
+                        # native models legitimately call tools without any narration
+                        # text, so "tool call + no text" is NOT a degradation signal on
+                        # its own. Only a text-less round that ALSO makes no progress
+                        # (a repeated tool intent — going in circles) counts toward the
+                        # empty/think-only loop guards. Repeated intents are additionally
+                        # bounded by the intent-dedup guard below, and distinct runaway
+                        # calls by the tool-call budget. (Fixes EMPTY_OUTPUT_LOOP false
+                        # positives on legitimate multi-step skill workflows; a genuine
+                        # empty LLM response under the streaming model ends the turn
+                        # rather than looping back here.)
+                        intent_sig = _extract_tool_intent_signature(s_name, s_args)
+                        made_progress = bool(intent_sig) and tool_intent_signatures.get(intent_sig, 0) == 0
+                        if made_progress:
+                            consecutive_empty_llm_rounds = 0
+                            consecutive_think_only_rounds = 0
+                        else:
+                            # Empty-output loop detection (only when not progressing)
+                            err = self._check_empty_output_loop(
+                                llm_had_output_this_round, llm_had_think_this_round,
+                                tool_execution_count,
+                                consecutive_empty_llm_rounds, consecutive_think_only_rounds,
+                                response,
+                                tool_call_count, tool_names_executed, failed_tool_outputs,
+                            )
+                            if err:
+                                _flush_trajectory()
+                                yield err
+                                return
                         # Repeated-text loop detection
                         if tool_execution_count > 0 and _check_round_text_loop():
                             _flush_trajectory()
@@ -732,7 +749,7 @@ class TurnOrchestrator:
                                 failed_tool_outputs=failed_tool_outputs,
                             )
                             return
-                        if not llm_had_output_this_round and tool_execution_count > 0:
+                        if not made_progress and not llm_had_output_this_round and tool_execution_count > 0:
                             if llm_had_think_this_round:
                                 consecutive_think_only_rounds += 1
                             else:
@@ -760,8 +777,7 @@ class TurnOrchestrator:
                             )
                             return
 
-                        # Intent dedup check
-                        intent_sig = _extract_tool_intent_signature(s_name, s_args)
+                        # Intent dedup check (intent_sig computed above)
                         err = self._check_intent_dedup(
                             intent_sig, tool_intent_signatures, warned_intents,
                             response, tool_call_count, tool_execution_count,
@@ -880,18 +896,29 @@ class TurnOrchestrator:
                             if pid:
                                 phantom_pids[pid] = t_name
 
-                    # Empty-output loop detection
-                    err = self._check_empty_output_loop(
-                        llm_had_output_this_round, llm_had_think_this_round,
-                        tool_execution_count,
-                        consecutive_empty_llm_rounds, consecutive_think_only_rounds,
-                        response,
-                        tool_call_count, tool_names_executed, failed_tool_outputs,
-                    )
-                    if err:
-                        _flush_trajectory()
-                        yield err
-                        return
+                    # A novel tool call means progress (see the skill branch above):
+                    # tool-use without narration is not a degradation signal; only a
+                    # text-less round that repeats a tool intent counts toward the
+                    # empty/think-only loop guards.
+                    t_args_raw = progress.get("args", "")
+                    intent_sig = _extract_tool_intent_signature(t_name, t_args_raw)
+                    made_progress = bool(intent_sig) and tool_intent_signatures.get(intent_sig, 0) == 0
+                    if made_progress:
+                        consecutive_empty_llm_rounds = 0
+                        consecutive_think_only_rounds = 0
+                    else:
+                        # Empty-output loop detection (only when not progressing)
+                        err = self._check_empty_output_loop(
+                            llm_had_output_this_round, llm_had_think_this_round,
+                            tool_execution_count,
+                            consecutive_empty_llm_rounds, consecutive_think_only_rounds,
+                            response,
+                            tool_call_count, tool_names_executed, failed_tool_outputs,
+                        )
+                        if err:
+                            _flush_trajectory()
+                            yield err
+                            return
                     # Repeated-text loop detection
                     if tool_execution_count > 0 and _check_round_text_loop():
                         _flush_trajectory()
@@ -904,7 +931,7 @@ class TurnOrchestrator:
                             failed_tool_outputs=failed_tool_outputs,
                         )
                         return
-                    if not llm_had_output_this_round and tool_execution_count > 0:
+                    if not made_progress and not llm_had_output_this_round and tool_execution_count > 0:
                         if llm_had_think_this_round:
                             consecutive_think_only_rounds += 1
                         else:
@@ -930,10 +957,8 @@ class TurnOrchestrator:
                         return
                     if pid and sent_progress.get(pid) == status:
                         continue
-                    t_args_raw = progress.get("args", "")
 
-                    # Intent dedup check
-                    intent_sig = _extract_tool_intent_signature(t_name, t_args_raw)
+                    # Intent dedup check (intent_sig computed above)
                     err = self._check_intent_dedup(
                         intent_sig, tool_intent_signatures, warned_intents,
                         response, tool_call_count, tool_execution_count,

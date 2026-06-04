@@ -164,6 +164,53 @@ async def test_incremental_repeated_token_deltas_are_not_deduped():
 
 
 @pytest.mark.asyncio
+async def test_distinct_silent_tool_calls_do_not_trip_empty_output_loop():
+    """A model may legitimately make several DISTINCT tool calls with no narration
+    text before answering (e.g. read skill doc → fetch → fetch → answer). Each
+    novel tool call is progress and must NOT count toward EMPTY_OUTPUT_LOOP.
+    Regression: paper-discovery aborted at the 3rd silent run_command.
+    """
+    script = []
+    for i in range(5):  # 5 > max_consecutive_empty_llm_rounds (3)
+        script.append(_progress_event(_skill_call("run_command", f"cmd_{i}", pid=f"sk{i}")))
+        script.append(_progress_event(_skill_output("run_command", f"out_{i}", pid=f"so{i}")))
+    script.append(_progress_event(_llm_delta("📚 here are the papers", pid="llm")))
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(TurnPolicy(max_attempts=1, max_tool_calls=20))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "papers"):
+        events.append(te)
+
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert errors == [], f"unexpected guard fired: {[e.error for e in errors]}"
+    complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
+    assert complete.answer == "📚 here are the papers"
+
+
+@pytest.mark.asyncio
+async def test_repeated_silent_tool_intent_still_stops():
+    """Protection preserved: a model silently REPEATING the same tool intent makes
+    no progress and must still be stopped by a guard (not loop forever).
+    """
+    script = []
+    for i in range(8):  # same command + args every round → no progress
+        script.append(_progress_event(_skill_call("run_command", "same_cmd", pid=f"sk{i}")))
+        script.append(_progress_event(_skill_output("run_command", "same_out", pid=f"so{i}")))
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(TurnPolicy(max_attempts=1, max_tool_calls=50))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "go"):
+        events.append(te)
+
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert errors, "a repeated silent tool intent must trip a guard"
+    assert any(
+        ("EMPTY_OUTPUT_LOOP" in e.error) or ("REPEATED_TOOL_INTENT" in e.error)
+        for e in errors
+    ), f"unexpected error: {[e.error for e in errors]}"
+
+
+@pytest.mark.asyncio
 async def test_tool_call_budget_exceeded():
     """Exceeding max_tool_calls yields TURN_ERROR."""
     calls = [_progress_event(_tool_call(f"tool_{i}", pid=f"tc_{i}")) for i in range(5)]
@@ -995,15 +1042,21 @@ def test_job_policy_has_timeout():
 
 @pytest.mark.asyncio
 async def test_empty_output_loop_triggers_error():
-    """Consecutive tool calls with no LLM text output triggers TURN_ERROR."""
+    """Repeated tool calls with the SAME intent and no LLM text trigger TURN_ERROR.
+
+    (Distinct silent tool calls are progress and are exempt — see
+    test_distinct_silent_tool_calls_do_not_trip_empty_output_loop. The guard
+    fires only on no-progress loops: same command repeated without narration.)
+    """
     script = []
     # First tool call (with LLM output — establishes baseline)
     script.append(_progress_event(_llm_delta("Let me help")))
     script.append(_progress_event(_tool_call("_bash", "echo hi", pid="tc0")))
     script.append(_progress_event(_tool_output("_bash", "hi", pid="to0")))
-    # 3 consecutive tool calls with NO LLM output
-    for i in range(1, 4):
-        script.append(_progress_event(_tool_call("_bash", f"echo {i}", pid=f"tc{i}")))
+    # Repeated IDENTICAL tool calls with NO LLM output (no progress). The first
+    # repeat is still "novel" (resets), so 4 are needed to reach the threshold of 3.
+    for i in range(1, 5):
+        script.append(_progress_event(_tool_call("_bash", "echo same", pid=f"tc{i}")))
         script.append(_progress_event(_tool_output("_bash", str(i), pid=f"to{i}")))
     agent = _ScriptedAgent(script)
     orch = TurnOrchestrator(TurnPolicy(
@@ -1054,15 +1107,16 @@ async def test_empty_output_loop_resets_on_llm_output():
 
 @pytest.mark.asyncio
 async def test_empty_output_loop_via_skill_stage():
-    """Empty-output loop detection also works for skill-stage events."""
+    """Empty-output loop detection also works for skill-stage events (repeated intent)."""
     script = []
     # First skill call with LLM output
     script.append(_progress_event(_llm_delta("loading")))
     script.append(_progress_event(_skill_call("_load_resource_skill", "paper-discovery", pid="sk0")))
     script.append(_progress_event(_skill_output("_load_resource_skill", "SKILL.md content", pid="so0")))
-    # 3 consecutive skill calls with no LLM output
-    for i in range(1, 4):
-        script.append(_progress_event(_skill_call("_bash", f"fetch {i}", pid=f"sk{i}")))
+    # Repeated IDENTICAL skill calls with no LLM output (no progress); 4 reach
+    # the threshold of 3 (the first repeat is still novel and resets).
+    for i in range(1, 5):
+        script.append(_progress_event(_skill_call("_bash", "fetch same", pid=f"sk{i}")))
         script.append(_progress_event(_skill_output("_bash", f"result {i}", pid=f"so{i}")))
     agent = _ScriptedAgent(script)
     orch = TurnOrchestrator(TurnPolicy(
