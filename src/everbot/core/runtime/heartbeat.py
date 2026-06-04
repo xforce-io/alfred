@@ -1625,12 +1625,13 @@ class _SkillLLMClient:
         client = AsyncOpenAI(
             base_url=base_url,
             api_key=route.api_key or "dummy",
+            default_headers=route.headers or None,  # 透传 cloud headers(如 kimi User-Agent)
             timeout=60.0,
         )
 
         call_kwargs = {
             "temperature": kwargs.get("temperature", 0.3),
-            "max_tokens": kwargs.get("max_tokens", 2000),
+            "max_tokens": kwargs.get("max_tokens", 8192),  # 恢复原 dolphin 默认上限(原 2000 会截断长输出)
         }
         # Pass through DPH-extracted params accepted by the OpenAI API
         for k, v in kwargs.items():

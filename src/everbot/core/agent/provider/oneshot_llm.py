@@ -48,11 +48,18 @@ class OneshotLLMProvider:
             "temperature": temperature,
             "stream": False,
         }
-        headers = {"Authorization": f"Bearer {route.api_key}", "content-type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {route.api_key}",
+            "content-type": "application/json",
+            **route.headers,  # 透传 cloud 级 headers(如 kimi User-Agent)
+        }
+        # base_url 可能已含 /chat/completions(防双拼)
+        base = route.base_url
+        url = base if base.endswith("/chat/completions") else f"{base}/chat/completions"
         client = self._client or httpx.AsyncClient(timeout=httpx.Timeout(120.0), trust_env=False)
         owns = self._client is None
         try:
-            resp = await client.post(f"{route.base_url}/chat/completions", json=payload, headers=headers)
+            resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code >= 400:
                 msg = f"oneshot LLM HTTP {resp.status_code}: {resp.text[:300]}"
                 if raise_on_error:

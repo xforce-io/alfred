@@ -67,3 +67,22 @@ async def test_missing_file_does_not_crash(tmp_path):
     ch = _channel()
     res = await ch._send_attachment_directives("c", [AttachmentDirective("file", "/no/such/file", "")])
     assert res == [("/no/such/file", False)]
+
+
+async def test_photo_both_fail_returns_failure(tmp_path, monkeypatch):
+    # photo 失败 + 降级 document 也失败 → 终态 (path, False),不崩。
+    img = tmp_path / "x.png"; img.write_bytes(b"\x89PNG" + b"0" * 40)
+    import src.everbot.channels.telegram_skillkit as tsk
+
+    async def _photo(self, chat_id, file_path, caption=""):
+        return {"ok": False, "description": "photo too big"}
+
+    async def _doc(self, chat_id, file_path, caption=""):
+        return {"ok": False, "description": "server error"}
+
+    monkeypatch.setattr(tsk.TelegramSkillkit, "_send_photo_api", _photo)
+    monkeypatch.setattr(tsk.TelegramSkillkit, "_send_document", _doc)
+
+    ch = _channel()
+    res = await ch._send_attachment_directives("c", [AttachmentDirective("photo", str(img), "")])
+    assert res == [(str(img), False)]

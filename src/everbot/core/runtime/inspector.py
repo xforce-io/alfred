@@ -681,21 +681,18 @@ class Inspector:
         # Build enriched reflection prompt
         reflect_prompt = self._build_reflect_prompt(ctx)
 
-        # Run LLM reflection via independent agent (方案C) or legacy path.
+        # Run LLM reflection. 默认走独立 agent 路径(``_run_llm``,经 get_provider_for_agent
+        # 自建隔离 agent,dolphin-free)。仅当调用方**显式**提供 legacy 回调
+        # (run_agent/inject_context/agent)时才走 legacy 路径(测试/特殊调用方)。
+        # #38:不再依赖 self.agent_factory(已随 dolphin 移除,恒 None)。
         try:
-            if self.agent_factory is not None:
+            if run_agent is not None and inject_context is not None and agent is not None:
+                user_message = await inject_context(agent, reflect_prompt, mode="reflect_json")
+                response = await run_agent(agent, user_message, system_prompt_override=_REFLECT_SYSTEM_PROMPT)
+            else:
                 # Independent agent: fresh agent with _REFLECT_SYSTEM_PROMPT,
                 # no heartbeat system-prompt contamination.
                 response = await self._run_llm(reflect_prompt)
-            else:
-                # Legacy fallback: reuse caller-provided agent and run_agent/inject_context.
-                if inject_context is None or run_agent is None or agent is None:
-                    raise RuntimeError(
-                        "agent_factory is not set but legacy callbacks (run_agent, inject_context, agent) "
-                        "were not provided to inspect()"
-                    )
-                user_message = await inject_context(agent, reflect_prompt, mode="reflect_json")
-                response = await run_agent(agent, user_message, system_prompt_override=_REFLECT_SYSTEM_PROMPT)
         except Exception as exc:
             logger.warning("LLM reflection failed: %s", exc)
             raise

@@ -449,6 +449,26 @@ class TestInspect:
         assert inject_context.await_args.kwargs["mode"] == "reflect_json"
 
     @pytest.mark.asyncio
+    async def test_production_path_uses_run_llm_without_legacy_callbacks(self, tmp_path):
+        """#38 回归守护:生产调用不传 legacy 回调(daemon/heartbeat),inspect 必须走
+        _run_llm(经 get_provider_for_agent),而非抛 RuntimeError。
+
+        曾因守卫 `if agent_factory is not None` 反置 + agent_factory 随 dolphin 置 None,
+        导致每个 inspect 周期 RuntimeError。"""
+        inspector = _make_inspector(tmp_path)  # 无 agent_factory、无 legacy 回调
+        inspector._run_llm = AsyncMock(return_value=_make_reflection_response_no_proposals())
+
+        with patch.object(inspector, "_write_event"):
+            result = await inspector.inspect(
+                heartbeat_content="hb content",
+                run_id="run_prod",
+            )
+
+        inspector._run_llm.assert_awaited_once()   # 走独立 agent 反思路径
+        assert result.skipped is False
+        assert result.output == "HEARTBEAT_OK"
+
+    @pytest.mark.asyncio
     async def test_proposals_auto_register(self, tmp_path):
         """When auto_register_routines=True, proposals are applied via RoutineManager."""
         routine_mgr = RoutineManager(tmp_path)

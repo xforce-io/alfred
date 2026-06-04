@@ -178,6 +178,14 @@ class MilkieProvider:
     ) -> MilkieAgentHandle:
         # 经 pool 惰性 spawn/复用 per-agent 的 milkie serve;handle 携带该 serve 的
         # base_url(动态端口),而非固定 config base_url。
+        if tools_override is not None:
+            # 已知限制(#38):milkie serve 的 agent 工具由 agent.md 的 FSM state 决定,
+            # 暂不支持 per-create 工具限权。heartbeat 的只读工具集限制在 milkie 下未生效
+            # (agent 仍持全量工具含 run_command)。待 milkie serve 支持运行时工具限权后落地。
+            logger.warning(
+                "MilkieProvider.create_agent: tools_override 暂不支持(milkie serve 无运行时工具限权);"
+                "agent '%s' 将使用 agent.md 定义的全量工具。", agent_name,
+            )
         sidecar = await self._get_pool().get_or_spawn(agent_name)
         return MilkieAgentHandle(
             base_url=sidecar.base_url,

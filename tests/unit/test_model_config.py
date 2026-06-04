@@ -57,6 +57,43 @@ def test_missing_file_yields_empty(tmp_path):
     assert mc.llms == {} and mc.default_model == ""
 
 
+def test_route_merges_cloud_and_llm_headers(tmp_path):
+    p = tmp_path / "h.yaml"
+    p.write_text(
+        "default: m\nfast: m\n"
+        "clouds:\n  c:\n    api: http://x/v1\n    api_key: k\n    headers:\n      User-Agent: KimiCLI/0.77\n"
+        "llms:\n  m:\n    cloud: c\n    model_name: mm\n",
+        encoding="utf-8",
+    )
+    r = load_model_config(p).route()
+    assert r.headers.get("User-Agent") == "KimiCLI/0.77"
+
+
+def test_route_unset_env_placeholder_fails_fast(tmp_path, monkeypatch):
+    monkeypatch.delenv("MISSING_KEY_XYZ", raising=False)
+    p = tmp_path / "e.yaml"
+    p.write_text(
+        "default: m\nfast: m\n"
+        'clouds:\n  c:\n    api: http://x/v1\n    api_key: "${MISSING_KEY_XYZ}"\n'
+        "llms:\n  m:\n    cloud: c\n    model_name: mm\n",
+        encoding="utf-8",
+    )
+    import pytest
+    with pytest.raises(ValueError, match="环境变量未设置"):
+        load_model_config(p).route()  # ${MISSING_KEY_XYZ} 未设 → fail-fast,不泄漏 literal
+
+
+def test_route_for_prefers_llm_level_api(tmp_path):
+    p = tmp_path / "a.yaml"
+    p.write_text(
+        "default: m\nfast: m\n"
+        "clouds:\n  c:\n    api: http://cloud/v1\n    api_key: k\n"
+        "llms:\n  m:\n    cloud: c\n    model_name: mm\n    api: http://llm-override/v1\n",
+        encoding="utf-8",
+    )
+    assert load_model_config(p).route().base_url == "http://llm-override/v1"  # llm 级覆盖 cloud
+
+
 def test_legacy_default_model_key_still_works(tmp_path):
     p = tmp_path / "d.yaml"
     p.write_text("default_model: m\nfast_llm: m\nllms:\n  m:\n    cloud: c\n    model_name: mm\n"

@@ -915,24 +915,20 @@ class TelegramChannel:
         return results
 
     def _ensure_telegram_skillkit(self, agent: Any, agent_name: str) -> None:
-        """Register TelegramSkillkit on the agent if not already present.
+        """#38:milkie 下为优雅 no-op。
 
-        Routes through the *per-agent* provider (``get_provider_for_agent``) so
-        skillkit registration follows the same provider as the agent itself —
-        under ``everbot.provider=milkie`` + telegram, the agent is auto-fallen
-        back to dolphin, and skillkit registration must follow it (兑现 #4 回退).
+        dolphin 已移除,milkie 是唯一 runtime;``register_skillkit`` 是 no-op,telegram
+        文件/图片发送改由输出约定(``<<<send_file: ...>>>``,见 attachment_directives)在
+        turn 后投递。此方法保留仅为兼容调用点,实际不再注册任何工具。
         """
         from ..core.agent.provider import get_provider_for_agent
 
         provider = get_provider_for_agent(agent_name)
         if provider.has_skill(agent, "_tg_send_file"):
             return
-
         from .telegram_skillkit import TelegramSkillkit
 
-        tg_skillkit = TelegramSkillkit(bot_token=self._bot_token)
-        provider.register_skillkit(agent, tg_skillkit)
-        logger.info("Registered TelegramSkillkit on agent")
+        provider.register_skillkit(agent, TelegramSkillkit(bot_token=self._bot_token))
 
     # ------------------------------------------------------------------
     # Typing indicator

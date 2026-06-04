@@ -34,8 +34,18 @@ def find_model_config_path() -> Optional[Path]:
     return None
 
 
+_ENV_PLACEHOLDER = __import__("re").compile(r"\$\{[^}]+\}")
+
+
 def _expand(v: Any) -> Any:
-    return os.path.expandvars(v) if isinstance(v, str) else v
+    """展开 ${ENV};未设的占位符 fail-fast(原 dolphin 行为),避免 literal `${VAR}` 泄漏到请求。"""
+    if not isinstance(v, str):
+        return v
+    expanded = os.path.expandvars(v)
+    leftover = _ENV_PLACEHOLDER.search(expanded)
+    if leftover:
+        raise ValueError(f"model config: 环境变量未设置: {leftover.group(0)}(原值 {v!r})")
+    return expanded
 
 
 @dataclass
@@ -43,6 +53,11 @@ class ModelRoute:
     base_url: str
     api_key: str
     model: str
+    headers: Dict[str, str] = None  # type: ignore[assignment]
+
+    def __post_init__(self):
+        if self.headers is None:
+            self.headers = {}
 
 
 @dataclass
@@ -57,15 +72,22 @@ class ModelConfig:
         return self.route_for(self.fast_model if fast else self.default_model)
 
     def route_for(self, model_name: str) -> ModelRoute:
-        """解析指定 llm 名的 {base_url, api_key, model}。未知名 → KeyError。"""
+        """解析指定 llm 名的 {base_url, api_key, model, headers}。未知名 → KeyError。
+
+        base_url 优先 llm 级 ``api``(effective_api 语义)再回退 cloud;headers 合并
+        cloud + llm(llm 级覆盖 cloud 级),透传如 kimi 的 ``User-Agent``。
+        """
         if model_name not in self.llms:
             raise KeyError(f"model '{model_name}' not in llms config")
         llm = self.llms[model_name]
         cloud = self.clouds[llm["cloud"]]
+        base = llm.get("api") or cloud["api"]
+        headers = {**(cloud.get("headers") or {}), **(llm.get("headers") or {})}
         return ModelRoute(
-            base_url=_expand(cloud["api"]).rstrip("/"),
-            api_key=_expand(cloud.get("api_key", "")) or "",
+            base_url=_expand(base).rstrip("/"),
+            api_key=_expand(llm.get("api_key") or cloud.get("api_key", "")) or "",
             model=llm["model_name"],
+            headers={k: _expand(v) for k, v in headers.items()},
         )
 
 
