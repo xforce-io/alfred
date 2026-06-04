@@ -304,6 +304,37 @@ def test_export_session_reads_history_and_translates_to_alfred_format():
     assert out["variables"] == {}
 
 
+def test_export_session_applies_history_hygiene_orphan_and_empty():
+    """A4 端到端:export_session 走 /session/history → 翻译 → **数据卫生**。
+    含中断轮的空 assistant + orphan tool(无配对 tool_use)的 milkie 历史,
+    export 出的 history_messages 必须已清洗(空 assistant 剔除、orphan 不残留)。"""
+    canonical = [
+        {"role": "user", "content": [{"type": "text", "text": "do x"}]},
+        {"role": "assistant", "content": []},  # 空 assistant(中断轮)
+        {"role": "tool", "content": [
+            {"type": "tool_result", "tool_use_id": "ghost", "content": "orphan output"},
+        ]},  # orphan:无配对 assistant tool_use
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"messages": canonical})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        p = MilkieProvider("http://x", sync_client=client)
+        hist = p.export_session(MilkieAgentHandle("http://sidecar", "c1"))["history_messages"]
+    finally:
+        client.close()
+
+    # 空 assistant 被剔除
+    assert not any(m["role"] == "assistant" and not (m.get("content") or "").strip()
+                   and not m.get("tool_calls") for m in hist)
+    # orphan tool 不残留
+    assert not any(m["role"] == "tool" and m.get("tool_call_id") == "ghost" for m in hist)
+    # orphan 内容并入 user 上下文(不丢)
+    assert any(m["role"] == "user" and "orphan output" in (m.get("content") or "") for m in hist)
+
+
 async def test_interrupt_posts_to_interrupt_endpoint():
     """MilkieProvider.interrupt 经 serve /interrupt 端点(contextId)跨进程发信号。"""
     cap: dict = {}

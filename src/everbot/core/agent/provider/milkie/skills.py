@@ -80,8 +80,20 @@ def parse_skill_metadata(skill_dir: Path) -> Optional[Dict[str, Any]]:
     }
 
 
-def discover_skills(workspace_path: Path) -> List[Dict[str, Any]]:
-    """扫所有 skill 目录,返回去重后的可用 skill 元数据列表(高优先级目录胜出)。"""
+def discover_skills(
+    workspace_path: Path,
+    *,
+    include: Optional[List[str]] = None,
+    exclude: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """扫所有 skill 目录,返回去重后的可用 skill 元数据列表(高优先级目录胜出)。
+
+    per-agent allowlist(对应 dolphin 的 ``everbot.agents.<name>.skills.include/exclude``):
+    - ``include`` 非空 → 只保留其中的 skill;
+    - ``exclude`` → 移除其中的 skill;
+    - include/exclude 里出现**未发现**的 skill 名 → ``ValueError``(fail-loud,防配置笔误,
+      与 dolphin 行为一致)。
+    """
     skills: List[Dict[str, Any]] = []
     seen: set[str] = set()
     for skills_dir in resolve_skill_dirs(workspace_path):
@@ -94,6 +106,18 @@ def discover_skills(workspace_path: Path) -> List[Dict[str, Any]]:
             if meta:
                 seen.add(item.name)
                 skills.append(meta)
+
+    available = {s["name"] for s in skills}
+    if include:
+        unknown = [n for n in include if n not in available]
+        if unknown:
+            raise ValueError(f"skills.include 含未发现的 skill: {unknown}(可用: {sorted(available)})")
+        skills = [s for s in skills if s["name"] in set(include)]
+    if exclude:
+        unknown = [n for n in exclude if n not in available]
+        if unknown:
+            raise ValueError(f"skills.exclude 含未发现的 skill: {unknown}(可用: {sorted(available)})")
+        skills = [s for s in skills if s["name"] not in set(exclude)]
     return skills
 
 

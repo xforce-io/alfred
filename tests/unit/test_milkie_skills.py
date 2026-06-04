@@ -79,6 +79,74 @@ def test_build_section_empty_when_no_skills():
     assert msk.build_milkie_skills_section([], Path("/ws")) == ""
 
 
+def _setup_three(tmp_path, monkeypatch):
+    d = tmp_path / "d"
+    for n in ("alpha", "beta", "gamma"):
+        _make_skill(d, n, n.title(), f"{n} skill")
+    monkeypatch.setattr(msk, "resolve_skill_dirs", lambda _ws: [d])
+    return tmp_path
+
+
+def test_discover_skills_include_filters_to_allowlist(tmp_path, monkeypatch):
+    _setup_three(tmp_path, monkeypatch)
+    found = msk.discover_skills(tmp_path, include=["alpha", "beta"])
+    assert sorted(s["name"] for s in found) == ["alpha", "beta"]
+
+
+def test_discover_skills_exclude_removes_listed(tmp_path, monkeypatch):
+    _setup_three(tmp_path, monkeypatch)
+    found = msk.discover_skills(tmp_path, exclude=["gamma"])
+    assert sorted(s["name"] for s in found) == ["alpha", "beta"]
+
+
+def test_discover_skills_include_then_exclude(tmp_path, monkeypatch):
+    _setup_three(tmp_path, monkeypatch)
+    found = msk.discover_skills(tmp_path, include=["alpha", "beta"], exclude=["beta"])
+    assert [s["name"] for s in found] == ["alpha"]
+
+
+def test_discover_skills_unknown_in_include_raises(tmp_path, monkeypatch):
+    import pytest
+    _setup_three(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="nonexistent"):
+        msk.discover_skills(tmp_path, include=["alpha", "nonexistent"])
+
+
+def test_discover_skills_unknown_in_exclude_raises(tmp_path, monkeypatch):
+    import pytest
+    _setup_three(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="ghost"):
+        msk.discover_skills(tmp_path, exclude=["ghost"])
+
+
+def test_discover_skills_no_filter_returns_all(tmp_path, monkeypatch):
+    _setup_three(tmp_path, monkeypatch)
+    found = msk.discover_skills(tmp_path)
+    assert sorted(s["name"] for s in found) == ["alpha", "beta", "gamma"]
+
+
+def test_loader_applies_per_agent_skill_include(tmp_path, monkeypatch):
+    """_default_system_prompt_loader 读 everbot.agents.<name>.skills.include 过滤注入。"""
+    from src.everbot.core.agent.provider.milkie import provider as mprov
+    import src.everbot.infra.config as config_module
+
+    ws = tmp_path / "ws"
+    (ws / "skills").mkdir(parents=True)
+    (ws / "SOUL.md").write_text("身份", encoding="utf-8")
+    for n in ("ops", "web", "secret"):
+        _make_skill(ws / "skills", n, n, f"{n} skill")
+
+    monkeypatch.setattr(mprov, "_resolve_agent_workspace", lambda _n: ws)
+    monkeypatch.setattr(msk, "resolve_skill_dirs", lambda _ws: [ws / "skills"])
+    monkeypatch.setattr(
+        config_module, "get_config",
+        lambda *a, **k: {"everbot": {"agents": {"a1": {"skills": {"include": ["ops", "web"]}}}}},
+    )
+    prompt = mprov._default_system_prompt_loader("a1")
+    assert "ops" in prompt and "web" in prompt
+    assert "secret" not in prompt  # 不在 include → 不注入
+
+
 def test_system_prompt_loader_injects_discovered_skills(tmp_path, monkeypatch):
     """_default_system_prompt_loader 把 workspace 指令 + 发现的 skill 都拼进系统提示。"""
     from src.everbot.core.agent.provider.milkie import provider as mprov

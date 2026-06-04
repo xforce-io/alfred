@@ -53,7 +53,11 @@ def _default_system_prompt_loader(agent_name: str) -> str:
 
     # 动态发现 shell 型 skill 并注入(milkie 无 dolphin 的 ResourceSkillkit;agent 经
     # 内建 run_command(milkie#134)读 SKILL.md 并跑脚本 —— 与 dolphin 能力对等)。
-    section = build_milkie_skills_section(discover_skills(workspace), workspace)
+    # per-agent allowlist:everbot.agents.<name>.skills.include/exclude(A3,对齐 dolphin)。
+    include, exclude = _agent_skill_filter(agent_name)
+    section = build_milkie_skills_section(
+        discover_skills(workspace, include=include, exclude=exclude), workspace
+    )
     if section:
         base = f"{base}\n\n---\n\n{section}" if base else section
 
@@ -63,6 +67,19 @@ def _default_system_prompt_loader(agent_name: str) -> str:
         from .....channels.attachment_directives import ATTACHMENT_INSTRUCTION
         base = f"{base}\n\n---\n\n{ATTACHMENT_INSTRUCTION}" if base else ATTACHMENT_INSTRUCTION
     return base
+
+
+def _agent_skill_filter(agent_name: str):
+    """读 everbot.agents.<name>.skills.{include,exclude} → (include, exclude)。缺省 (None, None)。"""
+    try:
+        from .....infra.config import get_config
+
+        everbot_cfg = (get_config() or {}).get("everbot", {}) or {}
+        agent_cfg = (everbot_cfg.get("agents", {}) or {}).get(agent_name, {}) or {}
+        skills_cfg = agent_cfg.get("skills", {}) or {}
+        return skills_cfg.get("include"), skills_cfg.get("exclude")
+    except Exception:
+        return None, None
 
 
 def _is_telegram_serving(agent_name: str) -> bool:
@@ -445,4 +462,10 @@ def _milkie_messages_to_history(messages: list) -> list:
                         "tool_call_id": c.get("tool_use_id"),
                         "content": c.get("content", ""),
                     })
+    # A4 数据卫生:milkie 历史可能含中断轮留下的空 assistant / orphan tool(无配对
+    # tool_use),下游送 LLM 会 400。复用与 dolphin 保存路径同一套纯变换(惰性 import,
+    # persistence 顶层不引 milkie → 无循环)。
+    from ....session.persistence import SessionPersistence
+    out = SessionPersistence._filter_empty_assistant_messages(out)
+    out = SessionPersistence._heal_orphan_tool_messages(out)
     return out
