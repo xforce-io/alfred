@@ -35,4 +35,4 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          pytest tests/unit/ -x -q --tb=short
+          pytest tests/unit/ -m "not integration" -x -q --tb=short

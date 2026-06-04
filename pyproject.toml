@@ -37,6 +37,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
     "slow: marks tests as slow",
+    "integration: marks tests needing real preset data (e.g. demo_agent agent.dph); excluded from the default unit run, trigger explicitly with -m integration",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:docstring_parser",
