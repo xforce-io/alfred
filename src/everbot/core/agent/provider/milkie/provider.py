@@ -34,6 +34,12 @@ def _resolve_agent_workspace(agent_name: str) -> Path:
     return get_user_data_manager().get_agent_dir(agent_name)
 
 
+# 共享 reflector agent 名(#34 C):milkie 丢弃 per-turn system_prompt,故自省不能复用业务
+# agent + override(会被业务人设污染),改路由到此独立 agent —— 其 agent.md 的 systemPrompt
+# 即 reflect-JSON 提示,池内单例(shutdown 自动回收)、contextId 隔离、上下文自包含在 message。
+REFLECTOR_AGENT = "_reflector"
+
+
 def _default_system_prompt_loader(agent_name: str) -> str:
     """构建 milkie agent 的 system prompt —— 真实来源。
 
@@ -41,6 +47,11 @@ def _default_system_prompt_loader(agent_name: str) -> str:
     USER/MEMORY.md(同 dolphin agent 的 ``$workspace_instructions``,但不耦合
     dolphin factory)。workspace 不存在即 bug,fail loud(raise),绝不静默返回 ""。
     """
+    if agent_name == REFLECTOR_AGENT:
+        # reflector 的 systemPrompt 即 reflect-JSON 提示;不读业务 workspace(无污染、无需 workspace)。
+        from ....runtime.inspector import _REFLECT_SYSTEM_PROMPT  # 延迟引,避免模块期循环
+        return _REFLECT_SYSTEM_PROMPT
+
     from .....infra.workspace import WorkspaceLoader
     from .skills import build_milkie_skills_section, discover_skills
 

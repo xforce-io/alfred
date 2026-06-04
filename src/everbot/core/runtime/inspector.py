@@ -583,21 +583,19 @@ class Inspector:
         self._persist_state(state)
 
     async def _run_llm(self, prompt: str, timeout_seconds: float = 120.0) -> str:
-        """Create an independent agent and run the reflection LLM call.
+        """Run the reflection LLM call via the shared **reflector** agent.
 
-        Uses ``self.agent_factory`` to create a fresh agent with no heartbeat
-        system-prompt contamination, then sends the reflection prompt directly.
+        #34 C:milkie 丢弃 per-turn ``system_prompt``,复用业务 agent + override 会被业务
+        人设污染。改路由到共享 ``REFLECTOR_AGENT`` —— 其 agent.md systemPrompt 即
+        ``_REFLECT_SYSTEM_PROMPT``,reflection 上下文自包含在 ``prompt`` 消息里,无需业务
+        workspace;池内单例、contextId 隔离。
         """
         ensure_continue_chat_compatibility()
         from ..agent.provider import get_provider_for_agent
+        from ..agent.provider.milkie.provider import REFLECTOR_AGENT
 
-        # Route creation through the per-agent provider (milkie/dolphin
-        # selection). No tools_override → full tool access, matching the
-        # prior raw-factory behaviour which bypassed provider routing.
-        provider = get_provider_for_agent(self.agent_name)
-        agent = await provider.create_agent(
-            self.agent_name, self.workspace_path
-        )
+        provider = get_provider_for_agent(REFLECTOR_AGENT)
+        agent = await provider.create_agent(REFLECTOR_AGENT, self.workspace_path)
         answer = ""
         deltas: list[str] = []
         seen_progress: set[str] = set()
@@ -607,7 +605,7 @@ class Inspector:
             async for event in provider.run_turn(
                 agent,
                 prompt,
-                system_prompt=_REFLECT_SYSTEM_PROMPT,
+                # reflector 的 agent.md systemPrompt 已是 _REFLECT_SYSTEM_PROMPT;无需(milkie 亦丢弃)override。
                 stream_mode="delta",
             ):
                 if not isinstance(event, dict):

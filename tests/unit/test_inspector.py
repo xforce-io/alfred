@@ -449,6 +449,29 @@ class TestInspect:
         assert inject_context.await_args.kwargs["mode"] == "reflect_json"
 
     @pytest.mark.asyncio
+    async def test_run_llm_routes_to_shared_reflector_agent(self, tmp_path, monkeypatch):
+        """#34 C:_run_llm 路由到共享 reflector agent(systemPrompt 即 reflect 提示),
+        而非业务 agent —— milkie 丢弃 per-turn system_prompt,复用业务 agent 会被人设污染。"""
+        inspector = _make_inspector(tmp_path)
+        captured = {}
+
+        class _FakeProvider:
+            async def create_agent(self, name, ws, **kw):
+                captured["agent_name"] = name
+                return MagicMock()
+
+            async def run_turn(self, agent, prompt, **kw):
+                captured["ran"] = True
+                yield {"_progress": [{"stage": "llm", "delta": "{}", "answer": "{}"}]}
+
+        import src.everbot.core.agent.provider as prov_mod
+        monkeypatch.setattr(prov_mod, "get_provider_for_agent", lambda name: _FakeProvider())
+
+        out = await inspector._run_llm("reflect now")
+        assert captured["agent_name"] == "_reflector"   # 共享 reflector,非业务 agent
+        assert captured.get("ran") and out == "{}"
+
+    @pytest.mark.asyncio
     async def test_production_path_uses_run_llm_without_legacy_callbacks(self, tmp_path):
         """#38 回归守护:生产调用不传 legacy 回调(daemon/heartbeat),inspect 必须走
         _run_llm(经 get_provider_for_agent),而非抛 RuntimeError。
@@ -700,12 +723,13 @@ class TestRunLLMRoutesThroughProvider:
         result = await inspector._run_llm("reflect please", timeout_seconds=5.0)
 
         assert result == "Hello world"
-        assert seen["create"][0] == "test_agent"
+        assert seen["create"][0] == "_reflector"  # #34 C:路由到共享 reflector,非业务 agent
         assert seen["run_turn"]["agent"] is fake_agent
         assert seen["run_turn"]["message"] == "reflect please"
         assert seen["run_turn"]["stream_mode"] == "delta"
-        # reflection system prompt threaded through, dolphin behaviour preserved
-        assert seen["run_turn"]["system_prompt"]
+        # #34 C:reflect 提示由 reflector agent.md 的 systemPrompt 承载,不再经 per-turn
+        # system_prompt override(milkie 会丢弃 override)。故此处不传。
+        assert not seen["run_turn"]["system_prompt"]
         fake_agent.continue_chat.assert_not_called()
 
 
@@ -1625,8 +1649,8 @@ class TestRunLlmProviderRouting:
         result = await inspector._run_llm("reflect please")
 
         assert result == "reflection answer"
-        # Routed through provider with name + workspace, no tools_override.
-        create_agent.assert_awaited_once_with("test_agent", tmp_path)
+        # #34 C:路由到共享 reflector agent(systemPrompt 即 reflect 提示),非业务 agent。
+        create_agent.assert_awaited_once_with("_reflector", tmp_path)
         assert "tools_override" not in create_agent.await_args.kwargs
         # Raw injected agent_factory must NOT be used for creation.
         raw_factory.assert_not_awaited()

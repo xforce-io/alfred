@@ -125,6 +125,18 @@ def test_discover_skills_no_filter_returns_all(tmp_path, monkeypatch):
     assert sorted(s["name"] for s in found) == ["alpha", "beta", "gamma"]
 
 
+def test_loader_returns_reflect_prompt_for_reflector():
+    """#34 C:reflector agent 的 systemPrompt 即 reflect-JSON 提示(不读 workspace)。
+
+    milkie 丢弃 per-turn system_prompt → 自省必须用独立 reflector agent(systemPrompt 即
+    reflect 提示)而非业务 agent + override(否则被业务人设污染)。"""
+    from src.everbot.core.agent.provider.milkie import provider as mprov
+
+    out = mprov._default_system_prompt_loader(mprov.REFLECTOR_AGENT)
+    assert "reflection" in out and "JSON" in out      # 是 reflect 提示
+    assert "身份定义" not in out and "已安装技能" not in out  # 不是 workspace 系统提示
+
+
 def test_loader_applies_per_agent_skill_include(tmp_path, monkeypatch):
     """_default_system_prompt_loader 读 everbot.agents.<name>.skills.include 过滤注入。"""
     from src.everbot.core.agent.provider.milkie import provider as mprov
