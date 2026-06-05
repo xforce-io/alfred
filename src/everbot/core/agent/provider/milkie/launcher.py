@@ -5,12 +5,38 @@
 """
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .agent_spec import build_milkie_agent_md, build_milkie_model_tiers
+
+
+# skill_list manifest(milkie #139):写在 milkie data-dir,经 MILKIE_SKILL_MANIFEST
+# env 告知 serve;milkie 默认 handler 读它返回真实技能列表(去 stub)。
+SKILL_MANIFEST_FILENAME = "skill-manifest.json"
+SKILL_MANIFEST_ENV = "MILKIE_SKILL_MANIFEST"
+
+
+def _render_skill_manifest(skills: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """discover_skills 结果 → skill_list manifest(milkie #139 定稿 schema)。
+
+    v1 每条目写 ``{name, description, dir}``(``dir`` = discover_skills 的
+    ``abs_path``);``version`` 留空待 s-010。milkie 消费 name/description,``dir``
+    为宿主附加字段(milkie handler 原样透传)。
+    """
+    return {
+        "skills": [
+            {
+                "name": s["name"],
+                "description": s.get("description", ""),
+                "dir": s["abs_path"],
+            }
+            for s in skills
+        ]
+    }
 
 
 @dataclass
@@ -41,7 +67,14 @@ class SidecarLauncher:
         self._default_model = default_model
         self._fast_model = fast_model
 
-    def build(self, agent_name: str, *, system_prompt: str, default_model: str | None = None) -> LaunchSpec:
+    def build(
+        self,
+        agent_name: str,
+        *,
+        system_prompt: str,
+        skills: Optional[List[Dict[str, Any]]] = None,
+        default_model: str | None = None,
+    ) -> LaunchSpec:
         # default_model:per-agent 模型覆盖(everbot.agents.<name>.model)。缺省回退全局默认。
         # 不传则**所有 agent 用同一全局模型**——会无视 per-agent 配置(实测踩到:demo_agent
         # 配 deepseek-volcengine 却被用成全局 kimi-code)。
@@ -72,4 +105,15 @@ class SidecarLauncher:
         if default_cloud != "volcengine":
             env.pop("VOLCENGINE_TOKEN", None)
             env.pop("VOLCENGINE_API_BASE", None)
+        # skill_list manifest(milkie #139):skills 非 None 即产出(含空列表 → configured
+        # but empty)。skills is None(注入式 loader / reflector)→ 不写、不设 env,milkie
+        # 侧据缺失 degrade(registryConfigured:false)。与 prompt 技能段同源(provider 侧
+        # 单次 discover_skills)。
+        if skills is not None:
+            manifest_path = data_dir / SKILL_MANIFEST_FILENAME
+            manifest_path.write_text(
+                json.dumps(_render_skill_manifest(skills), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            env[SKILL_MANIFEST_ENV] = str(manifest_path)
         return LaunchSpec(cmd=cmd, env=env, data_dir=data_dir, agent_md=agent_md)

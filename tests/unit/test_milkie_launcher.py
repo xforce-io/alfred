@@ -1,7 +1,22 @@
 
+import json
+
 import pytest
 
-from src.everbot.core.agent.provider.milkie.launcher import SidecarLauncher, LaunchSpec
+from src.everbot.core.agent.provider.milkie.launcher import (
+    SidecarLauncher,
+    LaunchSpec,
+    SKILL_MANIFEST_ENV,
+    SKILL_MANIFEST_FILENAME,
+)
+
+
+# discover_skills 输出形状(name/title/description/abs_path)。
+_SKILLS = [
+    {"name": "twitter-watch", "title": "Twitter Watch",
+     "description": "抓取 X 用户最新推文", "abs_path": "/abs/twitter-watch"},
+    {"name": "ops", "title": "Ops", "description": "", "abs_path": "/abs/ops"},
+]
 
 
 def _launcher(tmp_path):
@@ -133,3 +148,65 @@ def test_build_uses_per_agent_model_override(tmp_path):
     assert fm["model"]["model"] == "my-model"        # 默认(chat)档用 per-agent 模型
     assert spec.env["OPENAI_API_KEY"] == "k2"        # 用 per-agent 模型的 cloud key
     assert fm["models"]["fast"]["model"] == "global-model"  # fast 档仍全局(单独 concern)
+
+
+# ── skill_list manifest producer(milkie #139）─────────────────────────
+
+def test_build_writes_skill_manifest_and_sets_env(tmp_path):
+    spec = _launcher(tmp_path).build("alice", system_prompt="x", skills=_SKILLS)
+    manifest_path = spec.data_dir / SKILL_MANIFEST_FILENAME
+    assert manifest_path.exists()
+    assert spec.env[SKILL_MANIFEST_ENV] == str(manifest_path)
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    # 定稿 schema:每条目 {name, description, dir}（dir = discover_skills 的 abs_path）。
+    assert data == {"skills": [
+        {"name": "twitter-watch", "description": "抓取 X 用户最新推文", "dir": "/abs/twitter-watch"},
+        {"name": "ops", "description": "", "dir": "/abs/ops"},
+    ]}
+
+
+def test_build_manifest_includes_every_discovered_skill(tmp_path):
+    # 防"漏列"回归:manifest 技能集合 == 传入的 discover_skills 集合，一个不少。
+    spec = _launcher(tmp_path).build("alice", system_prompt="x", skills=_SKILLS)
+    data = json.loads((spec.data_dir / SKILL_MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert {s["name"] for s in data["skills"]} == {s["name"] for s in _SKILLS}
+
+
+def test_build_skills_none_writes_no_manifest(tmp_path):
+    # 注入式 loader / reflector：skills=None → 不产出 manifest、不设 env（milkie 侧 degrade）。
+    spec = _launcher(tmp_path).build("alice", system_prompt="x", skills=None)
+    assert not (spec.data_dir / SKILL_MANIFEST_FILENAME).exists()
+    assert SKILL_MANIFEST_ENV not in spec.env
+
+
+def test_build_default_skills_arg_is_none(tmp_path):
+    # 默认不传 skills 即 None → 向后兼容旧调用，不产出 manifest。
+    spec = _launcher(tmp_path).build("alice", system_prompt="x")
+    assert not (spec.data_dir / SKILL_MANIFEST_FILENAME).exists()
+    assert SKILL_MANIFEST_ENV not in spec.env
+
+
+def test_build_empty_skills_writes_configured_empty_manifest(tmp_path):
+    # 空技能集(configured but empty)：写 {skills:[]}、设 env —— 比"未配置"更准确。
+    spec = _launcher(tmp_path).build("alice", system_prompt="x", skills=[])
+    manifest_path = spec.data_dir / SKILL_MANIFEST_FILENAME
+    assert manifest_path.exists()
+    assert spec.env[SKILL_MANIFEST_ENV] == str(manifest_path)
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == {"skills": []}
+
+
+def test_build_manifest_missing_description_defaults_empty(tmp_path):
+    spec = _launcher(tmp_path).build(
+        "alice", system_prompt="x",
+        skills=[{"name": "n", "title": "N", "abs_path": "/abs/n"}],  # 无 description 键
+    )
+    data = json.loads((spec.data_dir / SKILL_MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert data["skills"][0] == {"name": "n", "description": "", "dir": "/abs/n"}
+
+
+def test_build_manifest_is_valid_utf8_json_with_cjk(tmp_path):
+    # ensure_ascii=False：中文按原样写入，不转义。
+    spec = _launcher(tmp_path).build("alice", system_prompt="x", skills=_SKILLS)
+    raw = (spec.data_dir / SKILL_MANIFEST_FILENAME).read_text(encoding="utf-8")
+    assert "抓取 X 用户最新推文" in raw  # 未被 \uXXXX 转义
+    json.loads(raw)  # 合法 JSON
