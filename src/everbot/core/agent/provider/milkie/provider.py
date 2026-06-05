@@ -21,9 +21,30 @@ import httpx
 
 from .adapter import milkie_event_to_progress
 from .sse import SSEParser
+from .....infra.milkie_trace import capture_trace_report
 from .....infra.user_data import get_user_data_manager
 
 logger = logging.getLogger(__name__)
+
+
+def _milkie_data_dir(agent_name: str) -> Path:
+    """该 agent 的 milkie sidecar 数据目录(= 传给 ``serve --data-dir`` 的目录,
+    ``<data_dir_root>/<agent_name>``,与 launcher 的 data-dir 构造一致)。供
+    ``capture_trace`` 定位落盘 trace —— 即 ``milkie trace --data-dir`` 的入参。"""
+    root = "~/.alfred/milkie"
+    try:
+        from .....infra.config import get_config
+
+        milkie_cfg = ((get_config() or {}).get("everbot", {}) or {}).get("milkie", {}) or {}
+        root = milkie_cfg.get("data_dir_root") or root
+    except Exception:
+        pass
+    return Path(root).expanduser() / agent_name
+
+
+def _traces_dir() -> Path:
+    """trace 留证 HTML 的落点(``~/.alfred/logs/traces``,与 daemon 日志同根)。"""
+    return Path("~/.alfred/logs/traces").expanduser()
 
 
 def _resolve_agent_workspace(agent_name: str) -> Path:
@@ -135,6 +156,9 @@ class MilkieAgentHandle:
     base_url: str
     context_id: str
     name: str = ""
+    # #47: milkie 的单次运行 id(milkie#140 经终止帧回传),provider 私有 —— 供
+    # Provider 据此定位落盘 trace(`milkie trace <runId>`)。绝不进中立 _progress。
+    last_run_id: Optional[str] = None
 
 
 class MilkieProvider:
@@ -301,14 +325,21 @@ class MilkieProvider:
                             raise RuntimeError(
                                 f"milkie agent error: {data.get('message') or data}"
                             )
-                        if event == "agent.run.completed" and data.get("status") == "error":
-                            msg = (
-                                data.get("error")
-                                or data.get("output")
-                                or data.get("lastTextOutput")
-                                or "unknown error"
-                            )
-                            raise RuntimeError(f"milkie agent run failed: {msg}")
+                        if event == "agent.run.completed":
+                            # #47: 捕获本轮 runId(milkie#140)到 handle —— 必须在
+                            # 下面 error 抛出之前,失败 run 才同样可被留证。runId 是
+                            # milkie 私有,只落在 provider 内的 handle,不进 _progress。
+                            run_id = data.get("runId")
+                            if run_id:
+                                handle.last_run_id = run_id
+                            if data.get("status") == "error":
+                                msg = (
+                                    data.get("error")
+                                    or data.get("output")
+                                    or data.get("lastTextOutput")
+                                    or "unknown error"
+                                )
+                                raise RuntimeError(f"milkie agent run failed: {msg}")
                         item = milkie_event_to_progress(event, data)
                         if item is not None:
                             yield {"_progress": [item]}
@@ -322,6 +353,23 @@ class MilkieProvider:
 
     def is_error(self, agent: Any) -> bool:
         return False
+
+    def capture_trace(self, agent: Any) -> Optional[Path]:
+        """#47:为这一(失败)轮留证 —— 通用能力,中立调用方(cron 失败分支)只调它、
+        不碰 runId。内部从 ``handle.last_run_id``(milkie 私有,step2 在终止帧捕获)取 runId,
+        shell ``milkie trace report --data-dir <sidecar-data> <runId>`` 写 HTML 到 traces_dir。
+
+        best-effort,带外:失败返回 None、不抛(经 chokepoint 保证)。无 runId
+        (非 milkie 路径 / 未跑过)→ None,不调 CLI。runId 不出 Provider 边界。"""
+        run_id = getattr(agent, "last_run_id", None)
+        if not run_id:
+            return None
+        agent_name = getattr(agent, "name", "") or ""
+        return capture_trace_report(
+            run_id,
+            traces_dir=_traces_dir(),
+            data_dir=str(_milkie_data_dir(agent_name)),
+        )
 
     def is_user_interrupt_paused(self, agent: Any) -> bool:
         # milkie#137:经 serve /context/state 查运行态。paused ⇔ context 被 /interrupt

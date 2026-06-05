@@ -33,6 +33,14 @@ class AgentProvider(Protocol):
 
     def is_error(self, agent: Any) -> bool: ...
 
+    def capture_trace(self, agent: Any) -> Optional[Any]:
+        """#47:为这一(失败)轮留证一份带外诊断 trace,返回产物路径或 None。
+
+        通用能力:中立调用方(cron 失败分支)只调它、不碰任何 provider 私有标识。
+        无此能力 / 无可留证的 provider 返回 None(默认)。MilkieProvider 经
+        ``milkie trace`` 渲染落盘 run 的 HTML 报告。"""
+        return None
+
     def is_user_interrupt_paused(self, agent: Any) -> bool: ...
 
     async def call_llm(

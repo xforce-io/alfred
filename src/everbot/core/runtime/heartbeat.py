@@ -1351,9 +1351,31 @@ If not, reply with `HEARTBEAT_OK`.
         system_prompt_override: Optional[str] = None,
     ) -> str:
         """执行 Agent"""
-        if isinstance(system_prompt_override, str):
-            return await self._run_agent_with_override(agent, message, system_prompt_override)
-        return await self._run_heartbeat_turn(agent, message)
+        try:
+            if isinstance(system_prompt_override, str):
+                return await self._run_agent_with_override(agent, message, system_prompt_override)
+            return await self._run_heartbeat_turn(agent, message)
+        except Exception:
+            # #47:后台 turn(cron/heartbeat llm 任务、反思)失败 → 带外留证一份
+            # milkie trace HTML。失败 run 的 runId 已在 provider.run_turn 的终止帧
+            # 捕获到 handle(step2),此处经 provider 通用能力渲染。best-effort,不掩盖原错。
+            self._capture_trace_safe(agent)
+            raise
+
+    def _capture_trace_safe(self, agent: Any) -> None:
+        """#47:经 provider 通用能力为失败的后台 turn 带外留证诊断 trace。
+
+        best-effort:provider 无此能力 / 无 runId(非 milkie 路径)返回 None;留证
+        自身任何异常一律吞掉,绝不掩盖原始失败、绝不拖垮失败处理(对齐 #45 静默恢复)。
+        """
+        try:
+            from ..agent.provider import provider_for
+
+            path = provider_for(agent).capture_trace(agent)
+            if path is not None:
+                logger.info("[%s] 失败 turn 已留证 trace:%s", self.agent_name, path)
+        except Exception as exc:
+            logger.debug("[%s] capture_trace 留证失败(忽略):%s", self.agent_name, exc)
 
     @staticmethod
     def _extract_llm_result(events: list[dict[str, Any]]) -> str:
