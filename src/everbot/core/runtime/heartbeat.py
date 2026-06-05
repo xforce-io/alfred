@@ -793,11 +793,15 @@ If not, reply with `HEARTBEAT_OK`.
                             return "HEARTBEAT_OK"
 
                 # LLM recovery check
+                # Recovery is logged only, NOT pushed to the user. Mac sleep/wake
+                # cycles make the LLM probe fail (no network while asleep) and then
+                # succeed on wake, so pushing a recovery notice spams the user with
+                # "LLM 已恢复" every time the laptop wakes. The outage notice
+                # (returned above) is the actionable signal; recovery is not.
                 if self._llm_unavailable_since is not None:
                     self._llm_unavailable_since = None
                     self._llm_unavailable_last_notified_at = None
-                    logger.info("[%s] LLM recovered", self.agent_name)
-                    await self._delivery.deliver_result("LLM 已恢复, 心跳任务恢复正常", run_id)
+                    logger.info("[%s] LLM recovered (silent, not delivered)", self.agent_name)
 
                 # Recover tasks stuck in 'running' (crash/timeout) before
                 # mode dispatch. Without this, stuck tasks cause reflect mode

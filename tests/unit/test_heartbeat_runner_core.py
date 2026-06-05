@@ -1362,8 +1362,13 @@ async def test_execute_once_cooldown_suppresses_repeated_notification(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_execute_once_recovery_notification(tmp_path):
-    """When LLM recovers after being unavailable, notify recovery."""
+async def test_execute_once_recovery_is_silent(tmp_path):
+    """When LLM recovers after being unavailable, clear state silently.
+
+    Recovery must NOT push a notification to the user: Mac sleep/wake cycles
+    repeatedly toggle probe failure→success, and pushing "LLM 已恢复" on every
+    wake spams the user. State is cleared but no deliver_result is called.
+    """
     runner = _setup_runner_for_execute_once(tmp_path, probe_return=False)
     # First: probe fails
     await runner._execute_once()
@@ -1383,10 +1388,9 @@ async def test_execute_once_recovery_notification(tmp_path):
     await runner._execute_once()
     # Recovery state cleared
     assert runner._llm_unavailable_since is None
-    # Recovery notification sent
-    runner._delivery.deliver_result.assert_called_once()
-    call_args = runner._delivery.deliver_result.call_args
-    assert "LLM 已恢复" in call_args[0][0]
+    assert runner._llm_unavailable_last_notified_at is None
+    # Recovery notification must NOT be pushed to the user (silent recovery)
+    runner._delivery.deliver_result.assert_not_called()
 
 
 class TestRunHeartbeatTurnMilkieSafe:
