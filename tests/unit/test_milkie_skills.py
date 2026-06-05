@@ -75,7 +75,17 @@ def test_build_section_includes_run_command_and_paths(tmp_path):
     assert "$WORKSPACE_ROOT" in section and "/ws" in section
 
 
+def test_build_section_nudges_enumeration_to_skill_list(tmp_path):
+    """列举意图引导到 skill_list 工具(确定性,防漏列;alfred#50)。"""
+    skills = [{"name": "ops", "title": "Ops", "description": "运维", "abs_path": "/abs/ops"}]
+    section = msk.build_milkie_skills_section(skills, Path("/ws"))
+    assert "skill_list" in section            # 指向工具
+    assert "列举" in section or "罗列" in section  # 命中枚举意图
+    assert "不要" in section                   # 明确禁止手抄
+
+
 def test_build_section_empty_when_no_skills():
+    # 空技能集仍 ""（不渲染指令，行为不变）。
     assert msk.build_milkie_skills_section([], Path("/ws")) == ""
 
 
