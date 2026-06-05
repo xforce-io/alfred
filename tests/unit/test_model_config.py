@@ -100,3 +100,21 @@ def test_legacy_default_model_key_still_works(tmp_path):
                  "clouds:\n  c:\n    api: http://x\n    api_key: k\n", encoding="utf-8")
     mc = load_model_config(p)
     assert mc.default_model == "m" and mc.fast_model == "m"
+
+
+def test_repo_fast_tier_does_not_route_to_aliyun(monkeypatch):
+    """Regression guard (#45): the shipped config/dolphin.yaml `fast` tier must
+    not point at aliyun/dashscope. Background skill jobs (skill-evaluate Judge,
+    reflection) resolve their model via cron.py:_resolve_skill_model() ->
+    fast_model. An expired aliyun key there made every skill evaluation fail
+    with 403 access_denied while normal chat (volcengine) kept working.
+    """
+    repo_config = Path(__file__).resolve().parents[2] / "config" / "dolphin.yaml"
+    assert repo_config.exists(), repo_config
+    # Provide volcengine creds so route_for() can expand ${...} placeholders.
+    monkeypatch.setenv("VOLCENGINE_API_BASE", "https://volc.example/v1")
+    monkeypatch.setenv("VOLCENGINE_TOKEN", "vk-test")
+    mc = load_model_config(repo_config)
+    route = mc.route(fast=True)
+    assert "dashscope" not in route.base_url.lower(), route.base_url
+    assert "aliyun" not in route.base_url.lower(), route.base_url
