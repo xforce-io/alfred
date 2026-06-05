@@ -86,6 +86,78 @@ async def test_restricted_agent_factory_keeps_resource_skill_tools(tmp_path: Pat
     )
 
 
+# ── #47: 后台 turn 失败 → provider.capture_trace 带外留证 ──
+
+
+def _patch_provider_for(monkeypatch, provider):
+    import importlib
+    prov_mod = importlib.import_module(
+        HeartbeatRunner.__module__.rsplit(".", 2)[0] + ".agent.provider"
+    )
+    monkeypatch.setattr(prov_mod, "provider_for", lambda agent: provider)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_captures_trace_on_failure_then_reraises(tmp_path, monkeypatch):
+    """后台 turn 失败 → 调 provider.capture_trace(agent) 留证,并仍向上 re-raise
+    (留证是带外副作用,不吞掉失败)。"""
+    runner = _make_runner(workspace_path=tmp_path)
+
+    async def boom(agent, message):
+        raise RuntimeError("milkie agent run failed: boom")
+
+    monkeypatch.setattr(runner, "_run_heartbeat_turn", boom)
+
+    captured: list = []
+    provider = SimpleNamespace(
+        capture_trace=lambda agent: captured.append(agent) or (tmp_path / "x.html")
+    )
+    _patch_provider_for(monkeypatch, provider)
+
+    sentinel_agent = object()
+    with pytest.raises(RuntimeError, match="boom"):
+        await runner._run_agent(sentinel_agent, "do work")
+    assert captured == [sentinel_agent]   # 留证被调用,入参为失败的 agent
+
+
+@pytest.mark.asyncio
+async def test_run_agent_success_does_not_capture_trace(tmp_path, monkeypatch):
+    """成功 turn 不留证(留证只在失败路径)。"""
+    runner = _make_runner(workspace_path=tmp_path)
+
+    async def ok(agent, message):
+        return "done"
+
+    monkeypatch.setattr(runner, "_run_heartbeat_turn", ok)
+
+    called: list = []
+    provider = SimpleNamespace(capture_trace=lambda agent: called.append(agent))
+    _patch_provider_for(monkeypatch, provider)
+
+    result = await runner._run_agent(object(), "do work")
+    assert result == "done"
+    assert called == []
+
+
+@pytest.mark.asyncio
+async def test_run_agent_capture_trace_failure_does_not_mask_original_error(tmp_path, monkeypatch):
+    """留证本身抛异常也不能掩盖/替换原始失败 —— 带外不该拖垮失败处理。"""
+    runner = _make_runner(workspace_path=tmp_path)
+
+    async def boom(agent, message):
+        raise RuntimeError("original boom")
+
+    monkeypatch.setattr(runner, "_run_heartbeat_turn", boom)
+
+    def explode(agent):
+        raise OSError("capture blew up")
+
+    _patch_provider_for(monkeypatch, SimpleNamespace(capture_trace=explode))
+
+    with pytest.raises(RuntimeError, match="original boom"):
+        await runner._run_agent(object(), "do work")
+
+
 def _build_structured_md(tasks: list[dict] | None = None) -> str:
     """Build a valid HEARTBEAT.md string with optional task list."""
     task_list = {"version": 2, "tasks": tasks or []}

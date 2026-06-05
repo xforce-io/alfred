@@ -9,6 +9,7 @@ import json
 import httpx
 import pytest
 
+from src.everbot.core.agent.provider.milkie import provider as provider_mod
 from src.everbot.core.agent.provider.milkie.provider import MilkieAgentHandle, MilkieProvider
 
 
@@ -158,6 +159,42 @@ async def test_run_turn_captures_runid_even_on_error_terminal():
     finally:
         await client.aclose()
     assert handle.last_run_id == "run-err"
+
+
+# ── #47: capture_trace — 中立能力,内部从 handle.last_run_id 取 runId,调带外 chokepoint ──
+
+def test_capture_trace_returns_none_without_run_id(monkeypatch):
+    """无 runId(从未跑过 / 非 milkie 路径)→ 返回 None,绝不调 chokepoint。"""
+    called: list = []
+    monkeypatch.setattr(provider_mod, "capture_trace_report", lambda *a, **k: called.append(1))
+    p = MilkieProvider("http://x")
+    h = MilkieAgentHandle("http://s", "c", name="alice")  # last_run_id 默认 None
+    assert p.capture_trace(h) is None
+    assert called == []
+
+
+def test_capture_trace_invokes_chokepoint_with_runid_and_agent_data_dir(monkeypatch, tmp_path):
+    """有 runId → 用 handle.last_run_id + 按 agent.name 解析的 sidecar data_dir 调 chokepoint。
+    runId 不出 Provider —— 由 capture_trace 内部取用。"""
+    captured: dict = {}
+
+    def fake_report(run_id, *, traces_dir, data_dir, **kw):
+        captured.update(run_id=run_id, traces_dir=traces_dir, data_dir=data_dir)
+        return tmp_path / f"{run_id}.html"
+
+    monkeypatch.setattr(provider_mod, "capture_trace_report", fake_report)
+    monkeypatch.setattr(provider_mod, "_milkie_data_dir", lambda name: f"/data/{name}")
+    monkeypatch.setattr(provider_mod, "_traces_dir", lambda: tmp_path)
+
+    p = MilkieProvider("http://x")
+    h = MilkieAgentHandle("http://s", "c", name="alice")
+    h.last_run_id = "run-77"
+
+    out = p.capture_trace(h)
+    assert out == tmp_path / "run-77.html"
+    assert captured["run_id"] == "run-77"
+    assert captured["data_dir"] == "/data/alice"   # data_dir 由 agent.name 推出
+    assert captured["traces_dir"] == tmp_path
 
 
 async def test_run_turn_sends_contextid_and_input_to_chat():
