@@ -120,6 +120,46 @@ async def test_run_turn_raises_on_error_frame():
         await client.aclose()
 
 
+# ── #47: capture milkie's per-run id off the terminal frame (milkie#140) ──
+# runId is milkie-private and must NOT enter the neutral _progress contract; it
+# is stashed on the provider-internal handle so the Provider can later locate the
+# recorded trace (`milkie trace <runId>`). Never surfaced to turn_orchestrator.
+
+async def test_run_turn_captures_runid_onto_handle():
+    """The completed terminal frame's runId is stashed on the handle (not _progress)."""
+    sse = _sse(
+        ("agent.run.started", {"contextId": "c"}),
+        ("message_delta", {"text": "hi"}),
+        ("agent.run.completed", {"status": "completed", "output": "hi", "runId": "run-abc"}),
+    )
+    p, client = _provider(sse)
+    handle = MilkieAgentHandle("http://sidecar", "c")
+    try:
+        events = [e async for e in p.run_turn(handle, "hi")]
+    finally:
+        await client.aclose()
+    assert handle.last_run_id == "run-abc"
+    # runId must not leak into the neutral _progress contract
+    assert "run-abc" not in json.dumps(events)
+
+
+async def test_run_turn_captures_runid_even_on_error_terminal():
+    """失败 run 也要留得到 runId(供 cron 失败分支留证):error 终止帧的 runId
+    必须在抛 RuntimeError 前捕获到 handle。"""
+    sse = _sse(
+        ("agent.run.started", {"contextId": "c"}),
+        ("agent.run.completed", {"status": "error", "output": "boom", "runId": "run-err"}),
+    )
+    p, client = _provider(sse)
+    handle = MilkieAgentHandle("http://sidecar", "c")
+    try:
+        with pytest.raises(RuntimeError):
+            _ = [e async for e in p.run_turn(handle, "hi")]
+    finally:
+        await client.aclose()
+    assert handle.last_run_id == "run-err"
+
+
 async def test_run_turn_sends_contextid_and_input_to_chat():
     cap: dict = {}
     p, client = _provider(_sse(("agent.run.completed", {"status": "completed", "output": ""})), cap)

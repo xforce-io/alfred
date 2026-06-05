@@ -135,6 +135,9 @@ class MilkieAgentHandle:
     base_url: str
     context_id: str
     name: str = ""
+    # #47: milkie 的单次运行 id(milkie#140 经终止帧回传),provider 私有 —— 供
+    # Provider 据此定位落盘 trace(`milkie trace <runId>`)。绝不进中立 _progress。
+    last_run_id: Optional[str] = None
 
 
 class MilkieProvider:
@@ -301,14 +304,21 @@ class MilkieProvider:
                             raise RuntimeError(
                                 f"milkie agent error: {data.get('message') or data}"
                             )
-                        if event == "agent.run.completed" and data.get("status") == "error":
-                            msg = (
-                                data.get("error")
-                                or data.get("output")
-                                or data.get("lastTextOutput")
-                                or "unknown error"
-                            )
-                            raise RuntimeError(f"milkie agent run failed: {msg}")
+                        if event == "agent.run.completed":
+                            # #47: 捕获本轮 runId(milkie#140)到 handle —— 必须在
+                            # 下面 error 抛出之前,失败 run 才同样可被留证。runId 是
+                            # milkie 私有,只落在 provider 内的 handle,不进 _progress。
+                            run_id = data.get("runId")
+                            if run_id:
+                                handle.last_run_id = run_id
+                            if data.get("status") == "error":
+                                msg = (
+                                    data.get("error")
+                                    or data.get("output")
+                                    or data.get("lastTextOutput")
+                                    or "unknown error"
+                                )
+                                raise RuntimeError(f"milkie agent run failed: {msg}")
                         item = milkie_event_to_progress(event, data)
                         if item is not None:
                             yield {"_progress": [item]}
