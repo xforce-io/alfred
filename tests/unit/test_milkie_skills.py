@@ -178,6 +178,75 @@ def test_system_prompt_loader_injects_discovered_skills(tmp_path, monkeypatch):
     assert "run_command" in prompt               # 面向 run_command 的调用说明在
 
 
+# ── _build_default_prompt_and_skills:同源(prompt + skill_list manifest)─────
+
+def _setup_ws_skills(tmp_path, monkeypatch, names, *, agent="a1", config=None):
+    """搭一个 workspace + 若干 skill,隔离全局/仓库 skill 目录。返回 ws。"""
+    from src.everbot.core.agent.provider.milkie import provider as mprov
+    import src.everbot.infra.config as config_module
+
+    ws = tmp_path / "ws"
+    (ws / "skills").mkdir(parents=True)
+    (ws / "SOUL.md").write_text("身份", encoding="utf-8")
+    for n in names:
+        _make_skill(ws / "skills", n, n, f"{n} 的说明")
+    monkeypatch.setattr(mprov, "_resolve_agent_workspace", lambda _n: ws)
+    monkeypatch.setattr(msk, "resolve_skill_dirs", lambda _ws: [ws / "skills"])
+    monkeypatch.setattr(config_module, "get_config", lambda *a, **k: config or {})
+    return ws
+
+
+def test_build_default_returns_prompt_and_skills_same_source(tmp_path, monkeypatch):
+    """返回 (prompt, skills);skills 即 manifest 来源,与 prompt 技能段同一份发现结果。"""
+    from src.everbot.core.agent.provider.milkie import provider as mprov
+
+    _setup_ws_skills(tmp_path, monkeypatch, ["ops", "web", "twitter-watch"])
+    prompt, skills = mprov._build_default_prompt_and_skills("a1")
+
+    names = {s["name"] for s in skills}
+    assert names == {"ops", "web", "twitter-watch"}        # 一个不少(防漏列)
+    # 同源:返回的 prompt 必须等于薄包装 loader 的输出
+    assert prompt == mprov._default_system_prompt_loader("a1")
+    # 同源:每个 skill 都出现在 prompt 技能段里
+    for n in names:
+        assert n in prompt
+    # skills 形状含 manifest 需要的 abs_path
+    assert all("abs_path" in s and "description" in s for s in skills)
+
+
+def test_build_default_reflector_returns_none_skills(tmp_path, monkeypatch):
+    """reflector:无技能集 → skills is None(调用方据此不产出 manifest)。"""
+    from src.everbot.core.agent.provider.milkie import provider as mprov
+
+    prompt, skills = mprov._build_default_prompt_and_skills(mprov.REFLECTOR_AGENT)
+    assert skills is None
+    assert "reflection" in prompt and "JSON" in prompt
+
+
+def test_build_default_respects_include_filter(tmp_path, monkeypatch):
+    from src.everbot.core.agent.provider.milkie import provider as mprov
+
+    _setup_ws_skills(
+        tmp_path, monkeypatch, ["ops", "web", "secret"],
+        config={"everbot": {"agents": {"a1": {"skills": {"include": ["ops", "web"]}}}}},
+    )
+    _prompt, skills = mprov._build_default_prompt_and_skills("a1")
+    assert {s["name"] for s in skills} == {"ops", "web"}  # secret 被白名单挡掉
+
+
+def test_build_default_bad_include_fails_loud(tmp_path, monkeypatch):
+    """producer fail-loud(milkie#139):include 引用不存在的 skill → discover_skills raise。"""
+    import pytest
+    from src.everbot.core.agent.provider.milkie import provider as mprov
+
+    _setup_ws_skills(
+        tmp_path, monkeypatch, ["ops"],
+        config={"everbot": {"agents": {"a1": {"skills": {"include": ["nope"]}}}}},
+    )
+    with pytest.raises(ValueError):
+        mprov._build_default_prompt_and_skills("a1")
+
+
 def test_telegram_agent_gets_attachment_instruction(tmp_path, monkeypatch):
     """telegram-serving agent 的系统提示注入附件输出约定;非 telegram agent 不注入。"""
     from src.everbot.core.agent.provider.milkie import provider as mprov

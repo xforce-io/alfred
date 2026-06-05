@@ -40,8 +40,16 @@ def _resolve_agent_workspace(agent_name: str) -> Path:
 REFLECTOR_AGENT = "_reflector"
 
 
-def _default_system_prompt_loader(agent_name: str) -> str:
-    """构建 milkie agent 的 system prompt —— 真实来源。
+def _build_default_prompt_and_skills(
+    agent_name: str,
+) -> tuple[str, Optional[list[dict[str, Any]]]]:
+    """构建 milkie agent 的 system prompt + 发现的 skill 列表(同一次 discover_skills)。
+
+    返回 ``(system_prompt, skills)``。``skills is None`` 表示该 agent 没有可发现的
+    技能集(reflector) —— 调用方据此决定是否产出 skill_list manifest(milkie #139)。
+
+    **同源保证**:prompt 的技能段与 skill_list manifest 由这同一份 discover_skills
+    结果产出,杜绝两份表漂移(见 milkie#139 producer 纪律)。
 
     经 :class:`WorkspaceLoader` 读取并合并 agent 工作区的 SOUL/AGENTS/SKILLS/
     USER/MEMORY.md(同 dolphin agent 的 ``$workspace_instructions``,但不耦合
@@ -50,7 +58,7 @@ def _default_system_prompt_loader(agent_name: str) -> str:
     if agent_name == REFLECTOR_AGENT:
         # reflector 的 systemPrompt 即 reflect-JSON 提示;不读业务 workspace(无污染、无需 workspace)。
         from ....runtime.inspector import _REFLECT_SYSTEM_PROMPT  # 延迟引,避免模块期循环
-        return _REFLECT_SYSTEM_PROMPT
+        return _REFLECT_SYSTEM_PROMPT, None
 
     from .....infra.workspace import WorkspaceLoader
     from .skills import build_milkie_skills_section, discover_skills
@@ -65,10 +73,11 @@ def _default_system_prompt_loader(agent_name: str) -> str:
     # 动态发现 shell 型 skill 并注入(milkie 无 dolphin 的 ResourceSkillkit;agent 经
     # 内建 run_command(milkie#134)读 SKILL.md 并跑脚本 —— 与 dolphin 能力对等)。
     # per-agent allowlist:everbot.agents.<name>.skills.include/exclude(A3,对齐 dolphin)。
+    # discover_skills 对 include/exclude 笔误 fail-loud(raise ValueError)——即 milkie#139
+    # 要求的 producer 侧 fail-fast(错误落在 spawn 边界、operator 可见)。
     include, exclude = _agent_skill_filter(agent_name)
-    section = build_milkie_skills_section(
-        discover_skills(workspace, include=include, exclude=exclude), workspace
-    )
+    skills = discover_skills(workspace, include=include, exclude=exclude)
+    section = build_milkie_skills_section(skills, workspace)
     if section:
         base = f"{base}\n\n---\n\n{section}" if base else section
 
@@ -77,7 +86,16 @@ def _default_system_prompt_loader(agent_name: str) -> str:
     if _is_telegram_serving(agent_name):
         from .....channels.attachment_directives import ATTACHMENT_INSTRUCTION
         base = f"{base}\n\n---\n\n{ATTACHMENT_INSTRUCTION}" if base else ATTACHMENT_INSTRUCTION
-    return base
+    return base, skills
+
+
+def _default_system_prompt_loader(agent_name: str) -> str:
+    """构建 milkie agent 的 system prompt —— 真实来源。
+
+    薄包装,委托 :func:`_build_default_prompt_and_skills` 并只取 prompt;保持
+    ``(agent_name) -> str`` 的 loader seam 契约不变。
+    """
+    return _build_default_prompt_and_skills(agent_name)[0]
 
 
 def _agent_skill_filter(agent_name: str):
@@ -177,9 +195,18 @@ class MilkieProvider:
             # agent 都用全局默认模型(实测 bug:demo_agent 被用成 kimi-code 而非其配置的 volcengine)。
             from ...agent_config import resolve_agent_model
             per_agent_model = resolve_agent_model(agent_name) or None
+            # 同源(milkie#139):默认 loader 时跑一次 discover_skills,prompt 技能段与
+            # skill_list manifest 共用同一结果、不漂移。注入式 loader(测试 seam)绕过
+            # 发现 → skills=None → launcher 不产出 manifest(milkie 侧据缺失 degrade)。
+            if self._system_prompt_loader is _default_system_prompt_loader:
+                system_prompt, skills = _build_default_prompt_and_skills(agent_name)
+            else:
+                system_prompt = self._system_prompt_loader(agent_name)
+                skills = None
             spec = launcher.build(
                 agent_name,
-                system_prompt=self._system_prompt_loader(agent_name),
+                system_prompt=system_prompt,
+                skills=skills,
                 default_model=per_agent_model,
             )
             return spec.cmd, spec.env

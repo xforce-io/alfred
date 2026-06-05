@@ -616,10 +616,12 @@ def test_injected_system_prompt_loader_is_used(monkeypatch):
     from src.everbot.core.agent.provider.milkie.launcher import LaunchSpec
 
     captured_prompts: list = []
+    captured_skills: list = []
 
     class _CapturingLauncher:
-        def build(self, agent_name, *, system_prompt, default_model=None):
+        def build(self, agent_name, *, system_prompt, skills=None, default_model=None):
             captured_prompts.append(system_prompt)
+            captured_skills.append(skills)
             return LaunchSpec(
                 cmd=["node"], env={}, data_dir=Path("/tmp"), agent_md=Path("/tmp/a.md")
             )
@@ -647,4 +649,43 @@ def test_injected_system_prompt_loader_is_used(monkeypatch):
     # 触发 build 闭包(pool 把闭包存为 self._build)
     cmd, env = pool._build("alice")
     assert captured_prompts == ["PROMPT::alice"]
+    # 注入式 loader 绕过发现 → skills=None → 不产出 manifest(milkie#139)
+    assert captured_skills == [None]
     assert cmd == ["node"]
+
+
+def test_default_loader_feeds_discovered_skills_to_launcher(monkeypatch):
+    """默认 loader 路径:_build 跑一次 discover_skills,把 skills 喂给 launcher(同源 manifest)。"""
+    from pathlib import Path
+
+    import src.everbot.core.agent.provider.milkie.provider as mod
+    from src.everbot.core.agent.provider.milkie.launcher import LaunchSpec
+
+    captured = {}
+
+    class _CapturingLauncher:
+        def build(self, agent_name, *, system_prompt, skills=None, default_model=None):
+            captured["system_prompt"] = system_prompt
+            captured["skills"] = skills
+            return LaunchSpec(
+                cmd=["node"], env={}, data_dir=Path("/tmp"), agent_md=Path("/tmp/a.md")
+            )
+
+    monkeypatch.setattr(
+        "src.everbot.core.agent.provider.milkie.launcher.SidecarLauncher",
+        lambda **kw: _CapturingLauncher(),
+    )
+    monkeypatch.setattr("src.everbot.infra.config.get_config", lambda *a, **k: {})
+
+    # 让默认 loader 返回确定的 (prompt, skills),验证它确实被 _build 调用并透传
+    fake_skills = [{"name": "twitter-watch", "description": "d", "abs_path": "/abs/tw"}]
+    monkeypatch.setattr(
+        mod, "_build_default_prompt_and_skills",
+        lambda name: (f"PROMPT::{name}", fake_skills),
+    )
+
+    # 不注入 loader → 用模块默认 loader → 走"同源 discover"分支
+    prov = mod.MilkieProvider("http://x")
+    cmd, env = prov._get_pool()._build("alice")
+    assert captured["system_prompt"] == "PROMPT::alice"
+    assert captured["skills"] == fake_skills  # 默认路径把 skills 喂到 launcher
