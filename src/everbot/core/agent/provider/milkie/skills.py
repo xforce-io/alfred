@@ -132,6 +132,12 @@ def build_milkie_skills_section(skills: List[Dict[str, Any]], workspace_root: Pa
         "再按文档用 `run_command` 执行其脚本（用脚本的绝对路径）。文档里的 "
         f"`$SKILL_DIR` 指该技能目录、`$WORKSPACE_ROOT` 指 `{workspace_root}`。",
         "",
+        # 列举意图 → 走 skill_list 工具(权威完整),而非凭本段落手抄(手抄是非确定性的,
+        # 实测会漏列;skill_list 由 manifest 背书,见 milkie#139 / alfred#50)。
+        "⚠️ 当用户要求**列举/罗列你的全部技能**（如「你有哪些技能」「列出技能」）时，"
+        "调用 `skill_list` 工具获取权威完整清单后再作答，**不要凭本段落或记忆手动罗列**"
+        "（手动罗列易漏列技能）。`skill_list` 返回的每个条目含 `dir` 字段，即上面各技能的目录。",
+        "",
     ]
     for s in skills:
         desc = s["description"] or s["title"]
