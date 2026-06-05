@@ -1,8 +1,9 @@
 """#47: Best-effort trace capture chokepoint tests."""
 
 import subprocess
+import sys
 
-from src.everbot.infra.milkie_trace import capture_trace_report
+from src.everbot.infra.milkie_trace import _default_runner, capture_trace_report
 
 
 class _FakeProc:
@@ -59,6 +60,30 @@ def test_capture_trace_report_tolerates_runner_exception(tmp_path):
         raise FileNotFoundError("milkie not found")
 
     assert capture_trace_report("run-x", traces_dir=tmp_path, data_dir="/d", runner=runner) is None
+
+
+def test_default_runner_captures_large_stdout_without_truncation():
+    """#55: 真实 runner 经文件重定向捕获大 stdout,不被管道 drain 截断。
+
+    用真实子进程输出远超管道缓冲(>45KB,实测截断点)的内容,断言完整拿回。
+    """
+    size = 600_000  # ~600KB,模拟 trace report HTML 量级
+    code = f"import sys; sys.stdout.write('A' * {size})"
+    proc = _default_runner([sys.executable, "-c", code], 30.0)
+
+    assert proc.returncode == 0
+    assert len(proc.stdout) == size
+    assert proc.stdout == "A" * size
+
+
+def test_default_runner_propagates_returncode_and_stderr():
+    """#55: 非零退出码与 stderr 仍正确透出(stderr 走 pipe)。"""
+    code = "import sys; sys.stderr.write('boom'); sys.exit(3)"
+    proc = _default_runner([sys.executable, "-c", code], 30.0)
+
+    assert proc.returncode == 3
+    assert "boom" in proc.stderr
+    assert proc.stdout == ""
 
 
 def test_capture_trace_report_returns_none_on_timeout(tmp_path):

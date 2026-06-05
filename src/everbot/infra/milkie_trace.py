@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
@@ -23,7 +24,20 @@ DEFAULT_TRACE_TIMEOUT_SECONDS = 5.0
 
 
 def _default_runner(cmd: Sequence[str], timeout: float) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    """跑 milkie CLI,stdout 重定向到临时文件再读回。
+
+    milkie/Node 经**管道**输出大内容时,``process.exit`` 可能在 stdout 未 drain 完就退出
+    → 截断(实测 execution JSON 约 45KB 处断;``trace report`` 的 HTML 可达 ~558KB,必断)。
+    用 ``capture_output=True``(pipe)会拿到残缺 HTML。重定向到文件(同步 fd 写)绕开该
+    bug。stderr 量小,仍走 pipe。详见 #55。
+    """
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as out:
+        proc = subprocess.run(
+            list(cmd), stdout=out, stderr=subprocess.PIPE, text=True, timeout=timeout
+        )
+        out.seek(0)
+        stdout = out.read()
+    return subprocess.CompletedProcess(list(cmd), proc.returncode, stdout, proc.stderr)
 
 
 def capture_trace_report(
