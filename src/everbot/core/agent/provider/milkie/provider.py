@@ -47,6 +47,25 @@ def _traces_dir() -> Path:
     return Path("~/.alfred/logs/traces").expanduser()
 
 
+def _milkie_cli_cmd() -> tuple[str, str]:
+    """milkie CLI 的调用前缀 ``(node_bin, dist_path)`` —— 与 pool 装配同源解析。
+
+    sidecar 是经 ``node <dist>/cli/index.js`` 启动的,环境通常**没有 ``milkie`` 可执行**;
+    自动留证必须用同一 node+dist 调 ``trace report``,否则 ``FileNotFoundError`` → 静默失效
+    (#57)。缺省回退 ``node`` + ``../milkie/dist/cli/index.js``(相对 alfred 仓)。"""
+    node_bin = "node"
+    dist_path = Path(__file__).resolve().parents[6].parent / "milkie" / "dist" / "cli" / "index.js"
+    try:
+        from .....infra.config import get_config
+
+        milkie_cfg = ((get_config() or {}).get("everbot", {}) or {}).get("milkie", {}) or {}
+        node_bin = milkie_cfg.get("node_bin") or node_bin
+        dist_path = Path(milkie_cfg.get("dist_path") or dist_path)
+    except Exception:
+        pass
+    return node_bin, str(dist_path.expanduser())
+
+
 def _resolve_agent_workspace(agent_name: str) -> Path:
     """解析 agent 工作区目录(= ``~/.alfred/agents/<name>``)。
 
@@ -365,10 +384,12 @@ class MilkieProvider:
         if not run_id:
             return None
         agent_name = getattr(agent, "name", "") or ""
+        # #57:用 sidecar 实际的 node+dist 调 CLI —— 环境无字面 ``milkie`` 可执行。
         return capture_trace_report(
             run_id,
             traces_dir=_traces_dir(),
             data_dir=str(_milkie_data_dir(agent_name)),
+            milkie_cmd=_milkie_cli_cmd(),
         )
 
     def is_user_interrupt_paused(self, agent: Any) -> bool:

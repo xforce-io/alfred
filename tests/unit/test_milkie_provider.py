@@ -766,3 +766,56 @@ def test_default_loader_feeds_discovered_skills_to_launcher(monkeypatch):
     cmd, env = prov._get_pool()._build("alice")
     assert captured["system_prompt"] == "PROMPT::alice"
     assert captured["skills"] == fake_skills  # 默认路径把 skills 喂到 launcher
+
+
+# ---------------------------------------------------------------------------
+# #57: capture_trace 走 node+dist(而非字面 milkie)
+# ---------------------------------------------------------------------------
+def test_milkie_cli_cmd_defaults(monkeypatch):
+    monkeypatch.setattr("src.everbot.infra.config.get_config", lambda *a, **k: {})
+    node_bin, dist = provider_mod._milkie_cli_cmd()
+    assert node_bin == "node"
+    assert dist.endswith("milkie/dist/cli/index.js")
+
+
+def test_milkie_cli_cmd_reads_config(monkeypatch):
+    monkeypatch.setattr(
+        "src.everbot.infra.config.get_config",
+        lambda *a, **k: {"everbot": {"milkie": {"node_bin": "/usr/bin/node18", "dist_path": "/opt/milkie/x.js"}}},
+    )
+    node_bin, dist = provider_mod._milkie_cli_cmd()
+    assert node_bin == "/usr/bin/node18"
+    assert dist == "/opt/milkie/x.js"
+
+
+def test_capture_trace_forwards_node_dist_cmd(monkeypatch, tmp_path):
+    """capture_trace 必须把 milkie_cmd=(node, dist) 转发给 chokepoint,而非默认字面 milkie。"""
+    monkeypatch.setattr("src.everbot.infra.config.get_config", lambda *a, **k: {})
+    captured: dict = {}
+
+    def _fake_report(run_id, *, traces_dir, data_dir, milkie_cmd=("milkie",), **kw):
+        captured.update(run_id=run_id, milkie_cmd=tuple(milkie_cmd), data_dir=data_dir)
+        return tmp_path / f"{run_id}.html"
+
+    monkeypatch.setattr(provider_mod, "capture_trace_report", _fake_report)
+
+    agent = MilkieAgentHandle(base_url="http://x", context_id="c", name="demo_agent")
+    agent.last_run_id = "run-123"
+    out = MilkieProvider("http://x").capture_trace(agent)
+
+    assert out == tmp_path / "run-123.html"
+    assert captured["run_id"] == "run-123"
+    # 关键:前缀是 node + dist,不是字面 milkie
+    assert captured["milkie_cmd"][0] == "node"
+    assert captured["milkie_cmd"][1].endswith("milkie/dist/cli/index.js")
+    assert "milkie" != captured["milkie_cmd"][0]
+
+
+def test_capture_trace_none_without_run_id(monkeypatch):
+    """无 last_run_id(非 milkie 路径/未跑过)→ None,不调 chokepoint。"""
+    def _boom(*a, **k):
+        raise AssertionError("不应调用 capture_trace_report")
+
+    monkeypatch.setattr(provider_mod, "capture_trace_report", _boom)
+    agent = MilkieAgentHandle(base_url="http://x", context_id="c", name="a")  # last_run_id 默认 None
+    assert MilkieProvider("http://x").capture_trace(agent) is None
