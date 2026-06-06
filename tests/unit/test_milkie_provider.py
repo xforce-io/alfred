@@ -819,3 +819,49 @@ def test_capture_trace_none_without_run_id(monkeypatch):
     monkeypatch.setattr(provider_mod, "capture_trace_report", _boom)
     agent = MilkieAgentHandle(base_url="http://x", context_id="c", name="a")  # last_run_id 默认 None
     assert MilkieProvider("http://x").capture_trace(agent) is None
+
+
+# ============================================================================
+# #60 / milkie#146:把投递到 channel 的外部产出登记为 context projection
+# (读侧、不进 history)。attach_projection 走 serve POST /projection/attach。
+# ============================================================================
+
+async def test_attach_projection_posts_to_projection_attach_endpoint():
+    """attach_projection 以 channel 的 contextId 为 target、job 的 milkie runId
+    为 sourceRunId,把 displayText POST 到 /projection/attach。"""
+    capture: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        capture["url"] = str(request.url)
+        capture["payload"] = json.loads(request.content)
+        return httpx.Response(200, json={"projection": {"sourceRunId": "job-run-1"}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = MilkieProvider("http://sidecar", client=client)
+    handle = MilkieAgentHandle("http://sidecar", "tg_session_demo_agent__123")
+
+    await provider.attach_projection(
+        handle,
+        source_run_id="job-run-1",
+        display_text="今日 $SIVE 推文分析…",
+        delivered_at="2026-06-06T02:02:00Z",
+    )
+
+    assert capture["url"] == "http://sidecar/projection/attach"
+    assert capture["payload"]["contextId"] == "tg_session_demo_agent__123"
+    assert capture["payload"]["sourceRunId"] == "job-run-1"
+    assert capture["payload"]["displayText"].startswith("今日 $SIVE")
+    assert capture["payload"]["deliveredAt"] == "2026-06-06T02:02:00Z"
+
+
+async def test_attach_projection_raises_on_non_2xx():
+    """serve 非 2xx 不静默吞 —— 让调用方(带外 best-effort)能记日志。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "boom"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = MilkieProvider("http://sidecar", client=client)
+    handle = MilkieAgentHandle("http://sidecar", "ctx")
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await provider.attach_projection(handle, source_run_id="r", display_text="x")

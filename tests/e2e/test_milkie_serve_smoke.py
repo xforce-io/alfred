@@ -268,3 +268,82 @@ async def test_generated_agent_md_loads_and_runs_in_real_serve(tmp_path, fake_op
         if item.get("stage") == "llm" and item.get("delta")
     ]
     assert "".join(deltas) == "Hello, world!", f"生成的 agent.md 应能跑通 turn,得 deltas={deltas}"
+
+
+async def test_attached_projection_appears_in_next_turn_prompt_via_real_serve(tmp_path, monkeypatch):
+    """#60 端到端(真 milkie serve):attach_projection 后,下一轮 assemble 把投影作为
+    `External Delivered Context` 注入模型 prompt —— 证明修复真生效:模型看得见这篇
+    已投递给用户的报告。覆盖 MockTransport 测不到的 alfred↔milkie 真 HTTP + 真 assemble。"""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    cli = _milkie_cli()
+    if cli is None:
+        pytest.skip("milkie dist not built at ../milkie/dist/cli/index.js")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-proj")
+
+    captured: dict = {"messages": None}
+
+    class _RecordingOpenAI(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("content-length", 0))
+            req = json.loads(self.rfile.read(length) or "{}")
+            captured["messages"] = req.get("messages")  # 记录本轮喂给 LLM 的 prompt
+            frames = [
+                "data: " + json.dumps({
+                    "id": "c", "object": "chat.completion.chunk", "created": 0,
+                    "model": req.get("model", "fake"),
+                    "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": None}],
+                }),
+                "data: " + json.dumps({
+                    "id": "c", "object": "chat.completion.chunk", "created": 0,
+                    "model": req.get("model", "fake"),
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                }),
+                "data: [DONE]",
+            ]
+            body = ("\n\n".join(frames) + "\n\n").encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), _RecordingOpenAI)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+
+    agent_md = _write_agent(tmp_path, port)
+    data_dir = tmp_path / "milkie-data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    cmd = ["node", str(cli), "serve", "--agent", str(agent_md), "--port", "0",
+           "--state-store", "sqlite", "--data-dir", str(data_dir)]
+    sidecar = MilkieSidecar(cmd, ready_timeout=20.0)
+    await sidecar.start()
+    try:
+        provider = MilkieProvider(sidecar.base_url)
+        handle = MilkieAgentHandle(sidecar.base_url, "ctx-proj")
+        # 1) 建 context
+        _ = [e async for e in provider.run_turn(handle, "hi")]
+        # 2) 把"已投递的报告"登记为 projection(真 HTTP /projection/attach)
+        await provider.attach_projection(
+            handle,
+            source_run_id="job-run-xyz",
+            display_text="MARKER_SIVE_REPORT 今日 $SIVE 推文深度分析",
+        )
+        # 3) 下一轮:assemble 应把投影注入 prompt
+        _ = [e async for e in provider.run_turn(handle, "上面内容从哪来的")]
+    finally:
+        await sidecar.close()
+        server.shutdown()
+
+    prompt = json.dumps(captured["messages"], ensure_ascii=False)
+    assert "MARKER_SIVE_REPORT" in prompt, f"投影内容应进入模型 prompt,得:{prompt[:800]}"
+    assert "External Delivered Context" in prompt, "应带明确的外部投递标注(非用户原话)"
+    assert "job-run-xyz" in prompt, "应带 producedBy.runId 溯源"

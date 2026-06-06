@@ -593,7 +593,7 @@ class CronExecutor:
                 run_id=run_id,
             )
             await self.delivery.inject_to_history(result, run_id)
-            await self.delivery._emit_realtime(result, run_id)
+            await self.delivery._emit_realtime(result, run_id, transcript_worthy=True)
 
             return result
         except Exception as exc:
@@ -655,7 +655,7 @@ class CronExecutor:
                 run_id=run_id,
             )
             await self.delivery.inject_to_history(result, run_id)
-            await self.delivery._emit_realtime(result, run_id)
+            await self.delivery._emit_realtime(result, run_id, transcript_worthy=True)
 
             # SLM: record skill invocations from this isolated agent run.
             # Reads the just-written trajectory to find _load_resource_skill

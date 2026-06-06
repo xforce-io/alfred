@@ -51,6 +51,15 @@ logger = logging.getLogger(__name__)
 TELEGRAM_MSG_LIMIT = 4096
 
 
+def _truncate_projection_text(text: str, limit: int = 4000) -> str:
+    """#60:截断 projection 的 displayText —— milkie 侧不限长,而 projection 每轮
+    重渲直到 trim/TTL 清掉,长报告会持续吃 token。超长则截到 ``limit`` 并以省略号收尾
+    (总长 ≤ limit)。"""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
 def _extract_urls(text: str, entities: list) -> list[str]:
     """Extract URLs from Telegram entities (url + text_link), deduplicated and ordered."""
     seen: set[str] = set()
@@ -176,6 +185,44 @@ class TelegramChannel:
     # Event subscription (heartbeat delivery push)
     # ------------------------------------------------------------------
 
+    async def _maybe_attach_projection(
+        self, agent_name: str, chat_id: Any, data: Dict[str, Any]
+    ) -> None:
+        """#60 / milkie#146:内容型投递 → 把投递文本登记为该 channel 会话的 context
+        projection(读侧、不进 ``history:turn-*``),使模型下一轮看得见用户屏幕上那篇报告。
+
+        闸门:仅 ``transcript_worthy`` 且带 ``run_id``(去重/溯源锚点)+ ``detail``(内容)。
+        心跳状态 ping 不置该标志,故不入逐字稿。带外 best-effort:气泡此时已发出,
+        attach 失败只记日志、绝不冒泡破坏投递。"""
+        if not data.get("transcript_worthy"):
+            return
+        detail = str(data.get("detail") or data.get("summary") or "").strip()
+        run_id = str(data.get("run_id") or "").strip()
+        if not detail or not run_id:
+            return
+
+        session_id = ChannelSessionResolver.resolve("telegram", agent_name, str(chat_id))
+        agent = self._session_manager.get_cached_agent(session_id)
+        if agent is None:
+            return
+
+        from ..core.agent.provider import get_provider_for_agent
+
+        attach = getattr(get_provider_for_agent(agent_name), "attach_projection", None)
+        if attach is None:
+            return
+        try:
+            await attach(
+                agent,
+                source_run_id=run_id,
+                display_text=_truncate_projection_text(detail),
+                delivered_at=data.get("delivered_at"),
+            )
+        except Exception as exc:  # best-effort,带外:绝不破坏已完成的气泡投递
+            logger.warning(
+                "attach_projection failed for %s chat %s: %s", agent_name, chat_id, exc
+            )
+
     async def _on_background_event(
         self, source_session_id: str, data: Dict[str, Any]
     ) -> None:
@@ -254,6 +301,9 @@ class TelegramChannel:
                     source_type, chat_id,
                 )
                 continue
+            # #60:内容型投递 → 登记 milkie context projection,使模型下一轮看得见
+            # 这篇已投递给用户的报告(读侧、不进 history)。带外 best-effort。
+            await self._maybe_attach_projection(agent_name, chat_id, data)
             if source_type != "deferred_result" and hasattr(self._session_manager, "deposit_mailbox_event"):
                 from ..core.models.system_event import build_system_event
 

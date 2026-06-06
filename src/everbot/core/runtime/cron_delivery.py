@@ -172,8 +172,14 @@ class CronDelivery:
             ),
         }
 
-    async def _emit_realtime(self, result: str, run_id: str) -> None:
-        """Emit realtime push event (SSE / Telegram)."""
+    async def _emit_realtime(
+        self, result: str, run_id: str, *, transcript_worthy: bool = False
+    ) -> None:
+        """Emit realtime push event (SSE / Telegram).
+
+        ``transcript_worthy`` (#60):本次投递是否是"内容型"产出(具名 job/agent 任务的
+        用户可见报告),供 channel 侧据此登记 milkie context projection(读侧逐字稿)。
+        心跳状态 ping / 失败消息保持 False,不入逐字稿。"""
         from .events import emit
 
         message = {
@@ -185,6 +191,7 @@ class CronDelivery:
             "source_type": "heartbeat_delivery",
             "run_id": run_id,
             "deliver": True,
+            "transcript_worthy": transcript_worthy,
         }
         await emit(
             self.primary_session_id,
