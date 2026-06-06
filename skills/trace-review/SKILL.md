@@ -1,21 +1,22 @@
 ---
 name: trace-review
-description: 对话式复盘/求证一次 milkie run —— 看"这一轮怎么跑的、调了什么工具、命中什么证据、答案的数据来源"。当用户说"复盘上一轮""你刚那个数怎么来的""这个结论怎么得到的""看下执行过程/命中证据""求证一下""上一轮为什么慢/失败"时使用。
+description: 对话式复盘/求证一次 milkie run —— 看"这一轮怎么跑的、调了什么工具、命中什么证据、答案的数据来源"。当用户说"复盘上一轮""复盘下刚的分析""你刚那个数怎么来的""这个结论怎么得到的""上面内容/那篇报告从哪来的""这些内容怎么来的/哪儿来的/哪来的""看下执行过程/命中证据""求证一下""上一轮为什么慢/失败"时使用。亦覆盖对某条已投递报告/推送的来源追问。
 version: "0.1.0"
 tags: [trace, observability, review, provenance, debugging, milkie]
 ---
 
 # Trace Review
 
-复盘一次 milkie run 的执行过程,用于**对话式求证**:把某轮对话的「用户问题 → 执行步骤(工具调用 + 命中证据)→ 最终答案」摊开,让用户核验结论的数据来源、定位慢/失败的原因。
+复盘/求证一次 milkie run:摊开「用户问题→执行步骤(工具调用+命中证据)→答案」核验来源、定位慢/失败。追问『上面内容/那篇报告从哪来的』『这些内容怎么来的/哪儿来的』『复盘下刚的分析』『你那数/结论怎么来的』时用。
 
 milkie 每轮已把完整事件溯源 trace 落盘到 `~/.alfred/milkie/<agent>/runs/<runId>.jsonl`。本 skill **只消费** milkie 现成的诊断产物(`milkie trace execution/report`),不重写诊断逻辑。
 
 ## 何时用
 
-- 用户要核验某个结论/数字的来源:「你刚那个数怎么来的」「这个结论怎么得到的」「求证一下」
-- 用户要看执行过程:「复盘上一轮」「看下你调了什么工具、命中什么」
+- 用户要核验某个结论/数字/内容的来源:「你刚那个数怎么来的」「这个结论怎么得到的」「**上面内容/那篇报告从哪来的**」「**这些内容怎么来的/哪儿来的**」「求证一下」
+- 用户要看执行过程:「复盘上一轮」「**复盘下刚的分析**」「看下你调了什么工具、命中什么」
 - 用户排查上一轮为什么慢 / 失败 / 缓存没命中
+- 用户追问的是**某条具体已投递报告/推送**(不一定是最近一轮)时,用 `--match <报告里的关键词>` 定位产出它的 run,而非盲取最近一轮
 
 ## 命令
 
@@ -27,6 +28,7 @@ python skills/trace-review/scripts/review_run.py [选项]
 |---|---|
 | `--agent NAME` | 收窄到指定 agent(缺省扫所有 agent) |
 | `--run-id ID` | 显式指定 runId(缺省取最近一个**已完成** run) |
+| `--match TEXT` | 按内容定位:取最近一个其**用户输入或最终答案含 TEXT** 的已完成 run。追问"上面那篇报告/那条内容从哪来的"时,传报告里的关键词,定位产出它的那轮(而非盲取最近) |
 | `--brief` | 精简输出(默认详尽,保留完整 query/命中证据) |
 | `--full` | 额外渲染自包含 HTML 报告到 `~/.alfred/logs/traces/<runId>.html` |
 
@@ -43,6 +45,9 @@ python skills/trace-review/scripts/review_run.py --agent demo_agent
 
 # 复盘指定 run 并出 HTML
 python skills/trace-review/scripts/review_run.py --run-id <runId> --full
+
+# 追问"上面那篇报告从哪来的" —— 用报告里的关键词定位产出它的 run
+python skills/trace-review/scripts/review_run.py --match "$SIVE"
 ```
 
 ## 输出契约

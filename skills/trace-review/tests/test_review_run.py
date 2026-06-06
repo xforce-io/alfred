@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -404,3 +405,133 @@ def test_run_cli_failure_degrades(tmp_path):
         runner=lambda c, t: _proc(stderr="kaboom", rc=1),
     )
     assert code == 3 and "复盘失败" in md
+
+
+# ---------------------------------------------------------------------------
+# #61: 按内容定位 run(run_matches / pick_run match=)
+# ---------------------------------------------------------------------------
+def _write_run_content(root: Path, agent: str, run_id: str, *, mtime: float,
+                       inp: str = "hi", out: str = "bye") -> Path:
+    runs = root / agent / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    f = runs / f"{run_id}.jsonl"
+    f.write_text(
+        json.dumps({"type": "agent.run.started", "payload": {"input": inp}}) + "\n"
+        + json.dumps({"type": "agent.run.completed", "payload": {"lastTextOutput": out}}) + "\n",
+        encoding="utf-8",
+    )
+    os.utime(f, (mtime, mtime))
+    return f
+
+
+def test_run_matches_input_and_output(tmp_path):
+    f = _write_run_content(tmp_path, "a", "r1", mtime=1, inp="分析推文", out="报告里提到 $SIVE 强烈看多")
+    assert rr.run_matches(f, "SIVE") is True          # 命中 output(大小写不敏感)
+    assert rr.run_matches(f, "分析推文") is True       # 命中 input
+    assert rr.run_matches(f, "不存在的内容") is False
+    assert rr.run_matches(f, "") is True               # 空 match 视为不过滤
+
+
+def test_run_matches_missing_file(tmp_path):
+    assert rr.run_matches(tmp_path / "ghost.jsonl", "x") is False
+
+
+def test_pick_run_match_selects_matching_over_latest(tmp_path):
+    # 更新的 run 不含关键词;较老的 run 含 —— match 应越过"最近"选中含关键词的那个
+    _write_run_content(tmp_path, "a", "r_new", mtime=200, inp="闲聊", out="好的")
+    _write_run_content(tmp_path, "a", "r_old", mtime=100, inp="分析推文", out="$SIVE 报告")
+    runs = rr.discover_runs(tmp_path)
+    picked = rr.pick_run(runs, match="SIVE")
+    assert picked is not None
+    assert picked[1] == "r_old"
+
+
+def test_pick_run_match_picks_most_recent_among_matches(tmp_path):
+    _write_run_content(tmp_path, "a", "r1", mtime=100, inp="x", out="$SIVE 旧报告")
+    _write_run_content(tmp_path, "a", "r2", mtime=300, inp="y", out="$SIVE 新报告")
+    runs = rr.discover_runs(tmp_path)
+    picked = rr.pick_run(runs, match="SIVE")
+    assert picked[1] == "r2"   # 多个命中取最近
+
+
+def test_pick_run_match_none_when_no_match(tmp_path):
+    _write_run_content(tmp_path, "a", "r1", mtime=100, inp="x", out="y")
+    runs = rr.discover_runs(tmp_path)
+    assert rr.pick_run(runs, match="无此内容") is None
+
+
+def test_pick_run_no_match_keeps_latest_completed(tmp_path):
+    # 不传 match → 既有行为不变(最近已完成)
+    _write_run_content(tmp_path, "a", "r_old", mtime=100, inp="x", out="y")
+    _write_run_content(tmp_path, "a", "r_new", mtime=200, inp="x", out="y")
+    runs = rr.discover_runs(tmp_path)
+    assert rr.pick_run(runs)[1] == "r_new"
+
+
+def test_run_match_selects_matching_run_end_to_end(tmp_path):
+    """--match:端到端定位到内容命中的那轮(而非最近),并对它跑复盘。"""
+    root = tmp_path / "milkie"
+    _write_run_content(root, "demo", "r_new", mtime=9000, inp="闲聊", out="好的")
+    _write_run_content(root, "demo", "r_old", mtime=1000, inp="分析推文", out="$SIVE 报告")
+    dist = tmp_path / "dist.js"
+    dist.write_text("//", encoding="utf-8")
+    seen: dict = {}
+
+    def _runner(cmd, timeout):
+        seen["run_id"] = cmd[-1]
+        return _proc(stdout=json.dumps({"steps": []}))
+
+    code, md = rr.run(
+        ["--data-dir-root", str(root), "--dist", str(dist),
+         "--config", str(tmp_path / "x.yaml"), "--match", "SIVE"],
+        runner=_runner,
+    )
+    assert code == 0
+    assert seen["run_id"] == "r_old"
+
+
+def test_run_match_no_match_reports_clearly(tmp_path):
+    root = tmp_path / "milkie"
+    _write_run_content(root, "demo", "r1", mtime=1000, inp="x", out="y")
+    dist = tmp_path / "dist.js"
+    dist.write_text("//", encoding="utf-8")
+    code, md = rr.run(
+        ["--data-dir-root", str(root), "--dist", str(dist),
+         "--config", str(tmp_path / "x.yaml"), "--match", "无此内容"],
+    )
+    assert code == 2 and "没有内容含" in md
+
+
+# ---------------------------------------------------------------------------
+# #61 part1: SKILL.md 触发描述须覆盖口语化溯源追问(原 bug:『上面内容从哪来的』不激活)
+# ---------------------------------------------------------------------------
+def _routing_description(skill_md: str, max_chars: int = 150) -> str:
+    """复刻 everbot discover_skills 的 description 提取:# 标题后首段正文,截断到 max_chars。
+    这是 skill_list **路由**实际看到的文本(触发词必须在此 —— frontmatter/何时用 影响不到路由)。"""
+    tm = re.search(r"^#\s+(.+)$", skill_md, re.MULTILINE)
+    after = skill_md[tm.end():] if tm else skill_md
+    para: list[str] = []
+    for line in after.splitlines():
+        s = line.strip()
+        if not para:
+            if not s:
+                continue
+            if s.startswith("#"):
+                break
+        elif not s or s.startswith("#"):
+            break
+        para.append(s)
+    desc = " ".join(para).strip()
+    return desc if len(desc) <= max_chars else desc[:max_chars]
+
+
+def test_skill_md_covers_colloquial_provenance_triggers():
+    skill_md = (Path(__file__).resolve().parents[1] / "SKILL.md").read_text(encoding="utf-8")
+    routed = _routing_description(skill_md)  # 路由实际看到的(截断后)文本
+    for phrase in ["上面", "哪来", "怎么来", "复盘", "这些内容"]:
+        assert phrase in routed, f"路由 description 须含『{phrase}』,否则 skill_list 选不中(#61)"
+
+
+def test_skill_md_documents_match_option():
+    skill_md = (Path(__file__).resolve().parents[1] / "SKILL.md").read_text(encoding="utf-8")
+    assert "--match" in skill_md, "SKILL.md 应文档化 --match(按内容定位 run)"
