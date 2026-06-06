@@ -1436,3 +1436,41 @@ async def test_on_background_event_invokes_projection_attach_after_send(tmp_path
     assert args[0] == "my_agent"
     assert str(args[1]) == "111"
     assert args[2].get("run_id") == "job-run-1"
+
+
+@pytest.mark.asyncio
+async def test_transcript_worthy_projection_skips_mailbox_mirror(tmp_path):
+    """内容型投递成功 attach projection 后,不再镜像进 Background Updates ——
+    避免双重表示,且防止报告的镜像版本贴着"上面"劫持指代。"""
+    ch = _make_channel(tmp_path)
+    ch._send_message = AsyncMock()
+    ch._bindings = {"111": "my_agent"}
+    ch._session_manager.get_cached_agent.return_value = SimpleNamespace(context_id="c", base_url="u")
+    attach = AsyncMock()
+    with patch("src.everbot.core.agent.provider.get_provider_for_agent",
+               return_value=SimpleNamespace(attach_projection=attach)):
+        await ch._on_background_event("session_1", {
+            "source_type": "heartbeat_delivery", "agent_name": "my_agent",
+            "detail": "REPORT", "deliver": True, "scope": "agent",
+            "run_id": "job-1", "transcript_worthy": True,
+        })
+    attach.assert_awaited_once()
+    ch._session_manager.deposit_mailbox_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_projection_falls_back_to_mailbox_mirror(tmp_path):
+    """attach 失败 → 回落 mailbox 镜像,内容不丢(degraded but visible)。"""
+    ch = _make_channel(tmp_path)
+    ch._send_message = AsyncMock()
+    ch._bindings = {"111": "my_agent"}
+    ch._session_manager.get_cached_agent.return_value = SimpleNamespace(context_id="c", base_url="u")
+    attach = AsyncMock(side_effect=RuntimeError("serve down"))
+    with patch("src.everbot.core.agent.provider.get_provider_for_agent",
+               return_value=SimpleNamespace(attach_projection=attach)):
+        await ch._on_background_event("session_1", {
+            "source_type": "heartbeat_delivery", "agent_name": "my_agent",
+            "detail": "REPORT", "deliver": True, "scope": "agent",
+            "run_id": "job-1", "transcript_worthy": True,
+        })
+    ch._session_manager.deposit_mailbox_event.assert_awaited_once()

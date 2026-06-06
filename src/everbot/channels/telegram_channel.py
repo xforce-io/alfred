@@ -187,30 +187,34 @@ class TelegramChannel:
 
     async def _maybe_attach_projection(
         self, agent_name: str, chat_id: Any, data: Dict[str, Any]
-    ) -> None:
+    ) -> bool:
         """#60 / milkie#146:内容型投递 → 把投递文本登记为该 channel 会话的 context
         projection(读侧、不进 ``history:turn-*``),使模型下一轮看得见用户屏幕上那篇报告。
 
         闸门:仅 ``transcript_worthy`` 且带 ``run_id``(去重/溯源锚点)+ ``detail``(内容)。
         心跳状态 ping 不置该标志,故不入逐字稿。带外 best-effort:气泡此时已发出,
-        attach 失败只记日志、绝不冒泡破坏投递。"""
+        attach 失败只记日志、绝不冒泡破坏投递。
+
+        返回是否成功登记为 projection —— 调用方据此**跳过 mailbox 镜像**(projection
+        取代 Background Updates,避免双重表示 + 报告镜像版劫持"上面"指代);失败/未命中
+        闸门则返回 False,调用方回落到镜像,内容不丢。"""
         if not data.get("transcript_worthy"):
-            return
+            return False
         detail = str(data.get("detail") or data.get("summary") or "").strip()
         run_id = str(data.get("run_id") or "").strip()
         if not detail or not run_id:
-            return
+            return False
 
         session_id = ChannelSessionResolver.resolve("telegram", agent_name, str(chat_id))
         agent = self._session_manager.get_cached_agent(session_id)
         if agent is None:
-            return
+            return False
 
         from ..core.agent.provider import get_provider_for_agent
 
         attach = getattr(get_provider_for_agent(agent_name), "attach_projection", None)
         if attach is None:
-            return
+            return False
         try:
             await attach(
                 agent,
@@ -218,10 +222,12 @@ class TelegramChannel:
                 display_text=_truncate_projection_text(detail),
                 delivered_at=data.get("delivered_at"),
             )
+            return True
         except Exception as exc:  # best-effort,带外:绝不破坏已完成的气泡投递
             logger.warning(
                 "attach_projection failed for %s chat %s: %s", agent_name, chat_id, exc
             )
+            return False
 
     async def _on_background_event(
         self, source_session_id: str, data: Dict[str, Any]
@@ -302,9 +308,14 @@ class TelegramChannel:
                 )
                 continue
             # #60:内容型投递 → 登记 milkie context projection,使模型下一轮看得见
-            # 这篇已投递给用户的报告(读侧、不进 history)。带外 best-effort。
-            await self._maybe_attach_projection(agent_name, chat_id, data)
-            if source_type != "deferred_result" and hasattr(self._session_manager, "deposit_mailbox_event"):
+            # 这篇已投递给用户的报告(读侧、不进 history)。成功则 projection 取代下面的
+            # mailbox 镜像(否则报告会被双重表示、且镜像版贴着"上面"劫持指代)。
+            projected = await self._maybe_attach_projection(agent_name, chat_id, data)
+            if (
+                not projected
+                and source_type != "deferred_result"
+                and hasattr(self._session_manager, "deposit_mailbox_event")
+            ):
                 from ..core.models.system_event import build_system_event
 
                 tg_session_id = ChannelSessionResolver.resolve(
