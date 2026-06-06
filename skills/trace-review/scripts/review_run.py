@@ -146,18 +146,59 @@ def is_completed(jsonl_path: Path, tail_bytes: int = _TAIL_BYTES) -> bool:
     return COMPLETION_MARKER.encode("utf-8") in data
 
 
+def run_matches(jsonl_path: Path, text: str) -> bool:
+    """#61:该 run 的用户输入(``agent.run.started.input/goal``)或最终答案
+    (``agent.run.completed.lastTextOutput/output``)是否含 ``text``(子串,大小写不敏感)。
+    用于按"那篇报告/那条内容"定位产出它的 run,而非盲取最近一轮。空 text → True(不过滤);
+    文件缺失/读失败 → False。"""
+    if not text:
+        return True
+    needle = text.lower()
+    try:
+        with open(jsonl_path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                p = e.get("payload") or {}
+                if e.get("type") == "agent.run.started":
+                    s = str(p.get("input") or p.get("goal") or "")
+                elif e.get("type") == "agent.run.completed":
+                    s = str(p.get("lastTextOutput") or p.get("output") or "")
+                else:
+                    continue
+                if needle in s.lower():
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def pick_run(
-    runs: List[Tuple[str, str, Path, float]], *, run_id: Optional[str] = None
+    runs: List[Tuple[str, str, Path, float]],
+    *,
+    run_id: Optional[str] = None,
+    match: Optional[str] = None,
 ) -> Optional[Tuple[str, str, Path]]:
-    """显式 run_id 优先;否则按 mtime 降序取第一个**已完成**的 run。"""
+    """显式 run_id 优先;否则按 mtime 降序取第一个**已完成**的 run。
+
+    ``match`` 给定时(#61):在已完成 run 中,按 mtime 降序取第一个**内容命中** ``match``
+    的(用户追问"上面那篇报告从哪来的"时定位产出它的 run,而非盲取最近);无命中 → None。"""
     if run_id:
         for name, rid, path, _ in runs:
             if rid == run_id:
                 return (name, rid, path)
         return None
     for name, rid, path, _ in sorted(runs, key=lambda r: r[3], reverse=True):
-        if is_completed(path):
-            return (name, rid, path)
+        if not is_completed(path):
+            continue
+        if match and not run_matches(path, match):
+            continue
+        return (name, rid, path)
     return None
 
 
@@ -404,6 +445,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--agent", default=None, help="收窄到指定 agent(缺省扫所有 agent)")
     p.add_argument("--run-id", default=None, help="显式指定 runId(缺省取最近已完成 run)")
+    p.add_argument(
+        "--match",
+        default=None,
+        help="按内容定位 run:取最近一个其用户输入或最终答案含此子串的已完成 run "
+        "(追问『上面那篇报告/那条内容从哪来的』时用,避免盲取最近一轮)",
+    )
     p.add_argument("--brief", action="store_true", help="精简输出(默认详尽)")
     p.add_argument("--full", action="store_true", help="额外渲染 HTML 报告到 ~/.alfred/logs/traces/")
     p.add_argument("--dist", default=None, help="覆盖 milkie dist 路径")
@@ -436,11 +483,13 @@ def run(argv: Optional[Sequence[str]] = None, *, runner: Runner = _default_runne
         )
 
     runs = discover_runs(paths.data_dir_root, args.agent)
-    picked = pick_run(runs, run_id=args.run_id)
+    picked = pick_run(runs, run_id=args.run_id, match=args.match)
     if picked is None:
         scope = f"agent `{args.agent}`" if args.agent else "所有 agent"
         if args.run_id:
             return 2, f"# 复盘失败\n\n在 {scope} 下找不到 runId `{args.run_id}`。"
+        if args.match:
+            return 2, f"# 复盘失败\n\n在 {scope} 下没有内容含 `{args.match}` 的已完成 run。"
         return 2, f"# 复盘失败\n\n{scope} 下没有**已完成**的 run 可复盘。"
 
     agent, run_id, _ = picked
