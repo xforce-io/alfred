@@ -408,6 +408,37 @@ class MilkieProvider:
             if owns:
                 client.close()
 
+    async def attach_projection(
+        self,
+        agent: Any,
+        *,
+        source_run_id: str,
+        display_text: str,
+        delivered_at: Optional[str] = None,
+    ) -> None:
+        """milkie#146:把已投递到该 channel 的外部产出登记为 context projection。
+
+        读侧、不进 ``history:turn-*``:target = channel 的 contextId(``agent.context_id``),
+        ``sourceRunId`` = 产出它的 job 的 milkie runId(去重/溯源锚点)。serve 侧按
+        sourceRunId 去重、默认 maxCount=5、turn-local 投影。"""
+        client = self._client or self._new_client()
+        owns = self._client is None
+        try:
+            payload: dict = {
+                "contextId": agent.context_id,
+                "sourceRunId": source_run_id,
+                "displayText": display_text,
+            }
+            if delivered_at:
+                payload["deliveredAt"] = delivered_at
+            resp = await client.post(
+                f"{agent.base_url}/projection/attach", json=payload
+            )
+            resp.raise_for_status()
+        finally:
+            if owns:
+                await client.aclose()
+
     def ensure_chat_compatibility(self) -> bool:
         return False  # milkie 无 dolphin 的 EXPLORE_BLOCK_V2 flag
 

@@ -1301,3 +1301,200 @@ class TestExtractTextFromMessage:
         from src.everbot.core.channel.core_service import ChannelCoreService
         msg = [{"type": "image_url", "image_url": {"url": "data:..."}}]
         assert ChannelCoreService._extract_text_from_message(msg) == ""
+
+
+# ===========================================================================
+# #60 / milkie#146:把投递到 channel 的外部产出登记为 context projection。
+# ===========================================================================
+
+def test_truncate_projection_text_caps_to_limit_with_ellipsis():
+    """milkie 不限 displayText 长度 → alfred 必须截断,避免每轮重渲吃 token。"""
+    from src.everbot.channels.telegram_channel import _truncate_projection_text
+
+    out = _truncate_projection_text("x" * 5000, limit=100)
+    assert len(out) == 100
+    assert out.endswith("…")
+    assert out.startswith("x" * 10)
+
+
+def test_truncate_projection_text_keeps_short_text_unchanged():
+    from src.everbot.channels.telegram_channel import _truncate_projection_text
+
+    assert _truncate_projection_text("hello", limit=100) == "hello"
+
+
+def _attach_data(**over):
+    d = {
+        "transcript_worthy": True,
+        "run_id": "job-run-1",
+        "detail": "今日 $SIVE 推文分析…",
+        "delivered_at": "2026-06-06T02:02:00Z",
+    }
+    d.update(over)
+    return d
+
+
+@pytest.mark.asyncio
+async def test_maybe_attach_projection_calls_provider_when_transcript_worthy(tmp_path):
+    """内容型投递(transcript_worthy)→ 用 run_id 作 sourceRunId、detail 作 displayText
+    调 channel 会话句柄的 provider.attach_projection。"""
+    ch = _make_channel(tmp_path)
+    fake_agent = SimpleNamespace(context_id="tg_session_demo__111", base_url="http://x")
+    ch._session_manager.get_cached_agent.return_value = fake_agent
+    attach = AsyncMock()
+    with patch(
+        "src.everbot.core.agent.provider.get_provider_for_agent",
+        return_value=SimpleNamespace(attach_projection=attach),
+    ):
+        await ch._maybe_attach_projection("demo_agent", "111", _attach_data())
+    attach.assert_awaited_once()
+    assert attach.call_args.args[0] is fake_agent
+    # 关键:解析出 channel 会话 id 并取该会话句柄(投到用户所在会话,不投错)
+    ch._session_manager.get_cached_agent.assert_called_once_with("tg_session_demo_agent__111")
+    kwargs = attach.call_args.kwargs
+    assert kwargs["source_run_id"] == "job-run-1"
+    assert kwargs["display_text"].startswith("今日 $SIVE")
+    assert kwargs["delivered_at"] == "2026-06-06T02:02:00Z"
+
+
+@pytest.mark.asyncio
+async def test_maybe_attach_projection_skips_when_not_transcript_worthy(tmp_path):
+    """心跳状态 ping(无 transcript_worthy)→ 不进逐字稿,不 attach。"""
+    ch = _make_channel(tmp_path)
+    ch._session_manager.get_cached_agent.return_value = SimpleNamespace(context_id="c", base_url="u")
+    attach = AsyncMock()
+    with patch(
+        "src.everbot.core.agent.provider.get_provider_for_agent",
+        return_value=SimpleNamespace(attach_projection=attach),
+    ):
+        await ch._maybe_attach_projection("demo_agent", "111", _attach_data(transcript_worthy=False))
+    attach.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_maybe_attach_projection_skips_without_run_id(tmp_path):
+    """无 sourceRunId(去重/溯源锚点缺失)→ 不 attach。"""
+    ch = _make_channel(tmp_path)
+    ch._session_manager.get_cached_agent.return_value = SimpleNamespace(context_id="c", base_url="u")
+    attach = AsyncMock()
+    with patch(
+        "src.everbot.core.agent.provider.get_provider_for_agent",
+        return_value=SimpleNamespace(attach_projection=attach),
+    ):
+        await ch._maybe_attach_projection("demo_agent", "111", _attach_data(run_id=""))
+    attach.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_maybe_attach_projection_swallows_create_failure(tmp_path):
+    """未缓存时回落创建;若创建失败(如 sidecar spawn 出错)→ 带外吞掉,
+    返回 False、不 attach、不崩(调用方据此回落镜像,内容不丢)。"""
+    ch = _make_channel(tmp_path)
+    ch._session_manager.get_cached_agent.return_value = None
+    ch._agent_service.create_agent_instance = AsyncMock(side_effect=RuntimeError("spawn failed"))
+    attach = AsyncMock()
+    with patch(
+        "src.everbot.core.agent.provider.get_provider_for_agent",
+        return_value=SimpleNamespace(attach_projection=attach, set_session_id=MagicMock()),
+    ):
+        ok = await ch._maybe_attach_projection("demo_agent", "111", _attach_data())
+    assert ok is False
+    attach.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_maybe_attach_projection_swallows_attach_failure(tmp_path):
+    """attach 失败是带外 best-effort —— 气泡已发出,绝不能让异常冒泡破坏投递。"""
+    ch = _make_channel(tmp_path)
+    ch._session_manager.get_cached_agent.return_value = SimpleNamespace(context_id="c", base_url="u")
+    attach = AsyncMock(side_effect=RuntimeError("serve down"))
+    with patch(
+        "src.everbot.core.agent.provider.get_provider_for_agent",
+        return_value=SimpleNamespace(attach_projection=attach),
+    ):
+        # 不抛 = 通过
+        await ch._maybe_attach_projection("demo_agent", "111", _attach_data())
+    attach.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_on_background_event_invokes_projection_attach_after_send(tmp_path):
+    """_on_background_event 在成功投递气泡后,对该 chat 调 _maybe_attach_projection
+    (内容型投递据此登记 context projection)。"""
+    ch = _make_channel(tmp_path)
+    ch._send_message = AsyncMock()
+    ch._bindings = {"111": "my_agent"}
+    ch._maybe_attach_projection = AsyncMock()
+    await ch._on_background_event("session_1", {
+        "source_type": "heartbeat_delivery",
+        "agent_name": "my_agent",
+        "detail": "DAILY REPORT",
+        "deliver": True,
+        "scope": "agent",
+        "run_id": "job-run-1",
+        "transcript_worthy": True,
+    })
+    ch._maybe_attach_projection.assert_awaited_once()
+    args = ch._maybe_attach_projection.call_args.args
+    assert args[0] == "my_agent"
+    assert str(args[1]) == "111"
+    assert args[2].get("run_id") == "job-run-1"
+
+
+@pytest.mark.asyncio
+async def test_transcript_worthy_projection_skips_mailbox_mirror(tmp_path):
+    """内容型投递成功 attach projection 后,不再镜像进 Background Updates ——
+    避免双重表示,且防止报告的镜像版本贴着"上面"劫持指代。"""
+    ch = _make_channel(tmp_path)
+    ch._send_message = AsyncMock()
+    ch._bindings = {"111": "my_agent"}
+    ch._session_manager.get_cached_agent.return_value = SimpleNamespace(context_id="c", base_url="u")
+    attach = AsyncMock()
+    with patch("src.everbot.core.agent.provider.get_provider_for_agent",
+               return_value=SimpleNamespace(attach_projection=attach)):
+        await ch._on_background_event("session_1", {
+            "source_type": "heartbeat_delivery", "agent_name": "my_agent",
+            "detail": "REPORT", "deliver": True, "scope": "agent",
+            "run_id": "job-1", "transcript_worthy": True,
+        })
+    attach.assert_awaited_once()
+    ch._session_manager.deposit_mailbox_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_projection_falls_back_to_mailbox_mirror(tmp_path):
+    """attach 失败 → 回落 mailbox 镜像,内容不丢(degraded but visible)。"""
+    ch = _make_channel(tmp_path)
+    ch._send_message = AsyncMock()
+    ch._bindings = {"111": "my_agent"}
+    ch._session_manager.get_cached_agent.return_value = SimpleNamespace(context_id="c", base_url="u")
+    attach = AsyncMock(side_effect=RuntimeError("serve down"))
+    with patch("src.everbot.core.agent.provider.get_provider_for_agent",
+               return_value=SimpleNamespace(attach_projection=attach)):
+        await ch._on_background_event("session_1", {
+            "source_type": "heartbeat_delivery", "agent_name": "my_agent",
+            "detail": "REPORT", "deliver": True, "scope": "agent",
+            "run_id": "job-1", "transcript_worthy": True,
+        })
+    ch._session_manager.deposit_mailbox_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_maybe_attach_projection_creates_handle_when_not_cached(tmp_path):
+    """后台投递常发生在用户空闲时,channel 句柄不在缓存 —— 必须回落创建并绑定
+    channel context(set_session_id),否则永远不 attach(主动推送场景的核心)。"""
+    ch = _make_channel(tmp_path)
+    ch._session_manager.get_cached_agent.return_value = None
+    created = SimpleNamespace(context_id="random-ctx", base_url="u")
+    ch._agent_service.create_agent_instance = AsyncMock(return_value=created)
+    attach = AsyncMock()
+    set_sid = MagicMock()
+    with patch("src.everbot.core.agent.provider.get_provider_for_agent",
+               return_value=SimpleNamespace(attach_projection=attach, set_session_id=set_sid)):
+        ok = await ch._maybe_attach_projection("demo_agent", "111", _attach_data())
+    assert ok is True
+    ch._agent_service.create_agent_instance.assert_awaited_once_with("demo_agent")
+    set_sid.assert_called_once_with(created, "tg_session_demo_agent__111")
+    ch._session_manager.cache_agent.assert_called_once()
+    attach.assert_awaited_once()
+    assert attach.call_args.args[0] is created

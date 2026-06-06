@@ -51,6 +51,15 @@ logger = logging.getLogger(__name__)
 TELEGRAM_MSG_LIMIT = 4096
 
 
+def _truncate_projection_text(text: str, limit: int = 4000) -> str:
+    """#60:截断 projection 的 displayText —— milkie 侧不限长,而 projection 每轮
+    重渲直到 trim/TTL 清掉,长报告会持续吃 token。超长则截到 ``limit`` 并以省略号收尾
+    (总长 ≤ limit)。"""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
 def _extract_urls(text: str, entities: list) -> list[str]:
     """Extract URLs from Telegram entities (url + text_link), deduplicated and ordered."""
     seen: set[str] = set()
@@ -176,6 +185,56 @@ class TelegramChannel:
     # Event subscription (heartbeat delivery push)
     # ------------------------------------------------------------------
 
+    async def _maybe_attach_projection(
+        self, agent_name: str, chat_id: Any, data: Dict[str, Any]
+    ) -> bool:
+        """#60 / milkie#146:内容型投递 → 把投递文本登记为该 channel 会话的 context
+        projection(读侧、不进 ``history:turn-*``),使模型下一轮看得见用户屏幕上那篇报告。
+
+        闸门:仅 ``transcript_worthy`` 且带 ``run_id``(去重/溯源锚点)+ ``detail``(内容)。
+        心跳状态 ping 不置该标志,故不入逐字稿。带外 best-effort:气泡此时已发出,
+        attach 失败只记日志、绝不冒泡破坏投递。
+
+        返回是否成功登记为 projection —— 调用方据此**跳过 mailbox 镜像**(projection
+        取代 Background Updates,避免双重表示 + 报告镜像版劫持"上面"指代);失败/未命中
+        闸门则返回 False,调用方回落到镜像,内容不丢。"""
+        if not data.get("transcript_worthy"):
+            return False
+        detail = str(data.get("detail") or data.get("summary") or "").strip()
+        run_id = str(data.get("run_id") or "").strip()
+        if not detail or not run_id:
+            return False
+
+        from ..core.agent.provider import get_provider_for_agent
+
+        provider = get_provider_for_agent(agent_name)
+        attach = getattr(provider, "attach_projection", None)
+        if attach is None:
+            return False
+
+        session_id = ChannelSessionResolver.resolve("telegram", agent_name, str(chat_id))
+        try:
+            agent = self._session_manager.get_cached_agent(session_id)
+            if agent is None:
+                # 主动推送多在用户空闲时发生,channel 句柄常不在缓存(尤其 daemon 重启
+                # 后用户尚未发言)。回落创建并 set_session_id 绑到 channel context(同
+                # 聊天路径),否则 projection 永不触发 —— 这正是主动推送的核心场景。
+                agent = await self._agent_service.create_agent_instance(agent_name)
+                provider.set_session_id(agent, session_id)
+                self._session_manager.cache_agent(session_id, agent, agent_name, "auto")
+            await attach(
+                agent,
+                source_run_id=run_id,
+                display_text=_truncate_projection_text(detail),
+                delivered_at=data.get("delivered_at"),
+            )
+            return True
+        except Exception as exc:  # best-effort,带外:绝不破坏已完成的气泡投递
+            logger.warning(
+                "attach_projection failed for %s chat %s: %s", agent_name, chat_id, exc
+            )
+            return False
+
     async def _on_background_event(
         self, source_session_id: str, data: Dict[str, Any]
     ) -> None:
@@ -254,7 +313,15 @@ class TelegramChannel:
                     source_type, chat_id,
                 )
                 continue
-            if source_type != "deferred_result" and hasattr(self._session_manager, "deposit_mailbox_event"):
+            # #60:内容型投递 → 登记 milkie context projection,使模型下一轮看得见
+            # 这篇已投递给用户的报告(读侧、不进 history)。成功则 projection 取代下面的
+            # mailbox 镜像(否则报告会被双重表示、且镜像版贴着"上面"劫持指代)。
+            projected = await self._maybe_attach_projection(agent_name, chat_id, data)
+            if (
+                not projected
+                and source_type != "deferred_result"
+                and hasattr(self._session_manager, "deposit_mailbox_event")
+            ):
                 from ..core.models.system_event import build_system_event
 
                 tg_session_id = ChannelSessionResolver.resolve(

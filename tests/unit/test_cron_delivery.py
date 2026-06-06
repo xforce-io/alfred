@@ -118,3 +118,36 @@ class TestRealtimeEmit:
         assert source_session_id == "web_session_test"
         assert kwargs["scope"] == "session"
         assert kwargs["target_session_id"] == "web_session_test"
+
+    @pytest.mark.asyncio
+    async def test_emit_realtime_carries_transcript_worthy_flag(self, monkeypatch):
+        """#60:内容型 job/agent 投递置 transcript_worthy=True,
+        供 channel 侧据此把报告登记为 context projection。"""
+        emitted = []
+        d = _make_delivery()
+
+        async def _fake_emit(source_session_id, data, **kwargs):
+            emitted.append(data)
+
+        monkeypatch.setattr("src.everbot.core.runtime.cron_delivery.emit", _fake_emit, raising=False)
+        monkeypatch.setattr("src.everbot.core.runtime.events.emit", _fake_emit)
+
+        await d._emit_realtime("report body", "run_x", transcript_worthy=True)
+
+        assert emitted[0]["transcript_worthy"] is True
+
+    @pytest.mark.asyncio
+    async def test_emit_realtime_defaults_not_transcript_worthy(self, monkeypatch):
+        """缺省(心跳状态路径)不置 transcript_worthy → 不入逐字稿。"""
+        emitted = []
+        d = _make_delivery()
+
+        async def _fake_emit(source_session_id, data, **kwargs):
+            emitted.append(data)
+
+        monkeypatch.setattr("src.everbot.core.runtime.cron_delivery.emit", _fake_emit, raising=False)
+        monkeypatch.setattr("src.everbot.core.runtime.events.emit", _fake_emit)
+
+        await d._emit_realtime("status ping", "run_y")
+
+        assert emitted[0].get("transcript_worthy", False) is False

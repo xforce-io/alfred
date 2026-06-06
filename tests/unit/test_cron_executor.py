@@ -927,3 +927,60 @@ class TestBuildJobSystemPromptMilkieSafe:
         task = Task(id="t3", title="T", description="cron job")
         out = CronExecutor._build_job_system_prompt(agent, task)
         assert out == "DOLPHIN WS\n\ncron job"
+
+
+class TestTranscriptWorthyDelivery:
+    """#60:内容型 job/agent 成功投递标记 transcript_worthy=True(进逐字稿 projection);
+    失败消息不标记。"""
+
+    @pytest.mark.asyncio
+    async def test_isolated_job_success_marks_transcript_worthy(self, tmp_path):
+        executor = _make_executor(tmp_path)
+        executor._invoke_job = AsyncMock(return_value="REPORT BODY")
+        executor.delivery.deposit_job_event = AsyncMock()
+        executor.delivery.inject_to_history = AsyncMock()
+        executor.delivery._emit_realtime = AsyncMock()
+        task = SimpleNamespace(job="mod.fn", title="Daily", id="t1", timeout_seconds=60)
+
+        out = await executor._run_isolated_job(task, "run-1")
+
+        assert out == "REPORT BODY"
+        executor.delivery._emit_realtime.assert_awaited_once()
+        assert executor.delivery._emit_realtime.call_args.kwargs.get("transcript_worthy") is True
+
+    @pytest.mark.asyncio
+    async def test_isolated_job_failure_not_transcript_worthy(self, tmp_path):
+        executor = _make_executor(tmp_path)
+        executor._invoke_job = AsyncMock(side_effect=RuntimeError("boom"))
+        executor.delivery.deposit_job_event = AsyncMock()
+        executor.delivery.inject_to_history = AsyncMock()
+        executor.delivery._emit_realtime = AsyncMock()
+        task = SimpleNamespace(job="mod.fn", title="Daily", id="t1", timeout_seconds=60)
+
+        with patch("src.everbot.core.tasks.task_manager.format_retry_hint", return_value=""):
+            with pytest.raises(RuntimeError):
+                await executor._run_isolated_job(task, "run-1")
+
+        executor.delivery._emit_realtime.assert_awaited_once()
+        assert executor.delivery._emit_realtime.call_args.kwargs.get("transcript_worthy", False) is False
+
+    @pytest.mark.asyncio
+    async def test_isolated_agent_success_marks_transcript_worthy(self, tmp_path):
+        executor = _make_executor(tmp_path)
+        executor._create_job_agent = AsyncMock(return_value=SimpleNamespace(name="a"))
+        executor._build_job_system_prompt = MagicMock(return_value="sys")
+        executor._record_skill_log = MagicMock()
+        executor.delivery.deposit_job_event = AsyncMock()
+        executor.delivery.inject_to_history = AsyncMock()
+        executor.delivery._emit_realtime = AsyncMock()
+        task = SimpleNamespace(title="Daily", id="t1", timeout_seconds=60)
+
+        async def _run_agent(agent, prompt, system_prompt_override=None):
+            return "AGENT REPORT"
+
+        with patch("src.everbot.core.runtime.cron.build_job_session_id", return_value="job_t1"), \
+             patch("src.everbot.core.runtime.cron.build_isolated_task_prompt", return_value="prompt"):
+            out = await executor._run_isolated_agent(task, "run-1", run_agent=_run_agent)
+
+        assert out == "AGENT REPORT"
+        assert executor.delivery._emit_realtime.call_args.kwargs.get("transcript_worthy") is True
