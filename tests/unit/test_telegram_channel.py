@@ -1386,16 +1386,19 @@ async def test_maybe_attach_projection_skips_without_run_id(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_maybe_attach_projection_skips_when_no_cached_agent(tmp_path):
-    """channel 会话句柄不在缓存(未建/已逐出)→ 不 attach,不崩。"""
+async def test_maybe_attach_projection_swallows_create_failure(tmp_path):
+    """未缓存时回落创建;若创建失败(如 sidecar spawn 出错)→ 带外吞掉,
+    返回 False、不 attach、不崩(调用方据此回落镜像,内容不丢)。"""
     ch = _make_channel(tmp_path)
     ch._session_manager.get_cached_agent.return_value = None
+    ch._agent_service.create_agent_instance = AsyncMock(side_effect=RuntimeError("spawn failed"))
     attach = AsyncMock()
     with patch(
         "src.everbot.core.agent.provider.get_provider_for_agent",
-        return_value=SimpleNamespace(attach_projection=attach),
+        return_value=SimpleNamespace(attach_projection=attach, set_session_id=MagicMock()),
     ):
-        await ch._maybe_attach_projection("demo_agent", "111", _attach_data())
+        ok = await ch._maybe_attach_projection("demo_agent", "111", _attach_data())
+    assert ok is False
     attach.assert_not_awaited()
 
 
@@ -1474,3 +1477,24 @@ async def test_failed_projection_falls_back_to_mailbox_mirror(tmp_path):
             "run_id": "job-1", "transcript_worthy": True,
         })
     ch._session_manager.deposit_mailbox_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_maybe_attach_projection_creates_handle_when_not_cached(tmp_path):
+    """后台投递常发生在用户空闲时,channel 句柄不在缓存 —— 必须回落创建并绑定
+    channel context(set_session_id),否则永远不 attach(主动推送场景的核心)。"""
+    ch = _make_channel(tmp_path)
+    ch._session_manager.get_cached_agent.return_value = None
+    created = SimpleNamespace(context_id="random-ctx", base_url="u")
+    ch._agent_service.create_agent_instance = AsyncMock(return_value=created)
+    attach = AsyncMock()
+    set_sid = MagicMock()
+    with patch("src.everbot.core.agent.provider.get_provider_for_agent",
+               return_value=SimpleNamespace(attach_projection=attach, set_session_id=set_sid)):
+        ok = await ch._maybe_attach_projection("demo_agent", "111", _attach_data())
+    assert ok is True
+    ch._agent_service.create_agent_instance.assert_awaited_once_with("demo_agent")
+    set_sid.assert_called_once_with(created, "tg_session_demo_agent__111")
+    ch._session_manager.cache_agent.assert_called_once()
+    attach.assert_awaited_once()
+    assert attach.call_args.args[0] is created

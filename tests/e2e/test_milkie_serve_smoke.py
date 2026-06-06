@@ -347,3 +347,92 @@ async def test_attached_projection_appears_in_next_turn_prompt_via_real_serve(tm
     assert "MARKER_SIVE_REPORT" in prompt, f"投影内容应进入模型 prompt,得:{prompt[:800]}"
     assert "External Delivered Context" in prompt, "应带明确的外部投递标注(非用户原话)"
     assert "job-run-xyz" in prompt, "应带 producedBy.runId 溯源"
+
+
+async def test_on_background_event_path_lands_projection_via_real_serve(tmp_path, monkeypatch):
+    """#60 全链路 E2E(真 milkie serve + 真 TelegramChannel 编排):驱动生产代码
+    _maybe_attach_projection(门控→缓存句柄→真 /projection/attach)后,下一轮 assemble
+    把报告作为 External Delivered Context 注入模型 prompt。覆盖 alfred 编排↔milkie 真缝。"""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from src.everbot.channels.telegram_channel import TelegramChannel
+
+    cli = _milkie_cli()
+    if cli is None:
+        pytest.skip("milkie dist not built at ../milkie/dist/cli/index.js")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-proj2")
+
+    captured: dict = {"messages": None}
+
+    class _RecordingOpenAI(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("content-length", 0))
+            req = json.loads(self.rfile.read(length) or "{}")
+            captured["messages"] = req.get("messages")
+            frames = [
+                "data: " + json.dumps({"id": "c", "object": "chat.completion.chunk", "created": 0,
+                    "model": req.get("model", "fake"),
+                    "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": None}]}),
+                "data: " + json.dumps({"id": "c", "object": "chat.completion.chunk", "created": 0,
+                    "model": req.get("model", "fake"),
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+                "data: [DONE]",
+            ]
+            body = ("\n\n".join(frames) + "\n\n").encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), _RecordingOpenAI)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+
+    agent_md = _write_agent(tmp_path, port)
+    data_dir = tmp_path / "milkie-data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    sidecar = MilkieSidecar(
+        ["node", str(cli), "serve", "--agent", str(agent_md), "--port", "0",
+         "--state-store", "sqlite", "--data-dir", str(data_dir)],
+        ready_timeout=20.0,
+    )
+    await sidecar.start()
+    try:
+        ctx = "tg_session_demo_agent__999"  # = ChannelSessionResolver.resolve("telegram","demo_agent","999")
+        handle = MilkieAgentHandle(sidecar.base_url, ctx, name="demo_agent")
+        provider = MilkieProvider(sidecar.base_url)
+        _ = [e async for e in provider.run_turn(handle, "hi")]  # 建 channel context
+
+        sm = MagicMock()
+        sm.get_cached_agent.return_value = handle  # 模拟 channel 句柄已缓存
+        sm.deposit_mailbox_event = AsyncMock(return_value=True)
+        ch = TelegramChannel(bot_token="123:FAKE", session_manager=sm, default_agent="demo_agent")
+
+        # 真实编排:内容型后台事件 → _maybe_attach_projection
+        with patch("src.everbot.core.agent.provider.get_provider_for_agent", return_value=provider):
+            ok = await ch._maybe_attach_projection("demo_agent", "999", {
+                "transcript_worthy": True,
+                "run_id": "job-xyz",
+                "detail": "MARKER2_DELIVERED_REPORT 今日 $SIVE 推文深度分析",
+                "delivered_at": "2026-06-06T10:00:00Z",
+            })
+        assert ok is True, "内容型投递应成功 attach projection"
+
+        _ = [e async for e in provider.run_turn(handle, "上面报告从哪来的")]  # 下一轮
+    finally:
+        await sidecar.close()
+        server.shutdown()
+
+    prompt = json.dumps(captured["messages"], ensure_ascii=False)
+    assert "MARKER2_DELIVERED_REPORT" in prompt, f"报告应进入下一轮模型 prompt,得:{prompt[:600]}"
+    assert "External Delivered Context" in prompt, "应带外部投递标注"
+    assert "job-xyz" in prompt, "应带 producedBy.runId 溯源"

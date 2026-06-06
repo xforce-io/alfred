@@ -205,17 +205,23 @@ class TelegramChannel:
         if not detail or not run_id:
             return False
 
-        session_id = ChannelSessionResolver.resolve("telegram", agent_name, str(chat_id))
-        agent = self._session_manager.get_cached_agent(session_id)
-        if agent is None:
-            return False
-
         from ..core.agent.provider import get_provider_for_agent
 
-        attach = getattr(get_provider_for_agent(agent_name), "attach_projection", None)
+        provider = get_provider_for_agent(agent_name)
+        attach = getattr(provider, "attach_projection", None)
         if attach is None:
             return False
+
+        session_id = ChannelSessionResolver.resolve("telegram", agent_name, str(chat_id))
         try:
+            agent = self._session_manager.get_cached_agent(session_id)
+            if agent is None:
+                # 主动推送多在用户空闲时发生,channel 句柄常不在缓存(尤其 daemon 重启
+                # 后用户尚未发言)。回落创建并 set_session_id 绑到 channel context(同
+                # 聊天路径),否则 projection 永不触发 —— 这正是主动推送的核心场景。
+                agent = await self._agent_service.create_agent_instance(agent_name)
+                provider.set_session_id(agent, session_id)
+                self._session_manager.cache_agent(session_id, agent, agent_name, "auto")
             await attach(
                 agent,
                 source_run_id=run_id,
