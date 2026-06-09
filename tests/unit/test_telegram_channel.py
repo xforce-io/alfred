@@ -1498,3 +1498,111 @@ async def test_maybe_attach_projection_creates_handle_when_not_cached(tmp_path):
     ch._session_manager.cache_agent.assert_called_once()
     attach.assert_awaited_once()
     assert attach.call_args.args[0] is created
+
+
+# ===========================================================================
+# 16. _convert_markdown — table normalisation gate (issue #66)
+# ===========================================================================
+
+class TestConvertMarkdown:
+    """_convert_markdown must normalise +---+ tables unconditionally, even when
+    the message also has entity-producing spans (bold headings, ticker links).
+
+    Old bug: normalisation was gated behind ``if not entity_dicts``, so any
+    message with bold/link entities skipped table conversion entirely.
+    """
+
+    # Reusable fixture: message with bold heading AND a +--- style table
+    _MIXED_TEXT = (
+        "**投资信号汇总**\n\n"
+        "标的        | 信号    | 强度\n"
+        "------------+--------+------\n"
+        "$SIVE       | 买入    | 强\n"
+        "$XFAB       | 观望    | 中\n"
+    )
+
+    @staticmethod
+    def _fake_entity():
+        """Minimal entity stub returned by the mocked tg_md_convert."""
+        class _E:
+            def to_dict(self):
+                return {"type": "bold", "offset": 0, "length": 8}
+        return _E()
+
+    def test_table_normalised_before_convert_when_entities_present(self):
+        """tg_md_convert must receive normalised text (no ---+--- separator)
+        even when it would produce entities (bold heading).  This is the
+        direct regression test for the issue #66 gate bug."""
+        import src.everbot.channels.telegram_channel as ch_mod
+
+        captured = []
+
+        def fake_convert(t):
+            captured.append(t)
+            # Simulate a convert that produces an entity (bold heading)
+            return (t, [self._fake_entity()])
+
+        with patch("src.everbot.channels.telegram_channel.HAS_TELEGRAMIFY", True), \
+             patch("src.everbot.channels.telegram_channel.tg_md_convert", fake_convert, create=True):
+            plain, entities = TelegramChannel._convert_markdown(self._MIXED_TEXT)
+
+        assert captured, "tg_md_convert was never called"
+        received = captured[0]
+
+        # The separator line must be normalised — no raw +---+ form
+        assert "---+---" not in received, (
+            f"Table was NOT normalised before tg_md_convert.\nGot:\n{received}"
+        )
+        assert "----+--------+------" not in received, (
+            f"Original +---+ separator still present.\nGot:\n{received}"
+        )
+        # Standard MD separator should be present after normalisation
+        assert "| --- |" in received, (
+            f"Expected normalised '| --- |' separator.\nGot:\n{received}"
+        )
+
+        # Entities should still pass through unchanged
+        assert entities is not None
+        assert len(entities) == 1
+        assert entities[0]["type"] == "bold"
+
+    def test_table_normalised_when_no_entities(self):
+        """Existing behaviour: table is also normalised when convert produces no entities."""
+        captured = []
+
+        def fake_convert(t):
+            captured.append(t)
+            return (t, [])  # no entities
+
+        with patch("src.everbot.channels.telegram_channel.HAS_TELEGRAMIFY", True), \
+             patch("src.everbot.channels.telegram_channel.tg_md_convert", fake_convert, create=True):
+            plain, entities = TelegramChannel._convert_markdown(self._MIXED_TEXT)
+
+        assert captured
+        received = captured[0]
+        assert "| --- |" in received
+        assert "----+--------+------" not in received
+
+    def test_plain_text_without_table_unchanged(self):
+        """Text without +---+ markers must not be modified before conversion."""
+        text = "**Hello** world\n\nSome *italic* text."
+        captured = []
+
+        def fake_convert(t):
+            captured.append(t)
+            return (t, [self._fake_entity()])
+
+        with patch("src.everbot.channels.telegram_channel.HAS_TELEGRAMIFY", True), \
+             patch("src.everbot.channels.telegram_channel.tg_md_convert", fake_convert, create=True):
+            TelegramChannel._convert_markdown(text)
+
+        assert captured[0] == text, "Non-table text must pass through unmodified"
+
+    def test_fallback_when_no_telegramify(self):
+        """When telegramify is absent, heading markers are stripped (existing fallback)."""
+        text = "# Heading\n\nSome text."
+        with patch("src.everbot.channels.telegram_channel.HAS_TELEGRAMIFY", False):
+            plain, entities = TelegramChannel._convert_markdown(text)
+        assert "# " not in plain
+        assert "Heading" in plain
+        assert entities is None

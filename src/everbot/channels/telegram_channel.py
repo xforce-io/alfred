@@ -886,18 +886,15 @@ class TelegramChannel:
         """
         if HAS_TELEGRAMIFY:
             try:
-                plain, entities = tg_md_convert(text)
-                entity_dicts = [e.to_dict() for e in entities]
-                if entity_dicts:
-                    return plain, entity_dicts
-                # No entities produced — try normalising tables first
+                # Normalise +---+ style tables unconditionally before conversion.
+                # Must happen first: messages with bold/link entities would otherwise
+                # return early and never reach table normalisation (issue #66).
                 if "+" in text and "---" in text:
                     normalised = TelegramChannel._normalize_tables(text)
                     if normalised != text:
-                        plain2, entities2 = tg_md_convert(normalised)
-                        entity_dicts2 = [e.to_dict() for e in entities2]
-                        if entity_dicts2:
-                            return plain2, entity_dicts2
+                        text = normalised
+                plain, entities = tg_md_convert(text)
+                entity_dicts = [e.to_dict() for e in entities]
                 return plain, entity_dicts
             except Exception as exc:
                 logger.warning("telegramify_markdown conversion failed: %s", exc)
