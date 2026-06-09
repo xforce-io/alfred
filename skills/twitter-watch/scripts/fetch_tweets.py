@@ -92,9 +92,14 @@ if (loggedOut > 0 && handleVisible === 0) {
   process.exit(3);
 }
 
-// 渐进滚动,触发懒加载,直到攒够 count 条或到达上限。
+// Progressively scroll to trigger lazy-load. Count only non-pinned tweets
+// toward the goal — pinned tweets are excluded from the final result, so
+// counting them would cause the loop to exit early and under-collect.
 const seen = new Map();
-for (let scroll = 0; scroll < 8 && seen.size < count; scroll++) {
+const nonPinnedCount = () =>
+  Array.from(seen.values()).filter((t) => !t.is_pinned && t.ts).length;
+
+for (let scroll = 0; scroll < 8 && nonPinnedCount() < count; scroll++) {
   const batch = await page.evaluate(() => {
     const arts = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
     return arts.map((a) => {
@@ -104,12 +109,16 @@ for (let scroll = 0; scroll < 8 && seen.size < count; scroll++) {
       const social = a.querySelector('[role="group"]');
       const pinned = !!Array.from(a.querySelectorAll('span'))
         .find((e) => /^Pinned/i.test((e.textContent || "").trim()));
+      // Detect tweets truncated by X's "Show more" fold — full text requires
+      // navigating to the individual tweet page.
+      const truncated = !!a.querySelector('[data-testid="tweet-text-show-more-link"]');
       return {
         text: textEl ? textEl.innerText : "",
         ts: timeEl ? timeEl.getAttribute("datetime") : null,
         url: linkEl ? linkEl.href : null,
         is_pinned: pinned,
         metrics: social ? (social.getAttribute("aria-label") || "") : "",
+        truncated,
       };
     });
   });
@@ -121,11 +130,30 @@ for (let scroll = 0; scroll < 8 && seen.size < count; scroll++) {
   await page.waitForTimeout(1500);
 }
 
-// 置顶推文不计入"最新":按时间倒序取最新 count 条。
+// Exclude pinned tweets; sort by timestamp descending; take the newest count.
 let tweets = Array.from(seen.values());
 const nonPinned = tweets.filter((t) => !t.is_pinned && t.ts);
 nonPinned.sort((a, b) => (a.ts < b.ts ? 1 : -1));
 const out = nonPinned.slice(0, count);
+
+// Expand truncated tweets: navigate to the individual tweet page for full text.
+for (const t of out) {
+  if (t.truncated && t.url) {
+    try {
+      await page.goto(t.url, { waitUntil: "domcontentloaded" });
+      await waitForPageLoad(page).catch(() => {});
+      await page.waitForTimeout(2000);
+      const fullText = await page.evaluate(() => {
+        const textEl = document.querySelector('[data-testid="tweetText"]');
+        return textEl ? textEl.innerText : null;
+      });
+      if (fullText) t.text = fullText;
+    } catch (_) {
+      // Navigation failed — keep original truncated text
+    }
+  }
+  delete t.truncated;
+}
 
 console.log(JSON.stringify({ handle, count: out.length, tweets: out }));
 await client.disconnect();
