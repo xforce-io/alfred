@@ -1,10 +1,10 @@
 """模型路由配置(dolphin-free)。
 
-从 ``config/dolphin.yaml``(纯 YAML,非 dolphin 代码)读取 llms/clouds + 默认/快速档。
+从 ``models.yaml``(#74 正名;legacy ``dolphin.yaml`` 兜底)读取 llms/clouds + 默认/快速档。
 此前 milkie pool 经 dolphin factory 的 ``global_config_path`` 取这份配置,导致 milkie
 仍耦合 dolphin;本模块用同样的查找顺序独立定位,去掉该耦合(#38 去 dolphin)。
 
-文件 schema(``config/dolphin.yaml``):
+文件 schema(``config/models.yaml``):
     default: <llm-name>        # 默认档(亦兼容旧键 default_model)
     fast:    <llm-name>        # 快速档(亦兼容旧键 fast_llm)
     clouds:  {name: {api, api_key}}
@@ -21,16 +21,31 @@ from typing import Any, Dict, Optional
 import yaml
 
 
-def find_model_config_path() -> Optional[Path]:
-    """定位模型配置 yaml(同 dolphin 的查找顺序,但不依赖 dolphin)。"""
-    candidates = [
-        Path("~/.alfred/dolphin.yaml").expanduser(),
-        Path("./config/dolphin.yaml").resolve(),
-        Path(__file__).resolve().parents[5] / "config" / "dolphin.yaml",  # repo config/
-    ]
-    for p in candidates:
-        if p.exists():
-            return p
+# #74:正名 models.yaml(dolphin 已于 #38 移除,旧名误导);同位置内新名优先、
+# 旧名兜底 —— 用户 home 级 dolphin.yaml 覆盖仍优先于 cwd/repo 的新名,改名不悄换生效配置。
+_CONFIG_NAMES = ("models.yaml", "dolphin.yaml")
+
+
+def find_model_config_path(
+    *,
+    home: Optional[Path] = None,
+    cwd_config: Optional[Path] = None,
+    repo_config: Optional[Path] = None,
+) -> Optional[Path]:
+    """定位模型配置 yaml。位置优先级:~/.alfred → ./config → repo config/。
+
+    kwargs 仅供测试注入;生产调用零参。
+    """
+    bases = (
+        home or Path("~/.alfred").expanduser(),
+        cwd_config or Path("./config").resolve(),
+        repo_config or Path(__file__).resolve().parents[5] / "config",  # repo config/
+    )
+    for base in bases:
+        for name in _CONFIG_NAMES:
+            p = base / name
+            if p.exists():
+                return p
     return None
 
 
@@ -106,7 +121,7 @@ def load_model_config(path: Optional[Path] = None) -> ModelConfig:
         raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
     llms = raw.get("llms", {}) or {}
     clouds = raw.get("clouds", {}) or {}
-    # 兼容两套键:config/dolphin.yaml 用 default/fast;旧代码用 default_model/fast_llm。
+    # 兼容两套键:models.yaml 用 default/fast;旧代码用 default_model/fast_llm。
     default_model = raw.get("default_model") or raw.get("default") or next(iter(llms), "")
     fast_model = raw.get("fast_llm") or raw.get("fast") or default_model
     return ModelConfig(llms=llms, clouds=clouds, default_model=default_model, fast_model=fast_model)

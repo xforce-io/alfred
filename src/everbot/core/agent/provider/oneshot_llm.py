@@ -1,7 +1,7 @@
 """一次性无状态 LLM(dolphin-free)—— 记忆抽取 / 历史压缩用。
 
 ``call_llm`` 与 agent runtime 无关(单 prompt → 单回复),此前经 dolphin 的 LLMClient
-实现。本模块改为直连 OpenAI 兼容端点(httpx),模型路由读 ``config/dolphin.yaml``
+实现。本模块改为直连 OpenAI 兼容端点(httpx),模型路由读 ``config/models.yaml``
 (见 :mod:`model_config`),去掉对 dolphin 的依赖(#38)。
 
 ``raise_on_error`` 双语义保持与原 DolphinProvider.call_llm 一致:

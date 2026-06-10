@@ -26,16 +26,22 @@ class DoctorItem:
     hint: Optional[str] = None
 
 
-def resolve_dolphin_config_path(user_data: UserDataManager, project_root: Path) -> Tuple[str, Optional[Path]]:
+def resolve_model_config_source(user_data: UserDataManager, project_root: Path) -> Tuple[str, Optional[Path]]:
     """
-    Resolve which Dolphin config file is effectively used.
+    Resolve which model-routing config file is effectively used.
+
+    #74:正名 models.yaml,同位置内旧名 dolphin.yaml 兜底(与
+    model_config.find_model_config_path 同语义)。
 
     Returns:
         (source_label, path or None)
     """
     candidates = [
+        ("alfred", user_data.models_config_path),
         ("alfred", user_data.dolphin_config_path),
+        ("project", (project_root / "config" / "models.yaml").resolve()),
         ("project", (project_root / "config" / "dolphin.yaml").resolve()),
+        ("cwd", Path("./config/models.yaml").resolve()),
         ("cwd", Path("./config/dolphin.yaml").resolve()),
     ]
 
@@ -54,17 +60,6 @@ def parse_yaml_file(path: Path) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def dolphin_has_system_skillkit(config: Dict[str, Any]) -> bool:
-    """Check if system_skillkit is enabled in Dolphin config."""
-    tool = config.get("tool", {}) if isinstance(config.get("tool", {}), dict) else {}
-    skill = config.get("skill", {}) if isinstance(config.get("skill", {}), dict) else {}
-    enabled = tool.get("enabled_tools")
-    if enabled is None:
-        enabled = skill.get("enabled_skills", [])
-    if not isinstance(enabled, list):
-        return False
-    return any(str(x).strip() == "system_skillkit" for x in enabled)
-
 
 def detect_agent_dph_format(agent_dph_content: str) -> str:
     """Detect whether agent.dph looks like DPH or legacy YAML."""
@@ -76,15 +71,6 @@ def detect_agent_dph_format(agent_dph_content: str) -> str:
         return "legacy_yaml"
     return "unknown"
 
-
-def dph_declares_read_file_tool(agent_dph_content: str) -> bool:
-    """Heuristic: check if _read_file is declared in tools=[...] in DPH."""
-    raw = agent_dph_content or ""
-    m = re.search(r"tools\s*=\s*\[([^\]]*)\]", raw)
-    if not m:
-        return False
-    tools = m.group(1)
-    return "_read_file" in tools
 
 
 def collect_doctor_report(
@@ -126,43 +112,24 @@ def collect_doctor_report(
             )
         )
 
-    # Dolphin config
-    source, dolphin_path = resolve_dolphin_config_path(user_data, project_root)
-    if dolphin_path is None:
+    # Model routing config(#74:正名 models.yaml;skillkit 检查随死配置移除 ——
+    # tool.enabled_tools 自 #38 去 dolphin 后无 runtime 消费方,体检它只产噪音)
+    source, models_path = resolve_model_config_source(user_data, project_root)
+    if models_path is None:
         items.append(
             DoctorItem(
                 level="WARN",
-                title="Dolphin config",
-                details="No Dolphin YAML config found; using Dolphin defaults.",
-                hint=f"Create {user_data.dolphin_config_path} (copy from config/dolphin.yaml).",
-            )
-        )
-        dolphin_cfg: Dict[str, Any] = {}
-    else:
-        items.append(
-            DoctorItem(
-                level="OK",
-                title="Dolphin config",
-                details=f"Using {source} config: {dolphin_path}",
-            )
-        )
-        dolphin_cfg = parse_yaml_file(dolphin_path)
-
-    if dolphin_path is not None and not dolphin_has_system_skillkit(dolphin_cfg):
-        items.append(
-            DoctorItem(
-                level="WARN",
-                title="system_skillkit",
-                details="system_skillkit is not enabled in Dolphin config.",
-                hint='Add "system_skillkit" under tool.enabled_tools (or legacy skill.enabled_skills) in dolphin.yaml.',
+                title="Model routing config",
+                details="No model routing YAML found (models.yaml / legacy dolphin.yaml).",
+                hint=f"Create {user_data.models_config_path} (copy from config/models.yaml).",
             )
         )
     else:
         items.append(
             DoctorItem(
                 level="OK",
-                title="system_skillkit",
-                details="system_skillkit enabled (or Dolphin defaults assumed).",
+                title="Model routing config",
+                details=f"Using {source} config: {models_path}",
             )
         )
 
@@ -266,20 +233,10 @@ def collect_doctor_report(
                 )
             )
 
-        if dolphin_path is not None and dolphin_has_system_skillkit(dolphin_cfg):
-            if not dph_declares_read_file_tool(content):
-                items.append(
-                    DoctorItem(
-                        level="WARN",
-                        title=f"Agent {agent_name} tools",
-                        details="agent.dph does not declare _read_file in tools=[...].",
-                        hint="Add _read_file/_read_folder to tools list in agent.dph.",
-                    )
-                )
-
         # Basic env check for Aliyun model config
-        if dolphin_path is not None:
-            clouds = dolphin_cfg.get("clouds", {}) if isinstance(dolphin_cfg.get("clouds", {}), dict) else {}
+        if models_path is not None:
+            models_cfg = parse_yaml_file(models_path)
+            clouds = models_cfg.get("clouds", {}) if isinstance(models_cfg.get("clouds", {}), dict) else {}
             default_cloud = (clouds.get("default") if isinstance(clouds, dict) else None) or ""
             if str(default_cloud).strip() == "aliyun":
                 if not os.getenv("ALIYUN_API_KEY"):

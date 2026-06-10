@@ -1658,7 +1658,7 @@ If not, reply with `HEARTBEAT_OK`.
 
 
 def _resolve_skill_model_route(model_name: str):
-    """解析 skill LLM 的 {base_url, api_key, model}(dolphin-free,读 config/dolphin.yaml)。"""
+    """解析 skill LLM 的 {base_url, api_key, model}(dolphin-free,读 config/models.yaml)。"""
     from ..agent.provider.model_config import load_model_config
     return load_model_config().route_for(model_name)
 
@@ -1694,7 +1694,7 @@ def _probe_timeout_s() -> float:
 class _SkillLLMClient:
     """Lightweight LLM client for reflection skills.
 
-    Uses Dolphin GlobalConfig to resolve model endpoint/credentials,
+    Resolves model endpoint/credentials from models.yaml (model_config),
     then calls AsyncOpenAI directly.  No litellm dependency.
     """
 
@@ -1713,7 +1713,7 @@ class _SkillLLMClient:
             import os
             model = os.environ.get("ALFRED_SKILL_MODEL", "deepseek-chat")
 
-        # 解析模型 endpoint/凭证(dolphin-free,读 config/dolphin.yaml)
+        # 解析模型 endpoint/凭证(dolphin-free,读 config/models.yaml)
         route = _resolve_skill_model_route(model)
 
         base_url = route.base_url

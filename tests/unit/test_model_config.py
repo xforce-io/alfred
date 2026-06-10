@@ -156,3 +156,50 @@ def test_route_merges_cloud_and_llm_extra_body_llm_wins(tmp_path):
     # 未配 extra_body 的 llm 仅继承 cloud 级
     r2 = mc.route_for("deepseek-chat")
     assert r2.extra_body == {"cloud_flag": True, "thinking": {"type": "enabled"}}
+
+
+# ── #74: models.yaml 正名,dolphin.yaml legacy 兜底(同位置新名优先) ────
+
+
+from src.everbot.core.agent.provider.model_config import find_model_config_path
+
+
+def _mk_cfg(base: Path, name: str) -> Path:
+    base.mkdir(parents=True, exist_ok=True)
+    p = base / name
+    p.write_text("default: x\n", encoding="utf-8")
+    return p
+
+
+def test_find_prefers_models_over_dolphin_in_same_location(tmp_path):
+    home = tmp_path / "home"
+    models = _mk_cfg(home, "models.yaml")
+    _mk_cfg(home, "dolphin.yaml")
+    got = find_model_config_path(
+        home=home, cwd_config=tmp_path / "n1", repo_config=tmp_path / "n2")
+    assert got == models
+
+
+def test_find_legacy_home_dolphin_beats_lower_priority_models(tmp_path):
+    """用户 home 级旧名覆盖必须仍优先于 cwd/repo 的新名 —— 改名不得悄换生效配置。"""
+    home = tmp_path / "home"
+    cwdc = tmp_path / "cwdc"
+    legacy = _mk_cfg(home, "dolphin.yaml")
+    _mk_cfg(cwdc, "models.yaml")
+    got = find_model_config_path(home=home, cwd_config=cwdc, repo_config=tmp_path / "n")
+    assert got == legacy
+
+
+def test_find_falls_back_cwd_then_repo(tmp_path):
+    cwdc = tmp_path / "cwdc"
+    repoc = tmp_path / "repoc"
+    _mk_cfg(repoc, "models.yaml")
+    cwd_models = _mk_cfg(cwdc, "models.yaml")
+    got = find_model_config_path(home=tmp_path / "n", cwd_config=cwdc, repo_config=repoc)
+    assert got == cwd_models
+
+
+def test_find_returns_none_when_nothing_exists(tmp_path):
+    got = find_model_config_path(
+        home=tmp_path / "a", cwd_config=tmp_path / "b", repo_config=tmp_path / "c")
+    assert got is None

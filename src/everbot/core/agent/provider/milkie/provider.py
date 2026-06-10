@@ -198,7 +198,7 @@ class MilkieProvider:
         self._system_prompt_loader = system_prompt_loader or _default_system_prompt_loader
 
     def _get_pool(self):
-        """惰性装配 pool:首次 create_agent 时才读 config + dolphin.yaml + factory。"""
+        """惰性装配 pool:首次 create_agent 时才读 config + models.yaml + factory。"""
         if self._pool is None:
             self._pool = self._build_pool()
         return self._pool
@@ -221,7 +221,7 @@ class MilkieProvider:
         data_dir_root = Path(milkie_cfg.get("data_dir_root") or "~/.alfred/milkie").expanduser()
         node_bin = milkie_cfg.get("node_bin") or "node"
 
-        # 模型路由读 config/dolphin.yaml(纯 YAML),经 model_config 定位 —— 不再经
+        # 模型路由读 config/models.yaml(纯 YAML),经 model_config 定位 —— 不再经
         # dolphin factory 的 global_config_path(去 dolphin 耦合,#38)。
         from ..model_config import load_model_config
         mc = load_model_config()
