@@ -142,6 +142,89 @@ class TestSplitMessage:
 
 
 # ===========================================================================
+# 1b. _send_split_with_entities — split + per-part entity slicing (#76)
+# ===========================================================================
+
+class TestSendSplitWithEntities:
+    @pytest.fixture
+    def channel(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._send_message = AsyncMock(return_value=True)
+        return ch
+
+    @pytest.mark.asyncio
+    async def test_single_part_keeps_entities(self, channel):
+        entities = [{"type": "bold", "offset": 0, "length": 5}]
+        ok, total = await channel._send_split_with_entities("111", "hello world", entities)
+        assert (ok, total) == (1, 1)
+        channel._send_message.assert_awaited_once_with("111", "hello world", entities)
+
+    @pytest.mark.asyncio
+    async def test_empty_text_sends_nothing(self, channel):
+        ok, total = await channel._send_split_with_entities("111", "", None)
+        assert (ok, total) == (0, 0)
+        channel._send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_multipart_slices_entities_per_part(self, channel):
+        p1, p2 = "a" * 3000, "b" * 3000
+        text = f"{p1}\n\n{p2}"
+        # Bold over the first 10 chars of paragraph 2 (offset 3002 in full text)
+        entities = [{"type": "bold", "offset": 3002, "length": 10}]
+
+        ok, total = await channel._send_split_with_entities("111", text, entities)
+
+        assert (ok, total) == (2, 2)
+        calls = channel._send_message.call_args_list
+        assert calls[0].args[1] == p1
+        assert calls[0].args[2] is None  # no entity falls in part 1
+        assert calls[1].args[1] == p2
+        assert calls[1].args[2] == [{"type": "bold", "offset": 0, "length": 10}]
+
+    @pytest.mark.asyncio
+    async def test_entity_spanning_boundary_clamped_into_both_parts(self, channel):
+        p1, p2 = "a" * 3000, "b" * 3000
+        text = f"{p1}\n\n{p2}"
+        # Bold spanning the split point: last 10 a's + "\n\n" + first 8 b's
+        entities = [{"type": "bold", "offset": 2990, "length": 20}]
+
+        await channel._send_split_with_entities("111", text, entities)
+
+        calls = channel._send_message.call_args_list
+        assert calls[0].args[2] == [{"type": "bold", "offset": 2990, "length": 10}]
+        assert calls[1].args[2] == [{"type": "bold", "offset": 0, "length": 8}]
+
+    @pytest.mark.asyncio
+    async def test_emoji_offsets_counted_in_utf16(self, channel):
+        # 📌 is one Python char but two UTF-16 code units; Telegram counts UTF-16.
+        p1, p2 = "a" * 3000, "📌" + "b" * 3000
+        text = f"{p1}\n\n{p2}"
+        # Bold over the first 10 b's: UTF-16 offset = 3002 (prefix) + 2 (emoji)
+        entities = [{"type": "bold", "offset": 3004, "length": 10}]
+
+        await channel._send_split_with_entities("111", text, entities)
+
+        calls = channel._send_message.call_args_list
+        assert calls[1].args[1] == p2
+        assert calls[1].args[2] == [{"type": "bold", "offset": 2, "length": 10}]
+
+    @pytest.mark.asyncio
+    async def test_no_entities_multipart_sends_plain(self, channel):
+        text = "a" * 3000 + "\n\n" + "b" * 3000
+        ok, total = await channel._send_split_with_entities("111", text, None)
+        assert (ok, total) == (2, 2)
+        for call in channel._send_message.call_args_list:
+            assert call.args[2] is None
+
+    @pytest.mark.asyncio
+    async def test_part_failure_reflected_in_counts(self, channel):
+        channel._send_message = AsyncMock(side_effect=[True, False])
+        text = "a" * 3000 + "\n\n" + "b" * 3000
+        ok, total = await channel._send_split_with_entities("111", text, None)
+        assert (ok, total) == (1, 2)
+
+
+# ===========================================================================
 # 2. Command handling
 # ===========================================================================
 
@@ -281,6 +364,50 @@ class TestEventFiltering:
         })
 
         channel._send_message.assert_awaited_once()
+        channel._session_manager.deposit_mailbox_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_long_heartbeat_preserves_entities_per_part(self, channel):
+        """#76: heartbeat messages split over TELEGRAM_MSG_LIMIT must carry
+        re-offset entities on every part instead of dropping all formatting."""
+        p1, p2 = "a" * 3000, "b" * 3000
+        converted = f"{p1}\n\n{p2}"
+        entities = [{"type": "bold", "offset": 3002, "length": 10}]
+        channel._convert_markdown = lambda text: (converted, entities)
+
+        await channel._on_background_event("session_1", {
+            "source_type": "heartbeat_delivery",
+            "agent_name": "my_agent",
+            "detail": "long report",
+            "deliver": True,
+            "scope": "agent",
+        })
+
+        calls = channel._send_message.call_args_list
+        assert len(calls) == 2
+        assert calls[0].args[1] == p1
+        assert calls[1].args[1] == p2
+        assert calls[1].args[2] == [{"type": "bold", "offset": 0, "length": 10}]
+        # All parts delivered → mailbox mirror still happens
+        channel._session_manager.deposit_mailbox_event.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_multipart_partial_failure_skips_mailbox_mirror(self, channel):
+        """#76: if any split part fails to send, the heartbeat counts as
+        undelivered and must not be mirrored into the session mailbox."""
+        channel._send_message = AsyncMock(side_effect=[True, False])
+        converted = "a" * 3000 + "\n\n" + "b" * 3000
+        channel._convert_markdown = lambda text: (converted, None)
+
+        await channel._on_background_event("session_1", {
+            "source_type": "heartbeat_delivery",
+            "agent_name": "my_agent",
+            "detail": "long report",
+            "deliver": True,
+            "scope": "agent",
+        })
+
+        assert channel._send_message.await_count == 2
         channel._session_manager.deposit_mailbox_event.assert_not_awaited()
 
     @pytest.mark.asyncio

@@ -293,15 +293,12 @@ class TelegramChannel:
                 continue
             if target_chat and str(chat_id) != target_chat:
                 continue
-            # Split long heartbeat messages instead of truncating
-            parts = self._split_message(text)
-            if len(parts) <= 1:
-                sent = await self._send_message(chat_id, text, entities)
-            else:
-                sent = True
-                for part in parts:
-                    if not await self._send_message(chat_id, part):
-                        sent = False
+            # Split long heartbeat messages instead of truncating; entities
+            # are sliced per part so formatting survives the split (#76).
+            ok_count, total = await self._send_split_with_entities(
+                chat_id, text, entities,
+            )
+            sent = total > 0 and ok_count == total
             # Deposit heartbeat result into channel session mailbox so the
             # next user turn sees it via "## Background Updates" prefix.
             # This replaces the old inject_history_message approach which
@@ -794,30 +791,10 @@ class TelegramChannel:
 
         # Fallback: batch send (original behavior)
         converted_text, converted_entities = self._convert_markdown(full_reply)
-        sent_any = False
-        parts = self._split_message(converted_text)
-        if len(parts) <= 1:
-            for part in parts:
-                success = await self._send_message(chat_id, part, converted_entities)
-                if success:
-                    sent_any = True
-        else:
-            search_from = 0
-            for part in parts:
-                part_start = converted_text.find(part, search_from)
-                if part_start < 0:
-                    part_start = search_from
-                utf16_offset = self._utf16_len(converted_text[:part_start])
-                utf16_length = self._utf16_len(part)
-                part_entities = self._slice_entities(
-                    converted_entities, utf16_offset, utf16_length,
-                )
-                success = await self._send_message(
-                    chat_id, part, part_entities or None,
-                )
-                if success:
-                    sent_any = True
-                search_from = part_start + len(part)
+        ok_count, _total = await self._send_split_with_entities(
+            chat_id, converted_text, converted_entities,
+        )
+        sent_any = ok_count > 0
 
         if not sent_any:
             fallback = full_reply[:200]
@@ -946,6 +923,37 @@ class TelegramChannel:
             sliced["length"] = new_length
             result.append(sliced)
         return result
+
+    async def _send_split_with_entities(
+        self, chat_id: str, text: str, entities: Optional[list],
+    ) -> tuple:
+        """Send *text* in Telegram-size parts, slicing *entities* per part.
+
+        Entity offsets are re-based to each part in UTF-16 code units (the
+        Telegram API convention), so formatting survives the split (#76).
+        Returns ``(ok_count, total_parts)``; ``(0, 0)`` for empty text.
+        """
+        parts = self._split_message(text)
+        if not parts:
+            return 0, 0
+        if len(parts) == 1:
+            ok = await self._send_message(chat_id, text, entities)
+            return (1 if ok else 0), 1
+        ok_count = 0
+        search_from = 0
+        for part in parts:
+            part_start = text.find(part, search_from)
+            if part_start < 0:
+                part_start = search_from
+            part_entities = self._slice_entities(
+                entities,
+                self._utf16_len(text[:part_start]),
+                self._utf16_len(part),
+            )
+            if await self._send_message(chat_id, part, part_entities or None):
+                ok_count += 1
+            search_from = part_start + len(part)
+        return ok_count, len(parts)
 
     # ------------------------------------------------------------------
     # Telegram Skillkit registration
