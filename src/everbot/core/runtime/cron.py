@@ -234,7 +234,7 @@ class CronExecutor:
     def _resolve_skill_model(self) -> str:
         """Resolve the model for skill LLM calls.
 
-        Uses the 'fast' model from Dolphin GlobalConfig — skill jobs
+        Uses the 'fast' model from models.yaml (model_config) — skill jobs
         (eval, reflection) are simple scoring tasks that don't need
         a reasoning model.  Falls back to agent model if 'fast' is unset.
         """

@@ -638,7 +638,7 @@ class EverBotDaemon:
                 import yaml as _yaml
                 with open(model_cfg_path, "r", encoding="utf-8") as f:
                     model_cfg = _yaml.safe_load(f) or {}
-                _walk(model_cfg, "dolphin.yaml")
+                _walk(model_cfg, "models.yaml")
             except Exception:
                 pass  # non-critical
 

@@ -37,8 +37,13 @@ class UserDataManager:
         return self.alfred_home / "config.yaml"
 
     @property
+    def models_config_path(self) -> Path:
+        """模型路由配置文件路径(#74 正名)"""
+        return self.alfred_home / "models.yaml"
+
+    @property
     def dolphin_config_path(self) -> Path:
-        """Dolphin 配置文件路径"""
+        """legacy 模型配置路径(#38 去 dolphin 后旧名残留,仅兜底查找用)"""
         return self.alfred_home / "dolphin.yaml"
 
     @property

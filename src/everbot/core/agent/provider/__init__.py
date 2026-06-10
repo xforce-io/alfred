@@ -71,7 +71,7 @@ def oneshot_llm_provider() -> "AgentProvider":
     """Provider for stateless one-shot ``call_llm`` (memory extraction / history compression).
 
     ``call_llm`` is NOT agent-relative(单 prompt → 单回复)。改用 dolphin-free 的
-    :class:`OneshotLLMProvider`(直连 OpenAI 兼容端点,模型路由读 config/dolphin.yaml),
+    :class:`OneshotLLMProvider`(直连 OpenAI 兼容端点,模型路由读 config/models.yaml),
     去掉对 dolphin in-process LLMClient 的依赖(#38 去 dolphin)。
     """
     cached = _provider_by_name.get("oneshot")

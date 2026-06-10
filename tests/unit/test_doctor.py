@@ -3,7 +3,7 @@
 from pathlib import Path
 import tempfile
 
-from src.everbot.cli.doctor import collect_doctor_report, dolphin_has_system_skillkit
+from src.everbot.cli.doctor import collect_doctor_report
 from src.everbot.infra.user_data import UserDataManager
 
 
@@ -19,15 +19,40 @@ def test_doctor_reports_missing_config_and_agents_dir():
         assert "WARN" in levels
 
 
-def test_dolphin_has_system_skillkit_supports_tool_enabled_tools():
-    """Doctor should recognize the renamed tool.enabled_tools config key."""
-    assert dolphin_has_system_skillkit(
-        {"tool": {"enabled_tools": ["system_skillkit", "resource_skillkit"]}}
-    )
+# #74:dolphin_has_system_skillkit 已随死配置 tool.enabled_tools 移除,
+# 原两条钉住该函数的用例一并撤销。
 
 
-def test_dolphin_has_system_skillkit_supports_legacy_skill_enabled_skills():
-    """Doctor should keep accepting the legacy skill.enabled_skills key."""
-    assert dolphin_has_system_skillkit(
-        {"skill": {"enabled_skills": ["system_skillkit"]}}
-    )
+# ── #74: doctor 同步改名(models.yaml 优先、dolphin.yaml 兜底、撤 skillkit 残留检查) ──
+
+
+def test_doctor_resolves_models_yaml_first(tmp_path):
+    from src.everbot.cli.doctor import resolve_model_config_source
+    home = tmp_path / ".alfred"
+    home.mkdir(parents=True)
+    (home / "models.yaml").write_text("default: x\n", encoding="utf-8")
+    (home / "dolphin.yaml").write_text("default: y\n", encoding="utf-8")
+    ud = UserDataManager(alfred_home=home)
+    label, path = resolve_model_config_source(ud, tmp_path)
+    assert label == "alfred"
+    assert path == home / "models.yaml"
+
+
+def test_doctor_legacy_dolphin_still_resolves(tmp_path):
+    from src.everbot.cli.doctor import resolve_model_config_source
+    home = tmp_path / ".alfred"
+    home.mkdir(parents=True)
+    proj_cfg = tmp_path / "config"
+    proj_cfg.mkdir(parents=True)
+    (proj_cfg / "dolphin.yaml").write_text("default: y\n", encoding="utf-8")
+    ud = UserDataManager(alfred_home=home)
+    label, path = resolve_model_config_source(ud, tmp_path)
+    assert label == "project"
+    assert path == proj_cfg / "dolphin.yaml"
+
+
+def test_doctor_report_drops_dead_skillkit_check(tmp_path):
+    """tool.enabled_tools 已无 runtime 消费方,doctor 不应再为它产报告项。"""
+    home = tmp_path / ".alfred"
+    items = collect_doctor_report(project_root=tmp_path, alfred_home=home)
+    assert not any("skillkit" in (i.title or "").lower() for i in items)
