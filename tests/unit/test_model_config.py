@@ -100,3 +100,59 @@ def test_legacy_default_model_key_still_works(tmp_path):
                  "clouds:\n  c:\n    api: http://x\n    api_key: k\n", encoding="utf-8")
     mc = load_model_config(p)
     assert mc.default_model == "m" and mc.fast_model == "m"
+
+
+# ── #71: extra_body 解析与合并(fast 档关 thinking 的承载机制) ────
+
+
+_YAML_EXTRA = """
+default: deepseek-chat
+fast: doubao-nothink
+clouds:
+  volcengine:
+    api: https://ark.example.com/v3
+    api_key: sk-ark
+    extra_body:
+      cloud_flag: true
+      thinking:
+        type: enabled
+llms:
+  deepseek-chat:
+    cloud: volcengine
+    model_name: deepseek-chat
+  doubao-nothink:
+    cloud: volcengine
+    model_name: doubao-seed-2-0-pro
+    extra_body:
+      thinking:
+        type: disabled
+"""
+
+
+def _write_extra(tmp_path) -> Path:
+    p = tmp_path / "dolphin_extra.yaml"
+    p.write_text(_YAML_EXTRA, encoding="utf-8")
+    return p
+
+
+def test_route_extra_body_defaults_empty(tmp_path):
+    mc = load_model_config(_write(tmp_path))
+    r = mc.route_for("qwen-turbo")
+    assert r.extra_body == {}
+
+
+def test_route_parses_llm_extra_body(tmp_path):
+    mc = load_model_config(_write_extra(tmp_path))
+    r = mc.route_for("doubao-nothink")
+    assert r.extra_body["thinking"] == {"type": "disabled"}
+
+
+def test_route_merges_cloud_and_llm_extra_body_llm_wins(tmp_path):
+    mc = load_model_config(_write_extra(tmp_path))
+    r = mc.route_for("doubao-nothink")
+    # cloud 级键保留,llm 级同名键覆盖(同 headers 惯例)
+    assert r.extra_body["cloud_flag"] is True
+    assert r.extra_body["thinking"] == {"type": "disabled"}
+    # 未配 extra_body 的 llm 仅继承 cloud 级
+    r2 = mc.route_for("deepseek-chat")
+    assert r2.extra_body == {"cloud_flag": True, "thinking": {"type": "enabled"}}

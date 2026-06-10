@@ -1737,6 +1737,9 @@ class _SkillLLMClient:
             "temperature": kwargs.get("temperature", 0.3),
             "max_tokens": kwargs.get("max_tokens", 8192),  # 恢复原 dolphin 默认上限(原 2000 会截断长输出)
         }
+        # #71:透传路由级 provider 私有参数(如 fast 档对 ark 关 thinking)。
+        if route.extra_body:
+            call_kwargs["extra_body"] = route.extra_body
         # Pass through DPH-extracted params accepted by the OpenAI API
         for k, v in kwargs.items():
             if k not in ("mode", "output_format", "system_prompt", "model"):

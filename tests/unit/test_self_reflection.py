@@ -955,3 +955,50 @@ class TestSkillLLMTimeouts:
                 assert await runner._probe_llm() is False
             with um.patch.dict(os.environ, {"ALFRED_SKILL_LLM_PROBE_TIMEOUT": "5"}):
                 assert await runner._probe_llm() is True
+
+
+# ── #71: _SkillLLMClient 透传路由级 extra_body(关 thinking 的执行端) ──
+
+
+class TestSkillLLMExtraBody:
+    """#71:fast 档应急切到深思模型后,skill 任务承受 thinking 延迟方差与计费溢价。
+    路由层声明 extra_body(如 {thinking: {type: disabled}}),client 端透传给 create。"""
+
+    async def _create_call_kwargs(self, route):
+        import unittest.mock as um
+
+        from src.everbot.core.runtime.heartbeat import _SkillLLMClient
+
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock()]
+        fake_response.choices[0].message.content = "ok"
+        with um.patch(
+            "src.everbot.core.runtime.heartbeat._resolve_skill_model_route",
+            return_value=route,
+        ), um.patch(
+            "src.everbot.core.runtime.heartbeat.AsyncOpenAI",
+        ) as mock_openai_cls:
+            mock_client = AsyncMock()
+            mock_client.chat.completions.create.return_value = fake_response
+            mock_openai_cls.return_value = mock_client
+            await _SkillLLMClient(model="test-model").complete("hello")
+        return mock_client.chat.completions.create.call_args[1]
+
+    @pytest.mark.asyncio
+    async def test_route_extra_body_passed_through(self):
+        from src.everbot.core.agent.provider.model_config import ModelRoute
+
+        route = ModelRoute(
+            base_url="https://fake.example.com/v1", api_key="k", model="m",
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+        kwargs = await self._create_call_kwargs(route)
+        assert kwargs.get("extra_body") == {"thinking": {"type": "disabled"}}
+
+    @pytest.mark.asyncio
+    async def test_empty_extra_body_not_sent(self):
+        from src.everbot.core.agent.provider.model_config import ModelRoute
+
+        route = ModelRoute(base_url="https://fake.example.com/v1", api_key="k", model="m")
+        kwargs = await self._create_call_kwargs(route)
+        assert "extra_body" not in kwargs
