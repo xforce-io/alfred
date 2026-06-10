@@ -54,10 +54,15 @@ class ModelRoute:
     api_key: str
     model: str
     headers: Dict[str, str] = None  # type: ignore[assignment]
+    # #71:随请求透传的 provider 私有参数(如 volcengine ark 的
+    # ``thinking: {type: disabled}``),cloud 级与 llm 级合并、llm 覆盖(同 headers)。
+    extra_body: Dict[str, Any] = None  # type: ignore[assignment]
 
     def __post_init__(self):
         if self.headers is None:
             self.headers = {}
+        if self.extra_body is None:
+            self.extra_body = {}
 
 
 @dataclass
@@ -83,11 +88,13 @@ class ModelConfig:
         cloud = self.clouds[llm["cloud"]]
         base = llm.get("api") or cloud["api"]
         headers = {**(cloud.get("headers") or {}), **(llm.get("headers") or {})}
+        extra_body = {**(cloud.get("extra_body") or {}), **(llm.get("extra_body") or {})}
         return ModelRoute(
             base_url=_expand(base).rstrip("/"),
             api_key=_expand(llm.get("api_key") or cloud.get("api_key", "")) or "",
             model=llm["model_name"],
             headers={k: _expand(v) for k, v in headers.items()},
+            extra_body=extra_body,
         )
 
 
