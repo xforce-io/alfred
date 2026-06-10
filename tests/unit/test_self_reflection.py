@@ -867,3 +867,91 @@ class TestSkillLLMClient:
             await self._run_with_side_effect(openai.AuthenticationError(
                 message="invalid api key", response=MagicMock(status_code=401), body=None,
             ))
+
+
+# ── #59: _SkillLLMClient 超时/重试 与 _probe_llm 超时 ────────────
+
+
+class TestSkillLLMTimeouts:
+    """#59:60s 硬编码超时 × SDK 隐藏 retry(默认 max_retries=2)把单次慢调用最坏放大到
+    ~182s(实测 6/8 两次 job_degraded 182.0s/181.9s);probe 15s 对慢模型产生假阴性。
+    修复:max_retries=0(job 层已有 degraded→下轮重试语义,SDK 内层 retry 是双重重试)、
+    超时默认 120s 且 env 可配、probe 默认 30s 且 env 可配。"""
+
+    async def _capture_openai_kwargs(self, env=None):
+        import os
+        import unittest.mock as um
+        from src.everbot.core.runtime.heartbeat import _SkillLLMClient
+
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock()]
+        fake_response.choices[0].message.content = "ok"
+        env_patch = {"ALFRED_SKILL_LLM_TIMEOUT": "", "ALFRED_SKILL_LLM_PROBE_TIMEOUT": ""}
+        env_patch.update(env or {})
+        with um.patch.dict(os.environ, env_patch), \
+             um.patch(
+                 "src.everbot.core.runtime.heartbeat._resolve_skill_model_route",
+                 return_value=TestSkillLLMClient._route(model="test-model"),
+             ), um.patch(
+                 "src.everbot.core.runtime.heartbeat.AsyncOpenAI",
+             ) as mock_openai_cls:
+            mock_client = AsyncMock()
+            mock_client.chat.completions.create.return_value = fake_response
+            mock_openai_cls.return_value = mock_client
+            await _SkillLLMClient(model="test-model").complete("hello")
+        return mock_openai_cls.call_args[1]
+
+    @pytest.mark.asyncio
+    async def test_no_sdk_inner_retries(self):
+        kwargs = await self._capture_openai_kwargs()
+        assert kwargs.get("max_retries") == 0
+
+    @pytest.mark.asyncio
+    async def test_default_timeout_120s(self):
+        kwargs = await self._capture_openai_kwargs()
+        assert kwargs.get("timeout") == 120.0
+
+    @pytest.mark.asyncio
+    async def test_timeout_env_override(self):
+        kwargs = await self._capture_openai_kwargs(env={"ALFRED_SKILL_LLM_TIMEOUT": "45"})
+        assert kwargs.get("timeout") == 45.0
+
+    @pytest.mark.asyncio
+    async def test_timeout_env_invalid_falls_back_to_default(self):
+        kwargs = await self._capture_openai_kwargs(env={"ALFRED_SKILL_LLM_TIMEOUT": "abc"})
+        assert kwargs.get("timeout") == 120.0
+
+    def test_probe_timeout_default_and_env(self):
+        import os
+        import unittest.mock as um
+        from src.everbot.core.runtime.heartbeat import _probe_timeout_s
+
+        with um.patch.dict(os.environ, {"ALFRED_SKILL_LLM_PROBE_TIMEOUT": ""}):
+            assert _probe_timeout_s() == 30.0
+        with um.patch.dict(os.environ, {"ALFRED_SKILL_LLM_PROBE_TIMEOUT": "12.5"}):
+            assert _probe_timeout_s() == 12.5
+        with um.patch.dict(os.environ, {"ALFRED_SKILL_LLM_PROBE_TIMEOUT": "nope"}):
+            assert _probe_timeout_s() == 30.0
+
+    @pytest.mark.asyncio
+    async def test_probe_llm_honors_env_timeout(self):
+        """慢 complete(0.2s):probe 超时 0.05s → False;5s → True(假阴性来源即此)。"""
+        import asyncio
+        import os
+        import unittest.mock as um
+        from src.everbot.core.runtime.heartbeat import HeartbeatRunner
+
+        runner = HeartbeatRunner.__new__(HeartbeatRunner)
+        runner.agent_name = "test-agent"
+        stub = MagicMock()
+
+        async def slow_complete(*args, **kwargs):
+            await asyncio.sleep(0.2)
+            return "OK"
+
+        stub.complete = slow_complete
+        with um.patch.object(HeartbeatRunner, "_create_skill_llm_client", return_value=stub):
+            with um.patch.dict(os.environ, {"ALFRED_SKILL_LLM_PROBE_TIMEOUT": "0.05"}):
+                assert await runner._probe_llm() is False
+            with um.patch.dict(os.environ, {"ALFRED_SKILL_LLM_PROBE_TIMEOUT": "5"}):
+                assert await runner._probe_llm() is True

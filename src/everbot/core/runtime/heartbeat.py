@@ -1057,7 +1057,7 @@ If not, reply with `HEARTBEAT_OK`.
             client = self._create_skill_llm_client()
             await asyncio.wait_for(
                 client.complete("ping", max_tokens=1),
-                timeout=15,
+                timeout=_probe_timeout_s(),
             )
             return True
         except Exception as e:
@@ -1666,6 +1666,30 @@ def _resolve_skill_model_route(model_name: str):
 # Re-export for patching in tests; actual import deferred to complete().
 from openai import AsyncOpenAI
 
+# #59:skill LLM 超时默认 120s(原 60s 对 fast 档实际指向的深思模型偏紧,P90+ 单调用
+# 可达 60-112s);probe 默认 30s(原 15s 假阴性致心跳误判"LLM 不可用"暂停)。均 env 可配。
+_DEFAULT_SKILL_LLM_TIMEOUT_S = 120.0
+_DEFAULT_PROBE_TIMEOUT_S = 30.0
+
+
+def _env_float(name: str, default: float) -> float:
+    import os
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _skill_llm_timeout_s() -> float:
+    return _env_float("ALFRED_SKILL_LLM_TIMEOUT", _DEFAULT_SKILL_LLM_TIMEOUT_S)
+
+
+def _probe_timeout_s() -> float:
+    return _env_float("ALFRED_SKILL_LLM_PROBE_TIMEOUT", _DEFAULT_PROBE_TIMEOUT_S)
+
 
 class _SkillLLMClient:
     """Lightweight LLM client for reflection skills.
@@ -1703,7 +1727,10 @@ class _SkillLLMClient:
             base_url=base_url,
             api_key=route.api_key or "dummy",
             default_headers=route.headers or None,  # 透传 cloud headers(如 kimi User-Agent)
-            timeout=60.0,
+            timeout=_skill_llm_timeout_s(),
+            # #59:job 层已有 LLMTransientError→job_degraded→下轮重试语义,SDK 内层
+            # retry(默认 2 次)与之叠加是双重重试——单次卡死调用最坏被放大到 3×timeout。
+            max_retries=0,
         )
 
         call_kwargs = {
