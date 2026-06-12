@@ -1,7 +1,17 @@
 """milkie skill 发现单测(#38 E 能力层 alfred 侧)。"""
 from pathlib import Path
 
+import pytest
+
 from src.everbot.core.agent.provider.milkie import skills as msk
+
+
+@pytest.fixture(autouse=True)
+def _clear_discovery_cache():
+    """每例清空 #81 F2 的"上次成功发现"缓存,避免跨例污染。"""
+    msk._last_good_discovery.clear()
+    yield
+    msk._last_good_discovery.clear()
 
 
 def _make_skill(dir_: Path, name: str, title: str, desc: str) -> Path:
@@ -393,6 +403,97 @@ def test_discover_skills_deterministic_on_stable_fs(tmp_path, monkeypatch):
     runs = [tuple(sorted(s["name"] for s in msk.discover_skills(tmp_path))) for _ in range(50)]
     assert len(set(runs)) == 1
     assert runs[0] == ("alpha", "trace-review", "twitter-watch")
+
+
+# ── F2(#81):缩水重试 —— 目录瞬时消失(git checkout 中途)不丢、真删除接受 ──
+
+def test_discover_retries_on_transient_shrink_and_recovers(tmp_path, monkeypatch):
+    """上次见过 c,本次首扫缺 c(瞬时)→ 重扫整轮恢复,不误报缩水。"""
+    monkeypatch.setattr(msk, "_SKILL_MD_RETRY_DELAY_S", 0)
+    d = tmp_path / "d"
+    for n in ("a", "b", "c"):
+        _make_skill(d, n, n, n)
+    monkeypatch.setattr(msk, "resolve_skill_dirs", lambda _ws: [d])
+    assert sorted(s["name"] for s in msk.discover_skills(tmp_path)) == ["a", "b", "c"]  # 播种缓存
+
+    real = msk._scan_skills_once
+    calls = {"n": 0}
+
+    def flaky(ws):
+        calls["n"] += 1
+        skills, saw = real(ws)
+        if calls["n"] == 1:  # 首次扫描:c 目录"瞬时消失"
+            skills = [s for s in skills if s["name"] != "c"]
+        return skills, saw
+
+    monkeypatch.setattr(msk, "_scan_skills_once", flaky)
+    mock_logger = MagicMock()
+    monkeypatch.setattr(msk, "logger", mock_logger)
+
+    found = sorted(s["name"] for s in msk.discover_skills(tmp_path))
+    assert found == ["a", "b", "c"]            # 重试恢复,不丢 c
+    assert calls["n"] >= 2                       # 确实重扫了整轮
+    assert not mock_logger.warning.called        # 恢复了 → 不告警缩水
+
+
+def test_discover_persistent_shrink_accepted_warns_and_no_reretry(tmp_path, monkeypatch):
+    """c 真删除(每次都缺)→ 重试后接受、WARNING;缓存更新后下次不再重试。"""
+    monkeypatch.setattr(msk, "_SKILL_MD_RETRY_DELAY_S", 0)
+    d = tmp_path / "d"
+    for n in ("a", "b", "c"):
+        _make_skill(d, n, n, n)
+    monkeypatch.setattr(msk, "resolve_skill_dirs", lambda _ws: [d])
+    assert len(msk.discover_skills(tmp_path)) == 3  # 播种缓存 {a,b,c}
+
+    real = msk._scan_skills_once
+
+    def shrunk(ws):
+        skills, saw = real(ws)
+        return [s for s in skills if s["name"] != "c"], {x for x in saw if x != "c"}
+
+    monkeypatch.setattr(msk, "_scan_skills_once", shrunk)
+    mock_logger = MagicMock()
+    monkeypatch.setattr(msk, "logger", mock_logger)
+
+    found = sorted(s["name"] for s in msk.discover_skills(tmp_path))
+    assert found == ["a", "b"]               # 真删除被接受
+    assert mock_logger.warning.called        # 缩水出声
+
+    # 缓存已更新为 {a,b};下一次无缩水 → 只扫一次,不再重试
+    calls = {"n": 0}
+
+    def counted(ws):
+        calls["n"] += 1
+        return shrunk(ws)
+
+    monkeypatch.setattr(msk, "_scan_skills_once", counted)
+    msk.discover_skills(tmp_path)
+    assert calls["n"] == 1
+
+
+def test_discover_transient_shrink_does_not_raise_spurious_include_error(tmp_path, monkeypatch):
+    """include 命中的技能首扫瞬时缺失,不应误判 unknown 而 raise —— 校验跑在稳定全集上。"""
+    monkeypatch.setattr(msk, "_SKILL_MD_RETRY_DELAY_S", 0)
+    d = tmp_path / "d"
+    for n in ("a", "b"):
+        _make_skill(d, n, n, n)
+    monkeypatch.setattr(msk, "resolve_skill_dirs", lambda _ws: [d])
+    assert len(msk.discover_skills(tmp_path)) == 2  # 播种 {a,b}
+
+    real = msk._scan_skills_once
+    calls = {"n": 0}
+
+    def flaky(ws):
+        calls["n"] += 1
+        skills, saw = real(ws)
+        if calls["n"] == 1:           # 首扫瞬时缺 b
+            skills = [s for s in skills if s["name"] != "b"]
+        return skills, saw
+
+    monkeypatch.setattr(msk, "_scan_skills_once", flaky)
+    # include=[b]:若用首扫结果校验会 raise;重试恢复后应正常返回 b
+    found = msk.discover_skills(tmp_path, include=["b"])
+    assert [s["name"] for s in found] == ["b"]
 
 
 def test_resolve_skill_dirs_orders_workspace_first_and_dedups(tmp_path, monkeypatch):
