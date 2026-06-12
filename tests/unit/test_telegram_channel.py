@@ -11,7 +11,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from src.everbot.channels.telegram_channel import TelegramChannel, _extract_urls
+from src.everbot.channels.telegram_channel import (
+    TelegramChannel,
+    TELEGRAM_MSG_LIMIT,
+    _extract_urls,
+)
+
+
+def _fake_resp(ok=True, description="", message_id=42):
+    """Build a fake httpx-style response with a ``.json()`` method."""
+    r = MagicMock()
+    if ok:
+        r.json.return_value = {"ok": True, "result": {"message_id": message_id}}
+    else:
+        r.json.return_value = {"ok": False, "description": description}
+    return r
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +236,139 @@ class TestSendSplitWithEntities:
         text = "a" * 3000 + "\n\n" + "b" * 3000
         ok, total = await channel._send_split_with_entities("111", text, None)
         assert (ok, total) == (1, 2)
+
+
+# ===========================================================================
+# 1c. _edit_message — drop entities on truncation + entity-failure fallback (#79)
+# ===========================================================================
+
+class TestEditMessage:
+    @pytest.fixture
+    def channel(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._client = MagicMock()
+        ch._base_url = "http://x"
+        return ch
+
+    @pytest.mark.asyncio
+    async def test_success_keeps_entities(self, channel):
+        channel._client.post = AsyncMock(return_value=_fake_resp(ok=True))
+        ents = [{"type": "bold", "offset": 0, "length": 2}]
+        ok = await channel._edit_message("1", 5, "hi", ents)
+        assert ok is True
+        channel._client.post.assert_awaited_once()
+        payload = channel._client.post.call_args.kwargs["json"]
+        assert payload["entities"] == ents
+
+    @pytest.mark.asyncio
+    async def test_overlong_text_drops_entities(self, channel):
+        # Truncation invalidates entity offsets — they must not be sent.
+        channel._client.post = AsyncMock(return_value=_fake_resp(ok=True))
+        ents = [{"type": "bold", "offset": 0, "length": 4500}]
+        ok = await channel._edit_message("1", 5, "a" * 5000, ents)
+        assert ok is True
+        payload = channel._client.post.call_args.kwargs["json"]
+        assert "entities" not in payload
+        assert len(payload["text"]) <= TELEGRAM_MSG_LIMIT
+
+    @pytest.mark.asyncio
+    async def test_entities_rejected_retries_without_them(self, channel):
+        # First edit (with entities) is rejected; retry without entities succeeds.
+        channel._client.post = AsyncMock(side_effect=[
+            _fake_resp(ok=False, description="can't parse entities"),
+            _fake_resp(ok=True),
+        ])
+        ents = [{"type": "bold", "offset": 0, "length": 2}]
+        ok = await channel._edit_message("1", 5, "hi", ents)
+        assert ok is True
+        assert channel._client.post.await_count == 2
+        retry_payload = channel._client.post.call_args_list[1].kwargs["json"]
+        assert "entities" not in retry_payload
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_edit_fails_without_entities(self, channel):
+        # No entities → no retry; an API failure is reported honestly.
+        channel._client.post = AsyncMock(
+            return_value=_fake_resp(ok=False, description="message to edit not found")
+        )
+        ok = await channel._edit_message("1", 5, "hi", None)
+        assert ok is False
+        channel._client.post.assert_awaited_once()
+
+
+# ===========================================================================
+# 1d. _finalize_streaming — edit first part, send overflow as new messages (#79)
+# ===========================================================================
+
+class TestFinalizeStreaming:
+    @pytest.fixture
+    def channel(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._edit_message = AsyncMock(return_value=True)
+        ch._send_message = AsyncMock(return_value=True)
+        return ch
+
+    @pytest.mark.asyncio
+    async def test_single_part_edits_with_entities_no_extra_send(self, channel):
+        ents = [{"type": "bold", "offset": 0, "length": 5}]
+        ok = await channel._finalize_streaming("1", 42, "hello world", ents)
+        assert ok is True
+        channel._edit_message.assert_awaited_once_with("1", 42, "hello world", ents)
+        channel._send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_multipart_edits_first_sends_rest_sliced(self, channel):
+        p1, p2 = "a" * 3000, "b" * 3000
+        text = f"{p1}\n\n{p2}"
+        # Bold over the first 10 chars of paragraph 2 (offset 3002 in full text).
+        ents = [{"type": "bold", "offset": 3002, "length": 10}]
+        ok = await channel._finalize_streaming("1", 42, text, ents)
+        assert ok is True
+        # First part edits the streaming bubble; no entity falls inside it.
+        edit_call = channel._edit_message.call_args
+        assert edit_call.args[2] == p1
+        assert edit_call.args[3] is None
+        # Overflow part is sent as a new message with re-based entity.
+        send_call = channel._send_message.call_args
+        assert send_call.args[1] == p2
+        assert send_call.args[2] == [{"type": "bold", "offset": 0, "length": 10}]
+
+    @pytest.mark.asyncio
+    async def test_first_edit_failure_returns_false_and_skips_rest(self, channel):
+        # On a failed first-part edit the caller must fall back to a clean
+        # delete+batch resend, so overflow parts must NOT be sent here.
+        channel._edit_message = AsyncMock(return_value=False)
+        text = "a" * 3000 + "\n\n" + "b" * 3000
+        ok = await channel._finalize_streaming("1", 42, text, None)
+        assert ok is False
+        channel._send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_overflow_send_failure_logged_but_returns_true(self, channel):
+        # First part edits fine; an overflow part fails to send. We must NOT
+        # return False (that would re-post the first part via batch fallback) —
+        # the failure is dropped but logged so the partial delivery is visible.
+        channel._send_message = AsyncMock(return_value=False)
+        text = "a" * 3000 + "\n\n" + "b" * 3000
+        with patch(
+            "src.everbot.channels.telegram_channel.logger"
+        ) as mock_logger:
+            ok = await channel._finalize_streaming("1", 42, text, None)
+        assert ok is True
+        channel._edit_message.assert_awaited_once()
+        channel._send_message.assert_awaited_once()
+        mock_logger.warning.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_emoji_offsets_counted_in_utf16(self, channel):
+        # 📌 is one Python char but two UTF-16 code units.
+        p1, p2 = "a" * 3000, "📌" + "b" * 3000
+        text = f"{p1}\n\n{p2}"
+        ents = [{"type": "bold", "offset": 3004, "length": 10}]
+        await channel._finalize_streaming("1", 42, text, ents)
+        send_call = channel._send_message.call_args
+        assert send_call.args[1] == p2
+        assert send_call.args[2] == [{"type": "bold", "offset": 2, "length": 10}]
 
 
 # ===========================================================================
@@ -622,6 +769,55 @@ class TestMessageHandling:
         channel._send_message.assert_awaited()
         msg = channel._send_message.call_args[0][1]
         assert "part1 part2" in msg
+
+    @pytest.mark.asyncio
+    async def test_streaming_finalize_uses_full_reply_not_truncated(self, channel):
+        # When streaming is active, the finalize step must convert the FULL
+        # reply (no pre-truncation) and hand it to _finalize_streaming (#79 F1).
+        mock_agent = MagicMock()
+        channel._session_manager.get_cached_agent.return_value = mock_agent
+        channel._client = MagicMock()
+        channel._client.post = AsyncMock(return_value=_fake_resp(ok=True, message_id=42))
+        channel._finalize_streaming = AsyncMock(return_value=True)
+
+        async def fake_process(agent, agent_name, session_id, message, on_event):
+            from src.everbot.core.channel.models import OutboundMessage
+            # One delta long enough to start streaming (>= min_streaming_chars).
+            await on_event(OutboundMessage(session_id, "x" * 40, msg_type="delta"))
+            await on_event(OutboundMessage(session_id, "", msg_type="end"))
+
+        channel._core.process_message = fake_process
+
+        await channel._handle_message("111", "go", {})
+
+        channel._finalize_streaming.assert_awaited_once()
+        # message_id from the streaming sendMessage is reused for the edit.
+        args = channel._finalize_streaming.call_args.args
+        assert args[1] == 42
+        assert "x" * 40 in args[2]
+
+    @pytest.mark.asyncio
+    async def test_streaming_finalize_failure_falls_back_to_batch(self, channel):
+        # If the final edit fails, delete the stale bubble and batch-resend
+        # (so the user still gets the message) — #79 F6.
+        mock_agent = MagicMock()
+        channel._session_manager.get_cached_agent.return_value = mock_agent
+        channel._client = MagicMock()
+        channel._client.post = AsyncMock(return_value=_fake_resp(ok=True, message_id=42))
+        channel._finalize_streaming = AsyncMock(return_value=False)
+        channel._send_split_with_entities = AsyncMock(return_value=(1, 1))
+
+        async def fake_process(agent, agent_name, session_id, message, on_event):
+            from src.everbot.core.channel.models import OutboundMessage
+            await on_event(OutboundMessage(session_id, "y" * 40, msg_type="delta"))
+            await on_event(OutboundMessage(session_id, "", msg_type="end"))
+
+        channel._core.process_message = fake_process
+
+        await channel._handle_message("111", "go", {})
+
+        channel._finalize_streaming.assert_awaited_once()
+        channel._send_split_with_entities.assert_awaited()
 
 
 # ===========================================================================

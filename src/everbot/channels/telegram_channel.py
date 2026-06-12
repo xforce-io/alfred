@@ -772,11 +772,19 @@ class TelegramChannel:
                 summary_parts.append(f"🔧 {tool_call_count} commands executed")
             full_reply = f"{full_reply}\n\n{chr(10).join(summary_parts)}"
 
-        # If streaming worked, update with final text (remove cursor, apply formatting)
+        # If streaming worked, replace the bubble with the final formatted text.
+        # Convert the FULL reply (no pre-truncation): _normalize_tables/telegramify
+        # can expand text past the 4096 limit, so _finalize_streaming splits it —
+        # editing the first part in place and sending any overflow as new messages.
         if streaming_message_id and not streaming_failed:
-            final_text, final_entities = self._convert_markdown(full_reply[:TELEGRAM_MSG_LIMIT])
-            await self._edit_message(chat_id, streaming_message_id, final_text, final_entities)
-            return
+            final_text, final_entities = self._convert_markdown(full_reply)
+            if await self._finalize_streaming(
+                chat_id, streaming_message_id, final_text, final_entities,
+            ):
+                return
+            # Final edit failed outright — fall through to delete the stale
+            # bubble and batch-resend below (no overflow parts were sent).
+            streaming_failed = True
 
         # If streaming started but failed mid-way, delete the unformatted
         # streaming message so the batch send below doesn't duplicate it.
@@ -955,6 +963,57 @@ class TelegramChannel:
             search_from = part_start + len(part)
         return ok_count, len(parts)
 
+    async def _finalize_streaming(
+        self, chat_id: str, message_id: int, text: str, entities: Optional[list],
+    ) -> bool:
+        """Replace the streaming bubble with the final formatted *text*.
+
+        The first part edits the existing streaming message (dropping the
+        cursor, applying formatting); any overflow parts are sent as new
+        messages, since ``editMessageText`` cannot span multiple messages.
+        Entities are sliced per part in UTF-16 code units (#79).
+
+        Returns True if the first-part edit succeeded. On failure it sends
+        nothing further, so the caller can cleanly delete the bubble and
+        batch-resend without double-posting overflow parts.
+        """
+        parts = self._split_message(text)
+        if not parts:
+            return await self._edit_message(chat_id, message_id, text, entities)
+
+        first = parts[0]
+        if len(parts) == 1:
+            first_entities = entities
+        else:
+            first_entities = self._slice_entities(
+                entities, 0, self._utf16_len(first),
+            ) or None
+        if not await self._edit_message(chat_id, message_id, first, first_entities):
+            return False
+
+        search_from = len(first)
+        for part in parts[1:]:
+            part_start = text.find(part, search_from)
+            if part_start < 0:
+                part_start = search_from
+            part_entities = self._slice_entities(
+                entities,
+                self._utf16_len(text[:part_start]),
+                self._utf16_len(part),
+            )
+            # First part already landed via edit; we can't return False here
+            # (that would trigger a delete+batch-resend and double-post the
+            # first part), so a failed overflow part is dropped — log it so the
+            # truncated delivery is observable.
+            if not await self._send_message(chat_id, part, part_entities or None):
+                logger.warning(
+                    "_finalize_streaming: overflow part failed to send "
+                    "(chat=%s, %d chars) — reply delivered partially",
+                    chat_id, len(part),
+                )
+            search_from = part_start + len(part)
+        return True
+
     # ------------------------------------------------------------------
     # Telegram Skillkit registration
     # ------------------------------------------------------------------
@@ -1114,10 +1173,12 @@ class TelegramChannel:
             return True
         if len(text) > TELEGRAM_MSG_LIMIT:
             text = text[: TELEGRAM_MSG_LIMIT - 20] + "\n\n... (truncated)"
+            entities = None  # entity offsets are invalid after truncation
         if self._client is None:
             return False
 
-        payload: dict = {"chat_id": chat_id, "message_id": message_id, "text": text}
+        base = {"chat_id": chat_id, "message_id": message_id, "text": text}
+        payload: dict = dict(base)
         if entities:
             payload["entities"] = entities
 
@@ -1128,7 +1189,22 @@ class TelegramChannel:
             data = resp.json()
             if data.get("ok"):
                 return True
-            # Log but don't retry - edit conflicts are expected in streaming
+
+            # Entities can be rejected (e.g. offsets past the text after the
+            # streaming preview / table reflow). Retry once as plain text so the
+            # message still lands, mirroring _send_message's fallback.
+            if entities:
+                logger.warning(
+                    "editMessageText with entities failed: %s — retrying without entities",
+                    data.get("description", "unknown"),
+                )
+                resp = await self._client.post(
+                    f"{self._base_url}/editMessageText", json=base,
+                )
+                if resp.json().get("ok"):
+                    return True
+
+            # Log but don't retry further - edit conflicts are expected in streaming
             logger.debug("editMessageText failed: %s", data.get("description", "unknown"))
         except Exception as exc:
             logger.debug("editMessageText exception: [%s] %r", type(exc).__name__, exc)
