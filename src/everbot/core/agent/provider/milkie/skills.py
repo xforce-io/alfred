@@ -12,12 +12,41 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 _MAX_DESC_CHARS = 150
+
+# 读 SKILL.md 的瞬时失败重试(#81):git checkout / 写入中途文件会短暂不可读,
+# 重试一次挡掉绝大多数;仍失败才放弃并 WARNING(绝不静默丢技能)。
+_SKILL_MD_READ_RETRIES = 1
+_SKILL_MD_RETRY_DELAY_S = 0.05
+
+
+def _read_skill_md(skill_md: Path) -> Optional[str]:
+    """读 SKILL.md 文本;瞬时不可读(git checkout / 写入中途)重试一次。
+
+    彻底失败 → DEBUG + None。这里只记 DEBUG 不 WARNING:此刻还不知该技能是否会被
+    更低优先级目录兜住,过早 WARNING 会在 fallback 命中时误报能力丢失。真正的"能力被
+    跳过"判定与告警集中在 :func:`discover_skills`(它掌握最终全貌)——这是 #81 的核心:
+    去 fail-silent,但把"出声"放在能区分"瞬时/可恢复"与"真丢失"的那一层。
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(_SKILL_MD_READ_RETRIES + 1):
+        try:
+            return skill_md.read_text(encoding="utf-8")
+        except Exception as exc:
+            last_exc = exc
+            if attempt < _SKILL_MD_READ_RETRIES:
+                time.sleep(_SKILL_MD_RETRY_DELAY_S)
+    logger.debug(
+        "SKILL.md 读取失败(重试 %d 次后): %s — [%s] %r",
+        _SKILL_MD_READ_RETRIES, skill_md, type(last_exc).__name__, last_exc,
+    )
+    return None
 
 
 def resolve_skill_dirs(workspace_path: Path) -> List[Path]:
@@ -44,12 +73,10 @@ def parse_skill_metadata(skill_dir: Path) -> Optional[Dict[str, Any]]:
     """解析 SKILL.md 取元数据(name/title/description/abs_path)。无 SKILL.md → None。"""
     skill_md = skill_dir / "SKILL.md"
     if not skill_md.exists():
-        return None
-    try:
-        content = skill_md.read_text(encoding="utf-8")
-    except Exception:
-        logger.debug("读取 SKILL.md 失败: %s", skill_md, exc_info=True)
-        return None
+        return None  # 合法:非 skill 目录,静默跳过(避免噪声)
+    content = _read_skill_md(skill_md)
+    if content is None:
+        return None  # 有 SKILL.md 却读失败 —— _read_skill_md 已 WARNING
 
     title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
     title = title_match.group(1).strip() if title_match else skill_dir.name
@@ -96,16 +123,28 @@ def discover_skills(
     """
     skills: List[Dict[str, Any]] = []
     seen: set[str] = set()
+    saw_skill_md: set[str] = set()  # 含 SKILL.md(本应是技能)的目录名,用于丢弃告警(#81)
     for skills_dir in resolve_skill_dirs(workspace_path):
         for item in sorted(skills_dir.iterdir()):
             if not item.is_dir() or item.name.startswith("."):
                 continue
             if item.name in seen:
                 continue
+            if (item / "SKILL.md").exists():
+                saw_skill_md.add(item.name)
             meta = parse_skill_metadata(item)
             if meta:
                 seen.add(item.name)
                 skills.append(meta)
+
+    # #81:有 SKILL.md 却没能纳入(且无更低优先级目录兜住)的技能,聚合 WARNING ——
+    # 让"发现期目录变更导致静默丢技能"从隐形变可见,不再只有 debug。
+    dropped = saw_skill_md - seen
+    if dropped:
+        logger.warning(
+            "discover_skills: %d 个技能含 SKILL.md 却未能纳入(读取/解析失败),已被跳过: %s",
+            len(dropped), sorted(dropped),
+        )
 
     available = {s["name"] for s in skills}
     if include:
