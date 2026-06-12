@@ -278,6 +278,123 @@ def test_telegram_agent_gets_attachment_instruction(tmp_path, monkeypatch):
     assert "send_file" not in other_prompt   # 非 telegram agent 无
 
 
+# ── F1(#81):去 fail-silent —— 有 SKILL.md 却读失败必须重试 + 出声,不静默丢 ──
+
+import pathlib
+from unittest.mock import MagicMock
+
+
+def _fail_read_for(monkeypatch, fail_names, times=None):
+    """让路径名含 fail_names 之一的 SKILL.md read_text 抛错。
+
+    times=None → 每次都抛;times=N → 仅前 N 次抛(之后回落真实读取,模拟瞬时不可读)。
+    """
+    orig = pathlib.Path.read_text
+    counts: dict[str, int] = {}
+
+    def fake(self, *a, **k):
+        s = str(self)
+        for nm in fail_names:
+            if f"/{nm}/" in s:
+                counts[nm] = counts.get(nm, 0) + 1
+                if times is None or counts[nm] <= times:
+                    raise OSError("transient read failure")
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", fake)
+
+
+def test_parse_skill_metadata_retries_then_succeeds(tmp_path, monkeypatch):
+    """SKILL.md 瞬时不可读(读一次抛、再读成功)→ 重试命中,技能不丢。"""
+    monkeypatch.setattr(msk, "_SKILL_MD_RETRY_DELAY_S", 0)
+    sd = _make_skill(tmp_path, "ops", "Ops", "运维脚本")
+    _fail_read_for(monkeypatch, ["ops"], times=1)  # 仅首次抛
+    meta = msk.parse_skill_metadata(sd)
+    assert meta is not None and meta["name"] == "ops"
+
+
+def test_parse_skill_metadata_read_failure_returns_none_gracefully(tmp_path, monkeypatch):
+    """SKILL.md 存在却始终读失败 → 重试后优雅返回 None(不抛、不崩)。
+
+    "出声"由 discover_skills 在掌握全貌后负责(见 warns_on_dropped),parse 层只
+    DEBUG 不 WARNING——避免 fallback 命中时误报(见 no_warning_when_fallback)。
+    """
+    monkeypatch.setattr(msk, "_SKILL_MD_RETRY_DELAY_S", 0)
+    sd = _make_skill(tmp_path, "ops", "Ops", "运维脚本")
+    _fail_read_for(monkeypatch, ["ops"])  # 每次都抛
+    mock_logger = MagicMock()
+    monkeypatch.setattr(msk, "logger", mock_logger)
+    meta = msk.parse_skill_metadata(sd)
+    assert meta is None
+    assert not mock_logger.warning.called  # parse 层不告警(留给 discover)
+
+
+def test_parse_skill_metadata_missing_md_is_silent(tmp_path, monkeypatch):
+    """无 SKILL.md 是合法的"非 skill 目录" → None 且不告警(避免噪声)。"""
+    d = tmp_path / "plain"
+    d.mkdir()
+    mock_logger = MagicMock()
+    monkeypatch.setattr(msk, "logger", mock_logger)
+    assert msk.parse_skill_metadata(d) is None
+    assert not mock_logger.warning.called
+
+
+def test_discover_skills_warns_on_dropped_skill_with_skill_md(tmp_path, monkeypatch):
+    """有 SKILL.md 却没能纳入结果的技能,discover 必须聚合告警(含技能名)。"""
+    monkeypatch.setattr(msk, "_SKILL_MD_RETRY_DELAY_S", 0)
+    d = tmp_path / "d"
+    _make_skill(d, "good", "Good", "正常技能")
+    _make_skill(d, "trace-review", "Trace", "读失败的技能")
+    monkeypatch.setattr(msk, "resolve_skill_dirs", lambda _ws: [d])
+    _fail_read_for(monkeypatch, ["trace-review"])  # 这个始终读失败
+    mock_logger = MagicMock()
+    monkeypatch.setattr(msk, "logger", mock_logger)
+
+    found = msk.discover_skills(tmp_path)
+    assert [s["name"] for s in found] == ["good"]  # trace-review 被丢
+    # 丢弃必须出声,且日志里点名 trace-review
+    assert mock_logger.warning.called
+    warned = " ".join(str(c) for c in mock_logger.warning.call_args_list)
+    assert "trace-review" in warned
+
+
+def test_discover_skills_no_warning_when_fallback_dir_provides_skill(tmp_path, monkeypatch):
+    """高优先级目录该技能读失败,但低优先级目录提供了它 → 技能在,不应误报丢弃。"""
+    monkeypatch.setattr(msk, "_SKILL_MD_RETRY_DELAY_S", 0)
+    hi = tmp_path / "hi"
+    lo = tmp_path / "lo"
+    _make_skill(hi, "shared", "高版", "hi 版(将读失败)")
+    _make_skill(lo, "shared", "低版", "lo 版(可读)")
+    monkeypatch.setattr(msk, "resolve_skill_dirs", lambda _ws: [hi, lo])
+
+    orig = pathlib.Path.read_text
+
+    def fake(self, *a, **k):
+        s = str(self)
+        if "/hi/" in s and "shared" in s:
+            raise OSError("transient")
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", fake)
+    mock_logger = MagicMock()
+    monkeypatch.setattr(msk, "logger", mock_logger)
+
+    found = msk.discover_skills(tmp_path)
+    assert [s["name"] for s in found] == ["shared"]  # 低优先级兜住
+    assert not mock_logger.warning.called  # 最终有这个技能 → 不误报
+
+
+def test_discover_skills_deterministic_on_stable_fs(tmp_path, monkeypatch):
+    """静止文件系统上多次发现结果必须完全一致(固化 #81 的 200× 复现为回归)。"""
+    d = tmp_path / "d"
+    for n in ("alpha", "trace-review", "twitter-watch"):
+        _make_skill(d, n, n, f"{n} skill")
+    monkeypatch.setattr(msk, "resolve_skill_dirs", lambda _ws: [d])
+    runs = [tuple(sorted(s["name"] for s in msk.discover_skills(tmp_path))) for _ in range(50)]
+    assert len(set(runs)) == 1
+    assert runs[0] == ("alpha", "trace-review", "twitter-watch")
+
+
 def test_resolve_skill_dirs_orders_workspace_first_and_dedups(tmp_path, monkeypatch):
     ws = tmp_path / "ws"
     (ws / "skills").mkdir(parents=True)
