@@ -107,6 +107,71 @@ def parse_skill_metadata(skill_dir: Path) -> Optional[Dict[str, Any]]:
     }
 
 
+# #81 F2:每个 workspace 上一次成功发现的技能名集合(原始,未过滤),用于"缩水"检测。
+# git checkout / 软链接装卸期间,技能目录会整个瞬时消失,F1 的逐文件读重试兜不住
+# (目录列举那一刻它就不在)——靠与上次比对发现缩水、重扫整轮骑过瞬时窗口来覆盖。
+_DISCOVERY_SHRINK_RETRIES = 2
+_last_good_discovery: Dict[str, set] = {}
+
+
+def _scan_skills_once(workspace_path: Path):
+    """扫一遍所有 skill 目录 → ``(技能 meta 列表, 见到 SKILL.md 的目录名集合)``。
+
+    纯单次扫描,不告警/不重试/不碰缓存;供 :func:`_discover_stable` 包装。
+    """
+    skills: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    saw_skill_md: set[str] = set()  # 含 SKILL.md(本应是技能)的目录名
+    for skills_dir in resolve_skill_dirs(workspace_path):
+        for item in sorted(skills_dir.iterdir()):
+            if not item.is_dir() or item.name.startswith("."):
+                continue
+            if item.name in seen:
+                continue
+            if (item / "SKILL.md").exists():
+                saw_skill_md.add(item.name)
+            meta = parse_skill_metadata(item)
+            if meta:
+                seen.add(item.name)
+                skills.append(meta)
+    return skills, saw_skill_md
+
+
+def _discover_stable(workspace_path: Path):
+    """单次扫描 + 缩水重试,返回 ``(skills, saw_skill_md, names)``(均为原始未过滤)。
+
+    与上次成功发现比对:若本次"缩水"(少了曾出现过的技能),疑似目录变更中途,
+    重扫整轮(取技能最多的一次)以骑过瞬时窗口;**真删除**会跨重试持续缩水 → 接受
+    并 WARNING。无论瞬时与否,缩水都不再被静默吞掉。
+    """
+    skills, saw = _scan_skills_once(workspace_path)
+    names = {s["name"] for s in skills}
+
+    key = str(workspace_path)
+    prev = _last_good_discovery.get(key)
+    if prev is not None and not prev <= names:
+        best, best_saw, best_names = skills, saw, names
+        for _ in range(_DISCOVERY_SHRINK_RETRIES):
+            time.sleep(_SKILL_MD_RETRY_DELAY_S)
+            s2, saw2 = _scan_skills_once(workspace_path)
+            n2 = {s["name"] for s in s2}
+            if len(n2) > len(best_names):
+                best, best_saw, best_names = s2, saw2, n2
+            if prev <= n2:
+                break
+        skills, saw, names = best, best_saw, best_names
+        still_missing = prev - names
+        if still_missing:
+            logger.warning(
+                "discover_skills: 技能数较上次缩水(疑似发现期目录变更或确有删除),"
+                "重试 %d 次后仍缺: %s",
+                _DISCOVERY_SHRINK_RETRIES, sorted(still_missing),
+            )
+
+    _last_good_discovery[key] = names
+    return skills, saw, names
+
+
 def discover_skills(
     workspace_path: Path,
     *,
@@ -121,32 +186,18 @@ def discover_skills(
     - include/exclude 里出现**未发现**的 skill 名 → ``ValueError``(fail-loud,防配置笔误,
       与 dolphin 行为一致)。
     """
-    skills: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-    saw_skill_md: set[str] = set()  # 含 SKILL.md(本应是技能)的目录名,用于丢弃告警(#81)
-    for skills_dir in resolve_skill_dirs(workspace_path):
-        for item in sorted(skills_dir.iterdir()):
-            if not item.is_dir() or item.name.startswith("."):
-                continue
-            if item.name in seen:
-                continue
-            if (item / "SKILL.md").exists():
-                saw_skill_md.add(item.name)
-            meta = parse_skill_metadata(item)
-            if meta:
-                seen.add(item.name)
-                skills.append(meta)
+    skills, saw_skill_md, names = _discover_stable(workspace_path)
 
-    # #81:有 SKILL.md 却没能纳入(且无更低优先级目录兜住)的技能,聚合 WARNING ——
+    # #81 F1:有 SKILL.md 却没能纳入(且无更低优先级目录兜住)的技能,聚合 WARNING ——
     # 让"发现期目录变更导致静默丢技能"从隐形变可见,不再只有 debug。
-    dropped = saw_skill_md - seen
+    dropped = saw_skill_md - names
     if dropped:
         logger.warning(
             "discover_skills: %d 个技能含 SKILL.md 却未能纳入(读取/解析失败),已被跳过: %s",
             len(dropped), sorted(dropped),
         )
 
-    available = {s["name"] for s in skills}
+    available = names
     if include:
         unknown = [n for n in include if n not in available]
         if unknown:
