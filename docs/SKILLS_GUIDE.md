@@ -109,7 +109,7 @@ subprocess.run([
 ], check=True)
 ```
 
-下载后需要重启 agent 或在下次对话时 skill 会自动可用。
+下载后**无需重启**:下一轮对话该 skill 即自动可用(daemon 检测到技能集变化会自动重生对应 agent 的 milkie sidecar,#43)。
 
 ## 示例 Skills
 
@@ -175,7 +175,7 @@ Agent: [使用 _load_resource_skill 加载并应用指令]
    EOF
    ```
 
-3. 重启 agent，skill 会自动可用。
+3. 下一轮对话该 skill 即自动可用（无需重启,#43）。
 
 ## 注意事项
 
@@ -192,7 +192,7 @@ Agent: [使用 _load_resource_skill 加载并应用指令]
 - 检查 `SKILL.md` 文件是否存在
 - 检查 YAML frontmatter 格式是否正确
 - 检查 `resource_skills.directories` 配置
-- 重启 agent
+- 发起新一轮对话触发重新发现（daemon 按技能集指纹变化自动重生 sidecar,#43;若仍未发现,查 daemon 日志中的 `discover_skills` 告警）
 
 ### 加载失败
 
