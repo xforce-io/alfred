@@ -148,6 +148,146 @@ async def test_start_failure_after_spawn_closes_child_and_not_cached():
     assert pool._sidecars["alice"] is retry
 
 
+# ---------------------------------------------------------------------------
+# #43:技能变化按需重生 —— peek / fingerprint freshness / lease(在飞保护)
+# ---------------------------------------------------------------------------
+
+
+def _fp_pool(fingerprint):
+    return SidecarPool(
+        build=lambda name: (["node", "serve", name], {"K": "v"}),
+        sidecar_factory=lambda cmd, env: _FakeSidecar(cmd, env),
+        fingerprint=fingerprint,
+    )
+
+
+async def test_peek_returns_none_before_spawn_and_sidecar_after():
+    pool = _pool()
+    assert pool.peek("alice") is None
+    s = await pool.get_or_spawn("alice")
+    assert pool.peek("alice") is s
+
+
+async def test_fingerprint_unchanged_reuses_sidecar():
+    pool = _fp_pool(lambda name: "fp-v1")
+    s1 = await pool.get_or_spawn("alice")
+    s2 = await pool.get_or_spawn("alice")
+    assert s1 is s2
+    assert s1.closed == 0
+    assert len(_FakeSidecar.instances) == 1
+
+
+async def test_fingerprint_changed_respawns_and_closes_old():
+    fp = {"v": "fp-v1"}
+    pool = _fp_pool(lambda name: fp["v"])
+    old = await pool.get_or_spawn("alice")
+    fp["v"] = "fp-v2"
+    new = await pool.get_or_spawn("alice")
+    assert new is not old
+    assert old.closed == 1
+    assert new.started == 1
+    assert pool.peek("alice") is new
+
+
+async def test_respawn_records_new_fingerprint_no_repeated_respawn():
+    fp = {"v": "fp-v1"}
+    pool = _fp_pool(lambda name: fp["v"])
+    await pool.get_or_spawn("alice")
+    fp["v"] = "fp-v2"
+    new = await pool.get_or_spawn("alice")
+    again = await pool.get_or_spawn("alice")
+    assert again is new
+    assert len(_FakeSidecar.instances) == 2  # 仅初始 + 一次重生
+
+
+async def test_fingerprint_none_skips_check():
+    """指纹返回 None = 该 agent 不参与检查(reflector / 注入 loader)→ 永不重生。"""
+    calls = {"n": 0}
+
+    def fp(name):
+        calls["n"] += 1
+        return None
+
+    pool = _fp_pool(fp)
+    s1 = await pool.get_or_spawn("alice")
+    s2 = await pool.get_or_spawn("alice")
+    assert s1 is s2
+    assert s1.closed == 0
+    assert calls["n"] >= 1  # 检查跑了,但 None 视为跳过
+
+
+async def test_fingerprint_error_treated_as_unchanged(caplog):
+    """每轮检查是优化路径:指纹计算抛错 → WARNING + 不重生、不打断取用。"""
+    state = {"first": True}
+
+    def fp(name):
+        if state["first"]:
+            state["first"] = False
+            return "fp-v1"
+        raise OSError("workspace transiently unreadable")
+
+    pool = _fp_pool(fp)
+    s1 = await pool.get_or_spawn("alice")
+    with caplog.at_level("WARNING"):
+        s2 = await pool.get_or_spawn("alice")
+    assert s1 is s2
+    assert s1.closed == 0
+    assert any("fingerprint" in r.message for r in caplog.records)
+
+
+async def test_lease_yields_sidecar_and_tracks_inflight():
+    pool = _fp_pool(lambda name: "fp-v1")
+    async with pool.lease("alice") as sidecar:
+        assert sidecar is pool.peek("alice")
+        assert pool._inflight["alice"] == 1
+    assert pool._inflight["alice"] == 0
+
+
+async def test_lease_decrements_on_exception():
+    pool = _fp_pool(lambda name: "fp-v1")
+    with pytest.raises(RuntimeError):
+        async with pool.lease("alice"):
+            raise RuntimeError("turn blew up")
+    assert pool._inflight["alice"] == 0
+
+
+async def test_respawn_deferred_while_lease_held_then_applies():
+    """在飞 turn 持 lease 时指纹变化 → 本轮跳过重生(不腰斩);释放后下一次取用才重生。"""
+    fp = {"v": "fp-v1"}
+    pool = _fp_pool(lambda name: fp["v"])
+    async with pool.lease("alice") as old:
+        fp["v"] = "fp-v2"
+        deferred = await pool.get_or_spawn("alice")
+        assert deferred is old      # 有在飞 → 跳过
+        assert old.closed == 0
+    new = await pool.get_or_spawn("alice")
+    assert new is not old
+    assert old.closed == 1
+
+
+async def test_concurrent_gets_during_change_respawn_once():
+    """指纹变化时并发取用:per-agent 锁内串行,只重生一次,全部拿到新 sidecar。"""
+    fp = {"v": "fp-v1"}
+    pool = _fp_pool(lambda name: fp["v"])
+    old = await pool.get_or_spawn("alice")
+    fp["v"] = "fp-v2"
+    results = await asyncio.gather(*[pool.get_or_spawn("alice") for _ in range(10)])
+    assert all(r is results[0] for r in results)
+    assert results[0] is not old
+    assert len(_FakeSidecar.instances) == 2
+
+
+async def test_shutdown_then_respawn_fresh_fingerprint_no_loop():
+    """shutdown 后重新 spawn:指纹重新记录,后续无变化不重生。"""
+    pool = _fp_pool(lambda name: "fp-v1")
+    await pool.get_or_spawn("alice")
+    await pool.shutdown_all()
+    s = await pool.get_or_spawn("alice")
+    s2 = await pool.get_or_spawn("alice")
+    assert s is s2
+    assert len(_FakeSidecar.instances) == 2  # shutdown 前后各一,无额外重生
+
+
 async def test_start_failure_swallows_close_errors_and_reraises_original():
     """close() 自身抛错时(best-effort)不掩盖原始 start 异常。"""
     class _BadCloseSidecar:

@@ -10,9 +10,11 @@ prompt 由 agent.md 决定;serve 接 system_prompt override 待后续,见 milkie
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
@@ -138,6 +140,36 @@ def _default_system_prompt_loader(agent_name: str) -> str:
     return _build_default_prompt_and_skills(agent_name)[0]
 
 
+def _skills_fingerprint(agent_name: str) -> Optional[str]:
+    """该 agent 当前技能集的指纹 —— pool freshness 检查的输入(#43)。
+
+    对 ``discover_skills(workspace, include, exclude)`` 的**过滤后元数据列表**
+    (name/title/description/abs_path,按名排序后 JSON)取 sha256。prompt 技能段与
+    skill-manifest 都恰好由这份列表渲染 → **指纹变 ⇔ 重生后产出真的会变**:改
+    SKILL.md 正文(标题/首段之外)不触发重生 —— agent 运行时本就从磁盘读全文。
+
+    reflector 无技能集 → None(不参与检查)。抛错由 pool 按"未变化"处理(检查是
+    优化路径);spawn 路径的 fail-loud 仍在 ``_build_default_prompt_and_skills``。
+    """
+    if agent_name == REFLECTOR_AGENT:
+        return None
+    from .skills import discover_skills
+
+    include, exclude = _agent_skill_filter(agent_name)
+    skills = discover_skills(
+        _resolve_agent_workspace(agent_name), include=include, exclude=exclude
+    )
+    canon = json.dumps(
+        [
+            {k: s.get(k) for k in ("name", "title", "description", "abs_path")}
+            for s in sorted(skills, key=lambda s: s["name"])
+        ],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
 def _agent_skill_filter(agent_name: str):
     """读 everbot.agents.<name>.skills.{include,exclude} → (include, exclude)。缺省 (None, None)。"""
     try:
@@ -203,6 +235,13 @@ class MilkieProvider:
             self._pool = self._build_pool()
         return self._pool
 
+    def _pool_fingerprint(self) -> Optional[Any]:
+        """pool freshness 检查用的指纹函数(#43)。注入式 loader(测试 seam)下
+        prompt 不来自 discover_skills,指纹与产出脱钩 → None(不参与检查)。"""
+        if self._system_prompt_loader is _default_system_prompt_loader:
+            return _skills_fingerprint
+        return None
+
     def _build_pool(self):
         """装配 launcher + pool:从 alfred config(everbot.milkie)取 sidecar 运行参数,
         从 dolphin global config(llms/clouds/model 档)取模型路由,组成 SidecarPool。"""
@@ -259,6 +298,7 @@ class MilkieProvider:
             sidecar_factory=lambda cmd, env: MilkieSidecar(
                 cmd, env=env, ready_timeout=ready_timeout
             ),
+            fingerprint=self._pool_fingerprint(),
         )
 
     @staticmethod
@@ -270,6 +310,36 @@ class MilkieProvider:
     @staticmethod
     def _new_sync_client() -> httpx.Client:
         return httpx.Client(timeout=None, trust_env=False)
+
+    # -- #43:base_url 每轮解析 ------------------------------------------------
+    # sidecar 用动态端口且可因技能变化被重生;handle 构造时的 base_url 会变僵尸
+    # (同一 agent 被多 session 共享,重生只发生在某一轮)。故所有打 serve 的方法
+    # 都经下面两个 seam 按 agent 名取**当前**sidecar 地址;无 pool / 无名字
+    # (注入式构造、测试)回落 handle.base_url,行为同旧版。
+
+    def _agent_base_url(self, agent: Any) -> str:
+        name = getattr(agent, "name", "") or ""
+        if name and self._pool is not None:
+            peek = getattr(self._pool, "peek", None)
+            sidecar = peek(name) if peek is not None else None
+            if sidecar is not None:
+                return sidecar.base_url
+        return agent.base_url
+
+    @asynccontextmanager
+    async def _lease_base_url(self, agent: Any):
+        """流式路径(run_turn / resume)专用:解析地址并对整个流持 pool lease
+        (在飞登记),使技能变化触发的重生推迟到本轮之后 —— 绝不腰斩在飞流。"""
+        name = getattr(agent, "name", "") or ""
+        lease = (
+            getattr(self._pool, "lease", None)
+            if (name and self._pool is not None) else None
+        )
+        if lease is None:
+            yield self._agent_base_url(agent)
+            return
+        async with lease(name) as sidecar:
+            yield sidecar.base_url
 
     async def create_agent(
         self,
@@ -318,7 +388,10 @@ class MilkieProvider:
         text = message if isinstance(message, str) else str(message)
         payload = {"contextId": handle.context_id, "input": text, "goal": text}
         try:
-            async with client.stream("POST", f"{handle.base_url}/chat", json=payload) as resp:
+            # lease 与流同生命周期(#43):turn 在飞期间该 agent 的 sidecar 重生被推迟。
+            async with self._lease_base_url(handle) as base_url, client.stream(
+                "POST", f"{base_url}/chat", json=payload
+            ) as resp:
                 if resp.status_code >= 400:
                     # 非2xx 不能静默吞:不抛 → 无事件 → core_service 显示「(无响应)」。
                     # 读 body 并抛清晰 RuntimeError(headers 此时已就绪,可读 status)。
@@ -399,7 +472,7 @@ class MilkieProvider:
         owns = self._sync_client is None
         try:
             resp = client.post(
-                f"{agent.base_url}/context/state",
+                f"{self._agent_base_url(agent)}/context/state",
                 json={"contextId": agent.context_id},
             )
             resp.raise_for_status()  # 非2xx 不能静默返回 False,明确抛错
@@ -432,7 +505,7 @@ class MilkieProvider:
             if delivered_at:
                 payload["deliveredAt"] = delivered_at
             resp = await client.post(
-                f"{agent.base_url}/projection/attach", json=payload
+                f"{self._agent_base_url(agent)}/projection/attach", json=payload
             )
             resp.raise_for_status()
         finally:
@@ -468,7 +541,7 @@ class MilkieProvider:
         owns = self._sync_client is None
         try:
             resp = client.post(
-                f"{agent.base_url}/context/set",
+                f"{self._agent_base_url(agent)}/context/set",
                 json={"contextId": agent.context_id, "name": key, "value": value},
             )
             resp.raise_for_status()  # 非2xx 不能静默吞,明确抛错
@@ -481,7 +554,7 @@ class MilkieProvider:
         owns = self._sync_client is None
         try:
             resp = client.post(
-                f"{agent.base_url}/context/get",
+                f"{self._agent_base_url(agent)}/context/get",
                 json={"contextId": agent.context_id, "name": key},
             )
             resp.raise_for_status()  # 非2xx 不能静默返回 None,明确抛错
@@ -508,7 +581,7 @@ class MilkieProvider:
         owns = self._sync_client is None
         try:
             resp = client.post(
-                f"{agent.base_url}/session/history",
+                f"{self._agent_base_url(agent)}/session/history",
                 json={"contextId": agent.context_id},
             )
             if resp.status_code == 404:
@@ -533,7 +606,7 @@ class MilkieProvider:
         owns = self._client is None
         try:
             resp = await client.post(
-                f"{agent.base_url}/interrupt",
+                f"{self._agent_base_url(agent)}/interrupt",
                 json={"contextId": agent.context_id},
             )
             resp.raise_for_status()  # 非2xx 不能静默吞,明确抛错
@@ -548,8 +621,9 @@ class MilkieProvider:
         client = self._client or self._new_client()
         owns = self._client is None
         try:
-            async with client.stream(
-                "POST", f"{handle.base_url}/resume",
+            # 同 run_turn:流式 turn 全程持 lease(#43),续跑中途不被技能重生腰斩。
+            async with self._lease_base_url(handle) as base_url, client.stream(
+                "POST", f"{base_url}/resume",
                 json={"contextId": handle.context_id, "input": message},
             ) as resp:
                 if resp.status_code >= 400:
