@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from src.everbot.core.agent.provider.milkie.pool import SidecarPool
-from src.everbot.core.agent.provider.milkie.provider import MilkieAgentHandle, MilkieProvider
+from src.everbot.core.agent.provider.milkie.provider import MilkieProvider
 
 
 def _milkie_cli() -> Path | None:

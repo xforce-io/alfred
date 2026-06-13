@@ -2,8 +2,6 @@
 
 from pathlib import Path
 
-import pytest
-
 from src.everbot.infra.user_data import UserDataManager
 
 

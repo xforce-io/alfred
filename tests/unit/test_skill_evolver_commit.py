@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -53,10 +55,6 @@ class TestValidateContent:
         )
         with pytest.raises(ValueError, match="version mismatch"):
             m._validate_content(content, expected_version="2.0.0-userevolve-202605101630")
-
-
-import json
-import subprocess
 
 
 def _seed_workspace(tmp_path: Path, agent_name: str, skill_id: str, baseline_content: str) -> Path:

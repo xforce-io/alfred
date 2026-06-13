@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
 import sys
 from pathlib import Path
-
-import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -50,10 +50,6 @@ class TestNewVersion:
         m = _load_module()
         v = m._new_version("2.0.0-evolve-202604260331", ts="202605101630")
         assert v == "2.0.0-userevolve-202605101630"
-
-
-import json
-import subprocess
 
 
 def _seed_skill(skills_dir: Path, skill_id: str, content: str) -> Path:

@@ -149,7 +149,6 @@ class CronExecutor:
         self.agent_factory = agent_factory
         self.routine_manager = routine_manager
         self.delivery = delivery
-        scope = str(broadcast_scope or "agent").strip().lower()
         self.broadcast_scope = broadcast_scope
         self.active_hours = active_hours
 

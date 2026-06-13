@@ -19,7 +19,6 @@ from src.everbot.core.slm.models import (
     EvalReport,
     EvaluationSegment,
     JudgeResult,
-    VersionStatus,
 )
 from src.everbot.core.slm.segment_logger import SegmentLogger
 from src.everbot.core.slm.version_manager import VersionManager

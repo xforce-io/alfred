@@ -1856,8 +1856,6 @@ class TestConvertMarkdown:
         """tg_md_convert must receive normalised text (no ---+--- separator)
         even when it would produce entities (bold heading).  This is the
         direct regression test for the issue #66 gate bug."""
-        import src.everbot.channels.telegram_channel as ch_mod
-
         captured = []
 
         def fake_convert(t):

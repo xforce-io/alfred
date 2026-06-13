@@ -6,10 +6,11 @@ Tests cover two bugs:
 """
 import importlib.util
 import json
-import sys
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 
 def _load_module() -> ModuleType:
@@ -143,5 +144,3 @@ def test_main_exits_on_empty_tweets(capsys, monkeypatch):
             m.main()
 
 
-# Make pytest available in namespace for the last test
-import pytest

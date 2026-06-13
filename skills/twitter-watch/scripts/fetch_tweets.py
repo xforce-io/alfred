@@ -181,7 +181,7 @@ def main() -> None:
 
     # tsx 的 stdout 末行才是 JSON(前面可能有 npx/loader 噪音)。
     line = next(
-        (l for l in reversed(proc.stdout.splitlines()) if l.strip().startswith("{")),
+        (ln for ln in reversed(proc.stdout.splitlines()) if ln.strip().startswith("{")),
         "",
     )
     if not line:

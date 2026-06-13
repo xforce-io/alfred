@@ -10,14 +10,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from src.everbot.core.channel.core_service import ChannelCoreService
+from src.everbot.core.channel.models import OutboundMessage
 from src.everbot.infra.dolphin_compat import KEY_HISTORY
 
 
 class AgentState:  # #38:dolphin 已移除;mock agent 状态用本地桩(只需 .INITIALIZED 标记)
     INITIALIZED = "initialized"
-
-from src.everbot.core.channel.core_service import ChannelCoreService
-from src.everbot.core.channel.models import OutboundMessage
 
 
 def _make_session_manager_mock():

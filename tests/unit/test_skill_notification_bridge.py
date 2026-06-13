@@ -9,8 +9,6 @@ session mailbox forever and the user chatting via Telegram never sees them.
 from __future__ import annotations
 
 from typing import Any, List
-from unittest.mock import AsyncMock
-
 import pytest
 
 from src.everbot.core.runtime.skill_context import MailboxAdapter

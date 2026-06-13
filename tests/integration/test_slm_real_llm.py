@@ -145,7 +145,7 @@ class TestSLMRealLLMLifecycle:
         # ── Evaluate good segments (v1.0) ──
         report_good = await evaluate_skill(llm, "example-skill", "1.0", good_segments)
 
-        print(f"\n=== Good segments report ===")
+        print("\n=== Good segments report ===")
         print(f"  Segments: {report_good.segment_count}")
         print(f"  Critical rate: {report_good.critical_issue_rate:.0%}")
         print(f"  Satisfaction: {report_good.mean_satisfaction:.2f}")
@@ -155,7 +155,7 @@ class TestSLMRealLLMLifecycle:
         # ── Evaluate bad segments (v2.0) ──
         report_bad = await evaluate_skill(llm, "example-skill", "2.0", bad_segments)
 
-        print(f"\n=== Bad segments report ===")
+        print("\n=== Bad segments report ===")
         print(f"  Segments: {report_bad.segment_count}")
         print(f"  Critical rate: {report_bad.critical_issue_rate:.0%}")
         print(f"  Satisfaction: {report_bad.mean_satisfaction:.2f}")
@@ -258,7 +258,7 @@ class TestSLMRealLLMLifecycle:
         assert ver_mgr.get_metadata("example-skill", "2.0").status == VersionStatus.SUSPENDED
         assert ver_mgr.check_consistency("example-skill") is True
 
-        print(f"Rolled back to v1.0. Lifecycle complete.")
+        print("Rolled back to v1.0. Lifecycle complete.")
 
     @pytest.mark.asyncio
     async def test_real_lifecycle_successful_upgrade(self, tmp_path: Path):
@@ -321,7 +321,7 @@ class TestSLMRealLLMLifecycle:
         ver_mgr.save_eval_report("example-skill", "1.0", report_v1)
         ver_mgr.activate("example-skill", "1.0")
 
-        print(f"\n=== Phase 1: v1.0 baseline ===")
+        print("\n=== Phase 1: v1.0 baseline ===")
         print(f"  satisfaction={report_v1.mean_satisfaction:.2f}, critical={report_v1.critical_issue_rate:.0%}")
         for r in report_v1.results:
             print(f"  [{r.segment_index}] sat={r.satisfaction:.2f} reason={r.reason}")
@@ -407,13 +407,13 @@ class TestSLMRealLLMLifecycle:
         report_v2 = await evaluate_skill(llm, "example-skill", "2.0", v2_segs)
         ver_mgr.save_eval_report("example-skill", "2.0", report_v2)
 
-        print(f"\n=== Phase 2: v2.0 evaluation ===")
+        print("\n=== Phase 2: v2.0 evaluation ===")
         print(f"  satisfaction={report_v2.mean_satisfaction:.2f}, critical={report_v2.critical_issue_rate:.0%}")
         for r in report_v2.results:
             print(f"  [{r.segment_index}] sat={r.satisfaction:.2f} reason={r.reason}")
 
         # ── Phase 3: Compare and decide ──
-        print(f"\n=== Phase 3: Decision ===")
+        print("\n=== Phase 3: Decision ===")
         print(f"  v1.0 satisfaction: {report_v1.mean_satisfaction:.2f}")
         print(f"  v2.0 satisfaction: {report_v2.mean_satisfaction:.2f}")
         print(f"  Improvement: {report_v2.mean_satisfaction - report_v1.mean_satisfaction:+.2f}")
@@ -447,6 +447,6 @@ class TestSLMRealLLMLifecycle:
         assert r1 is not None and r2 is not None
         assert r2.mean_satisfaction > r1.mean_satisfaction
 
-        print(f"\n=== Lifecycle complete ===")
+        print("\n=== Lifecycle complete ===")
         print(f"  v2.0 activated as new stable (satisfaction {r1.mean_satisfaction:.2f} → {r2.mean_satisfaction:.2f})")
-        print(f"  Both reports preserved. Upgrade successful.")
+        print("  Both reports preserved. Upgrade successful.")

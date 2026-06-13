@@ -145,9 +145,6 @@ def test_compose_message_heartbeat_placed_before_user_message():
 
     message, ack_ids = compose_message_with_mailbox_updates(user_message, mailbox)
 
-    # Current structure: heartbeat comes first, user message last
-    lines = message.split("\n")
-
     # The heartbeat topic "反共识信号" appears BEFORE the user's message
     heartbeat_pos = message.find("反共识信号")
     user_msg_pos = message.find("好的，我也好奇具体怎么做的")

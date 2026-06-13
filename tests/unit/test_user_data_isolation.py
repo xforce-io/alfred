@@ -37,7 +37,7 @@ def test_cron_write_event_lands_in_isolated_home(tmp_path):
     events_file = get_user_data_manager().heartbeat_events_file
     assert events_file != real_events
     assert events_file.exists()
-    lines = [json.loads(l) for l in events_file.read_text().splitlines()]
+    lines = [json.loads(line) for line in events_file.read_text().splitlines()]
     assert any(e.get("agent") == "isolation-probe" for e in lines)
     # 生产日志在本测例期间必须零增长
     real_size_after = real_events.stat().st_size if real_events.exists() else 0

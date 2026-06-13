@@ -1664,7 +1664,7 @@ def _resolve_skill_model_route(model_name: str):
 
 
 # Re-export for patching in tests; actual import deferred to complete().
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI  # noqa: E402
 
 # #59:skill LLM 超时默认 120s(原 60s 对 fast 档实际指向的深思模型偏紧,P90+ 单调用
 # 可达 60-112s);probe 默认 30s(原 15s 假阴性致心跳误判"LLM 不可用"暂停)。均 env 可配。

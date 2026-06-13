@@ -119,7 +119,6 @@ class TestJobImportPathResolvable:
     def test_cron_invoke_uses_resolvable_path(self, tmp_path):
         """CronExecutor._invoke_job must use an import path that works
         without mocking importlib."""
-        import importlib
         from src.everbot.core.runtime.cron import CronExecutor
         import inspect
 

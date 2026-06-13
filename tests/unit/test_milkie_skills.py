@@ -1,5 +1,7 @@
 """milkie skill 发现单测(#38 E 能力层 alfred 侧)。"""
+import pathlib
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -289,9 +291,6 @@ def test_telegram_agent_gets_attachment_instruction(tmp_path, monkeypatch):
 
 
 # ── F1(#81):去 fail-silent —— 有 SKILL.md 却读失败必须重试 + 出声,不静默丢 ──
-
-import pathlib
-from unittest.mock import MagicMock
 
 
 def _fail_read_for(monkeypatch, fail_names, times=None):

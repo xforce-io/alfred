@@ -1,7 +1,7 @@
 """dolphin-free 模型路由配置单测(#38)。"""
 from pathlib import Path
 
-from src.everbot.core.agent.provider.model_config import load_model_config
+from src.everbot.core.agent.provider.model_config import find_model_config_path, load_model_config
 
 
 _YAML = """
@@ -159,9 +159,6 @@ def test_route_merges_cloud_and_llm_extra_body_llm_wins(tmp_path):
 
 
 # ── #74: models.yaml 正名,dolphin.yaml legacy 兜底(同位置新名优先) ────
-
-
-from src.everbot.core.agent.provider.model_config import find_model_config_path
 
 
 def _mk_cfg(base: Path, name: str) -> Path:

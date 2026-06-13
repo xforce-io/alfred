@@ -11,11 +11,9 @@ import pytest
 from src.everbot.core.jobs.llm_errors import LLMTransientError
 from src.everbot.core.jobs.skill_evaluate import _evaluate_one, run
 from src.everbot.core.slm.models import (
-    CurrentPointer,
     EvalReport,
     EvaluationSegment,
     JudgeResult,
-    VersionMetadata,
     VersionStatus,
 )
 from src.everbot.core.slm.segment_logger import SegmentLogger
@@ -267,7 +265,7 @@ async def test_testing_healthy_activates(tmp_path: Path):
     healthy_report = _make_healthy_report("my-skill", "1.0-evolve-202604")
 
     with patch("src.everbot.core.jobs.skill_evaluate.evaluate_skill", new=AsyncMock(return_value=healthy_report)):
-        result = await _evaluate_one(context, seg_logger, ver_mgr, "my-skill", tmp_path / "sessions")
+        await _evaluate_one(context, seg_logger, ver_mgr, "my-skill", tmp_path / "sessions")
 
     meta = ver_mgr.get_metadata("my-skill", "1.0-evolve-202604")
     assert meta.status == VersionStatus.ACTIVE
@@ -300,7 +298,7 @@ async def test_unhealthy_triggers_rollback_and_evolve(tmp_path: Path):
     unhealthy_report = _make_unhealthy_report("bad-skill", "1.0")
 
     with patch("src.everbot.core.jobs.skill_evaluate.evaluate_skill", new=AsyncMock(return_value=unhealthy_report)):
-        result = await _evaluate_one(context, seg_logger, ver_mgr, "bad-skill", tmp_path / "sessions")
+        await _evaluate_one(context, seg_logger, ver_mgr, "bad-skill", tmp_path / "sessions")
 
     pointer = ver_mgr.get_pointer("bad-skill")
     assert "evolve" in pointer.current_version
@@ -383,7 +381,7 @@ async def test_evolve_count_exceeded_suspends(tmp_path: Path):
     unhealthy_report = _make_unhealthy_report("stuck-skill", "1.0")
 
     with patch("src.everbot.core.jobs.skill_evaluate.evaluate_skill", new=AsyncMock(return_value=unhealthy_report)):
-        result = await _evaluate_one(context, seg_logger, ver_mgr, "stuck-skill", tmp_path / "sessions")
+        await _evaluate_one(context, seg_logger, ver_mgr, "stuck-skill", tmp_path / "sessions")
 
     meta = ver_mgr.get_metadata("stuck-skill", "1.0")
     assert meta.status == VersionStatus.SUSPENDED
@@ -411,7 +409,7 @@ async def test_evolve_llm_failure_still_rolls_back(tmp_path: Path):
     unhealthy_report = _make_unhealthy_report("fail-skill", "2.0")
 
     with patch("src.everbot.core.jobs.skill_evaluate.evaluate_skill", new=AsyncMock(return_value=unhealthy_report)):
-        result = await _evaluate_one(context, seg_logger, ver_mgr, "fail-skill", tmp_path / "sessions")
+        await _evaluate_one(context, seg_logger, ver_mgr, "fail-skill", tmp_path / "sessions")
 
     pointer = ver_mgr.get_pointer("fail-skill")
     assert pointer.current_version != "2.0"

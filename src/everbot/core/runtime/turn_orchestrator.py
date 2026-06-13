@@ -841,9 +841,9 @@ class TurnOrchestrator:
                         if _prev_hash == _out_hash:
                             warned_intents.add(_pid_intent)
                             warn_output += (
-                                f"\n[⚠ repeated_intent: This command returned the same result as"
-                                f" last time. You already have this output."
-                                f" Do NOT call it again — include it in your reply now.]"
+                                "\n[⚠ repeated_intent: This command returned the same result as"
+                                " last time. You already have this output."
+                                " Do NOT call it again — include it in your reply now.]"
                             )
                         elif _pid_intent in warned_intents:
                             warn_output += (
@@ -1031,9 +1031,9 @@ class TurnOrchestrator:
                             # Same successful output as last time — agent is stuck
                             warned_intents.add(_pid_intent)
                             out_preview += (
-                                f"\n[⚠ repeated_intent: This command returned the same result as"
-                                f" last time. You already have this output."
-                                f" Do NOT call it again — include it in your reply now.]"
+                                "\n[⚠ repeated_intent: This command returned the same result as"
+                                " last time. You already have this output."
+                                " Do NOT call it again — include it in your reply now.]"
                             )
                         elif _pid_intent in warned_intents:
                             out_preview += (

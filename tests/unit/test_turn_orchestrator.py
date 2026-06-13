@@ -2504,7 +2504,6 @@ async def test_multi_round_intermediate_text_not_in_final_deltas():
 
     # LLM_DELTA events visible to channel should reconstruct only the final text.
     # Intermediate deltas should be cancelled out by LLM_ROUND_RESET events.
-    deltas = [e for e in events if e.type == TurnEventType.LLM_DELTA]
     resets = [e for e in events if e.type == TurnEventType.LLM_ROUND_RESET]
     # There should be reset events before rounds 2 and 3
     assert len(resets) == 2, f"Expected 2 resets, got {len(resets)}"

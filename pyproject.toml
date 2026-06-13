@@ -87,6 +87,8 @@ target-version = "py310"
 
 [tool.ruff.lint.per-file-ignores]
 "skills/investment-signal/scripts/*" = ["E402"]
+"skills/invest/scripts/signals/*" = ["E402"]
+"skills/skill-evolver/scripts/*" = ["E402"]
 "src/everbot/core/session/compressor.py" = ["E402"]
 "src/everbot/core/session/session.py" = ["E402"]
 "src/everbot/core/tasks/routine_manager.py" = ["E402"]

@@ -205,7 +205,7 @@ class SegmentLogger:
                 data = json.loads(line)
                 triggered = data.get("triggered_at", "")
                 if triggered:
-                    from datetime import datetime, timezone
+                    from datetime import datetime
 
                     ts = datetime.fromisoformat(triggered).timestamp()
                     if ts < cutoff:

@@ -1,15 +1,11 @@
 """Tests for SLM VersionManager."""
 
-import tempfile
+import pytest
 from pathlib import Path
 
-import pytest
-
 from src.everbot.core.slm.models import (
-    CurrentPointer,
     EvalReport,
     JudgeResult,
-    VersionMetadata,
     VersionStatus,
 )
 from src.everbot.core.slm.version_manager import VersionManager, read_frontmatter_version

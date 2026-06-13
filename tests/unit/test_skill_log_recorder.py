@@ -15,7 +15,6 @@ from unittest.mock import patch
 
 import pytest
 
-from src.everbot.core.slm.models import EvaluationSegment
 from src.everbot.core.slm.segment_logger import SegmentLogger
 from src.everbot.core.slm.skill_log_recorder import (
     SkillLogRecorder,
@@ -284,7 +283,7 @@ class TestConcurrentWritesToSameSkillLog:
         log_path = tmp_path / "skill_logs" / "web-search.jsonl"
         assert log_path.exists()
 
-        lines = [l.strip() for l in log_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        lines = [ln.strip() for ln in log_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
         assert len(lines) == n_threads, f"Expected {n_threads} lines, got {len(lines)}"
 
         # Each line must be valid JSON
@@ -558,9 +557,8 @@ class TestCoreServicePathRecorderInjection:
 
     def test_core_service_accepts_skill_log_recorder(self, tmp_path: Path):
         """ChannelCoreService with an injected recorder uses it on SKILL completed events."""
-        from unittest.mock import MagicMock, AsyncMock
+        from unittest.mock import MagicMock
         from src.everbot.core.channel.core_service import ChannelCoreService
-        from src.everbot.core.runtime.turn_policy import TurnEvent, TurnEventType
 
         recorder = _make_recorder(tmp_path)
 
@@ -713,7 +711,7 @@ class TestSkillEvaluateCanConsumeRecorderLogs:
         ) as mock_evaluate:
             mock_context = MagicMock()
             mock_context.llm = MagicMock()
-            result = await _evaluate_one(mock_context, seg_logger, ver_mgr, "web-search", tmp_path / "sessions")
+            await _evaluate_one(mock_context, seg_logger, ver_mgr, "web-search", tmp_path / "sessions")
 
         # _evaluate_one should have found the segment and called evaluate_skill
         assert mock_evaluate.called, "evaluate_skill was never called — segment not found by _evaluate_one"

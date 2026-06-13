@@ -1,7 +1,5 @@
 """Tests for SLM data models."""
 
-import json
-
 from src.everbot.core.slm.models import (
     CurrentPointer,
     EvalReport,

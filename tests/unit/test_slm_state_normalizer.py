@@ -2,11 +2,7 @@
 
 from pathlib import Path
 
-import pytest
-
 from src.everbot.core.slm.models import (
-    CurrentPointer,
-    VersionMetadata,
     VersionStatus,
 )
 from src.everbot.core.slm.state_normalizer import (

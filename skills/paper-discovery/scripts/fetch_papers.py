@@ -110,7 +110,6 @@ def fetch_paper_by_id(paper_id: str) -> Dict[str, Any]:
         resp.raise_for_status()
         # Simple XML parsing without BeautifulSoup
         text = resp.text
-        title_match = re.search(r"<title>(.*?)</title>", text, re.DOTALL)
         summary_match = re.search(r"<summary>(.*?)</summary>", text, re.DOTALL)
         # Skip the feed-level title
         titles = re.findall(r"<title>(.*?)</title>", text, re.DOTALL)

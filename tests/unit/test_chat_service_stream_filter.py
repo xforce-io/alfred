@@ -11,12 +11,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 from src.everbot.infra.dolphin_compat import KEY_HISTORY
+from src.everbot.web.services.chat_service import ChatService
 
 
 class AgentState:  # #38:dolphin 已移除;mock agent 状态本地桩
     INITIALIZED = "initialized"
-
-from src.everbot.web.services.chat_service import ChatService
 
 
 def _make_session_manager_mock():

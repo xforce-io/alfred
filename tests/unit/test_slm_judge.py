@@ -5,7 +5,7 @@ import json
 import pytest
 
 from src.everbot.core.slm.judge import evaluate_skill, judge_segments
-from src.everbot.core.slm.models import EvaluationSegment, JudgeResult
+from src.everbot.core.slm.models import EvaluationSegment
 
 
 def _make_segment(**kw):
