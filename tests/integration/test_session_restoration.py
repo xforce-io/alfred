@@ -1,5 +1,17 @@
 """
 Session Restoration Integration Test
+
+#43 调查重写:原测试断言 dolphin 时代的 save/restore 语义 —— alfred 从进程内 agent
+经 ``snapshot.export_portable_session`` 抽取历史、restore 时经 ``import_portable_session``
+灌回。#38 去 dolphin、收敛到 milkie 后这条路径已死:
+
+- save 经 ``provider.export_session(agent)`` 取历史(milkie 下来自 serve 的 sqlite);
+- restore 在 ``provider.needs_history_restore()`` 为 False(milkie 即如此)时**故意
+  早返回、不灌回**(serve 用 sqlite/jsonl 自持久化跨重启恢复,见 milkie#130)。
+
+故本测试改为校验**当前**契约:save/load 元数据往返一致;restore 对自持久化
+provider 是 no-op(绝不触碰 agent.snapshot)。"历史跨重启恢复"的真实覆盖在
+e2e ``test_milkie_serve_smoke.py::test_session_history_persists_across_serve_restart``。
 """
 
 import pytest
@@ -12,87 +24,36 @@ from src.everbot.core.session.session import SessionManager
 
 
 @pytest.mark.asyncio
-async def test_session_save_and_restore_workflow():
-    """
-    Integration test:
-    1. Create an agent and context.
-    2. Save session.
-    3. Create a new agent and restore from session.
-    4. Verify history and variables are preserved.
-    """
+async def test_save_load_roundtrip_and_restore_is_noop_for_self_persisting_provider():
+    """milkie 契约:save/load 往返保留元数据;restore 对自持久化 provider 不灌回历史。"""
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         user_data = UserDataManager(alfred_home=tmp_path)
         user_data.ensure_directories()
-        
-        # Setup session manager
+
         session_manager = SessionManager(user_data.sessions_dir)
         session_id = "test_integration_session"
         agent_name = "test_agent"
-        
-        # Initialize agent workspace
         user_data.init_agent_workspace(agent_name)
-        
-        # Mock DolphinAgent and Context
-        # We use a real AgentFactory but we might need to mock the LLM if we were doing a full end-to-end.
-        # Here we focus on the state restoration logic between everbot components and Dolphin SDK.
 
+        # 假 agent:仅需 name(历史/变量经内存 provider 的 export_session,见 conftest)。
         mock_agent = MagicMock()
         mock_agent.name = agent_name
-        mock_context = MagicMock()
-        mock_agent.executor.context = mock_context
 
-        # Set up some initial state
-        mock_context.get_history_messages.return_value = [
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "hi there"}
-        ]
-        mock_context.get_var_value.side_effect = lambda x: {
-            "workspace_instructions": "Be helpful.",
-            "model_name": "gpt-4",
-            "current_time": "2024-01-01",
-            "session_created_at": "2024-01-01T00:00:00"
-        }.get(x)
-        mock_agent.snapshot.export_portable_session.return_value = {
-            "schema_version": "portable_session.v1",
-            "session_id": None,
-            "history_messages": [
-                {"role": "user", "content": "hello"},
-                {"role": "assistant", "content": "hi there"},
-            ],
-            "variables": {
-                "workspace_instructions": "Be helpful.",
-                "model_name": "gpt-4",
-                "current_time": "2024-01-01",
-            },
-        }
-        
-        # 1. Save session
+        # 1. 保存 + 落盘
         await session_manager.save_session(session_id, mock_agent, "gpt-4")
         assert (user_data.sessions_dir / f"{session_id}.json").exists()
-        
-        # 2. Load session data
+
+        # 2. 读回:元数据往返一致
         loaded_data = await session_manager.load_session(session_id)
         assert loaded_data is not None
         assert loaded_data.agent_name == agent_name
-        assert len(loaded_data.history_messages) == 2
-        
-        # 3. Restore to a NEW agent
+        assert loaded_data.model_name == "gpt-4"
+        # milkie 集成层无 serve,export_session 无历史可取 → 空(符合自持久化语义)
+        assert loaded_data.history_messages == []
+
+        # 3. restore 到新 agent:provider.needs_history_restore() 为 False(milkie)→
+        #    persistence.restore_to_agent 早返回,绝不触碰 agent.snapshot(灌回是 serve 的事)。
         new_mock_agent = MagicMock()
-        new_mock_context = MagicMock()
-        new_mock_agent.executor.context = new_mock_context
-
         await session_manager.restore_to_agent(new_mock_agent, loaded_data)
-
-        # 4. Verify restoration calls — now uses agent.snapshot.import_portable_session
-        new_mock_agent.snapshot.import_portable_session.assert_called_once()
-        call_args = new_mock_agent.snapshot.import_portable_session.call_args
-        portable_state = call_args[0][0]
-        assert portable_state["schema_version"] == "portable_session.v1"
-        assert portable_state["session_id"] == session_id
-        assert len(portable_state["history_messages"]) == 2
-        # workspace_instructions and model_name are runtime vars filtered before import
-        assert "workspace_instructions" not in portable_state["variables"]
-        assert "model_name" not in portable_state["variables"]
-        assert portable_state["variables"]["current_time"] == "2024-01-01"
-        assert call_args[1]["repair"] is True
+        new_mock_agent.snapshot.import_portable_session.assert_not_called()
