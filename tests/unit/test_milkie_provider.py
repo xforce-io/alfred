@@ -227,6 +227,282 @@ async def test_run_turn_yields_skill_progress_for_tools():
     assert items[0]["id"] == items[1]["id"] == "tc"
 
 
+# ---------------------------------------------------------------------------
+# #43:handle 不再冻结 base_url —— 每次调用经 pool 按 agent 名解析;run_turn 持 lease
+# ---------------------------------------------------------------------------
+
+
+class _FreshPool:
+    """fake pool:peek/lease 都解析到"新"sidecar(模拟重生后端口已变)。"""
+
+    def __init__(self, base_url: str = "http://fresh-sidecar"):
+        self._sidecar = type("_S", (), {"base_url": base_url})()
+        self.lease_active = 0
+        self.lease_names: list = []
+        self.peek_names: list = []
+
+    def peek(self, name):
+        self.peek_names.append(name)
+        return self._sidecar
+
+    def lease(self, name):
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _cm():
+            self.lease_names.append(name)
+            self.lease_active += 1
+            try:
+                yield self._sidecar
+            finally:
+                self.lease_active -= 1
+
+        return _cm()
+
+
+def _provider_with_pool(sse_text: str, pool, capture: dict | None = None):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if capture is not None:
+            capture["url"] = str(request.url)
+            capture["payload"] = json.loads(request.content)
+            capture["lease_active_during_request"] = pool.lease_active
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=sse_text.encode("utf-8")
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    sync_client = httpx.Client(transport=httpx.MockTransport(handler))
+    p = MilkieProvider("http://cfg", client=client, sync_client=sync_client, pool=pool)
+    return p, client, sync_client
+
+
+async def test_run_turn_resolves_base_url_via_pool_and_holds_lease():
+    """重生后 handle.base_url 已僵尸 → run_turn 必须经 pool 解析新地址,且流式期间持 lease。"""
+    pool = _FreshPool()
+    cap: dict = {}
+    p, client, sc = _provider_with_pool(
+        _sse(("agent.run.completed", {"status": "completed", "output": "ok"})), pool, cap
+    )
+    try:
+        h = MilkieAgentHandle("http://stale-dead-port", "ctx", name="alice")
+        _ = [e async for e in p.run_turn(h, "hi")]
+    finally:
+        await client.aclose()
+        sc.close()
+    assert cap["url"].startswith("http://fresh-sidecar")     # 不打僵尸端口
+    assert pool.lease_names == ["alice"]
+    assert cap["lease_active_during_request"] == 1           # 流式期间在飞登记中
+    assert pool.lease_active == 0                            # 结束后释放
+
+
+async def test_run_turn_releases_lease_on_error():
+    pool = _FreshPool()
+    p, client, sc = _provider_with_pool(
+        _sse(("error", {"message": "boom"})), pool
+    )
+    try:
+        h = MilkieAgentHandle("http://stale", "ctx", name="alice")
+        with pytest.raises(RuntimeError, match="boom"):
+            _ = [e async for e in p.run_turn(h, "hi")]
+    finally:
+        await client.aclose()
+        sc.close()
+    assert pool.lease_active == 0
+
+
+async def test_run_turn_without_pool_falls_back_to_handle_base_url():
+    """注入式构造(测试/无 pool)→ 沿用 handle.base_url,行为同旧版。"""
+    cap: dict = {}
+    p, client = _provider(
+        _sse(("agent.run.completed", {"status": "completed", "output": "ok"})), cap
+    )
+    try:
+        _ = [e async for e in p.run_turn(MilkieAgentHandle("http://sidecar", "c"), "hi")]
+    finally:
+        await client.aclose()
+    assert cap["url"].startswith("http://sidecar")
+
+
+async def test_resume_resolves_base_url_via_pool_and_holds_lease():
+    """resume 同样是流式 turn(中断续跑)—— 须经 pool 解析地址并全程持 lease,
+    防止续跑中途被技能重生腰斩。"""
+    pool = _FreshPool()
+    cap: dict = {}
+    p, client, sc = _provider_with_pool(
+        _sse(("agent.run.completed", {"status": "completed", "output": "ok"})), pool, cap
+    )
+    try:
+        h = MilkieAgentHandle("http://stale-dead-port", "ctx", name="alice")
+        await p.resume(h, "continue")
+    finally:
+        await client.aclose()
+        sc.close()
+    assert cap["url"] == "http://fresh-sidecar/resume"
+    assert cap["lease_active_during_request"] == 1
+    assert pool.lease_active == 0
+
+
+def test_sync_methods_resolve_base_url_via_pool_peek():
+    """set/get_variable 等 sync 方法经 pool.peek 解析当前 sidecar 地址。"""
+    pool = _FreshPool()
+    cap: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cap["url"] = str(request.url)
+        return httpx.Response(200, json={"ok": True, "value": "v", "paused": False})
+
+    sc = httpx.Client(transport=httpx.MockTransport(handler))
+    p = MilkieProvider("http://cfg", sync_client=sc, pool=pool)
+    h = MilkieAgentHandle("http://stale-dead-port", "c1", name="alice")
+    try:
+        p.set_variable(h, "k", "v")
+        assert cap["url"] == "http://fresh-sidecar/context/set"
+        p.get_variable(h, "k")
+        assert cap["url"] == "http://fresh-sidecar/context/get"
+        p.is_user_interrupt_paused(h)
+        assert cap["url"] == "http://fresh-sidecar/context/state"
+        p.export_session(h)
+        assert cap["url"] == "http://fresh-sidecar/session/history"
+    finally:
+        sc.close()
+
+
+async def test_async_methods_resolve_base_url_via_pool_peek():
+    """interrupt / attach_projection 同样经 pool 解析,不打僵尸端口。"""
+    pool = _FreshPool()
+    urls: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    p = MilkieProvider("http://cfg", client=client, pool=pool)
+    h = MilkieAgentHandle("http://stale", "c1", name="alice")
+    try:
+        await p.interrupt(h)
+        await p.attach_projection(h, source_run_id="r1", display_text="t")
+    finally:
+        await client.aclose()
+    assert urls == [
+        "http://fresh-sidecar/interrupt",
+        "http://fresh-sidecar/projection/attach",
+    ]
+
+
+def test_base_url_falls_back_when_pool_peek_misses():
+    """pool 里没有该 agent(尚未 spawn / 名字为空)→ 回落 handle.base_url。"""
+
+    class _EmptyPool:
+        def peek(self, name):
+            return None
+
+    cap: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cap["url"] = str(request.url)
+        return httpx.Response(200, json={"ok": True})
+
+    sc = httpx.Client(transport=httpx.MockTransport(handler))
+    p = MilkieProvider("http://cfg", sync_client=sc, pool=_EmptyPool())
+    try:
+        p.set_variable(MilkieAgentHandle("http://handle-url", "c", name="alice"), "k", "v")
+        assert cap["url"] == "http://handle-url/context/set"
+        # name 为空(旧式 2-arg 构造)→ 同样回落
+        p.set_variable(MilkieAgentHandle("http://handle-url2", "c"), "k", "v")
+        assert cap["url"] == "http://handle-url2/context/set"
+    finally:
+        sc.close()
+
+
+# ---------------------------------------------------------------------------
+# #43:技能指纹 —— pool freshness 检查的输入(指纹变 ⇔ prompt 技能段/manifest 会变)
+# ---------------------------------------------------------------------------
+
+
+def _make_skill(root, name: str, desc: str, body: str = ""):
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(f"# {name}\n\n{desc}\n{body}", encoding="utf-8")
+    return d
+
+
+def _fingerprint_env(tmp_path, monkeypatch):
+    """隔离的 workspace + 技能目录,返回技能根目录。"""
+    from src.everbot.core.agent.provider.milkie import skills as msk
+
+    ws = tmp_path / "ws"
+    skills_root = ws / "skills"
+    skills_root.mkdir(parents=True)
+    monkeypatch.setattr(provider_mod, "_resolve_agent_workspace", lambda name: ws)
+    monkeypatch.setattr(msk, "resolve_skill_dirs", lambda _ws: [skills_root])
+    monkeypatch.setattr(provider_mod, "_agent_skill_filter", lambda name: (None, None))
+    return skills_root
+
+
+def test_skills_fingerprint_reflector_returns_none():
+    assert provider_mod._skills_fingerprint(provider_mod.REFLECTOR_AGENT) is None
+
+
+def test_skills_fingerprint_deterministic(tmp_path, monkeypatch):
+    root = _fingerprint_env(tmp_path, monkeypatch)
+    _make_skill(root, "alpha", "does a thing")
+    fp1 = provider_mod._skills_fingerprint("alice")
+    fp2 = provider_mod._skills_fingerprint("alice")
+    assert isinstance(fp1, str) and len(fp1) == 64  # sha256 hex
+    assert fp1 == fp2
+
+
+def test_skills_fingerprint_changes_on_skill_added(tmp_path, monkeypatch):
+    root = _fingerprint_env(tmp_path, monkeypatch)
+    _make_skill(root, "alpha", "does a thing")
+    fp1 = provider_mod._skills_fingerprint("alice")
+    _make_skill(root, "beta", "another thing")
+    fp2 = provider_mod._skills_fingerprint("alice")
+    assert fp1 != fp2
+
+
+def test_skills_fingerprint_changes_on_description_change(tmp_path, monkeypatch):
+    root = _fingerprint_env(tmp_path, monkeypatch)
+    _make_skill(root, "alpha", "does a thing")
+    fp1 = provider_mod._skills_fingerprint("alice")
+    _make_skill(root, "alpha", "does a BETTER thing")
+    fp2 = provider_mod._skills_fingerprint("alice")
+    assert fp1 != fp2
+
+
+def test_skills_fingerprint_stable_on_body_only_change(tmp_path, monkeypatch):
+    """prompt 技能段只用 name/title/description/abs_path;改正文(首段之外)不应触发重生
+    —— agent 运行时本就经 run_command 从磁盘读全文。"""
+    root = _fingerprint_env(tmp_path, monkeypatch)
+    _make_skill(root, "alpha", "does a thing", body="\n## usage\nold steps\n")
+    fp1 = provider_mod._skills_fingerprint("alice")
+    _make_skill(root, "alpha", "does a thing", body="\n## usage\nNEW steps entirely\n")
+    fp2 = provider_mod._skills_fingerprint("alice")
+    assert fp1 == fp2
+
+
+def test_skills_fingerprint_respects_include_filter(tmp_path, monkeypatch):
+    """include/exclude 过滤后的列表才是 prompt 的来源 → 指纹必须基于过滤后结果。"""
+    root = _fingerprint_env(tmp_path, monkeypatch)
+    _make_skill(root, "alpha", "a")
+    _make_skill(root, "beta", "b")
+    fp_all = provider_mod._skills_fingerprint("alice")
+    monkeypatch.setattr(provider_mod, "_agent_skill_filter", lambda name: (["alpha"], None))
+    fp_filtered = provider_mod._skills_fingerprint("alice")
+    assert fp_all != fp_filtered
+
+
+def test_pool_fingerprint_gate_default_loader_vs_injected():
+    """默认 loader → pool 接技能指纹;注入式 loader(测试 seam,prompt 不来自
+    discover_skills)→ None,不参与 freshness 检查。"""
+    p_default = MilkieProvider("http://x")
+    assert p_default._pool_fingerprint() is provider_mod._skills_fingerprint
+
+    p_injected = MilkieProvider("http://x", system_prompt_loader=lambda name: "static")
+    assert p_injected._pool_fingerprint() is None
+
+
 async def test_self_built_client_disables_env_proxy():
     client = MilkieProvider("http://x")._new_client()
     try:
@@ -766,6 +1042,96 @@ def test_default_loader_feeds_discovered_skills_to_launcher(monkeypatch):
     cmd, env = prov._get_pool()._build("alice")
     assert captured["system_prompt"] == "PROMPT::alice"
     assert captured["skills"] == fake_skills  # 默认路径把 skills 喂到 launcher
+
+
+async def test_skill_change_respawn_chain_other_sessions_not_orphaned():
+    """全链路(真实 SidecarPool + fake sidecar):技能指纹变化 → 下一轮触发重生;
+    **另一个 session 的旧 handle** 后续调用自动解析到新 sidecar(验收 1/5:
+    免重启生效、重生后无僵尸 handle)。"""
+    from src.everbot.core.agent.provider.milkie.pool import SidecarPool
+
+    class _FakeSidecar:
+        seq = 0
+
+        def __init__(self):
+            _FakeSidecar.seq += 1
+            self.url = f"http://sidecar-v{_FakeSidecar.seq}"
+            self.closed = 0
+
+        @property
+        def base_url(self):
+            return self.url
+
+        async def start(self):
+            pass
+
+        async def close(self):
+            self.closed += 1
+
+    fp = {"v": "skills-v1"}
+    pool = SidecarPool(
+        build=lambda name: ([], {}),
+        sidecar_factory=lambda cmd, env: _FakeSidecar(),
+        fingerprint=lambda name: fp["v"],
+    )
+
+    hit_urls: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hit_urls.append(f"{request.url.scheme}://{request.url.host}")
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(("agent.run.completed", {"status": "completed", "output": "ok"})).encode(),
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    p = MilkieProvider(client=client, pool=pool)
+    try:
+        h_session1 = await p.create_agent("alice", "/ws")
+        h_session2 = await p.create_agent("alice", "/ws")   # 同 agent、另一 session
+
+        _ = [e async for e in p.run_turn(h_session1, "hi")]
+        assert hit_urls[-1] == "http://sidecar-v1"
+
+        fp["v"] = "skills-v2"                               # 技能变化(装/改技能)
+        _ = [e async for e in p.run_turn(h_session2, "hi")]  # 下一轮 → 触发重生
+        assert hit_urls[-1] == "http://sidecar-v2"
+
+        # 关键:session1 的旧 handle(构造时拿的是 v1 地址)不僵尸,自动跟到 v2
+        _ = [e async for e in p.run_turn(h_session1, "hi")]
+        assert hit_urls[-1] == "http://sidecar-v2"
+    finally:
+        await client.aclose()
+
+
+def test_build_pool_wires_skills_fingerprint(monkeypatch):
+    """#43 接线:默认 loader 装配的 pool 必须带技能指纹(freshness 检查生效);
+    注入式 loader → 不带(prompt 与 discover_skills 脱钩,检查无意义)。"""
+    from pathlib import Path
+
+    import src.everbot.core.agent.provider.milkie.provider as mod
+    from src.everbot.core.agent.provider.milkie.launcher import LaunchSpec
+
+    class _StubLauncher:
+        def build(self, agent_name, *, system_prompt, skills=None, default_model=None):
+            return LaunchSpec(
+                cmd=["node"], env={}, data_dir=Path("/tmp"), agent_md=Path("/tmp/a.md")
+            )
+
+    monkeypatch.setattr(
+        "src.everbot.core.agent.provider.milkie.launcher.SidecarLauncher",
+        lambda **kw: _StubLauncher(),
+    )
+    monkeypatch.setattr("src.everbot.infra.config.get_config", lambda *a, **k: {})
+
+    pool_default = mod.MilkieProvider("http://x")._get_pool()
+    assert pool_default._fingerprint is mod._skills_fingerprint
+
+    pool_injected = mod.MilkieProvider(
+        "http://x", system_prompt_loader=lambda name: "static"
+    )._get_pool()
+    assert pool_injected._fingerprint is None
 
 
 # ---------------------------------------------------------------------------

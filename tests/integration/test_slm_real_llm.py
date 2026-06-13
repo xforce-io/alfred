@@ -1,7 +1,11 @@
 """Real LLM e2e test for SLM: actual LLM Judge scores real conversation segments.
 
-Requires: ALIYUN_API_KEY environment variable set.
+Requires: VOLCENGINE_API_BASE + VOLCENGINE_TOKEN environment variables set.
 Run with: pytest tests/integration/test_slm_real_llm.py -v -m slow
+
+#43:原走 aliyun DashScope,但 ALIYUN 密钥持续 403/Access denied(见 config/models.yaml
+注释);改用项目实际在用、已验证可用的 volcengine OpenAI 兼容端点(doubao),与
+``everbot.milkie`` 默认云一致。
 """
 
 from __future__ import annotations
@@ -16,12 +20,12 @@ from src.everbot.core.slm.models import EvaluationSegment, VersionStatus
 from src.everbot.core.slm.version_manager import VersionManager
 
 
-def _has_aliyun_key() -> bool:
-    return bool(os.environ.get("ALIYUN_API_KEY"))
+def _has_volcengine_creds() -> bool:
+    return bool(os.environ.get("VOLCENGINE_API_BASE") and os.environ.get("VOLCENGINE_TOKEN"))
 
 
 class _RealLLMClient:
-    """Thin wrapper calling Aliyun DashScope qwen-turbo."""
+    """Thin wrapper calling volcengine doubao via its OpenAI-compatible endpoint."""
 
     async def complete(self, prompt: str, system: str = "") -> str:
         import litellm
@@ -32,12 +36,14 @@ class _RealLLMClient:
         messages.append({"role": "user", "content": prompt})
 
         response = await litellm.acompletion(
-            model="openai/qwen-turbo-latest",
-            api_key=os.environ["ALIYUN_API_KEY"],
-            api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            model="openai/doubao-seed-2-0-pro-260215",
+            api_key=os.environ["VOLCENGINE_TOKEN"],
+            api_base=os.environ["VOLCENGINE_API_BASE"],
             messages=messages,
             temperature=0.3,
             max_tokens=500,
+            # 简单打分任务无需深思,关 thinking 省 reasoning 计费/延迟(对齐 config 的 doubao-nothink)。
+            extra_body={"thinking": {"type": "disabled"}},
         )
         return response.choices[0].message.content or ""
 
@@ -62,7 +68,9 @@ You are an advanced coding assistant with deeper analysis.
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not _has_aliyun_key(), reason="ALIYUN_API_KEY not set")
+@pytest.mark.skipif(
+    not _has_volcengine_creds(), reason="VOLCENGINE_API_BASE/VOLCENGINE_TOKEN not set"
+)
 class TestSLMRealLLMLifecycle:
     """Full lifecycle with real LLM Judge scoring."""
 
