@@ -17,3 +17,12 @@ class LLMConfigError(Exception):
 
     Requires manual intervention to fix.
     """
+
+
+class LLMUnavailableError(Exception):
+    """LLM unreachable at the heartbeat probe layer (network down, endpoint dead).
+
+    Raised by the inline-task runner so the scheduler can back off its inline
+    path (#78) instead of spinning every 1s tick. Kept independent of
+    LLMTransientError so existing job-layer handlers are unaffected.
+    """

@@ -19,7 +19,24 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
+from ..jobs.llm_errors import LLMUnavailableError
+
 logger = logging.getLogger(__name__)
+
+
+def _inline_backoff_base_minutes() -> int:
+    """Base interval (minutes) for inline-task exponential backoff (#78).
+
+    Default 1; override with ALFRED_INLINE_BACKOFF_BASE_MIN.
+    """
+    import os
+    raw = (os.environ.get("ALFRED_INLINE_BACKOFF_BASE_MIN") or "").strip()
+    if not raw:
+        return 1
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 1
 
 
 @dataclass
@@ -41,6 +58,25 @@ class AgentSchedule:
     night_interval_minutes: Optional[int] = None
     next_heartbeat_at: Optional[datetime] = None
     active_hours: tuple[int, int] = (8, 22)
+    consecutive_failures: int = 0
+    max_backoff_minutes: int = 60
+
+
+@dataclass
+class InlineSchedule:
+    """Per-agent inline-task scheduling state (#78).
+
+    The inline path has no schedule clock of its own — it dispatches whenever a
+    task is due. When the LLM is unreachable the probe-fail path never advances
+    next_run_at, so due inline tasks re-trigger every 1s tick. This adds an
+    exponential backoff gate, symmetric with AgentSchedule / InspectorSchedule:
+    only LLMUnavailableError counts as a failure; other per-task errors are left
+    to the existing swallow semantics so one flaky task can't stall the agent.
+    """
+
+    agent_name: str
+    base_interval_minutes: int = 1
+    next_inline_at: Optional[datetime] = None
     consecutive_failures: int = 0
     max_backoff_minutes: int = 60
 
@@ -91,6 +127,7 @@ class Scheduler:
         # --- Config ---
         agent_schedules: Optional[Dict[str, AgentSchedule]] = None,
         inspector_schedules: Optional[Dict[str, InspectorSchedule]] = None,
+        inline_schedules: Optional[Dict[str, InlineSchedule]] = None,
         tick_interval_seconds: float = 1.0,
         state_file: Optional[Path] = None,
     ):
@@ -102,6 +139,7 @@ class Scheduler:
         self._run_inspector = run_inspector
         self._agent_schedules: Dict[str, AgentSchedule] = dict(agent_schedules or {})
         self._inspector_schedules: Dict[str, InspectorSchedule] = dict(inspector_schedules or {})
+        self._inline_schedules: Dict[str, InlineSchedule] = dict(inline_schedules or {})
         self._tick_interval_seconds = tick_interval_seconds
         self._running = False
         self._state_file = state_file
@@ -131,6 +169,17 @@ class Scheduler:
                 inspectors[name] = ientry
             if inspectors:
                 state["__inspectors__"] = inspectors
+            # Inline schedules (#78): only persist agents that are mid-backoff.
+            inlines: Dict[str, Any] = {}
+            for name, lsched in self._inline_schedules.items():
+                if lsched.next_inline_at is None and lsched.consecutive_failures == 0:
+                    continue
+                lentry: Dict[str, Any] = {"consecutive_failures": lsched.consecutive_failures}
+                if lsched.next_inline_at is not None:
+                    lentry["next_inline_at"] = lsched.next_inline_at.isoformat()
+                inlines[name] = lentry
+            if inlines:
+                state["__inline__"] = inlines
             self._state_file.parent.mkdir(parents=True, exist_ok=True)
             self._state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
         except Exception:
@@ -178,6 +227,20 @@ class Scheduler:
                         except (ValueError, TypeError):
                             pass
                     isched.consecutive_failures = int(ivalue.get("consecutive_failures", 0) or 0)
+            # Restore inline schedules (#78). Create entries lazily so backoff
+            # survives a restart even for agents not pre-registered.
+            inline_state = state.get("__inline__", {})
+            for name, lvalue in inline_state.items():
+                if not isinstance(lvalue, dict):
+                    continue
+                lsched = self._get_inline_schedule(name)
+                iso_str = lvalue.get("next_inline_at")
+                if iso_str:
+                    try:
+                        lsched.next_inline_at = datetime.fromisoformat(iso_str)
+                    except (ValueError, TypeError):
+                        pass
+                lsched.consecutive_failures = int(lvalue.get("consecutive_failures", 0) or 0)
             logger.debug("Restored scheduler state from %s", self._state_file)
         except Exception:
             logger.debug("Failed to restore scheduler state", exc_info=True)
@@ -197,6 +260,21 @@ class Scheduler:
 
     def unregister_inspector(self, agent_name: str) -> None:
         self._inspector_schedules.pop(agent_name, None)
+
+    def _get_inline_schedule(self, agent_name: str) -> InlineSchedule:
+        """Return the inline backoff schedule for an agent, creating it lazily.
+
+        Inline schedules are keyed by agent and only matter once an agent has
+        due inline tasks, so they are created on demand rather than pre-registered.
+        """
+        schedule = self._inline_schedules.get(agent_name)
+        if schedule is None:
+            schedule = InlineSchedule(
+                agent_name=agent_name,
+                base_interval_minutes=_inline_backoff_base_minutes(),
+            )
+            self._inline_schedules[agent_name] = schedule
+        return schedule
 
     # -- Core tick ----------------------------------------------------------
 
@@ -269,9 +347,41 @@ class Scheduler:
             for task in inline_tasks:
                 inline_by_agent.setdefault(task.agent_name, []).append(task)
             for agent_name, tasks in inline_by_agent.items():
+                schedule = self._get_inline_schedule(agent_name)
+                # Backoff gate: while the LLM is down, skip dispatch until
+                # next_inline_at so 1s ticks don't become 1s LLM probes (#78).
+                next_at = (
+                    self._normalize_ts(schedule.next_inline_at)
+                    if schedule.next_inline_at is not None
+                    else None
+                )
+                if next_at is not None and ts < next_at:
+                    continue
                 try:
                     await self._run_inline(agent_name, tasks, ts)
+                    # Success: clear backoff, resume normal cadence.
+                    schedule.consecutive_failures = 0
+                    schedule.next_inline_at = None
+                    self._save_state()
+                except LLMUnavailableError:
+                    schedule.consecutive_failures += 1
+                    base_interval = max(1, schedule.base_interval_minutes)
+                    backoff_minutes = min(
+                        base_interval * (2 ** schedule.consecutive_failures),
+                        schedule.max_backoff_minutes,
+                    )
+                    schedule.next_inline_at = ts + timedelta(minutes=backoff_minutes)
+                    logger.warning(
+                        "Inline task LLM unavailable for %s (consecutive_failures=%d, "
+                        "next_retry_in=%d min)",
+                        agent_name,
+                        schedule.consecutive_failures,
+                        backoff_minutes,
+                    )
+                    self._save_state()
                 except Exception:
+                    # Non-LLM failures: keep the existing swallow semantics so a
+                    # single flaky task can't stall the whole agent's inline path.
                     logger.exception("Inline task execution failed for %s", agent_name)
 
         # Isolated: claim then dispatch, per-task error isolation
