@@ -98,6 +98,17 @@ CASE_TEMPLATES = {
         'signal_long': 'ETF持续净流入，与黄金相关性上升',
         'signal_risk': '监管打压ETF，机构资金外流',
     },
+    '中国移动': {
+        'pricing_shift': '主题博弈资金 → 高股息配置资金',
+        'dimension_old': '5G用户数增长、ARPU值',
+        'dimension_new': '股息率、现金流稳定性、云收入占比',
+        'anchor_old': '成长股PEG（15-20x）',
+        'anchor_new': '高股息公用事业（10-15x + 60%+派息率）',
+        'catalyst': '数字经济基础设施定位，连续提升派息率至60%',
+        'signal_long': '北向资金连续增持且股息率>4%',
+        'signal_risk': '云业务增速不及预期，5G投资超预期',
+    },
+
 }
 
 
