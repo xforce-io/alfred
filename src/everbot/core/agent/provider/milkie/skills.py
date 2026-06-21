@@ -183,8 +183,9 @@ def discover_skills(
     per-agent allowlist(对应 dolphin 的 ``everbot.agents.<name>.skills.include/exclude``):
     - ``include`` 非空 → 只保留其中的 skill;
     - ``exclude`` → 移除其中的 skill;
-    - include/exclude 里出现**未发现**的 skill 名 → ``ValueError``(fail-loud,防配置笔误,
-      与 dolphin 行为一致)。
+    - ``include`` 里出现**未发现**的 skill 名 → ``ValueError``(fail-loud,allowlist 笔误应暴露);
+    - ``exclude`` 里出现**未发现**的 skill 名 → ``WARNING`` + 忽略(#106 E0,不 brick agent;
+      exclude 语义="确保不出现",引用不存在者本就满足)。
     """
     skills, saw_skill_md, names = _discover_stable(workspace_path)
 
@@ -204,9 +205,15 @@ def discover_skills(
             raise ValueError(f"skills.include 含未发现的 skill: {unknown}(可用: {sorted(available)})")
         skills = [s for s in skills if s["name"] in set(include)]
     if exclude:
+        # #106 E0:exclude 语义 = "确保这些不出现"。引用一个不存在的 skill 本就已满足该
+        # 语义,不该抛错把整个 agent spawn 弄挂(残留/笔误 exclude 不应 brick agent)。
+        # → 当作无操作 + WARNING(不静默),与 include(allowlist 笔误 fail-loud)区别对待。
         unknown = [n for n in exclude if n not in available]
         if unknown:
-            raise ValueError(f"skills.exclude 含未发现的 skill: {unknown}(可用: {sorted(available)})")
+            logger.warning(
+                "skills.exclude 含未发现的 skill(已忽略,不影响其余技能): %s(可用: %s)",
+                sorted(unknown), sorted(available),
+            )
         skills = [s for s in skills if s["name"] not in set(exclude)]
     return skills
 

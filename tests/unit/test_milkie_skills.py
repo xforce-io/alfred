@@ -132,11 +132,25 @@ def test_discover_skills_unknown_in_include_raises(tmp_path, monkeypatch):
         msk.discover_skills(tmp_path, include=["alpha", "nonexistent"])
 
 
-def test_discover_skills_unknown_in_exclude_raises(tmp_path, monkeypatch):
-    import pytest
+def test_discover_skills_unknown_in_exclude_degrades_not_raises(tmp_path, monkeypatch, caplog):
+    """exclude 引用不存在的 skill → 不 brick:WARNING + 当作无操作,其余正常返回(#106 E0)。
+
+    exclude 语义="确保这些不出现",引用一个不存在的 skill 本就已满足,不该抛错把整个
+    agent spawn 弄挂。
+    """
+    import logging
     _setup_three(tmp_path, monkeypatch)
-    with pytest.raises(ValueError, match="ghost"):
-        msk.discover_skills(tmp_path, exclude=["ghost"])
+    with caplog.at_level(logging.WARNING, logger=msk.__name__):
+        found = msk.discover_skills(tmp_path, exclude=["ghost"])
+    assert sorted(s["name"] for s in found) == ["alpha", "beta", "gamma"]
+    assert any("ghost" in r.message for r in caplog.records)
+
+
+def test_discover_skills_exclude_mixes_known_and_unknown(tmp_path, monkeypatch):
+    """known + unknown 混合:known 照常移除,unknown 忽略,不抛错(#106 E0)。"""
+    _setup_three(tmp_path, monkeypatch)
+    found = msk.discover_skills(tmp_path, exclude=["gamma", "ghost"])
+    assert sorted(s["name"] for s in found) == ["alpha", "beta"]
 
 
 def test_discover_skills_no_filter_returns_all(tmp_path, monkeypatch):

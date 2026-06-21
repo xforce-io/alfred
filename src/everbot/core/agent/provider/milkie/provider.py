@@ -115,8 +115,9 @@ def _build_default_prompt_and_skills(
     # 动态发现 shell 型 skill 并注入(milkie 无 dolphin 的 ResourceSkillkit;agent 经
     # 内建 run_command(milkie#134)读 SKILL.md 并跑脚本 —— 与 dolphin 能力对等)。
     # per-agent allowlist:everbot.agents.<name>.skills.include/exclude(A3,对齐 dolphin)。
-    # discover_skills 对 include/exclude 笔误 fail-loud(raise ValueError)——即 milkie#139
-    # 要求的 producer 侧 fail-fast(错误落在 spawn 边界、operator 可见)。
+    # discover_skills 对 include 笔误 fail-loud(raise ValueError)——milkie#139 要求的
+    # producer 侧 fail-fast(错误落在 spawn 边界、operator 可见)。exclude 笔误/残留则降级为
+    # WARNING + 忽略(#106 E0:exclude 引用不存在者不该 brick agent)。
     include, exclude = _agent_skill_filter(agent_name)
     skills = discover_skills(workspace, include=include, exclude=exclude)
     section = build_milkie_skills_section(skills, workspace)
