@@ -4,8 +4,29 @@ from pathlib import Path
 import sys
 import tempfile
 
-from src.everbot.cli.doctor import collect_doctor_report
+from src.everbot.cli.doctor import collect_doctor_report, DoctorItem
 from src.everbot.infra.user_data import UserDataManager
+
+
+def test_doctor_wires_native_deps_probe(tmp_path, monkeypatch):
+    """#91 件2:doctor 调 probe_native_deps,其产出的 item 进报告。"""
+    home = tmp_path / ".alfred"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        f"everbot:\n  milkie:\n    node_bin: {sys.executable}\n", encoding="utf-8"
+    )
+    from src.everbot.cli import milkie_preflight
+
+    monkeypatch.setattr(
+        milkie_preflight,
+        "probe_native_deps",
+        lambda node_bin, milkie_root: DoctorItem(
+            level="OK", title="milkie native deps", details="probed"
+        ),
+    )
+    items = collect_doctor_report(project_root=tmp_path, alfred_home=home)
+    probe_items = [i for i in items if i.title == "milkie native deps"]
+    assert len(probe_items) == 1 and probe_items[0].details == "probed"
 
 
 def test_doctor_includes_node_bin_check_ok_for_absolute(tmp_path):

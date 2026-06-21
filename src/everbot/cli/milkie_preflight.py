@@ -13,9 +13,13 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from typing import Optional
+from pathlib import Path
+from typing import List, Optional, Tuple
 
 from .doctor import DoctorItem
+
+# 诊断尾部保留行数(与 sidecar 诊断对齐)。
+_DIAG_TAIL_LINES = 20
 
 _PIN_HINT = (
     "在 ~/.alfred/config.yaml 的 everbot.milkie.node_bin 填**绝对路径**"
@@ -72,4 +76,105 @@ def check_node_bin(node_bin: str, *, service_mode: bool = False) -> DoctorItem:
             f"当前解析到:{resolved}。daemon 与 shell 的 PATH 可能解析到不同 node。"
         ),
         hint=_PIN_HINT.format(suggest=suggest),
+    )
+
+
+# --- 件2:native deps 探针 ----------------------------------------------------
+#
+# 用 daemon 同款 node_bin 实测在 milkie 包上下文 require('better-sqlite3')。一条探针
+# 同时覆盖:node_modules 缺失(Cannot find module)、ABI 不匹配(NODE_MODULE_VERSION)、
+# 动态库加载失败(dlopen/.node/image not found)。比"只扫目录"或"抽象比版本号"更真。
+
+# require 解析相对 cwd 的 node_modules;故 _run_probe 以 milkie 包根为 cwd。
+_PROBE_JS = (
+    "console.log('MILKIE_DEPS_ABI ' + process.version + ' ' + process.versions.modules);"
+    "require('better-sqlite3');"
+    "console.log('MILKIE_DEPS_OK');"
+)
+
+_PROBE_TITLE = "milkie native deps"
+
+
+def _run_probe(node_bin: str, cwd: str) -> Tuple[int, str, str]:
+    """跑一次 node -e 探针,返回 (returncode, stdout, stderr)。seam:测试可 monkeypatch。"""
+    out = subprocess.run(
+        [node_bin, "-e", _PROBE_JS],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    return out.returncode, out.stdout, out.stderr
+
+
+def _tail(text: str) -> str:
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    return "\n".join(lines[-_DIAG_TAIL_LINES:])
+
+
+def probe_native_deps(node_bin: str, milkie_root) -> Optional[DoctorItem]:
+    """实测 better-sqlite3 能否被 node_bin 加载。
+
+    milkie 目录整体不存在 → 返回 None(provider 未用 milkie,无需探测)。
+    成功 → OK(带 node 版本/ABI);失败 → ERROR,按 stderr 给可执行修复命令。
+    """
+    root = Path(milkie_root)
+    if not root.exists():
+        return None
+
+    try:
+        rc, out, err = _run_probe(node_bin, str(root))
+    except Exception as e:  # node 不存在 / 无法执行
+        return DoctorItem(
+            level="ERROR",
+            title=_PROBE_TITLE,
+            details=f"native deps 探针无法执行({node_bin}):{e}",
+            hint="确认 everbot.milkie.node_bin 指向可用的 node 可执行(见上一项 node_bin 检查)。",
+        )
+
+    blob = f"{out}\n{err}"
+
+    if rc == 0 and "MILKIE_DEPS_OK" in out:
+        abi = next(
+            (ln for ln in out.splitlines() if ln.startswith("MILKIE_DEPS_ABI")),
+            "MILKIE_DEPS_ABI ?",
+        )
+        return DoctorItem(
+            level="OK",
+            title=_PROBE_TITLE,
+            details=f"better-sqlite3 加载正常({abi.replace('MILKIE_DEPS_ABI ', 'node ')})",
+        )
+
+    if "NODE_MODULE_VERSION" in blob:
+        return DoctorItem(
+            level="ERROR",
+            title=_PROBE_TITLE,
+            details=_tail(err) or _tail(blob),
+            hint=(
+                f"原生模块 ABI 与 {node_bin} 不匹配 → 用该 node 对应的 npm 跑:"
+                f"(cd {root} && npm rebuild better-sqlite3)"
+            ),
+        )
+
+    if "Cannot find module" in blob:
+        return DoctorItem(
+            level="ERROR",
+            title=_PROBE_TITLE,
+            details=_tail(err) or _tail(blob),
+            hint=f"milkie 依赖缺失/不全 → 用 {node_bin} 对应的 npm 跑:(cd {root} && npm ci)",
+        )
+
+    if any(k in blob for k in ("dlopen", ".node", "image not found", "dylib", "shared library", "undefined symbol")):
+        return DoctorItem(
+            level="ERROR",
+            title=_PROBE_TITLE,
+            details=_tail(err) or _tail(blob),
+            hint=f"原生模块动态库加载失败 → 用 {node_bin} 重装/重编:(cd {root} && npm rebuild better-sqlite3)",
+        )
+
+    return DoctorItem(
+        level="ERROR",
+        title=_PROBE_TITLE,
+        details=_tail(blob) or f"探针非零退出(exit {rc}),无 stderr 输出。",
+        hint=f"手动复现:(cd {root} && {node_bin} -e \"require('better-sqlite3')\")",
     )
