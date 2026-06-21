@@ -210,3 +210,98 @@ def test_build_manifest_is_valid_utf8_json_with_cjk(tmp_path):
     raw = (spec.data_dir / SKILL_MANIFEST_FILENAME).read_text(encoding="utf-8")
     assert "抓取 X 用户最新推文" in raw  # 未被 \uXXXX 转义
     json.loads(raw)  # 合法 JSON
+
+
+# ── E2b：sidecar OS 沙箱(#108)──────────────────────────────────────────────
+import os
+
+from src.everbot.core.agent.provider.milkie import launcher as _lmod
+from src.everbot.core.agent.provider.milkie.launcher import (
+    build_sandbox_profile,
+    SANDBOX_PROFILE_FILENAME,
+)
+
+
+def _rp(p):
+    return os.path.realpath(str(p))
+
+
+def _sandbox_launcher(tmp_path, alfred_root):
+    return SidecarLauncher(
+        dist_path=tmp_path / "milkie" / "dist" / "cli" / "index.js",
+        data_dir_root=tmp_path / "data",
+        node_bin="node",
+        llms={"main": {"cloud": "oa", "model_name": "gpt-x", "type_api": "openai"},
+              "fast": {"cloud": "oa", "model_name": "gpt-fast", "type_api": "openai"}},
+        clouds={"oa": {"api": "https://api.oa/v1", "api_key": "sk-real"}},
+        default_model="main",
+        fast_model="fast",
+        sandbox_enabled=True,
+        alfred_root=alfred_root,
+    )
+
+
+def test_build_sandbox_profile_denies_shared_allows_workspace(tmp_path):
+    root = tmp_path / ".alfred"
+    (root / "skills").mkdir(parents=True)
+    ws = root / "agents" / "alice"
+    ws.mkdir(parents=True)
+    (root / "config.yaml").write_text("x", encoding="utf-8")
+
+    prof = build_sandbox_profile(alfred_root=root, agent_workspace=ws)
+
+    assert "(allow default)" in prof
+    assert f'(deny file-write* (subpath "{_rp(root / "skills")}"))' in prof
+    assert f'(deny file-write* (subpath "{_rp(root / "agents")}"))' in prof
+    assert f'(deny file-write* (literal "{_rp(root / "config.yaml")}"))' in prof
+    # 自身 workspace 在 /agents 树下 → allow 必须排在 deny agents 之后(last-match-wins)。
+    lines = prof.splitlines()
+    deny_agents_i = next(
+        i for i, l in enumerate(lines)
+        if l.strip().startswith("(deny") and _rp(root / "agents") in l and _rp(ws) not in l
+    )
+    allow_ws_i = next(
+        i for i, l in enumerate(lines)
+        if l.strip().startswith("(allow") and _rp(ws) in l
+    )
+    assert allow_ws_i > deny_agents_i
+
+
+def test_build_sandbox_profile_uses_realpath_not_symlink(tmp_path):
+    # /tmp 软链坑:profile 必须写解析后的真实路径,否则 seatbelt subpath 静默失效。
+    root = tmp_path / ".alfred"
+    (root / "skills").mkdir(parents=True)
+    ws = root / "agents" / "alice"
+    ws.mkdir(parents=True)
+    prof = build_sandbox_profile(alfred_root=root, agent_workspace=ws)
+    assert _rp(root / "skills") in prof
+
+
+def test_build_wraps_cmd_with_sandbox_when_enabled_on_darwin(tmp_path, monkeypatch):
+    monkeypatch.setattr(_lmod, "_is_darwin", lambda: True)
+    spec = _sandbox_launcher(tmp_path, tmp_path / ".alfred").build("alice", system_prompt="x")
+
+    assert spec.cmd[0] == "sandbox-exec"
+    assert spec.cmd[1] == "-f"
+    assert spec.cmd[2] == str(spec.data_dir / SANDBOX_PROFILE_FILENAME)
+    assert (spec.data_dir / SANDBOX_PROFILE_FILENAME).exists()
+    # 原始 node serve 命令原样跟在后面。
+    assert spec.cmd[3] == "node"
+    assert "serve" in spec.cmd
+
+
+def test_build_no_sandbox_when_disabled_by_default(tmp_path):
+    # 灰度默认关:不传 sandbox_enabled → cmd 不被包裹。
+    spec = _launcher(tmp_path).build("alice", system_prompt="x")
+    assert spec.cmd[0] == "node"
+    assert "sandbox-exec" not in spec.cmd
+
+
+def test_build_skips_sandbox_on_non_darwin_with_warning(tmp_path, monkeypatch, caplog):
+    import logging
+    monkeypatch.setattr(_lmod, "_is_darwin", lambda: False)
+    with caplog.at_level(logging.WARNING, logger=_lmod.__name__):
+        spec = _sandbox_launcher(tmp_path, tmp_path / ".alfred").build("alice", system_prompt="x")
+    assert spec.cmd[0] == "node"
+    assert "sandbox-exec" not in spec.cmd
+    assert any("sandbox" in r.message.lower() for r in caplog.records)
