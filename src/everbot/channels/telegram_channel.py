@@ -696,13 +696,18 @@ class TelegramChannel:
                     last_update_time = current_time  # prevent immediate retry
 
         async def on_event(out: OutboundMessage) -> None:
-            nonlocal tool_call_count, accumulated_text
+            nonlocal tool_call_count, accumulated_text, streaming_message_id
             if out.msg_type == "delta":
                 chunks.append(out.content)
                 accumulated_text += out.content
                 await flush_streaming()
             elif out.msg_type == "round_reset":
-                # New agentic round — discard intermediate text
+                # New agentic round. #114:已展示给用户的实质内容(长报告)定稿为独立消息,
+                # 不再被后续轮的短摘要覆盖;未展示的工具前过渡碎语仍丢弃。
+                if await self._commit_round_on_reset(
+                    chat_id, streaming_message_id, accumulated_text
+                ):
+                    streaming_message_id = None  # 下一轮另起新消息
                 chunks.clear()
                 accumulated_text = ""
             elif out.msg_type == "skill":
@@ -965,6 +970,36 @@ class TelegramChannel:
                 ok_count += 1
             search_from = part_start + len(part)
         return ok_count, len(parts)
+
+    async def _commit_round_on_reset(
+        self, chat_id: str, streaming_message_id: Optional[int], accumulated_text: str
+    ) -> bool:
+        """#114:新一轮(round_reset)开始时,如何处置上一轮的流式文本。
+
+        若上一轮文本**已展示给用户**(``streaming_message_id`` 非空——意味它过了流式阈值、
+        真发出去过),它是**实质内容**(而非工具调用前的过渡碎语):把它**定稿为一条独立消息**
+        (去掉流式光标),返回 ``True``,让调用方重置流式状态、下一轮另起新消息。
+
+        超长报告(>4096)走 batch 模式、未实时展示(``streaming_message_id`` 为 None),
+        但它显然是实质内容 → 也定稿(作为新消息分条发送)。
+
+        否则(短且未展示)沿用旧语义:丢弃,返回 ``False`` —— 那是工具调用前的过渡碎语。
+
+        修复:长报告在第 1 轮产出、随后调工具进入第 2 轮,旧逻辑会清空累积文本 →
+        第 2 轮的短摘要把同一条消息覆盖,用户侧"报告消失"。现在第 1 轮的报告作为独立消息留存。
+        """
+        if not accumulated_text.strip():
+            return False
+        shown = streaming_message_id is not None
+        too_long_to_stream = len(accumulated_text) > TELEGRAM_MSG_LIMIT
+        if not (shown or too_long_to_stream):
+            return False  # 短且未展示 = 工具前过渡碎语 → 丢弃
+        final_text, final_entities = self._convert_markdown(accumulated_text)
+        if shown:
+            await self._finalize_streaming(chat_id, streaming_message_id, final_text, final_entities)
+        else:
+            await self._send_split_with_entities(chat_id, final_text, final_entities)
+        return True
 
     async def _finalize_streaming(
         self, chat_id: str, message_id: int, text: str, entities: Optional[list],
