@@ -228,6 +228,7 @@ If not, reply with `HEARTBEAT_OK`.
         self._pending_delivery_details: list[str] = []
         self._llm_unavailable_since: Optional[datetime] = None
         self._llm_unavailable_last_notified_at: Optional[datetime] = None
+        self._last_probe_at: Optional[datetime] = None
         if summary_max_chars is not None:
             self.SUMMARY_MAX_CHARS = max(1, int(summary_max_chars))
 
@@ -1051,8 +1052,30 @@ If not, reply with `HEARTBEAT_OK`.
         model = resolve_agent_model(self.agent_name)
         return _SkillLLMClient(model=model)
 
+    @property
+    def is_llm_unavailable(self) -> bool:
+        """True while the LLM is known-down (set by the probe-fail path).
+
+        The scheduler's inline runner reads this after a heartbeat turn to
+        decide whether to raise LLMUnavailableError and trigger backoff (#78).
+        """
+        return self._llm_unavailable_since is not None
+
     async def _probe_llm(self) -> bool:
         """Quick LLM connectivity check. Returns True if LLM is reachable."""
+        now = datetime.now()
+        # Cooldown (#78): while the LLM is known-down, don't re-probe on every
+        # 1s tick — that turns an outage into a per-second connection storm.
+        # Within the cooldown window since the last actual probe, short-circuit
+        # to "still unavailable" without touching the network.
+        last_probe_at = getattr(self, "_last_probe_at", None)
+        if (
+            getattr(self, "_llm_unavailable_since", None) is not None
+            and last_probe_at is not None
+            and (now - last_probe_at).total_seconds() < _probe_cooldown_s()
+        ):
+            return False
+        self._last_probe_at = now
         try:
             client = self._create_skill_llm_client()
             await asyncio.wait_for(
@@ -1670,6 +1693,9 @@ from openai import AsyncOpenAI
 # 可达 60-112s);probe 默认 30s(原 15s 假阴性致心跳误判"LLM 不可用"暂停)。均 env 可配。
 _DEFAULT_SKILL_LLM_TIMEOUT_S = 120.0
 _DEFAULT_PROBE_TIMEOUT_S = 30.0
+# #78:LLM 不可用期间 probe 冷却,默认 60s(env 可配),把断网期的连接尝试
+# 从每秒一次降到每分钟一次。
+_DEFAULT_PROBE_COOLDOWN_S = 60.0
 
 
 def _env_float(name: str, default: float) -> float:
@@ -1689,6 +1715,11 @@ def _skill_llm_timeout_s() -> float:
 
 def _probe_timeout_s() -> float:
     return _env_float("ALFRED_SKILL_LLM_PROBE_TIMEOUT", _DEFAULT_PROBE_TIMEOUT_S)
+
+
+def _probe_cooldown_s() -> float:
+    # #78: while LLM is known-down, skip network probes within this window.
+    return _env_float("ALFRED_SKILL_LLM_PROBE_COOLDOWN", _DEFAULT_PROBE_COOLDOWN_S)
 
 
 class _SkillLLMClient:

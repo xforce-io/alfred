@@ -30,6 +30,7 @@ from ..infra.process import (
 )
 from ..infra.logging_utils import configure_daemon_logging
 from ..core.runtime.scheduler import AgentSchedule, InspectorSchedule, Scheduler, SchedulerTask
+from ..core.jobs.llm_errors import LLMUnavailableError
 from ..channels.telegram_channel import TelegramChannel
 from ..core.models.constants import DAEMON_IDLE_SLEEP
 
@@ -132,6 +133,20 @@ class EverBotDaemon:
         if result == "HEARTBEAT_FAILED":
             raise RuntimeError("Heartbeat returned HEARTBEAT_FAILED")
 
+    async def _dispatch_inline(self, agent_name: str) -> None:
+        """Run one agent's due inline tasks; signal LLM-down to the scheduler.
+
+        Raises LLMUnavailableError when the runner's probe found the LLM
+        unreachable, so the scheduler backs off the inline path instead of
+        spinning every 1s tick (#78).
+        """
+        runner = self.heartbeat_runners.get(agent_name)
+        if runner is None:
+            return
+        await self._run_runner_with_options(runner, include_inline=True, include_isolated=False)
+        if getattr(runner, "is_llm_unavailable", False):
+            raise LLMUnavailableError(f"LLM unavailable for {agent_name}")
+
     # -- Cron task callbacks ------------------------------------------------
 
     def _build_scheduler(self) -> Scheduler:
@@ -175,10 +190,7 @@ class EverBotDaemon:
             return bool(await claim(task_id)) if task_id else False
 
         async def _run_inline(agent_name: str, _tasks: list[SchedulerTask], _ts: datetime) -> None:
-            runner = self.heartbeat_runners.get(agent_name)
-            if runner is None:
-                return
-            await self._run_runner_with_options(runner, include_inline=True, include_isolated=False)
+            await self._dispatch_inline(agent_name)
 
         async def _run_isolated(task: SchedulerTask, ts: datetime) -> None:
             target = isolated_lookup.get(task.id)
