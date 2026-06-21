@@ -85,17 +85,28 @@ def collect_doctor_report(
     node_bin 由 WARN 升级为 ERROR)—— #91 件3。
     """
     # 延迟 import 破循环:milkie_preflight 复用本模块的 DoctorItem。
-    from .milkie_preflight import check_node_bin
+    from .milkie_preflight import check_node_bin, probe_native_deps
 
     user_data = UserDataManager(alfred_home=alfred_home)
     items: List[DoctorItem] = []
 
     # milkie node_bin 是否显式钉死(#91 件3):非绝对路径走 PATH → ABI 漂移风险。
     cfg = parse_yaml_file(user_data.config_path) if user_data.config_path.exists() else {}
-    node_bin = (
-        (((cfg.get("everbot") or {}).get("milkie") or {}).get("node_bin")) or "node"
-    )
+    milkie_cfg = ((cfg.get("everbot") or {}).get("milkie") or {})
+    node_bin = milkie_cfg.get("node_bin") or "node"
     items.append(check_node_bin(node_bin, service_mode=service_mode))
+
+    # milkie native deps 实测探针(#91 件2):用同款 node_bin 跑 require('better-sqlite3'),
+    # 覆盖 node_modules 缺失 / ABI 不匹配 / 动态库加载失败。milkie 未安装 → 返回 None 跳过。
+    dist = milkie_cfg.get("dist_path")
+    milkie_root = (
+        Path(dist).expanduser().parents[2]  # …/milkie/dist/cli/index.js → …/milkie
+        if dist
+        else (project_root.parent / "milkie")
+    )
+    probe_item = probe_native_deps(node_bin, milkie_root)
+    if probe_item is not None:
+        items.append(probe_item)
 
     # EverBot config
     if user_data.config_path.exists():

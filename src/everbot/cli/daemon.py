@@ -663,6 +663,20 @@ class EverBotDaemon:
 
     # -- Lifecycle ----------------------------------------------------------
 
+    def _run_milkie_boot_preflight(self) -> None:
+        """#91 PR4:启动期全局静态 preflight(node_bin + native deps)。
+
+        native deps 真失败(所有 sidecar 必死)→ raise 拒绝启动(fail-fast,见上方
+        [preflight] 诊断);node_bin 未钉死走 WARN 不阻塞。#92 告警通道就绪后,这里可
+        升级为"单 agent 降级 + 带外告警"而非整体 fail-fast。"""
+        from .milkie_preflight import enforce_boot_preflight
+
+        project_root = Path(
+            os.environ.get("ALFRED_PROJECT_ROOT")
+            or Path(__file__).resolve().parents[3]
+        )
+        enforce_boot_preflight(self.config, project_root, logger)
+
     async def start(self):
         """启动守护进程"""
         # Singleton guard: acquire exclusive file lock before anything else.
@@ -679,6 +693,7 @@ class EverBotDaemon:
 
         try:
             await self._init_components()
+            self._run_milkie_boot_preflight()
             self._validate_env_refs()
             self._enable_fault_handler()
             self._report_previous_unexpected_exit()
