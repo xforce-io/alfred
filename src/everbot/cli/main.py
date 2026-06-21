@@ -161,8 +161,31 @@ def cmd_config(args):
         config = get_default_config()
         save_config(config, args.config)
         print(f"配置已初始化: {args.config or '~/.alfred/config.yaml'}")
+    elif getattr(args, "impact", False):
+        _print_config_impact(args.config)
     else:
-        print("使用 --show 查看配置，--init 初始化配置")
+        print("使用 --show 查看配置，--init 初始化配置，--impact 查看模型变更爆炸半径")
+
+
+def _print_config_impact(config_path=None) -> None:
+    """打印 agent→llm key→(cloud, model_name) 映射 + 共享标记(#94 件A)。"""
+    from .config_impact import build_config_impact
+    from ..core.agent.agent_config import resolve_agent_model
+    from ..core.agent.provider.model_config import load_model_config
+
+    config = get_config(config_path)
+    agents = list(((config.get("everbot") or {}).get("agents") or {}).keys())
+    if not agents:
+        print("配置中无 agent。")
+        return
+    mc = load_model_config()
+    agent_keys = {a: (resolve_agent_model(a) or "?") for a in agents}
+    rows = build_config_impact(agent_keys, mc.llms)
+
+    print("配置变更爆炸半径(agent → llm key → cloud/model):")
+    for r in rows:
+        shared = f"  ⚠️ 共享(改 model_name 连带影响: {', '.join(r['shared_with'])})" if r["shared_with"] else ""
+        print(f"  - {r['agent']}: {r['key']} → {r['cloud']}/{r['model_name']}{shared}")
 
 
 def cmd_stop(args):
@@ -313,6 +336,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser_config = subparsers.add_parser("config", help="配置管理")
     parser_config.add_argument("--show", action="store_true", help="显示当前配置")
     parser_config.add_argument("--init", action="store_true", help="初始化默认配置")
+    parser_config.add_argument("--impact", action="store_true", help="查看模型变更爆炸半径(agent→模型,标共享 key)")
     parser_config.set_defaults(func=cmd_config)
 
     # heartbeat 命令
