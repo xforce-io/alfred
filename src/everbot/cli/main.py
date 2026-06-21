@@ -81,6 +81,9 @@ def cmd_status(args):
     if agents:
         print(f"Agents: {', '.join(agents)}")
 
+    # #93 件B:每 agent 生效模型 vs 配置目标(stale = 改了配置但未重启生效)。
+    _print_agent_model_states()
+
     hb = (snapshot.get("heartbeats", {}) if isinstance(snapshot, dict) else {}) or {}
     if hb:
         print("最近心跳:")
@@ -89,6 +92,42 @@ def cmd_status(args):
             preview = (state or {}).get("result_preview", "")
             if ts:
                 print(f"  - {agent_name}: {ts} {preview[:80]}")
+
+
+def _print_agent_model_states() -> None:
+    """打印每个配置 agent 的生效模型 / 配置目标 / stale 标记(#93 件B)。"""
+    try:
+        from .agent_model_state import collect_agent_model_states
+        from ..core.agent.agent_config import resolve_agent_model
+        from ..core.agent.provider.model_config import load_model_config
+
+        config = get_config()
+        agents = list(((config.get("everbot") or {}).get("agents") or {}).keys())
+        if not agents:
+            return
+        milkie_root = Path(
+            ((config.get("everbot") or {}).get("milkie") or {}).get("data_dir_root")
+            or (get_user_data_manager().alfred_home / "milkie")
+        ).expanduser()
+        mc = load_model_config()
+
+        def _configured(agent_name: str):
+            key = resolve_agent_model(agent_name)
+            return (mc.llms.get(key) or {}).get("model_name") if key else None
+
+        states = collect_agent_model_states(
+            agents, milkie_root=milkie_root, configured_resolver=_configured
+        )
+    except Exception as e:  # status 是只读自检,绝不因此崩
+        logging.getLogger(__name__).debug("agent model state collect failed: %s", e)
+        return
+
+    print("模型(生效 / 配置):")
+    for s in states:
+        eff = s["effective"] or "—(sidecar 未拉起)"
+        cfg = s["configured"] or "?"
+        flag = "  ⚠️ STALE 待重启生效" if s["stale"] else ""
+        print(f"  - {s['agent']}: {eff} / {cfg}{flag}")
 
 
 async def cmd_start_async(args):

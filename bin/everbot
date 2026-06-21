@@ -390,7 +390,23 @@ case "${cmd}" in
           _svc_target="gui/$(id -u)/${_svc_label}"
           if launchctl print "${_svc_target}" >/dev/null 2>&1; then
             echo "Restarting via launchctl (${_svc_label})..."
-            exec launchctl kickstart -k "${_svc_target}"
+            # #93 件A:核验重启确实生效 —— 记旧 pid → kickstart → 轮询新 pid 变更。
+            # 不再 exec(否则无法回报);pid 未变 = 重启没生效,非零退出报错。
+            _svc_pid() { launchctl print "${_svc_target}" 2>/dev/null | awk -F'= *' '/^[[:space:]]*pid =/{gsub(/[^0-9]/,"",$2); print $2; exit}'; }
+            _old_pid="$(_svc_pid)"
+            launchctl kickstart -k "${_svc_target}"
+            _new_pid=""
+            for _i in $(seq 1 30); do
+              _new_pid="$(_svc_pid)"
+              if [[ -n "${_new_pid}" && "${_new_pid}" != "${_old_pid}" ]]; then break; fi
+              sleep 0.5
+            done
+            if [[ -n "${_new_pid}" && "${_new_pid}" != "${_old_pid}" ]]; then
+              echo "restart OK: pid ${_old_pid:-none} → ${_new_pid}"
+              exit 0
+            fi
+            echo "restart FAILED: daemon pid 未变更 (still ${_old_pid:-none}) —— 重启可能未生效" >&2
+            exit 1
           fi
           ;;
         Linux)
