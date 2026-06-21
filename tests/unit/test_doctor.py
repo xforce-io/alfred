@@ -1,10 +1,39 @@
 """Doctor report tests."""
 
 from pathlib import Path
+import sys
 import tempfile
 
 from src.everbot.cli.doctor import collect_doctor_report
 from src.everbot.infra.user_data import UserDataManager
+
+
+def test_doctor_includes_node_bin_check_ok_for_absolute(tmp_path):
+    """#91 件3:doctor 报告 milkie node_bin;绝对可执行路径 → OK。"""
+    home = tmp_path / ".alfred"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        f"everbot:\n  milkie:\n    node_bin: {sys.executable}\n", encoding="utf-8"
+    )
+    items = collect_doctor_report(project_root=tmp_path, alfred_home=home)
+    node_items = [i for i in items if i.title == "milkie node_bin"]
+    assert len(node_items) == 1
+    assert node_items[0].level == "OK"
+    assert sys.executable in node_items[0].details
+
+
+def test_doctor_service_mode_errors_on_unpinned_node_bin(tmp_path):
+    """#91 件3:service 模式下未钉死(裸 node)→ ERROR。"""
+    home = tmp_path / ".alfred"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        "everbot:\n  milkie:\n    node_bin: node\n", encoding="utf-8"
+    )
+    items = collect_doctor_report(
+        project_root=tmp_path, alfred_home=home, service_mode=True
+    )
+    node_items = [i for i in items if i.title == "milkie node_bin"]
+    assert node_items and node_items[0].level == "ERROR"
 
 
 def test_doctor_reports_missing_config_and_agents_dir():

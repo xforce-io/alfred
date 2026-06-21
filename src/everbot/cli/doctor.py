@@ -77,10 +77,25 @@ def collect_doctor_report(
     *,
     project_root: Path,
     alfred_home: Optional[Path] = None,
+    service_mode: bool = False,
 ) -> List[DoctorItem]:
-    """Collect doctor report items."""
+    """Collect doctor report items.
+
+    service_mode=True(daemon/service boot)对部分检查更严格(如未钉死的
+    node_bin 由 WARN 升级为 ERROR)—— #91 件3。
+    """
+    # 延迟 import 破循环:milkie_preflight 复用本模块的 DoctorItem。
+    from .milkie_preflight import check_node_bin
+
     user_data = UserDataManager(alfred_home=alfred_home)
     items: List[DoctorItem] = []
+
+    # milkie node_bin 是否显式钉死(#91 件3):非绝对路径走 PATH → ABI 漂移风险。
+    cfg = parse_yaml_file(user_data.config_path) if user_data.config_path.exists() else {}
+    node_bin = (
+        (((cfg.get("everbot") or {}).get("milkie") or {}).get("node_bin")) or "node"
+    )
+    items.append(check_node_bin(node_bin, service_mode=service_mode))
 
     # EverBot config
     if user_data.config_path.exists():
