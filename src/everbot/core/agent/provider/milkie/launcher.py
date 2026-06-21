@@ -121,6 +121,7 @@ class SidecarLauncher:
         skills: Optional[List[Dict[str, Any]]] = None,
         default_model: str | None = None,
         agent_workspace: Optional[Path] = None,
+        sandbox_enabled: Optional[bool] = None,
     ) -> LaunchSpec:
         # default_model:per-agent 模型覆盖(everbot.agents.<name>.model)。缺省回退全局默认。
         # 不传则**所有 agent 用同一全局模型**——会无视 per-agent 配置(实测踩到:demo_agent
@@ -163,7 +164,9 @@ class SidecarLauncher:
                 encoding="utf-8",
             )
             env[SKILL_MANIFEST_ENV] = str(manifest_path)
-        cmd = self._maybe_sandbox(cmd, agent_name, data_dir, agent_workspace)
+        # per-agent override(#112):build 传 sandbox_enabled 则覆盖构造默认;None → 沿用默认。
+        enabled = self._sandbox_enabled if sandbox_enabled is None else sandbox_enabled
+        cmd = self._maybe_sandbox(cmd, agent_name, data_dir, agent_workspace, enabled)
         return LaunchSpec(cmd=cmd, env=env, data_dir=data_dir, agent_md=agent_md)
 
     def _maybe_sandbox(
@@ -172,13 +175,15 @@ class SidecarLauncher:
         agent_name: str,
         data_dir: Path,
         agent_workspace: Optional[Path],
+        enabled: bool,
     ) -> List[str]:
         """E2b(#108):启用且 darwin 时,写 per-agent profile 并用 sandbox-exec 包裹 cmd。
 
         非 darwin → 跳过 + WARNING(暂不支持,Linux 留后续 bwrap/namespaces);未配 alfred_root
         → 无从定位受保护路径,跳过 + WARNING。灰度默认关(``sandbox_enabled=False``)。
+        ``enabled`` 由调用方解析(per-agent override > 构造默认),见 :meth:`build`。
         """
-        if not self._sandbox_enabled:
+        if not enabled:
             return cmd
         if not _is_darwin():
             logger.warning(

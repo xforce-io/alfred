@@ -226,7 +226,7 @@ def _rp(p):
     return os.path.realpath(str(p))
 
 
-def _sandbox_launcher(tmp_path, alfred_root):
+def _sandbox_launcher(tmp_path, alfred_root, enabled=True):
     return SidecarLauncher(
         dist_path=tmp_path / "milkie" / "dist" / "cli" / "index.js",
         data_dir_root=tmp_path / "data",
@@ -236,7 +236,7 @@ def _sandbox_launcher(tmp_path, alfred_root):
         clouds={"oa": {"api": "https://api.oa/v1", "api_key": "sk-real"}},
         default_model="main",
         fast_model="fast",
-        sandbox_enabled=True,
+        sandbox_enabled=enabled,
         alfred_root=alfred_root,
     )
 
@@ -305,3 +305,28 @@ def test_build_skips_sandbox_on_non_darwin_with_warning(tmp_path, monkeypatch, c
     assert spec.cmd[0] == "node"
     assert "sandbox-exec" not in spec.cmd
     assert any("sandbox" in r.message.lower() for r in caplog.records)
+
+
+# ── per-agent override(#112):build() 接 per-call sandbox_enabled,覆盖构造默认 ──
+
+
+def test_build_per_call_override_enables_when_global_off(tmp_path, monkeypatch):
+    monkeypatch.setattr(_lmod, "_is_darwin", lambda: True)
+    launcher = _sandbox_launcher(tmp_path, tmp_path / ".alfred", enabled=False)  # 全局关
+    spec = launcher.build("alice", system_prompt="x", sandbox_enabled=True)       # 覆盖开
+    assert spec.cmd[0] == "sandbox-exec"
+
+
+def test_build_per_call_override_disables_when_global_on(tmp_path, monkeypatch):
+    monkeypatch.setattr(_lmod, "_is_darwin", lambda: True)
+    launcher = _sandbox_launcher(tmp_path, tmp_path / ".alfred", enabled=True)    # 全局开
+    spec = launcher.build("alice", system_prompt="x", sandbox_enabled=False)      # 覆盖关
+    assert spec.cmd[0] == "node"
+    assert "sandbox-exec" not in spec.cmd
+
+
+def test_build_sandbox_follows_constructor_when_no_override(tmp_path, monkeypatch):
+    monkeypatch.setattr(_lmod, "_is_darwin", lambda: True)
+    # 不传 sandbox_enabled(None)→ 沿用构造默认(True)。
+    spec = _sandbox_launcher(tmp_path, tmp_path / ".alfred", enabled=True).build("alice", system_prompt="x")
+    assert spec.cmd[0] == "sandbox-exec"

@@ -171,6 +171,25 @@ def _skills_fingerprint(agent_name: str) -> Optional[str]:
     return hashlib.sha256(canon.encode("utf-8")).hexdigest()
 
 
+def _agent_sandbox_enabled(agent_name: str) -> bool:
+    """解析 sidecar 沙箱开关(#112):per-agent 覆盖 > 全局 > False。
+
+    ``everbot.agents.<name>.security.sidecar_sandbox`` > ``everbot.security.sidecar_sandbox``
+    > ``False``。读失败按关处理(沙箱是加固项,解析异常不应阻断 spawn)。
+    """
+    try:
+        from .....infra.config import get_config
+
+        everbot_cfg = (get_config() or {}).get("everbot", {}) or {}
+        global_val = bool((everbot_cfg.get("security", {}) or {}).get("sidecar_sandbox", False))
+        agent_sec = (
+            ((everbot_cfg.get("agents", {}) or {}).get(agent_name, {}) or {}).get("security", {}) or {}
+        )
+        return bool(agent_sec.get("sidecar_sandbox", global_val))
+    except Exception:
+        return False
+
+
 def _agent_skill_filter(agent_name: str):
     """读 everbot.agents.<name>.skills.{include,exclude} → (include, exclude)。缺省 (None, None)。"""
     try:
@@ -266,18 +285,16 @@ class MilkieProvider:
         from ..model_config import load_model_config
         mc = load_model_config()
 
-        # E2b(#108):sidecar OS 沙箱开关,默认关(灰度)。开后 launcher 给 milkie serve
-        # 套 sandbox-exec,物理禁止子进程写共享路径(~/.alfred/skills·config·别的 agent)。
-        sandbox_enabled = bool(
-            ((cfg.get("everbot", {}) or {}).get("security", {}) or {}).get("sidecar_sandbox", False)
-        )
+        # E2b(#108):sidecar OS 沙箱,开后 launcher 给 milkie serve 套 sandbox-exec,物理禁止
+        # 子进程写共享路径(~/.alfred/skills·config·别的 agent)。开关 per-agent 解析(#112,
+        # 见 _agent_sandbox_enabled),故 launcher 构造不固化全局值 —— 每次 build 按 agent 传入。
         alfred_root = get_user_data_manager().alfred_home
 
         launcher = SidecarLauncher(
             dist_path=dist_path, data_dir_root=data_dir_root, node_bin=node_bin,
             llms=mc.llms, clouds=mc.clouds,
             default_model=mc.default_model, fast_model=mc.fast_model,
-            sandbox_enabled=sandbox_enabled, alfred_root=alfred_root,
+            alfred_root=alfred_root,
         )
         ready_timeout = float(milkie_cfg.get("ready_timeout", 20.0))
 
@@ -300,6 +317,7 @@ class MilkieProvider:
                 skills=skills,
                 default_model=per_agent_model,
                 agent_workspace=_resolve_agent_workspace(agent_name),
+                sandbox_enabled=_agent_sandbox_enabled(agent_name),
             )
             return spec.cmd, spec.env
 
