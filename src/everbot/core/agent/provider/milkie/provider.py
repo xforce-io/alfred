@@ -266,10 +266,18 @@ class MilkieProvider:
         from ..model_config import load_model_config
         mc = load_model_config()
 
+        # E2b(#108):sidecar OS 沙箱开关,默认关(灰度)。开后 launcher 给 milkie serve
+        # 套 sandbox-exec,物理禁止子进程写共享路径(~/.alfred/skills·config·别的 agent)。
+        sandbox_enabled = bool(
+            ((cfg.get("everbot", {}) or {}).get("security", {}) or {}).get("sidecar_sandbox", False)
+        )
+        alfred_root = get_user_data_manager().alfred_home
+
         launcher = SidecarLauncher(
             dist_path=dist_path, data_dir_root=data_dir_root, node_bin=node_bin,
             llms=mc.llms, clouds=mc.clouds,
             default_model=mc.default_model, fast_model=mc.fast_model,
+            sandbox_enabled=sandbox_enabled, alfred_root=alfred_root,
         )
         ready_timeout = float(milkie_cfg.get("ready_timeout", 20.0))
 
@@ -291,6 +299,7 @@ class MilkieProvider:
                 system_prompt=system_prompt,
                 skills=skills,
                 default_model=per_agent_model,
+                agent_workspace=_resolve_agent_workspace(agent_name),
             )
             return spec.cmd, spec.env
 

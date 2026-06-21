@@ -6,18 +6,59 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .agent_spec import build_milkie_agent_md, build_milkie_model_tiers
 
+logger = logging.getLogger(__name__)
+
 
 # skill_list manifest(milkie #139):写在 milkie data-dir,经 MILKIE_SKILL_MANIFEST
 # env 告知 serve;milkie 默认 handler 读它返回真实技能列表(去 stub)。
 SKILL_MANIFEST_FILENAME = "skill-manifest.json"
 SKILL_MANIFEST_ENV = "MILKIE_SKILL_MANIFEST"
+
+# E2b(#108):sidecar OS 沙箱 —— launcher 给 milkie serve 套 macOS sandbox-exec,
+# 物理禁止子进程(含 run_command fork 的 shell)写共享/系统路径,半径锁在自身 workspace。
+SANDBOX_PROFILE_FILENAME = "sandbox.sb"
+
+
+def _is_darwin() -> bool:
+    """是否 macOS —— sandbox-exec 仅此可用(测试 seam,可 monkeypatch)。"""
+    return sys.platform == "darwin"
+
+
+def build_sandbox_profile(*, alfred_root: Path, agent_workspace: Path) -> str:
+    """生成 macOS seatbelt profile:默认放行 + 黑名单禁写共享路径,放行自身 workspace。
+
+    爆炸半径控制(#103 E2):
+    - 禁写 ``<root>/skills``(全局 skill,半径=所有 agent);
+    - 禁写 ``<root>/agents`` 整树(隔离其他 agent),再**放行自身 workspace**(在该树下);
+    - 禁写 ``<root>/config.yaml``。
+
+    **必须 realpath**:seatbelt ``subpath`` 按真实路径匹配,``/tmp``→``/private/tmp`` 之类
+    软链会让规则静默失效(spike 实测踩到)。``allow`` 自身 workspace 排在 ``deny`` agents
+    之后 —— seatbelt last-match-wins,后者覆盖前者。
+    """
+    rp = lambda p: os.path.realpath(str(p))
+    skills = rp(Path(alfred_root) / "skills")
+    agents = rp(Path(alfred_root) / "agents")
+    config = rp(Path(alfred_root) / "config.yaml")
+    ws = rp(agent_workspace)
+    return "\n".join([
+        "(version 1)",
+        "(allow default)",
+        f'(deny file-write* (subpath "{skills}"))',
+        f'(deny file-write* (subpath "{agents}"))',
+        f'(allow file-write* (subpath "{ws}"))',
+        f'(deny file-write* (literal "{config}"))',
+        "",
+    ])
 
 
 def _render_skill_manifest(skills: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -58,6 +99,8 @@ class SidecarLauncher:
         clouds: Dict[str, Any],
         default_model: str,
         fast_model: str,
+        sandbox_enabled: bool = False,
+        alfred_root: Optional[Path] = None,
     ) -> None:
         self._dist_path = Path(dist_path)
         self._data_dir_root = Path(data_dir_root)
@@ -66,6 +109,9 @@ class SidecarLauncher:
         self._clouds = clouds
         self._default_model = default_model
         self._fast_model = fast_model
+        # E2b(#108):默认关(灰度),由 everbot.security.sidecar_sandbox 开。
+        self._sandbox_enabled = sandbox_enabled
+        self._alfred_root = Path(alfred_root) if alfred_root is not None else None
 
     def build(
         self,
@@ -74,6 +120,7 @@ class SidecarLauncher:
         system_prompt: str,
         skills: Optional[List[Dict[str, Any]]] = None,
         default_model: str | None = None,
+        agent_workspace: Optional[Path] = None,
     ) -> LaunchSpec:
         # default_model:per-agent 模型覆盖(everbot.agents.<name>.model)。缺省回退全局默认。
         # 不传则**所有 agent 用同一全局模型**——会无视 per-agent 配置(实测踩到:demo_agent
@@ -116,4 +163,37 @@ class SidecarLauncher:
                 encoding="utf-8",
             )
             env[SKILL_MANIFEST_ENV] = str(manifest_path)
+        cmd = self._maybe_sandbox(cmd, agent_name, data_dir, agent_workspace)
         return LaunchSpec(cmd=cmd, env=env, data_dir=data_dir, agent_md=agent_md)
+
+    def _maybe_sandbox(
+        self,
+        cmd: List[str],
+        agent_name: str,
+        data_dir: Path,
+        agent_workspace: Optional[Path],
+    ) -> List[str]:
+        """E2b(#108):启用且 darwin 时,写 per-agent profile 并用 sandbox-exec 包裹 cmd。
+
+        非 darwin → 跳过 + WARNING(暂不支持,Linux 留后续 bwrap/namespaces);未配 alfred_root
+        → 无从定位受保护路径,跳过 + WARNING。灰度默认关(``sandbox_enabled=False``)。
+        """
+        if not self._sandbox_enabled:
+            return cmd
+        if not _is_darwin():
+            logger.warning(
+                "sidecar_sandbox 已启用但当前平台非 macOS(%s)——跳过 sandbox-exec 包裹"
+                "(暂不支持,Linux 待 bwrap/namespaces)。", sys.platform,
+            )
+            return cmd
+        if self._alfred_root is None:
+            logger.warning("sidecar_sandbox 已启用但未配 alfred_root —— 无法定位受保护路径,跳过。")
+            return cmd
+        # 自身 workspace:缺省按约定 <root>/agents/<name>(放行写,隔离其他 agent)。
+        ws = agent_workspace if agent_workspace is not None else self._alfred_root / "agents" / agent_name
+        profile_path = data_dir / SANDBOX_PROFILE_FILENAME
+        profile_path.write_text(
+            build_sandbox_profile(alfred_root=self._alfred_root, agent_workspace=ws),
+            encoding="utf-8",
+        )
+        return ["sandbox-exec", "-f", str(profile_path), *cmd]
