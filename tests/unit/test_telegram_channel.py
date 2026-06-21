@@ -1929,3 +1929,51 @@ class TestConvertMarkdown:
         assert "# " not in plain
         assert "Heading" in plain
         assert entities is None
+
+
+# ---------------------------------------------------------------------------
+# #114: round_reset 不应丢弃已展示的实质内容(长报告被末尾摘要覆盖)
+# ---------------------------------------------------------------------------
+class TestCommitRoundOnReset:
+    @pytest.fixture
+    def channel(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._finalize_streaming = AsyncMock(return_value=True)
+        return ch
+
+    async def test_finalizes_shown_substantive_text(self, channel):
+        # 上一轮文本已展示(streaming_message_id 非空)→ 定稿为独立消息,返回 True。
+        committed = await channel._commit_round_on_reset("chat1", 42, "# 每日报告\n正文很长很长")
+        assert committed is True
+        channel._finalize_streaming.assert_awaited_once()
+        a = channel._finalize_streaming.await_args.args
+        assert a[0] == "chat1" and a[1] == 42
+        assert "正文很长很长" in a[2]
+
+    async def test_discards_when_not_shown(self, channel):
+        # 未展示(streaming_message_id None = 工具前过渡碎语)→ 丢弃,返回 False,不定稿。
+        committed = await channel._commit_round_on_reset("chat1", None, "让我看看新闻")
+        assert committed is False
+        channel._finalize_streaming.assert_not_awaited()
+
+    async def test_discards_blank_text(self, channel):
+        committed = await channel._commit_round_on_reset("chat1", 42, "   ")
+        assert committed is False
+        channel._finalize_streaming.assert_not_awaited()
+
+
+class TestCommitRoundOnResetTooLong:
+    @pytest.fixture
+    def channel(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._finalize_streaming = AsyncMock(return_value=True)
+        ch._send_split_with_entities = AsyncMock(return_value=(1, 1))
+        return ch
+
+    async def test_too_long_unshown_report_sent_as_new_messages(self, channel):
+        # >4096 报告走 batch、未实时展示(message_id None),仍应定稿(分条发送),不丢弃。
+        long_report = "# 报告\n" + ("正" * 5000)
+        committed = await channel._commit_round_on_reset("chat1", None, long_report)
+        assert committed is True
+        channel._send_split_with_entities.assert_awaited_once()
+        channel._finalize_streaming.assert_not_awaited()
