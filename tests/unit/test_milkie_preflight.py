@@ -124,3 +124,108 @@ def test_probe_runner_exception_is_error(monkeypatch, tmp_path):
     item = probe_native_deps("/opt/homebrew/bin/node", tmp_path)
     assert item.level == "ERROR"
     assert "node not found" in item.details
+
+
+# --- #91 PR4:daemon boot preflight(解析 + 决策 + fail-fast)--------------------
+
+from pathlib import Path as _Path  # noqa: E402
+
+from src.everbot.cli.milkie_preflight import (  # noqa: E402
+    resolve_node_bin_and_milkie_root,
+    run_boot_preflight,
+    enforce_boot_preflight,
+)
+
+
+def test_resolve_defaults_to_node_and_sibling_milkie(tmp_path):
+    node_bin, milkie_root = resolve_node_bin_and_milkie_root({}, tmp_path / "alfred")
+    assert node_bin == "node"
+    assert milkie_root == (tmp_path / "milkie")  # project_root.parent / milkie
+
+
+def test_resolve_reads_config_node_bin_and_dist_path():
+    cfg = {
+        "everbot": {
+            "milkie": {
+                "node_bin": "/opt/homebrew/bin/node",
+                "dist_path": "/x/milkie/dist/cli/index.js",
+            }
+        }
+    }
+    node_bin, milkie_root = resolve_node_bin_and_milkie_root(cfg, _Path("/x/alfred"))
+    assert node_bin == "/opt/homebrew/bin/node"
+    assert milkie_root == _Path("/x/milkie")
+
+
+def test_boot_preflight_fatal_on_native_deps_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "src.everbot.cli.milkie_preflight.probe_native_deps",
+        lambda nb, mr: DoctorItem(level="ERROR", title="milkie native deps", details="ABI"),
+    )
+    findings, fatal = run_boot_preflight("/opt/homebrew/bin/node", tmp_path)
+    assert fatal is True
+
+
+def test_boot_preflight_not_fatal_when_unpinned_but_deps_ok(monkeypatch, tmp_path):
+    # node_bin 裸名(WARN)但 deps 能加载 → 不致命(当前 node 可用,只是没钉死)。
+    monkeypatch.setattr(
+        "src.everbot.cli.milkie_preflight.shutil.which", lambda n: "/usr/bin/node"
+    )
+    monkeypatch.setattr(
+        "src.everbot.cli.milkie_preflight.probe_native_deps",
+        lambda nb, mr: DoctorItem(level="OK", title="milkie native deps", details="ok"),
+    )
+    findings, fatal = run_boot_preflight("node", tmp_path)
+    assert fatal is False
+    assert any(f.title == "milkie node_bin" and f.level == "WARN" for f in findings)
+
+
+def test_boot_preflight_not_fatal_when_milkie_absent(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "src.everbot.cli.milkie_preflight.probe_native_deps", lambda nb, mr: None
+    )
+    findings, fatal = run_boot_preflight("/opt/homebrew/bin/node", tmp_path)
+    assert fatal is False
+
+
+class _FakeLog:
+    def __init__(self):
+        self.calls = []
+
+    def error(self, *a):
+        self.calls.append(("error", a))
+
+    def warning(self, *a):
+        self.calls.append(("warning", a))
+
+    def info(self, *a):
+        self.calls.append(("info", a))
+
+
+def test_enforce_boot_preflight_raises_on_fatal(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "src.everbot.cli.milkie_preflight.run_boot_preflight",
+        lambda nb, mr: (
+            [DoctorItem(level="ERROR", title="milkie native deps", details="ABI", hint="rebuild")],
+            True,
+        ),
+    )
+    log = _FakeLog()
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError):
+        enforce_boot_preflight({}, tmp_path / "alfred", log)
+    # 致命诊断必须被 error 出来
+    assert any(lvl == "error" for lvl, _ in log.calls)
+
+
+def test_enforce_boot_preflight_returns_when_not_fatal(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "src.everbot.cli.milkie_preflight.run_boot_preflight",
+        lambda nb, mr: (
+            [DoctorItem(level="WARN", title="milkie node_bin", details="unpinned", hint="pin it")],
+            False,
+        ),
+    )
+    log = _FakeLog()
+    enforce_boot_preflight({}, tmp_path / "alfred", log)  # must NOT raise
+    assert any(lvl == "warning" for lvl, _ in log.calls)

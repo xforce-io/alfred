@@ -178,3 +178,52 @@ def probe_native_deps(node_bin: str, milkie_root) -> Optional[DoctorItem]:
         details=_tail(blob) or f"探针非零退出(exit {rc}),无 stderr 输出。",
         hint=f"手动复现:(cd {root} && {node_bin} -e \"require('better-sqlite3')\")",
     )
+
+
+# --- daemon boot 接入(#91 PR4)----------------------------------------------
+#
+# boot 只做**全局静态 preflight**(node_bin + native deps),不在 boot 全量真 spawn
+# 各 agent sidecar(那会拖慢启动、写 agent.md/data-dir)。fail-fast 策略:仅当 native
+# deps 真失败(deps 加载不了 → 所有 sidecar 必死)才拒绝启动;node_bin 未钉死是
+# advisory(WARN),deps 能加载就说明当前 node 可用,不阻塞 boot。
+
+
+def resolve_node_bin_and_milkie_root(config: dict, project_root) -> Tuple[str, Path]:
+    """从 everbot.milkie 配置解析 (node_bin, milkie 包根) —— 与 provider 装配同源。"""
+    milkie_cfg = ((config.get("everbot") or {}).get("milkie") or {})
+    node_bin = milkie_cfg.get("node_bin") or "node"
+    dist = milkie_cfg.get("dist_path")
+    milkie_root = (
+        Path(dist).expanduser().parents[2]  # …/milkie/dist/cli/index.js → …/milkie
+        if dist
+        else (Path(project_root).parent / "milkie")
+    )
+    return node_bin, milkie_root
+
+
+def run_boot_preflight(node_bin: str, milkie_root) -> Tuple[List[DoctorItem], bool]:
+    """跑全局静态 preflight,返回 (findings, fatal)。
+
+    fatal 仅由 native deps 真失败决定;node_bin 未钉死走 WARN(不致命)。
+    """
+    findings: List[DoctorItem] = [check_node_bin(node_bin, service_mode=False)]
+    probe = probe_native_deps(node_bin, milkie_root)
+    if probe is not None:
+        findings.append(probe)
+    fatal = any(f.title == _PROBE_TITLE and f.level == "ERROR" for f in findings)
+    return findings, fatal
+
+
+def enforce_boot_preflight(config: dict, project_root, log) -> None:
+    """daemon boot 调用:跑 preflight、按级别打日志,native deps 致命则 raise 拒绝启动。"""
+    node_bin, milkie_root = resolve_node_bin_and_milkie_root(config, project_root)
+    findings, fatal = run_boot_preflight(node_bin, milkie_root)
+    for f in findings:
+        emit = {"ERROR": log.error, "WARN": log.warning}.get(f.level, log.info)
+        emit("[preflight] %s: %s", f.title, f.details)
+        if f.hint and f.level != "OK":
+            emit("[preflight]   修复: %s", f.hint)
+    if fatal:
+        raise RuntimeError(
+            "milkie native deps preflight 失败,拒绝启动(见上方 [preflight] 诊断)"
+        )
