@@ -9,7 +9,11 @@ everbot:
   # milkie:                 # provider=milkie（或任一 agent provider=milkie）时生效：
   #   dist_path: ~/dev/github/milkie/dist/cli/index.js  # milkie serve CLI 入口；默认 ../milkie/dist/cli/index.js（相对 alfred 仓库）
   #   data_dir_root: ~/.alfred/milkie  # 每个 agent 的 milkie 会话/状态持久化根目录
-  #   node_bin: node        # 启动 milkie serve 的 node 可执行（默认走 PATH 的 node）
+  #   node_bin: /opt/homebrew/bin/node  # 启动 milkie serve 的 node 可执行。
+  #                         # ⚠️ 强烈建议填**绝对路径**(#91):daemon(launchd)与交互 shell 的
+  #                         # PATH 常解析到不同 node,原生模块(better-sqlite3)按某 node 编译后,
+  #                         # 另一 node 加载即 NODE_MODULE_VERSION 不匹配崩溃。裸 `node` 走 PATH
+  #                         # → `bin/everbot doctor` 报 WARN(daemon/service 模式 ERROR)。
   #   ready_timeout: 20.0   # 等待 serve 打印 MILKIE_SERVE_READY 就绪信号的超时（秒）
 
   # Web UI 配置
