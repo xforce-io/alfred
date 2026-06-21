@@ -1,6 +1,7 @@
 """Tests for SLM SegmentLogger."""
 
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from src.everbot.core.slm.models import EvaluationSegment
@@ -8,10 +9,16 @@ from src.everbot.core.slm.segment_logger import SegmentLogger
 
 
 def _make_segment(skill_id="test-skill", version="1.0", session_id="s1", **kw):
+    # Default to "now" so the age-based cleanup filter (_MAX_AGE_DAYS) never
+    # silently drops fixtures as wall-clock advances. Tests that care about the
+    # timestamp pass triggered_at explicitly.
     return EvaluationSegment(
         skill_id=skill_id,
         skill_version=version,
-        triggered_at=kw.get("triggered_at", "2026-03-17T10:00:00Z"),
+        triggered_at=kw.get(
+            "triggered_at",
+            datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        ),
         context_before=kw.get("context_before", "user: help"),
         skill_output=kw.get("skill_output", "assistant: done"),
         context_after=kw.get("context_after", "user: thanks"),
