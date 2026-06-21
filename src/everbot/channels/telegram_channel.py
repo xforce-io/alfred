@@ -24,6 +24,7 @@ try:
 except ImportError:
     HAS_TELEGRAMIFY = False
 
+from .user_messages import AGENT_UNAVAILABLE
 from ..core.channel.core_service import ChannelCoreService
 from ..core.channel.models import OutboundMessage
 from ..core.channel.session_resolver import ChannelSessionResolver
@@ -615,8 +616,10 @@ class TelegramChannel:
                 agent = await self._agent_service.create_agent_instance(agent_name)
                 self._session_manager.cache_agent(session_id, agent, agent_name, "auto")
             except Exception as exc:
-                logger.error("Failed to create agent %s: %s", agent_name, exc)
-                await self._send_message(chat_id, f"Failed to create agent: {exc}")
+                # #92:富诊断(SidecarStartError 含 command/stderr/ABI)只进日志,
+                # 绝不透传给用户;用户只见友好文案。
+                logger.error("Failed to create agent %s: %s", agent_name, exc, exc_info=True)
+                await self._send_message(chat_id, AGENT_UNAVAILABLE)
                 return
 
         # Register Telegram skillkit so the agent can send files/photos

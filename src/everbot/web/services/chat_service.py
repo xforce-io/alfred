@@ -17,6 +17,7 @@ from fastapi import WebSocket
 from ...core.agent.provider import provider_for
 
 from .agent_service import AgentService
+from ...channels.user_messages import AGENT_UNAVAILABLE
 from ...core.channel.core_service import ChannelCoreService
 from ...core.channel.models import OutboundMessage
 from ...core.runtime.events import resolve_routing
@@ -259,10 +260,11 @@ class ChatService:
                     logger.debug("Failed to check context: %s", e)
 
             except ValueError as e:
+                # #92:富诊断只进日志,用户只见友好文案。
                 logger.warning("Agent ValueError for %s: %s", agent_name, e, exc_info=True)
                 await websocket.send_json({
                     "type": "error",
-                    "content": f"Agent {agent_name} 初始化失败: {e}"
+                    "content": AGENT_UNAVAILABLE,
                 })
                 await websocket.close()
                 return
@@ -271,7 +273,7 @@ class ChatService:
                 logger.error("Agent initialization error:\n%s", error_detail)
                 await websocket.send_json({
                     "type": "error",
-                    "content": f"Agent 初始化失败: {str(e)}"
+                    "content": AGENT_UNAVAILABLE,
                 })
                 await websocket.close()
                 return
