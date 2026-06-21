@@ -11,7 +11,12 @@ import sys
 
 import pytest
 
-from src.everbot.core.agent.provider.milkie.sidecar import MilkieSidecar, parse_ready_signal
+from src.everbot.core.agent.provider.milkie.sidecar import (
+    MilkieSidecar,
+    SidecarStartError,
+    SIDECAR_DIAG_TAIL_LINES,
+    parse_ready_signal,
+)
 
 
 def _py(script: str) -> list[str]:
@@ -50,22 +55,97 @@ async def test_start_reads_port_from_ready_signal():
         await sc.close()
 
 
-async def test_start_times_out_when_no_ready_signal():
+async def test_start_timeout_raises_start_error_with_command_and_reason():
+    # #91 件1:就绪信号迟迟不来 → 统一抛 SidecarStartError(RuntimeError 子类),
+    # message 带 command 与「未就绪」原因。不再裸抛无信息的 TimeoutError。
     sc = MilkieSidecar(_py("import time;time.sleep(30)"), ready_timeout=0.5)
     try:
-        with pytest.raises((asyncio.TimeoutError, TimeoutError)):
+        with pytest.raises(SidecarStartError) as ei:
             await sc.start()
     finally:
         await sc.close()
+    msg = str(ei.value)
+    assert sys.executable in msg          # command 在 message 里
+    assert "ready" in msg.lower()         # 原因:未发出 ready 信号
 
 
 async def test_start_raises_if_process_exits_before_ready():
     sc = MilkieSidecar(_py("import sys;sys.exit(0)"), ready_timeout=5)
     try:
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError):  # SidecarStartError 仍是 RuntimeError 子类
             await sc.start()
     finally:
         await sc.close()
+
+
+# --- #91 件1:启动失败必须带 command / exit code / stdout·stderr tail ----------
+
+_CRASH_WITH_STDERR = (
+    "import sys;"
+    "sys.stderr.write('NODE_MODULE_VERSION 127 vs 131\\n');sys.stderr.flush();"
+    "sys.exit(3)"
+)
+
+
+async def test_start_failure_carries_command_exitcode_and_stderr_tail():
+    """ABI mismatch 场景:进程崩在 stderr、非零退出 → 异常带 command/exit code/stderr。"""
+    sc = MilkieSidecar(_py(_CRASH_WITH_STDERR), ready_timeout=5)
+    try:
+        with pytest.raises(SidecarStartError) as ei:
+            await sc.start()
+    finally:
+        await sc.close()
+    err = ei.value
+    assert err.returncode == 3
+    assert any("NODE_MODULE_VERSION 127 vs 131" in ln for ln in err.stderr_tail)
+    msg = str(err)
+    assert "NODE_MODULE_VERSION 127 vs 131" in msg   # stderr 进了 message
+    assert "exit code: 3" in msg                      # exit code 进了 message
+    assert sys.executable in msg                      # command 进了 message
+
+
+_STDOUT_THEN_CRASH = (
+    "import sys;"
+    "print('booting milkie');print('loading config');sys.stdout.flush();"
+    "sys.exit(1)"
+)
+
+
+async def test_start_failure_carries_stdout_tail():
+    """崩溃前写到 stdout 的行(非 ready 信号)也要进诊断。"""
+    sc = MilkieSidecar(_py(_STDOUT_THEN_CRASH), ready_timeout=5)
+    try:
+        with pytest.raises(SidecarStartError) as ei:
+            await sc.start()
+    finally:
+        await sc.close()
+    err = ei.value
+    assert any("loading config" in ln for ln in err.stdout_tail)
+    assert "loading config" in str(err)
+
+
+_MANY_STDERR_THEN_CRASH = (
+    "import sys\n"
+    "for i in range(100):\n"
+    "    sys.stderr.write('err line %d\\n' % i)\n"
+    "sys.stderr.flush()\n"
+    "sys.exit(2)\n"
+)
+
+
+async def test_start_failure_tail_is_bounded_to_last_n_lines():
+    """边界:海量 stderr 只保留末 N 行,丢最旧的。"""
+    sc = MilkieSidecar(_py(_MANY_STDERR_THEN_CRASH), ready_timeout=5)
+    try:
+        with pytest.raises(SidecarStartError) as ei:
+            await sc.start()
+    finally:
+        await sc.close()
+    tail = ei.value.stderr_tail
+    assert len(tail) == SIDECAR_DIAG_TAIL_LINES
+    assert tail[-1] == "err line 99"          # 最新一行在
+    assert all("err line 0\n" not in ln for ln in tail)
+    assert "err line 0" not in tail            # 最旧一行被丢弃
 
 
 async def test_close_terminates_process():
