@@ -972,7 +972,7 @@ def test_injected_system_prompt_loader_is_used(monkeypatch):
     captured_skills: list = []
 
     class _CapturingLauncher:
-        def build(self, agent_name, *, system_prompt, skills=None, default_model=None, agent_workspace=None):
+        def build(self, agent_name, *, system_prompt, skills=None, default_model=None, agent_workspace=None, sandbox_enabled=None):
             captured_prompts.append(system_prompt)
             captured_skills.append(skills)
             return LaunchSpec(
@@ -1017,7 +1017,7 @@ def test_default_loader_feeds_discovered_skills_to_launcher(monkeypatch):
     captured = {}
 
     class _CapturingLauncher:
-        def build(self, agent_name, *, system_prompt, skills=None, default_model=None, agent_workspace=None):
+        def build(self, agent_name, *, system_prompt, skills=None, default_model=None, agent_workspace=None, sandbox_enabled=None):
             captured["system_prompt"] = system_prompt
             captured["skills"] = skills
             return LaunchSpec(
@@ -1114,7 +1114,7 @@ def test_build_pool_wires_skills_fingerprint(monkeypatch):
     from src.everbot.core.agent.provider.milkie.launcher import LaunchSpec
 
     class _StubLauncher:
-        def build(self, agent_name, *, system_prompt, skills=None, default_model=None, agent_workspace=None):
+        def build(self, agent_name, *, system_prompt, skills=None, default_model=None, agent_workspace=None, sandbox_enabled=None):
             return LaunchSpec(
                 cmd=["node"], env={}, data_dir=Path("/tmp"), agent_md=Path("/tmp/a.md")
             )
@@ -1231,3 +1231,37 @@ async def test_attach_projection_raises_on_non_2xx():
 
     with pytest.raises(httpx.HTTPStatusError):
         await provider.attach_projection(handle, source_run_id="r", display_text="x")
+
+
+# ── per-agent sidecar 沙箱解析(#112)──────────────────────────────────────────
+from src.everbot.infra import config as _cfgmod
+
+
+def _set_cfg(monkeypatch, d):
+    monkeypatch.setattr(_cfgmod, "get_config", lambda *a, **k: d)
+
+
+def test_agent_sandbox_global_on_agent_override_off(monkeypatch):
+    _set_cfg(monkeypatch, {"everbot": {
+        "security": {"sidecar_sandbox": True},
+        "agents": {"a": {"security": {"sidecar_sandbox": False}}}}})
+    assert provider_mod._agent_sandbox_enabled("a") is False
+
+
+def test_agent_sandbox_global_off_agent_override_on(monkeypatch):
+    _set_cfg(monkeypatch, {"everbot": {
+        "security": {"sidecar_sandbox": False},
+        "agents": {"a": {"security": {"sidecar_sandbox": True}}}}})
+    assert provider_mod._agent_sandbox_enabled("a") is True
+
+
+def test_agent_sandbox_no_override_follows_global(monkeypatch):
+    _set_cfg(monkeypatch, {"everbot": {
+        "security": {"sidecar_sandbox": True},
+        "agents": {"a": {}}}})
+    assert provider_mod._agent_sandbox_enabled("a") is True
+
+
+def test_agent_sandbox_defaults_false_when_unset(monkeypatch):
+    _set_cfg(monkeypatch, {"everbot": {}})
+    assert provider_mod._agent_sandbox_enabled("a") is False
