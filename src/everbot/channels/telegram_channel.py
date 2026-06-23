@@ -14,7 +14,7 @@ import base64
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import httpx
 
@@ -50,6 +50,13 @@ from . import telegram_media
 logger = logging.getLogger(__name__)
 
 TELEGRAM_MSG_LIMIT = 4096
+
+# #119: pushes the agent initiates on its own — gated by the idle window so they
+# don't interrupt an in-flight user turn. deferred_result is intentionally NOT
+# here: user-awaited results are delivered immediately.
+_ACTIVE_PUSH_TYPES = frozenset(
+    {"heartbeat_delivery", "inspector_push", "skill_notification"}
+)
 
 
 def _truncate_projection_text(text: str, limit: int = 4000) -> str:
@@ -122,6 +129,15 @@ class TelegramChannel:
         bindings_suffix = f"_{name}" if name else ""
         self._bindings_path = self._user_data.alfred_home / f"telegram_bindings{bindings_suffix}.json"
 
+        # #119: idle gate — active background pushes (routine/heartbeat/inspector/
+        # skill) wait until the user has been quiet this long, so a delivery can't
+        # interrupt an in-flight confirmation turn. deferred_result is exempt
+        # (user-awaited). Deferred events are buffered here and flushed once idle.
+        self._idle_threshold_seconds = 180
+        self._flush_interval_seconds = 60
+        self._pending_pushes: List[Tuple[str, Dict[str, Any]]] = []
+        self._flush_task: Optional[asyncio.Task] = None
+
         self._client: Optional[httpx.AsyncClient] = None
         self._running = False
         self._poll_task: Optional[asyncio.Task] = None
@@ -144,6 +160,7 @@ class TelegramChannel:
         events.subscribe(self._on_background_event)
         self._dispatcher_task = asyncio.create_task(self._dispatcher_loop())
         self._poll_task = asyncio.create_task(self._polling_loop())
+        self._flush_task = asyncio.create_task(self._flush_loop())
         tag = f"[{self._name}] " if self._name else ""
         logger.info(
             "%sTelegramChannel started, restored %d binding(s)", tag, len(self._bindings)
@@ -167,6 +184,13 @@ class TelegramChannel:
             except asyncio.CancelledError:
                 pass
             self._dispatcher_task = None
+        if self._flush_task is not None:
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except asyncio.CancelledError:
+                pass
+            self._flush_task = None
         for task in self._chat_workers.values():
             task.cancel()
         for task in self._chat_workers.values():
@@ -236,6 +260,55 @@ class TelegramChannel:
             )
             return False
 
+    def _is_user_idle(self, agent_name: str) -> bool:
+        """True if the user has been quiet long enough (mirrors heartbeat gate).
+
+        Unknown / never-seen activity (None or non-numeric) is treated as idle —
+        when in doubt, deliver rather than hold (mirrors inspector.py guard)."""
+        last_activity = self._session_manager.get_last_activity_time(agent_name)
+        if not isinstance(last_activity, (int, float)):
+            return True
+        import time
+
+        return (time.time() - last_activity) >= self._idle_threshold_seconds
+
+    def _should_defer(self, source_type: Optional[str], agent_name: str) -> bool:
+        """#119: hold an agent-initiated push while the user is mid-conversation.
+
+        Only active-push types are gated; deferred_result (and anything else) is
+        delivered immediately so user-awaited results are never held back."""
+        if source_type not in _ACTIVE_PUSH_TYPES:
+            return False
+        return not self._is_user_idle(agent_name)
+
+    async def _flush_loop(self) -> None:
+        """#119: periodically retry buffered pushes until their users go idle."""
+        while self._running:
+            try:
+                await self._flush_pending_pushes()
+            except Exception:
+                logger.exception("flush_pending_pushes failed")
+            await asyncio.sleep(self._flush_interval_seconds)
+
+    async def _flush_pending_pushes(self) -> None:
+        """#119: re-deliver buffered active pushes once their user has gone idle.
+
+        Re-dispatches through ``_on_background_event``; since the user is now idle
+        the gate no longer defers, so bubble + context go out together. Entries
+        whose user is still active stay buffered for the next sweep."""
+        if not self._pending_pushes:
+            return
+        still_waiting: List[Tuple[str, Dict[str, Any]]] = []
+        ready: List[Tuple[str, Dict[str, Any]]] = []
+        for src, data in self._pending_pushes:
+            if self._should_defer(data.get("source_type"), data.get("agent_name")):
+                still_waiting.append((src, data))
+            else:
+                ready.append((src, data))
+        self._pending_pushes = still_waiting
+        for src, data in ready:
+            await self._on_background_event(src, data)
+
     async def _on_background_event(
         self, source_session_id: str, data: Dict[str, Any]
     ) -> None:
@@ -262,6 +335,18 @@ class TelegramChannel:
         # Build notification text
         detail = str(data.get("detail") or data.get("summary") or "").strip()
         if not detail:
+            return
+
+        # #119: hold agent-initiated pushes while the user is mid-conversation,
+        # so a routine/heartbeat delivery can't interrupt an in-flight turn.
+        # Bubble + context are withheld together, flushed once the user idles.
+        if self._should_defer(source_type, agent_name):
+            run_id = str(data.get("run_id") or "")
+            already = run_id and any(
+                str(d.get("run_id") or "") == run_id for _, d in self._pending_pushes
+            )
+            if not already:
+                self._pending_pushes.append((source_session_id, data))
             return
 
         if source_type == "deferred_result":
