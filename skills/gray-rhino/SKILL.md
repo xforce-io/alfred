@@ -66,6 +66,8 @@ $D --format text -v
 ```bash
 # 仅抓取新闻
 python $SKILL_DIR/scripts/news_fetcher.py --max-age 48 --format json
+# JSON 含 sources 画像：{attempted, succeeded, failed, failed_detail:[{source,error}], per_source:[{source,status,items}]}。
+# 报告里务必据此披露降级——若 failed>0，注明「X 源未抓到（超时/失败），信号基于剩余 N 源」，不要假装全源齐全。
 
 # 仅聚类分析（从 stdin 读取 news_fetcher 输出）
 python $SKILL_DIR/scripts/news_fetcher.py --format json | \
