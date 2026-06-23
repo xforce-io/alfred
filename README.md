@@ -340,7 +340,7 @@ alfred/
 
 ### Q: 如何修改心跳间隔？
 
-A: 编辑 `~/.alfred/config.yaml`，修改 `everbot.agents.<agent_name>.heartbeat.interval` 值（单位：分钟）。还可以设置 `night_interval_minutes` 来降低夜间频率。
+A: 编辑 `~/.alfred/config.yaml`，修改 `everbot.agents.<agent_name>.heartbeat.interval` 值（单位：分钟）。还可以设置 `heartbeat.night_interval` 来降低夜间频率（0 或省略表示夜间静默）。`active_hours` 按部署机本地时区判断；改完需 `./bin/everbot restart` 生效。
 
 ### Q: 心跳任务会污染用户对话历史吗？
 

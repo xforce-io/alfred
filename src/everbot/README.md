@@ -47,9 +47,13 @@ everbot:
       workspace: ~/.alfred/agents/my_agent
       heartbeat:
         enabled: true
-        interval: 30          # 每30分钟执行一次
-        active_hours: [8, 22] # 8:00-22:00 活跃
+        interval: 30           # 活跃时段每 30 分钟执行一次
+        active_hours: [8, 22]  # 活跃时段，按【部署机本地时区】判断，半开区间 [8, 22)（22:00 不含）
+        night_interval: 0      # 非活跃时段间隔（分钟）：0 或省略 = 夜间静默，正整数 = 夜间降频
 ```
+
+> ⚠️ `active_hours` 按**部署机本地时区**判断（不是 UTC）。修改 `config.yaml` 后需执行
+> `./bin/everbot restart` 才会生效——daemon 不会热重载已加载的代码与配置。
 
 ### 3. 编写任务清单
 

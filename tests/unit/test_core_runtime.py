@@ -308,24 +308,94 @@ async def test_scheduler_triggers_heartbeat_on_due_interval():
 
 
 @pytest.mark.asyncio
-async def test_scheduler_respects_active_hours():
-    """Heartbeat is skipped outside active hours."""
-    # 3 AM is outside default (8, 22)
-    now = datetime(2026, 2, 12, 3, 0, 0)
-    heartbeat_calls: list[str] = []
+async def test_scheduler_runs_heartbeat_during_local_active_hours(monkeypatch):
+    """During local active hours heartbeat fires — even when the same instant is
+    outside active_hours when read in UTC. Complements the night-silence case
+    below; together they pin active_hours to local-time semantics (#117)."""
+    import time
 
-    async def _run_heartbeat(agent_name: str, ts: datetime):
-        heartbeat_calls.append(agent_name)
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    time.tzset()
+    try:
+        # 05:00 UTC == 13:00 Beijing → inside active_hours (8, 22).
+        # The pre-fix code compared UTC hour (5) and wrongly skipped.
+        now = datetime(2026, 2, 12, 5, 0, 0, tzinfo=timezone.utc)
+        heartbeat_calls: list[str] = []
 
-    scheduler = Scheduler(
-        run_heartbeat=_run_heartbeat,
-        agent_schedules={
-            "alice": AgentSchedule(agent_name="alice", interval_minutes=30),
-        },
-    )
+        async def _run_heartbeat(agent_name: str, ts: datetime):
+            heartbeat_calls.append(agent_name)
 
-    await scheduler.tick(now)
-    assert heartbeat_calls == []
+        scheduler = Scheduler(
+            run_heartbeat=_run_heartbeat,
+            agent_schedules={
+                "alice": AgentSchedule(agent_name="alice", interval_minutes=30),
+            },
+        )
+
+        await scheduler.tick(now)
+        assert heartbeat_calls == ["alice"]
+    finally:
+        time.tzset()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_active_hours_uses_local_timezone(monkeypatch):
+    """active_hours is local-time semantics: Beijing 3 AM must be inactive
+    even though the same instant is 19:00 UTC (inside default active_hours).
+
+    Regression for #117: _is_active_time compared UTC hour against locally
+    configured active_hours, shifting the active window by the UTC offset and
+    letting heartbeat/inspector run all through the local night.
+    """
+    import time
+
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    time.tzset()
+    try:
+        # 19:00 UTC == 03:00 Beijing next day → outside active_hours (8, 22)
+        now = datetime(2026, 2, 12, 19, 0, 0, tzinfo=timezone.utc)
+        heartbeat_calls: list[str] = []
+
+        async def _run_heartbeat(agent_name: str, ts: datetime):
+            heartbeat_calls.append(agent_name)
+
+        scheduler = Scheduler(
+            run_heartbeat=_run_heartbeat,
+            agent_schedules={
+                "alice": AgentSchedule(agent_name="alice", interval_minutes=30),
+            },
+        )
+
+        await scheduler.tick(now)
+        assert heartbeat_calls == []
+    finally:
+        time.tzset()
+
+
+@pytest.mark.parametrize(
+    "local_hour,expected_active",
+    [
+        (7, False),   # just before start → inactive
+        (8, True),    # start is inclusive
+        (21, True),
+        (22, False),  # end is exclusive
+        (23, False),
+        (3, False),   # deep night
+    ],
+)
+def test_is_active_time_local_half_open_interval(monkeypatch, local_hour, expected_active):
+    """active_hours is a half-open [start, end) interval evaluated in local time."""
+    import time
+    from zoneinfo import ZoneInfo
+
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    time.tzset()
+    try:
+        schedule = AgentSchedule(agent_name="alice", active_hours=(8, 22))
+        ts = datetime(2026, 2, 12, local_hour, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        assert Scheduler._is_active_time(schedule, ts) is expected_active
+    finally:
+        time.tzset()
 
 
 @pytest.mark.asyncio
