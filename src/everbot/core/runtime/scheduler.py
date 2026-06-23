@@ -463,7 +463,12 @@ class Scheduler:
 
     @staticmethod
     def _is_active_time(schedule: Any, ts: datetime) -> bool:
-        hour = ts.hour
+        # active_hours is local-time semantics (the operator configures "8 to
+        # 23" meaning local clock hours). ts is normalized to UTC internally, so
+        # convert back to the deployment-host local timezone before comparing —
+        # otherwise the active window is shifted by the UTC offset and night
+        # silencing breaks (#117).
+        hour = ts.astimezone().hour
         start, end = schedule.active_hours
         return start <= hour < end
 
