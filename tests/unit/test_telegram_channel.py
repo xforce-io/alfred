@@ -1977,3 +1977,134 @@ class TestCommitRoundOnResetTooLong:
         assert committed is True
         channel._send_split_with_entities.assert_awaited_once()
         channel._finalize_streaming.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# #119: idle gate for active background pushes
+# ---------------------------------------------------------------------------
+class TestProjectionIdleGate:
+    """Active background pushes (routine/heartbeat/inspector/skill) are deferred
+    while the user is mid-conversation; deferred_result (user-awaited) is exempt."""
+
+    def _ch(self, tmp_path, last_activity, threshold=180):
+        ch = _make_channel(tmp_path)
+        ch._idle_threshold_seconds = threshold
+        ch._session_manager.get_last_activity_time = MagicMock(return_value=last_activity)
+        return ch
+
+    @pytest.mark.parametrize(
+        "source_type,active,expected",
+        [
+            ("heartbeat_delivery", True, True),    # routine/cron push, user active → defer
+            ("inspector_push", True, True),
+            ("skill_notification", True, True),
+            ("heartbeat_delivery", False, False),  # user idle → send now
+            ("deferred_result", True, False),      # user-awaited result → exempt
+            ("deferred_result", False, False),
+        ],
+    )
+    def test_should_defer_matrix(self, tmp_path, source_type, active, expected):
+        import time
+
+        last = time.time() if active else time.time() - 10_000
+        ch = self._ch(tmp_path, last_activity=last)
+        assert ch._should_defer(source_type, "test_agent") is expected
+
+    def test_no_activity_treated_as_idle(self, tmp_path):
+        # never-seen user → treat as idle → send immediately
+        ch = self._ch(tmp_path, last_activity=None)
+        assert ch._should_defer("heartbeat_delivery", "test_agent") is False
+
+    # -- behavior: gate inside _on_background_event + flush -----------------
+
+    def _ready_channel(self, tmp_path, last_activity, monkeypatch):
+        from src.everbot.channels import telegram_channel as tc
+
+        ch = self._ch(tmp_path, last_activity=last_activity)
+        ch._bindings = {"chat1": "test_agent"}
+        ch._send_split_with_entities = AsyncMock(return_value=(1, 1))
+        ch._maybe_attach_projection = AsyncMock(return_value=True)
+        ch._convert_markdown = MagicMock(return_value=("text", None))
+        monkeypatch.setattr(
+            tc, "resolve_routing",
+            lambda d: SimpleNamespace(
+                deliver=True, scope="broadcast", target_session_id=None,
+                target_channel="telegram", agent_name=d.get("agent_name"),
+            ),
+        )
+        return ch
+
+    def _push(self, source_type="heartbeat_delivery", run_id="j1"):
+        return {
+            "agent_name": "test_agent", "source_type": source_type,
+            "detail": "report body", "run_id": run_id, "transcript_worthy": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_active_push_while_active_is_buffered(self, tmp_path, monkeypatch):
+        import time
+
+        ch = self._ready_channel(tmp_path, time.time(), monkeypatch)
+        await ch._on_background_event("src", self._push())
+        ch._send_split_with_entities.assert_not_awaited()  # bubble withheld
+        ch._maybe_attach_projection.assert_not_awaited()   # context withheld
+        assert len(ch._pending_pushes) == 1                # buffered
+
+    @pytest.mark.asyncio
+    async def test_deferred_result_exempt_sent_even_when_active(self, tmp_path, monkeypatch):
+        import time
+
+        ch = self._ready_channel(tmp_path, time.time(), monkeypatch)
+        await ch._on_background_event("src", self._push(source_type="deferred_result"))
+        ch._send_split_with_entities.assert_awaited()  # delivered immediately
+        assert ch._pending_pushes == []
+
+    @pytest.mark.asyncio
+    async def test_flush_delivers_when_user_goes_idle(self, tmp_path, monkeypatch):
+        import time
+
+        ch = self._ready_channel(tmp_path, time.time(), monkeypatch)
+        await ch._on_background_event("src", self._push())
+        assert len(ch._pending_pushes) == 1
+        # user goes quiet → flush delivers bubble + context together
+        ch._session_manager.get_last_activity_time = MagicMock(
+            return_value=time.time() - 10_000
+        )
+        await ch._flush_pending_pushes()
+        ch._send_split_with_entities.assert_awaited()
+        assert ch._pending_pushes == []
+
+    @pytest.mark.asyncio
+    async def test_flush_keeps_buffered_while_still_active(self, tmp_path, monkeypatch):
+        import time
+
+        ch = self._ready_channel(tmp_path, time.time(), monkeypatch)
+        await ch._on_background_event("src", self._push())
+        await ch._flush_pending_pushes()  # user still active → keep waiting
+        ch._send_split_with_entities.assert_not_awaited()
+        assert len(ch._pending_pushes) == 1
+
+    @pytest.mark.asyncio
+    async def test_duplicate_run_id_not_buffered_twice(self, tmp_path, monkeypatch):
+        import time
+
+        ch = self._ready_channel(tmp_path, time.time(), monkeypatch)
+        await ch._on_background_event("src", self._push(run_id="dup"))
+        await ch._on_background_event("src", self._push(run_id="dup"))
+        assert len(ch._pending_pushes) == 1
+
+    @pytest.mark.asyncio
+    async def test_flush_loop_periodically_invokes_flush(self, tmp_path):
+        ch = _make_channel(tmp_path)
+        ch._flush_interval_seconds = 0.01
+        ch._flush_pending_pushes = AsyncMock()
+        ch._running = True
+        task = asyncio.create_task(ch._flush_loop())
+        await asyncio.sleep(0.05)
+        ch._running = False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert ch._flush_pending_pushes.await_count >= 1
