@@ -66,6 +66,9 @@ $D --format text -v
 ```bash
 # 仅抓取新闻
 python $SKILL_DIR/scripts/news_fetcher.py --max-age 48 --format json
+# JSON 含 sources 画像：{attempted, succeeded, failed, empty, contributing, failed_detail:[{source,error}], per_source:[{source,status,items}]}。
+# succeeded=未报错；其中 empty=抓到但 0 条（活着但降级），contributing=真正带回数据。status 取值 ok/empty/failed。
+# 报告里务必据此披露降级——若 failed>0 或 empty>0，注明「X 源未抓到（超时/失败）、Y 源返回空，信号基于 N 个有效源（=contributing）」，不要把空源算进有效源、也不要假装全源齐全。
 
 # 仅聚类分析（从 stdin 读取 news_fetcher 输出）
 python $SKILL_DIR/scripts/news_fetcher.py --format json | \

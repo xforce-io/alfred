@@ -75,10 +75,26 @@ class NewsFetcher:
     def __init__(self, sources: Optional[dict] = None, timeout: int = 15):
         self.sources = sources or DEFAULT_RSS_SOURCES
         self.timeout = timeout
+        # Per-source fetch report, populated by fetch_all (for degradation
+        # disclosure: which sources succeeded / failed / came back empty).
+        self.fetch_report: dict = {
+            "attempted": 0, "succeeded": 0, "failed": 0,
+            "failed_detail": [], "per_source": [],
+        }
 
     def fetch_all(self, max_age_hours: int = 48) -> List[NewsItem]:
         """Fetch from all sources in parallel, deduplicate, and filter by age."""
         all_items: List[NewsItem] = []
+        report = {
+            "attempted": len(self.sources), "succeeded": 0, "failed": 0,
+            # `succeeded` = fetched without error; of those, `empty` came back
+            # with zero items (alive but degraded) and `contributing` actually
+            # carried data. The signal disclosure must base its count on
+            # `contributing`, not `succeeded`, or an empty source inflates it.
+            "empty": 0, "contributing": 0,
+            "failed_detail": [],  # [{"source", "error"}]
+            "per_source": [],     # [{"source", "status", "items"(, "error")}]; items = raw count before dedup
+        }
 
         with ThreadPoolExecutor(max_workers=8) as pool:
             futures = {}
@@ -93,9 +109,25 @@ class NewsFetcher:
                 try:
                     items = future.result()
                     all_items.extend(items)
+                    report["succeeded"] += 1
+                    if items:
+                        report["contributing"] += 1
+                        status = "ok"
+                    else:
+                        report["empty"] += 1  # alive but degraded — not a contributor
+                        status = "empty"
+                    report["per_source"].append(
+                        {"source": source_name, "status": status, "items": len(items)})
                     logger.info(f"[{source_name}] fetched {len(items)} items")
                 except Exception as e:
+                    err = f"{type(e).__name__}: {e}"
+                    report["failed"] += 1
+                    report["failed_detail"].append({"source": source_name, "error": err})
+                    report["per_source"].append(
+                        {"source": source_name, "status": "failed", "items": 0, "error": err})
                     logger.warning(f"[{source_name}] fetch failed: {e}")
+
+        self.fetch_report = report
 
         # Filter by age
         if max_age_hours > 0:
@@ -269,8 +301,19 @@ def main():
         # Remove internal hash field
         for o in output:
             o.pop("_hash", None)
-        print(json.dumps({"ok": True, "count": len(output), "items": output},
-                         ensure_ascii=False, indent=2))
+        rep = fetcher.fetch_report
+        print(json.dumps({
+            "ok": True,
+            "count": len(output),
+            "sources": {
+                "attempted": rep.get("attempted", 0),
+                "succeeded": rep.get("succeeded", 0),
+                "failed": rep.get("failed", 0),
+                "failed_detail": rep.get("failed_detail", []),
+                "per_source": rep.get("per_source", []),
+            },
+            "items": output,
+        }, ensure_ascii=False, indent=2))
     else:
         print(f"Fetched {len(items)} news items\n")
         for i, item in enumerate(items, 1):
