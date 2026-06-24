@@ -184,7 +184,10 @@ class CronDelivery:
 
         ``source_session_id`` (#122):产出该报告的可解析 job session id(归档 session
         所在,报告全文+轨迹可回溯)。channel 侧据此作 projection 的溯源锚点,而非一次性
-        合成的 run_id(后者回溯不到任何执行 → "来源哪里"落空)。"""
+        合成的 run_id(后者回溯不到任何执行 → "来源哪里"落空)。
+
+        注意键名用 ``projection_source_id`` 而非 ``source_session_id``:后者是事件信封
+        (``emit``)的保留字段,会被覆盖为发出方 session(primary),借用会丢锚点。"""
         from .events import emit
 
         message = {
@@ -195,7 +198,7 @@ class CronDelivery:
             "detail": result,
             "source_type": "heartbeat_delivery",
             "run_id": run_id,
-            "source_session_id": source_session_id,
+            "projection_source_id": source_session_id,
             "deliver": True,
             "transcript_worthy": transcript_worthy,
         }

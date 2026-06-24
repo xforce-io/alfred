@@ -2130,8 +2130,9 @@ class TestProjectionProvenance:
         data = {
             "transcript_worthy": True,
             "detail": "# 每日投资信号\n🆕 恒生科技大涨 | 港股 | 5.8 | 2 条",
-            "run_id": "job_f8a5b0a67ad3",                       # 死 id
-            "source_session_id": "job_routine_38364fe6_d185ce87",  # 活 id(归档 session)
+            "run_id": "job_f8a5b0a67ad3",                        # 死 id
+            "source_session_id": "web_session_demo_agent",        # 信封自带的发出方 session(干扰项)
+            "projection_source_id": "job_routine_38364fe6_d185ce87",  # 活 id(归档 session)
         }
 
         ok = await ch._maybe_attach_projection("test_agent", 555, data)
@@ -2141,7 +2142,7 @@ class TestProjectionProvenance:
         assert kwargs["source_run_id"] == "job_routine_38364fe6_d185ce87"
 
     @pytest.mark.asyncio
-    async def test_falls_back_to_run_id_when_no_source_session(self, tmp_path, _provider):
+    async def test_falls_back_to_run_id_when_no_projection_source(self, tmp_path, _provider):
         ch = _make_channel(tmp_path)
         ch._session_manager.get_cached_agent.return_value = SimpleNamespace()
         data = {"transcript_worthy": True, "detail": "x", "run_id": "job_abc"}

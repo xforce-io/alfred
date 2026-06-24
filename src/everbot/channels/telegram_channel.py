@@ -229,10 +229,11 @@ class TelegramChannel:
         run_id = str(data.get("run_id") or "").strip()
         if not detail or not run_id:
             return False
-        # #122:溯源锚点优先用可解析的 source_session_id(归档 job session,报告全文+
-        # 轨迹所在);它缺失时才回落一次性合成的 run_id —— run_id 回溯不到任何执行,
-        # 用户问"来源哪里"会落空。
-        source_run_id = str(data.get("source_session_id") or "").strip() or run_id
+        # #122:溯源锚点优先用可解析的 projection_source_id(产出方归档 job session,
+        # 报告全文+轨迹所在);它缺失时才回落一次性合成的 run_id —— run_id 回溯不到
+        # 任何执行,用户问"来源哪里"会落空。注意不可用信封的 source_session_id:那是
+        # 发出方 session(primary),非产出方。
+        source_run_id = str(data.get("projection_source_id") or "").strip() or run_id
 
         from ..core.agent.provider import get_provider_for_agent
 

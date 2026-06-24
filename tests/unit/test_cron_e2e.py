@@ -420,6 +420,8 @@ class TestE2EProjectionProvenanceAcrossSeam:
         from src.everbot.core.tasks.task_manager import Task
         from src.everbot.channels.telegram_channel import TelegramChannel
 
+        from src.everbot.core.runtime import events
+
         runner = _make_runner(tmp_path)
         cron = runner._cron
 
@@ -427,13 +429,10 @@ class TestE2EProjectionProvenanceAcrossSeam:
         report = "# 每日投资信号\n🆕 恒生科技大涨 | 港股 | 5.8 | 2 条"
         monkeypatch.setattr(cron, "_invoke_job", AsyncMock(return_value=report))
 
-        # 捕获真实事件总线上的 realtime 投递 payload。
+        # 走真实 emit + 真实订阅者捕获信封 —— 真实 emit 会做信封 enrichment
+        # (覆盖 source_session_id),这正是上一版假 emit 漏掉的字段覆盖陷阱。
         captured = []
-
-        async def _capture_emit(source_session_id, data, **kwargs):
-            captured.append(data)
-
-        monkeypatch.setattr("src.everbot.core.runtime.events.emit", _capture_emit)
+        events.subscribe(lambda src, env: captured.append(env))
 
         task = Task.from_dict({
             "id": "iso_e2e",
@@ -448,14 +447,18 @@ class TestE2EProjectionProvenanceAcrossSeam:
 
         # 生产端:合成的 run_id 是"死 id",job_session_id 才可解析。
         dead_run_id = "job_f8a5b0a67ad3"
-        await cron._run_isolated_job(task, dead_run_id)
+        try:
+            await cron._run_isolated_job(task, dead_run_id)
+        finally:
+            events._subscribers.clear()
 
-        # ① 事件 payload 带上了可解析的 source_session_id,且不等于死 run_id。
+        # ① 真实信封里:projection_source_id 保留了可解析 job session(不被信封
+        #    的 source_session_id 覆盖);信封自有的 source_session_id 是发出方。
         realtime = [d for d in captured if d.get("transcript_worthy")]
         assert len(realtime) == 1
         event = realtime[0]
-        assert event["source_session_id"] == "job_iso_e2e"
-        assert event["source_session_id"] != dead_run_id
+        assert event["projection_source_id"] == "job_iso_e2e"
+        assert event["projection_source_id"] != dead_run_id
 
         # ② 消费端:真实 telegram channel 据此事件登记 projection,溯源锚点取
         #    可解析的 source_session_id(回溯得到归档 session),而非死 run_id。

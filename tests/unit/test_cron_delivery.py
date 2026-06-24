@@ -153,38 +153,44 @@ class TestRealtimeEmit:
         assert emitted[0].get("transcript_worthy", False) is False
 
     @pytest.mark.asyncio
-    async def test_emit_realtime_carries_source_session_id(self, monkeypatch):
-        """#122:realtime 事件须带可解析的 source_session_id 作 projection 溯源锚点。
-        run_id 是一次性合成的 job 执行 id(回溯不到任何执行),source_session_id 才
-        指向归档 job session(报告全文+轨迹所在)。"""
-        emitted = []
-        d = _make_delivery()
+    async def test_emit_realtime_projection_source_survives_envelope(self):
+        """#122:projection 溯源 id 必须用独立键 projection_source_id —— 不能复用
+        source_session_id,后者是事件信封保留字段,会被 emit() 覆盖为发出方 session
+        (primary),从而丢失 job session 锚点。本测试走真实 emit + 真实订阅者,
+        正是为捕捉这种字段覆盖(假 emit 会绕过信封 enrichment)。"""
+        from src.everbot.core.runtime import events
+        captured = []
 
-        async def _fake_emit(source_session_id, data, **kwargs):
-            emitted.append(data)
+        def _cap(src, env):
+            captured.append(env)
 
-        monkeypatch.setattr("src.everbot.core.runtime.cron_delivery.emit", _fake_emit, raising=False)
-        monkeypatch.setattr("src.everbot.core.runtime.events.emit", _fake_emit)
+        events.subscribe(_cap)
+        try:
+            d = _make_delivery()  # primary_session_id="web_session_test"
+            await d._emit_realtime(
+                "report body", "job_f8a5b0a67ad3", transcript_worthy=True,
+                source_session_id="job_routine_38364fe6_d185ce87",
+            )
+        finally:
+            events._subscribers.clear()
 
-        await d._emit_realtime(
-            "report body", "job_f8a5b0a67ad3", transcript_worthy=True,
-            source_session_id="job_routine_38364fe6_d185ce87",
-        )
-
-        assert emitted[0]["source_session_id"] == "job_routine_38364fe6_d185ce87"
+        assert len(captured) == 1
+        env = captured[0]
+        # 信封自有的 source_session_id 仍是发出方(primary),不被借用/覆盖。
+        assert env["source_session_id"] == "web_session_test"
+        # 溯源锚点用独立键,完整保留 job session(不被信封覆盖)。
+        assert env["projection_source_id"] == "job_routine_38364fe6_d185ce87"
 
     @pytest.mark.asyncio
-    async def test_emit_realtime_source_session_id_defaults_none(self, monkeypatch):
-        """未提供 source_session_id 时该键为 None,channel 侧据此回落 run_id。"""
-        emitted = []
-        d = _make_delivery()
+    async def test_emit_realtime_projection_source_defaults_none(self):
+        """未提供 source_session_id 时 projection_source_id 为 None,channel 回落 run_id。"""
+        from src.everbot.core.runtime import events
+        captured = []
+        events.subscribe(lambda src, env: captured.append(env))
+        try:
+            d = _make_delivery()
+            await d._emit_realtime("status ping", "run_y")
+        finally:
+            events._subscribers.clear()
 
-        async def _fake_emit(source_session_id, data, **kwargs):
-            emitted.append(data)
-
-        monkeypatch.setattr("src.everbot.core.runtime.cron_delivery.emit", _fake_emit, raising=False)
-        monkeypatch.setattr("src.everbot.core.runtime.events.emit", _fake_emit)
-
-        await d._emit_realtime("status ping", "run_y")
-
-        assert emitted[0].get("source_session_id") is None
+        assert captured[0].get("projection_source_id") is None
