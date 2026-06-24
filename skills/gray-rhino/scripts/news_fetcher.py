@@ -75,7 +75,8 @@ class NewsFetcher:
     def __init__(self, sources: Optional[dict] = None, timeout: int = 15):
         self.sources = sources or DEFAULT_RSS_SOURCES
         self.timeout = timeout
-        # 源级抓取画像，fetch_all 后填充（供降级披露：哪些源成功/失败/空）。
+        # Per-source fetch report, populated by fetch_all (for degradation
+        # disclosure: which sources succeeded / failed / came back empty).
         self.fetch_report: dict = {
             "attempted": 0, "succeeded": 0, "failed": 0,
             "failed_detail": [], "per_source": [],
@@ -87,7 +88,7 @@ class NewsFetcher:
         report = {
             "attempted": len(self.sources), "succeeded": 0, "failed": 0,
             "failed_detail": [],  # [{"source", "error"}]
-            "per_source": [],     # [{"source", "status", "items"(, "error")}] —— items 为去重前的原始抓取数
+            "per_source": [],     # [{"source", "status", "items"(, "error")}]; items = raw count before dedup
         }
 
         with ThreadPoolExecutor(max_workers=8) as pool:

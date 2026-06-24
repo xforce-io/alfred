@@ -47,6 +47,7 @@ def generate_report(max_age_hours: int = 48, top_n: int = 8,
             "ok": False,
             "error": "No news items fetched. Check network connectivity.",
             "generated_at": datetime.now(timezone.utc).isoformat(),
+            "sources": fetcher.fetch_report,
         }
 
     # Step 2: Cluster and analyze (min_cluster_size=1 to keep weak signals)
@@ -100,6 +101,7 @@ def generate_report(max_age_hours: int = 48, top_n: int = 8,
         "impact_matrix": asdict(matrix),
         "assets": list(ASSET_CLASSES.keys()),
         "history_days": len(tracker.load_history()),
+        "sources": fetcher.fetch_report,
     }
 
 
@@ -118,6 +120,17 @@ def format_text_report(report: dict) -> str:
     lines.append(f"  新闻源: {report['news_count']} 条 | "
                  f"聚类: {report['total_clusters']} 个 | "
                  f"历史基线: {history_days} 天")
+    sources = report.get("sources")
+    if sources:
+        succeeded = sources.get("succeeded", 0)
+        attempted = sources.get("attempted", 0)
+        failed = sources.get("failed", 0)
+        if failed:
+            names = "、".join(d.get("source", "?") for d in sources.get("failed_detail", []))
+            lines.append(f"  数据源: {succeeded}/{attempted} 成功，{failed} 个失败"
+                         f"（{names}）—— 信号基于剩余 {succeeded} 源，请据此降级解读")
+        else:
+            lines.append(f"  数据源: {succeeded}/{attempted} 全部成功")
     if history_days == 0:
         lines.append("  (首次运行，尚无历史基线。持续运行后趋势分析将更准确)")
     lines.append("")
@@ -267,7 +280,8 @@ def main():
         for o in output:
             o.pop("_hash", None)
         if args.format == "json":
-            print(json.dumps({"ok": True, "count": len(output), "items": output},
+            print(json.dumps({"ok": True, "count": len(output),
+                              "sources": fetcher.fetch_report, "items": output},
                              ensure_ascii=False, indent=2))
         else:
             print(f"Fetched {len(items)} news items\n")
