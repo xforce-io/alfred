@@ -87,6 +87,11 @@ class NewsFetcher:
         all_items: List[NewsItem] = []
         report = {
             "attempted": len(self.sources), "succeeded": 0, "failed": 0,
+            # `succeeded` = fetched without error; of those, `empty` came back
+            # with zero items (alive but degraded) and `contributing` actually
+            # carried data. The signal disclosure must base its count on
+            # `contributing`, not `succeeded`, or an empty source inflates it.
+            "empty": 0, "contributing": 0,
             "failed_detail": [],  # [{"source", "error"}]
             "per_source": [],     # [{"source", "status", "items"(, "error")}]; items = raw count before dedup
         }
@@ -105,8 +110,14 @@ class NewsFetcher:
                     items = future.result()
                     all_items.extend(items)
                     report["succeeded"] += 1
+                    if items:
+                        report["contributing"] += 1
+                        status = "ok"
+                    else:
+                        report["empty"] += 1  # alive but degraded — not a contributor
+                        status = "empty"
                     report["per_source"].append(
-                        {"source": source_name, "status": "ok", "items": len(items)})
+                        {"source": source_name, "status": status, "items": len(items)})
                     logger.info(f"[{source_name}] fetched {len(items)} items")
                 except Exception as e:
                     err = f"{type(e).__name__}: {e}"

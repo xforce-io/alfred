@@ -53,13 +53,15 @@ def test_fetch_report_counts_failures_and_degraded():
     f.fetch_all(max_age_hours=0)
     rep = f.fetch_report
     assert rep["attempted"] == 3
-    assert rep["succeeded"] == 2          # GoodA + EmptyC (empty still counts as success)
+    assert rep["succeeded"] == 2          # GoodA + EmptyC (succeeded = no error)
+    assert rep["empty"] == 1              # EmptyC: alive but degraded
+    assert rep["contributing"] == 1       # only GoodA actually carried data
     assert rep["failed"] == 1
     fd = rep["failed_detail"]
     assert len(fd) == 1 and fd[0]["source"] == "BadB" and "403" in fd[0]["error"]
     per = {p["source"]: p for p in rep["per_source"]}
     assert per["GoodA"]["status"] == "ok" and per["GoodA"]["items"] == 1
-    assert per["EmptyC"]["status"] == "ok" and per["EmptyC"]["items"] == 0
+    assert per["EmptyC"]["status"] == "empty" and per["EmptyC"]["items"] == 0
     assert per["BadB"]["status"] == "failed" and "403" in per["BadB"]["error"]
 
 
@@ -80,6 +82,7 @@ def test_fetch_report_all_succeed():
     f.fetch_all(max_age_hours=0)
     rep = f.fetch_report
     assert rep["failed"] == 0 and rep["succeeded"] == 3 and rep["failed_detail"] == []
+    assert rep["empty"] == 0 and rep["contributing"] == 3
 
 
 # --- format_text_report degradation disclosure (link B, new) -----------------
@@ -118,6 +121,56 @@ def test_text_shows_all_sources_ok():
     text = rr.format_text_report(_report(sources=sources))
     assert "20/20" in text             # positive confirmation, even with no failures
     assert "失败" not in text
+
+
+def test_text_error_branch_still_discloses_sources():
+    # P1: when ok=False (all sources failed -> no items), the text report must
+    # STILL name the failed sources, not collapse to a generic error line.
+    sources = {
+        "attempted": 2, "succeeded": 0, "failed": 2, "empty": 0, "contributing": 0,
+        "failed_detail": [{"source": "BBC", "error": "ConnectionError: down"},
+                          {"source": "OilPrice", "error": "TimeoutError: read timed out"}],
+        "per_source": [],
+    }
+    report = {"ok": False, "error": "No news items fetched. Check network connectivity.",
+              "sources": sources}
+    text = rr.format_text_report(report)
+    assert "Error:" in text            # the generic error is still surfaced
+    assert "BBC" in text and "OilPrice" in text   # but failed sources are named
+    assert "0/2" in text and "失败" in text
+
+
+def test_text_error_branch_no_sources_backward_compat():
+    # ok=False without a sources field must not crash and stays generic.
+    text = rr.format_text_report({"ok": False, "error": "boom"})
+    assert text == "Error: boom"
+
+
+def test_text_empty_source_excluded_from_signal_count():
+    # P2: 1 contributing + 1 empty + 1 failed. The "signal rests on N sources"
+    # claim must say 1 (contributing), not 2 (succeeded), and disclose the empty.
+    sources = {
+        "attempted": 3, "succeeded": 2, "failed": 1, "empty": 1, "contributing": 1,
+        "failed_detail": [{"source": "OilPrice", "error": "TimeoutError: x"}],
+        "per_source": [],
+    }
+    text = rr.format_text_report(_report(sources=sources))
+    assert "信号基于 1 个有效源" in text   # contributing, not succeeded(=2)
+    assert "1 个返回空" in text            # the empty source is disclosed
+    assert "OilPrice" in text
+
+
+def test_text_legacy_sources_without_contributing_falls_back():
+    # Old report dicts lacking `empty`/`contributing` must still render, basing
+    # the count on succeeded (no empty info available).
+    sources = {
+        "attempted": 3, "succeeded": 2, "failed": 1,
+        "failed_detail": [{"source": "OilPrice", "error": "TimeoutError: x"}],
+        "per_source": [],
+    }
+    text = rr.format_text_report(_report(sources=sources))
+    assert "信号基于 2 个有效源" in text   # succeeded - empty(=0) = 2
+    assert "OilPrice" in text
 
 
 def test_text_no_sources_backward_compat():

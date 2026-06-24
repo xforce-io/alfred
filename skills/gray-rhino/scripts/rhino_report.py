@@ -105,10 +105,41 @@ def generate_report(max_age_hours: int = 48, top_n: int = 8,
     }
 
 
+def _format_sources_line(sources: dict) -> str:
+    """One-line per-source health disclosure for the report header.
+
+    Bases the "signal rests on N sources" claim on `contributing` (sources that
+    actually returned data), not `succeeded` — an empty-but-alive source counts
+    as succeeded yet contributes nothing, so it must not inflate the count.
+    """
+    attempted = sources.get("attempted", 0)
+    succeeded = sources.get("succeeded", 0)
+    failed = sources.get("failed", 0)
+    empty = sources.get("empty", 0)
+    # Fall back to `succeeded` for legacy reports without the contributing field.
+    contributing = sources.get("contributing", succeeded - empty)
+
+    if not failed and not empty:
+        return f"  数据源: {succeeded}/{attempted} 全部成功"
+
+    parts = []
+    if failed:
+        names = "、".join(d.get("source", "?") for d in sources.get("failed_detail", []))
+        parts.append(f"{failed} 个失败（{names}）")
+    if empty:
+        parts.append(f"{empty} 个返回空")
+    return (f"  数据源: {succeeded}/{attempted} 成功，" + "，".join(parts)
+            + f" —— 信号基于 {contributing} 个有效源，请据此降级解读")
+
+
 def format_text_report(report: dict) -> str:
     """Format report as human-readable text with trend focus."""
     if not report.get("ok"):
-        return f"Error: {report.get('error', 'Unknown error')}"
+        lines = [f"Error: {report.get('error', 'Unknown error')}"]
+        sources = report.get("sources")
+        if sources:
+            lines.append(_format_sources_line(sources))
+        return "\n".join(lines)
 
     lines = []
     gen_time = report.get("generated_at", "")[:19].replace("T", " ")
@@ -122,15 +153,7 @@ def format_text_report(report: dict) -> str:
                  f"历史基线: {history_days} 天")
     sources = report.get("sources")
     if sources:
-        succeeded = sources.get("succeeded", 0)
-        attempted = sources.get("attempted", 0)
-        failed = sources.get("failed", 0)
-        if failed:
-            names = "、".join(d.get("source", "?") for d in sources.get("failed_detail", []))
-            lines.append(f"  数据源: {succeeded}/{attempted} 成功，{failed} 个失败"
-                         f"（{names}）—— 信号基于剩余 {succeeded} 源，请据此降级解读")
-        else:
-            lines.append(f"  数据源: {succeeded}/{attempted} 全部成功")
+        lines.append(_format_sources_line(sources))
     if history_days == 0:
         lines.append("  (首次运行，尚无历史基线。持续运行后趋势分析将更准确)")
     lines.append("")
