@@ -151,3 +151,40 @@ class TestRealtimeEmit:
         await d._emit_realtime("status ping", "run_y")
 
         assert emitted[0].get("transcript_worthy", False) is False
+
+    @pytest.mark.asyncio
+    async def test_emit_realtime_carries_source_session_id(self, monkeypatch):
+        """#122:realtime 事件须带可解析的 source_session_id 作 projection 溯源锚点。
+        run_id 是一次性合成的 job 执行 id(回溯不到任何执行),source_session_id 才
+        指向归档 job session(报告全文+轨迹所在)。"""
+        emitted = []
+        d = _make_delivery()
+
+        async def _fake_emit(source_session_id, data, **kwargs):
+            emitted.append(data)
+
+        monkeypatch.setattr("src.everbot.core.runtime.cron_delivery.emit", _fake_emit, raising=False)
+        monkeypatch.setattr("src.everbot.core.runtime.events.emit", _fake_emit)
+
+        await d._emit_realtime(
+            "report body", "job_f8a5b0a67ad3", transcript_worthy=True,
+            source_session_id="job_routine_38364fe6_d185ce87",
+        )
+
+        assert emitted[0]["source_session_id"] == "job_routine_38364fe6_d185ce87"
+
+    @pytest.mark.asyncio
+    async def test_emit_realtime_source_session_id_defaults_none(self, monkeypatch):
+        """未提供 source_session_id 时该键为 None,channel 侧据此回落 run_id。"""
+        emitted = []
+        d = _make_delivery()
+
+        async def _fake_emit(source_session_id, data, **kwargs):
+            emitted.append(data)
+
+        monkeypatch.setattr("src.everbot.core.runtime.cron_delivery.emit", _fake_emit, raising=False)
+        monkeypatch.setattr("src.everbot.core.runtime.events.emit", _fake_emit)
+
+        await d._emit_realtime("status ping", "run_y")
+
+        assert emitted[0].get("source_session_id") is None

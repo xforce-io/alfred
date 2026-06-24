@@ -2108,3 +2108,46 @@ class TestProjectionIdleGate:
         except asyncio.CancelledError:
             pass
         assert ch._flush_pending_pushes.await_count >= 1
+
+
+class TestProjectionProvenance:
+    """#122: projection 的 source_run_id 必须是可解析的 source_session_id,
+    而非一次性合成的 job 执行 run_id(后者回溯不到任何执行,溯源落空)。"""
+
+    @pytest.fixture
+    def _provider(self, monkeypatch):
+        provider = MagicMock()
+        provider.attach_projection = AsyncMock()
+        provider.set_session_id = MagicMock()
+        import src.everbot.core.agent.provider as provider_mod
+        monkeypatch.setattr(provider_mod, "get_provider_for_agent", lambda name: provider)
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_uses_source_session_id_as_provenance(self, tmp_path, _provider):
+        ch = _make_channel(tmp_path)
+        ch._session_manager.get_cached_agent.return_value = SimpleNamespace()  # 命中缓存,跳过创建
+        data = {
+            "transcript_worthy": True,
+            "detail": "# 每日投资信号\n🆕 恒生科技大涨 | 港股 | 5.8 | 2 条",
+            "run_id": "job_f8a5b0a67ad3",                       # 死 id
+            "source_session_id": "job_routine_38364fe6_d185ce87",  # 活 id(归档 session)
+        }
+
+        ok = await ch._maybe_attach_projection("test_agent", 555, data)
+
+        assert ok is True
+        kwargs = _provider.attach_projection.call_args.kwargs
+        assert kwargs["source_run_id"] == "job_routine_38364fe6_d185ce87"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_run_id_when_no_source_session(self, tmp_path, _provider):
+        ch = _make_channel(tmp_path)
+        ch._session_manager.get_cached_agent.return_value = SimpleNamespace()
+        data = {"transcript_worthy": True, "detail": "x", "run_id": "job_abc"}
+
+        ok = await ch._maybe_attach_projection("test_agent", 555, data)
+
+        assert ok is True
+        kwargs = _provider.attach_projection.call_args.kwargs
+        assert kwargs["source_run_id"] == "job_abc"

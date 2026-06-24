@@ -173,13 +173,18 @@ class CronDelivery:
         }
 
     async def _emit_realtime(
-        self, result: str, run_id: str, *, transcript_worthy: bool = False
+        self, result: str, run_id: str, *, transcript_worthy: bool = False,
+        source_session_id: Optional[str] = None,
     ) -> None:
         """Emit realtime push event (SSE / Telegram).
 
         ``transcript_worthy`` (#60):本次投递是否是"内容型"产出(具名 job/agent 任务的
         用户可见报告),供 channel 侧据此登记 milkie context projection(读侧逐字稿)。
-        心跳状态 ping / 失败消息保持 False,不入逐字稿。"""
+        心跳状态 ping / 失败消息保持 False,不入逐字稿。
+
+        ``source_session_id`` (#122):产出该报告的可解析 job session id(归档 session
+        所在,报告全文+轨迹可回溯)。channel 侧据此作 projection 的溯源锚点,而非一次性
+        合成的 run_id(后者回溯不到任何执行 → "来源哪里"落空)。"""
         from .events import emit
 
         message = {
@@ -190,6 +195,7 @@ class CronDelivery:
             "detail": result,
             "source_type": "heartbeat_delivery",
             "run_id": run_id,
+            "source_session_id": source_session_id,
             "deliver": True,
             "transcript_worthy": transcript_worthy,
         }
