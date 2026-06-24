@@ -650,6 +650,11 @@ class CronExecutor:
             await self.session_manager.save_session(job_session_id, agent)
             await self.session_manager.mark_session_archived(job_session_id)
 
+            # #127 L1 provenance gate (observe-only): log whether this report run
+            # was backed by real tools + cites. Does NOT alter delivery — we
+            # measure the live flag rate before any banner/block (防误杀).
+            self._observe_provenance(task, agent)
+
             summary = f"{task_title or task.id} completed"
             await self.delivery.deposit_job_event(
                 event_type="job_completed",
@@ -689,6 +694,34 @@ class CronExecutor:
                 fail_msg += f"\n\n{retry_hint}"
             await self.delivery._emit_realtime(fail_msg, run_id)
             raise
+
+    def _observe_provenance(self, task: Task, agent: Any) -> None:
+        """#127 L1 (observe-only): log a backing verdict for this isolated report
+        run — did it run real data tools, did it cite? LOG ONLY; never alters
+        delivery and never raises into it. Lets us measure the live flag rate
+        before turning on any banner/block (防误杀: observe-first)."""
+        try:
+            from .provenance_gate import assess_report_backing, read_run_events
+            from ..agent.provider.milkie.provider import _milkie_data_dir
+
+            milkie_run_id = getattr(agent, "last_run_id", None)
+            if not milkie_run_id:
+                return
+            events = read_run_events(_milkie_data_dir(self.agent_name), milkie_run_id)
+            if not events:
+                return
+            v = assess_report_backing(events)
+            verdict = (
+                "UNBACKED" if not v.has_tool_backing
+                else "NO_CITES" if not v.has_cites
+                else "ok"
+            )
+            logger.info(
+                "[provenance/observe] task=%s run=%s tool_calls=%d cites=%d verdict=%s",
+                task.id, milkie_run_id, v.tool_calls, v.cites, verdict,
+            )
+        except Exception:
+            logger.debug("provenance observe failed", exc_info=True)
 
     async def _create_job_agent(self, job_session_id: str) -> Any:
         """Create a fresh agent for isolated job execution."""
