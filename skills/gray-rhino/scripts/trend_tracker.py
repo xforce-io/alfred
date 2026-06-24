@@ -14,7 +14,7 @@ import json
 import logging
 import os
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -45,6 +45,9 @@ class TrendSignal:
     source_diversity: float  # 0-1, 1 = many independent sources
     days_tracked: int  # how many days this topic has appeared
     history_counts: List[int]  # daily counts over tracking window
+    # #124 L2:逐条来源证据(title+source+url+published),从 cluster 透传,
+    # 供报告逐条信号下钻与 cite。
+    evidence: List[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -255,6 +258,7 @@ class TrendTracker:
             source_diversity=round(source_diversity, 2),
             days_tracked=days_tracked,
             history_counts=history_counts,
+            evidence=cluster.get("evidence", []),
         )
 
     def _build_daily_counts(self, timeline: List[Tuple[str, int]],

@@ -119,6 +119,10 @@ python $SKILL_DIR/scripts/asset_mapper.py --list-scenarios
 3. **忽略 📉 信号**：除非用户明确要求，趋势减弱的事件通常已不构成灰犀牛
 4. **补充资产影响**：对未匹配到内置场景的信号，用你的分析能力推断资产影响
 5. **持续积累**：提醒用户定期运行以积累历史基线，趋势分析需要时间维度
+6. **溯源（#124 L2）**：报告每条信号现在都带 `evidence`（贡献新闻的 `title/source/url`，JSON 全量、text 列 top3 链接）。
+   - 回答"这条信号哪来的"时，**直接引用 `evidence` 里的真实链接**，不要凭印象编来源。
+   - milkie shell 工具已把脚本 stdout 铸成可引用 object（结果带回 `objectId`）。**把每条信号 `cite` 到该报告 object**，使 `get_lineage` 能溯源、且来源不可伪造。
+   - 诚实边界：这是**报告级**血缘（粗粒度）。「具体哪篇」可打开报告 object 看 `evidence`；逐条机械绑定属后续 L3，不要假装已做到。
 
 ## Dependencies
 
