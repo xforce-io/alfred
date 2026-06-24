@@ -79,6 +79,9 @@ class NewsCluster:
     sources: List[str]
     count: int
     keywords: List[str] = field(default_factory=list)
+    # #124 L2:保留每条贡献新闻的可溯源证据(title+source+url+published),
+    # 让下游报告逐条信号能带来源链接、被 cite 的报告 object 真带证据。
+    evidence: List[dict] = field(default_factory=list)
 
 
 class RhinoAnalyzer:
@@ -160,6 +163,15 @@ class RhinoAnalyzer:
                     sources=list(set(it.get("source", "") for it in group_items)),
                     count=len(group_items),
                     keywords=keywords[:10],
+                    evidence=[
+                        {
+                            "title": it.get("title", ""),
+                            "source": it.get("source", ""),
+                            "url": it.get("url", ""),
+                            "published": it.get("published", ""),
+                        }
+                        for it in group_items
+                    ],
                 ))
 
         return all_clusters

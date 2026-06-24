@@ -212,6 +212,13 @@ def format_text_report(report: dict) -> str:
 
         lines.append(f"   关键词: {', '.join(sig.get('keywords', [])[:6])}")
 
+        # #124 L2:逐条来源(标题 — 链接),最多 3 条,供下钻 / cite。
+        evidence = [e for e in sig.get("evidence", []) if e.get("url")]
+        if evidence:
+            lines.append("   来源:")
+            for e in evidence[:3]:
+                lines.append(f"     - {e.get('title', '')[:50]} — {e['url']}")
+
         # Asset impact
         event = event_map.get(sig["representative_title"])
         if event:
