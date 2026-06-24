@@ -181,6 +181,10 @@ def test_fetch_only_json_carries_sources(monkeypatch, capsys):
     import json as _json
     items = [nf.NewsItem(title="x", summary="", source="BBC", url="u")]
     monkeypatch.setattr(rr, "NewsFetcher", _fake_fetcher_cls(items))
+    # NewsFetcher is stubbed, so the real feedparser/requests deps are never
+    # touched; skip the import guard that would sys.exit when they're absent
+    # (feedparser is a skill-local dep, not installed in CI).
+    monkeypatch.setattr(rr, "_check_dependencies", lambda: None)
     monkeypatch.setattr(sys, "argv", ["rhino_report.py", "--fetch-only", "--format", "json"])
     rr.main()
     data = _json.loads(capsys.readouterr().out)
