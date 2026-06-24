@@ -405,3 +405,76 @@ class TestE2ERecoverStuckTask:
         assert len(disk_tasks) == 1
         assert disk_tasks[0]["state"] == "pending"
         assert disk_tasks[0]["error_message"] == "recovered: stuck in running state"
+
+
+# ── E2E: 投递溯源锚点跨缝(#122) ──────────────────────────────
+
+class TestE2EProjectionProvenanceAcrossSeam:
+    """真实 cron 投递 → 真实事件总线 payload → 真实 telegram _maybe_attach_projection,
+    断言 projection 溯源 id 是可解析的 job_session_id,而非一次性合成的 run_id。"""
+
+    @pytest.mark.asyncio
+    async def test_isolated_job_delivery_projection_uses_resolvable_session_id(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from src.everbot.core.tasks.task_manager import Task
+        from src.everbot.channels.telegram_channel import TelegramChannel
+
+        from src.everbot.core.runtime import events
+
+        runner = _make_runner(tmp_path)
+        cron = runner._cron
+
+        # 真实走 _run_isolated_job 的投递代码,只 stub 叶子(job 执行体)。
+        report = "# 每日投资信号\n🆕 恒生科技大涨 | 港股 | 5.8 | 2 条"
+        monkeypatch.setattr(cron, "_invoke_job", AsyncMock(return_value=report))
+
+        # 走真实 emit + 真实订阅者捕获信封 —— 真实 emit 会做信封 enrichment
+        # (覆盖 source_session_id),这正是上一版假 emit 漏掉的字段覆盖陷阱。
+        captured = []
+        events.subscribe(lambda src, env: captured.append(env))
+
+        task = Task.from_dict({
+            "id": "iso_e2e",
+            "title": "每日投资信号",
+            "description": "isolated work",
+            "schedule": "1d",
+            "state": "running",
+            "enabled": True,
+            "execution_mode": "isolated",
+            "timeout_seconds": 120,
+        })
+
+        # 生产端:合成的 run_id 是"死 id",job_session_id 才可解析。
+        dead_run_id = "job_f8a5b0a67ad3"
+        try:
+            await cron._run_isolated_job(task, dead_run_id)
+        finally:
+            events._subscribers.clear()
+
+        # ① 真实信封里:projection_source_id 保留了可解析 job session(不被信封
+        #    的 source_session_id 覆盖);信封自有的 source_session_id 是发出方。
+        realtime = [d for d in captured if d.get("transcript_worthy")]
+        assert len(realtime) == 1
+        event = realtime[0]
+        assert event["projection_source_id"] == "job_iso_e2e"
+        assert event["projection_source_id"] != dead_run_id
+
+        # ② 消费端:真实 telegram channel 据此事件登记 projection,溯源锚点取
+        #    可解析的 source_session_id(回溯得到归档 session),而非死 run_id。
+        ch = TelegramChannel(
+            bot_token="123:FAKE",
+            session_manager=MagicMock(),
+            default_agent="test_agent",
+        )
+        ch._session_manager.get_cached_agent.return_value = SimpleNamespace()
+
+        provider = MagicMock()
+        provider.attach_projection = AsyncMock()
+        import src.everbot.core.agent.provider as provider_mod
+        monkeypatch.setattr(provider_mod, "get_provider_for_agent", lambda name: provider)
+
+        ok = await ch._maybe_attach_projection("test_agent", 555, event)
+
+        assert ok is True
+        assert provider.attach_projection.call_args.kwargs["source_run_id"] == "job_iso_e2e"

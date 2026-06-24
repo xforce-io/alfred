@@ -585,15 +585,19 @@ class CronExecutor:
                 return None
 
             summary = f"{task_title or task.id} completed"
+            job_session_id = f"job_{task.id}"
             await self.delivery.deposit_job_event(
                 event_type="job_completed",
-                source_session_id=f"job_{task.id}",
+                source_session_id=job_session_id,
                 summary=summary,
                 detail=result,
                 run_id=run_id,
             )
             await self.delivery.inject_to_history(result, run_id)
-            await self.delivery._emit_realtime(result, run_id, transcript_worthy=True)
+            await self.delivery._emit_realtime(
+                result, run_id, transcript_worthy=True,
+                source_session_id=job_session_id,  # #122:可解析溯源锚点,非合成 run_id
+            )
 
             return result
         except Exception as exc:
@@ -655,7 +659,10 @@ class CronExecutor:
                 run_id=run_id,
             )
             await self.delivery.inject_to_history(result, run_id)
-            await self.delivery._emit_realtime(result, run_id, transcript_worthy=True)
+            await self.delivery._emit_realtime(
+                result, run_id, transcript_worthy=True,
+                source_session_id=job_session_id,  # #122:可解析溯源锚点(归档 job session)
+            )
 
             # SLM: record skill invocations from this isolated agent run.
             # Reads the just-written trajectory to find _load_resource_skill
