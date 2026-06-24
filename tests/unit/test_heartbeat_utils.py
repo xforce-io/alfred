@@ -22,3 +22,15 @@ def test_build_isolated_task_prompt_warns_against_python_wrapping():
 
     assert "Never execute `_load_resource_skill(...)` inside `_python` or `_bash`." in prompt
     assert '_load_resource_skill("kweaver-code-review", mode="full")' in prompt
+
+
+def test_build_isolated_task_prompt_includes_cite_convention():
+    """#124 L2(铺开):共享 isolated 提示词须含 cite 约定 —— 报告里的事实/数字
+    应 cite 到产出它的工具 object(objectId),使「来源哪里」可经 get_lineage 溯源、
+    且来源不可伪造。一处加,全报告型 routine 继承。"""
+    prompt = build_isolated_task_prompt(_Task(id="routine_x", title="每日投资信号", description="跑投资信号"))
+
+    assert "cite" in prompt
+    assert "objectId" in prompt
+    # 明确是"溯源/来源"语义,而非泛泛
+    assert ("溯源" in prompt) or ("来源" in prompt)

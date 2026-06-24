@@ -53,11 +53,18 @@ L2 要"可用",cite 指向的节点必须真带证据。当前 `rhino_analyzer.p
 - 效果:`get_lineage(query="某信号")` 走 cite 图返回报告 object;`resolveObject` 保证来源不可伪造。
 - **诚实标注边界**:这是**报告级**血缘(粗粒度)。"具体哪篇文章"仍需打开 object 看(4.1 的 evidence 让这一步有据可依),机械的逐条绑定属 L3。
 
-### 4.3 不做(明确排除)
+### 4.3 把 L2 铺到其余 routine(已做:cite 约定走共性层)
+
+L2 分两半:(a) 逐条 evidence 让被 cite 的节点有料;(b) cite 约定让结论挂上溯源边。
+
+- **(b) 通用,走共性层**:cite 约定加进**共享的** `build_isolated_task_prompt`(heartbeat + cron 单一真相,所有 isolated 报告型 routine——投资信号/论文/吸引子/Serenity/反共识/新闻简报——都走它)。**一处加,全 routine 继承**,不逐 SKILL.md 复制。前提已验证:milkie `AgentRuntime` 无条件注册 `cite`/`declare_relation`,trace 工具(`get_lineage`)亦在,shell 已铸 object → cite 真能用。
+- **(a) 逐技能,长尾**:evidence 保留是各技能 pipeline 特定的,**灰犀牛已做样板**;invest / paper-discovery / daily-attractor / twitter-watch / contrarian-signals 按同法逐个补(读各自脚本、把 source+url 透传进输出),属后续逐技能工作。
+
+### 4.4 不做(明确排除)
 
 - L3 原子 object / `derives_from` 逐条边(需 TS 数据工具层,另立项)。
-- L1 强制执行闸门(需框架级"未引用结论"检测)。
-- 把 L2 铺到其余 routine(灰犀牛跑通后再铺)。
+- L1 强制执行闸门(需框架级"未引用结论 / 无工具执行"检测)—— 注意 (b) 的提示词约定 LLM 仍可无视,**真正强制要靠 L1**。
+- L2(a) 在灰犀牛之外的逐技能 evidence 透传(长尾,见 4.3)。
 
 ## 5. 共性杠杆(后续,非本 issue)
 
