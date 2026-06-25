@@ -132,6 +132,23 @@ def _format_sources_line(sources: dict) -> str:
             + f" —— 信号基于 {contributing} 个有效源，请据此降级解读")
 
 
+def _build_provenance_block(signals: list) -> str:
+    """#130 T1: emit a machine PROVENANCE block carrying each signal's top-1 {title,url}
+    so delivery can extract source links for the push (independent of the LLM prose). Only
+    evidence with a url is included; no block is emitted when there is none."""
+    out = []
+    for sig in signals:
+        for e in sig.get("evidence", []):
+            url = e.get("url")
+            title = e.get("title")
+            if url and title:
+                out.append({"title": title, "url": url})
+                break  # top1 per signal
+    if not out:
+        return ""
+    return "<PROVENANCE>" + json.dumps({"signals": out}, ensure_ascii=False) + "</PROVENANCE>"
+
+
 def format_text_report(report: dict) -> str:
     """Format report as human-readable text with trend focus."""
     if not report.get("ok"):
@@ -258,6 +275,12 @@ def format_text_report(report: dict) -> str:
             lines.append(f"     - {s['representative_title']} "
                          f"(×{s.get('acceleration', 0):.1f})")
     lines.append("")
+
+    # #130 T1: append the machine PROVENANCE block (top-1 source link per signal) for
+    # delivery-side extraction.
+    block = _build_provenance_block(signals)
+    if block:
+        lines.append(block)
 
     return "\n".join(lines)
 

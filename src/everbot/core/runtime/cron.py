@@ -655,6 +655,16 @@ class CronExecutor:
             # measure the live flag rate before any banner/block (防误杀).
             self._observe_provenance(task, agent)
 
+            # #130 T1: mechanically append each signal's top-1 source link to the
+            # delivered result (independent of the LLM prose).
+            result = self._append_run_provenance(result, agent)
+
+            # #130 T2: the projection anchor must be the milkie run id (deref-able by the
+            # consuming agent via get_execution/get_lineage under milkie#200's
+            # delivered-runId allowlist), not the job session id — readByRunId is keyed by
+            # the milkie runId. Fall back to the session id when no run id was captured.
+            projection_anchor = getattr(agent, "last_run_id", None) or job_session_id
+
             summary = f"{task_title or task.id} completed"
             await self.delivery.deposit_job_event(
                 event_type="job_completed",
@@ -666,7 +676,7 @@ class CronExecutor:
             await self.delivery.inject_to_history(result, run_id)
             await self.delivery._emit_realtime(
                 result, run_id, transcript_worthy=True,
-                source_session_id=job_session_id,  # #122:可解析溯源锚点(归档 job session)
+                source_session_id=projection_anchor,  # #130 T2: milkie runId, deref-able
             )
 
             # SLM: record skill invocations from this isolated agent run.
@@ -722,6 +732,25 @@ class CronExecutor:
             )
         except Exception:
             logger.debug("provenance observe failed", exc_info=True)
+
+    def _append_run_provenance(self, result: str, agent: Any) -> str:
+        """#130 T1: mechanically append each signal's top-1 source link to the report —
+        independent of the LLM prose (which may drop the links). Source is the trusted
+        report-script's PROVENANCE block in the run events. Any failure is swallowed and the
+        body returned unchanged (delivery must not crash on the provenance add-on)."""
+        try:
+            from .provenance_footer import append_provenance_footer
+            from .provenance_gate import read_run_events
+            from ..agent.provider.milkie.provider import _milkie_data_dir
+
+            run_id = getattr(agent, "last_run_id", None)
+            if not run_id:
+                return result
+            events = read_run_events(_milkie_data_dir(self.agent_name), run_id)
+            return append_provenance_footer(result, events)
+        except Exception:
+            logger.debug("provenance footer failed", exc_info=True)
+            return result
 
     async def _create_job_agent(self, job_session_id: str) -> Any:
         """Create a fresh agent for isolated job execution."""

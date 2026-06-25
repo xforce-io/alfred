@@ -96,3 +96,19 @@ def test_text_report_lists_source_link_for_signal(tmp_path, monkeypatch):
     text = rr.format_text_report(result)
     # text 报告里逐条信号应能看到来源链接(粗粒度 cite 的节点据此可下钻)
     assert "https://finance.sina/cu1" in text or "https://finance.sina/al2" in text
+
+
+def test_text_report_appends_parseable_provenance_block(tmp_path, monkeypatch):
+    """#130 T1: the text report appends a machine PROVENANCE block parseable by the
+    delivery-side extractor. Top-1 {title,url} per signal, url from real evidence."""
+    from src.everbot.core.runtime.provenance_footer import extract_provenance_block
+
+    monkeypatch.setattr(rr, "NewsFetcher", _fake_fetcher_cls(_items()))
+    result = rr.generate_report(save_snapshot=False, history_dir=str(tmp_path))
+    text = rr.format_text_report(result)
+
+    signals = extract_provenance_block(text)
+    assert signals, "text report should end with a parseable PROVENANCE block"
+    for s in signals:
+        assert s["title"] and s["url"]
+        assert s["url"] in {"https://finance.sina/cu1", "https://finance.sina/al2"}

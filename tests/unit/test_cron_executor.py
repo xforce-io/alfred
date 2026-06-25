@@ -984,3 +984,106 @@ class TestTranscriptWorthyDelivery:
 
         assert out == "AGENT REPORT"
         assert executor.delivery._emit_realtime.call_args.kwargs.get("transcript_worthy") is True
+
+
+# ---- #130 T1: provenance footer wiring (CronExecutor._append_run_provenance) ----
+
+_PROV_BLOCK = ('<PROVENANCE>{"signals":[{"title":"Hormuz","url":"https://cnbc.com/x"}]}'
+               '</PROVENANCE>')
+# Trusted producer run: run_command invoking rhino_report.py, request+response paired by
+# toolCallId (only such output is honored — see provenance_footer security contract).
+_PROV_EVENTS = [
+    {"type": "tool.requested",
+     "payload": {"toolName": "run_command", "toolCallId": "c1",
+                 "input": {"command": "python /repo/skills/gray-rhino/scripts/"
+                                       "rhino_report.py --format text"}}},
+    {"type": "tool.responded",
+     "payload": {"toolName": "run_command", "toolCallId": "c1",
+                 "output": {"stdout": "report body\n" + _PROV_BLOCK}}},
+]
+
+
+def test_append_run_provenance_adds_footer(tmp_path, monkeypatch):
+    """LLM prose dropped the links; mechanically pull top-1 link from run events."""
+    from src.everbot.core.runtime import provenance_gate
+    monkeypatch.setattr(provenance_gate, "read_run_events", lambda *a, **k: _PROV_EVENTS)
+    executor = _make_executor(tmp_path)
+    agent = SimpleNamespace(last_run_id="run-1")
+
+    out = executor._append_run_provenance("# Gray Rhino\nSignal: Hormuz (no link)", agent)
+    assert "https://cnbc.com/x" in out
+    assert out.startswith("# Gray Rhino")
+
+
+def test_append_run_provenance_noop_without_run_id(tmp_path):
+    """agent without last_run_id -> returned unchanged (no event read)."""
+    executor = _make_executor(tmp_path)
+    result = "# report"
+    assert executor._append_run_provenance(result, SimpleNamespace()) == result
+
+
+def test_append_run_provenance_never_raises(tmp_path, monkeypatch):
+    """Reading events raises -> swallowed, returns body (delivery must not crash)."""
+    from src.everbot.core.runtime import provenance_gate
+    def _boom(*a, **k):
+        raise RuntimeError("disk gone")
+    monkeypatch.setattr(provenance_gate, "read_run_events", _boom)
+    executor = _make_executor(tmp_path)
+    result = "# report"
+    assert executor._append_run_provenance(result, SimpleNamespace(last_run_id="r")) == result
+
+
+@pytest.mark.asyncio
+async def test_isolated_agent_delivers_footer_appended_result(tmp_path, monkeypatch):
+    """End-to-end wiring: LLM prose dropped links, delivered report still carries them."""
+    from src.everbot.core.runtime import provenance_gate
+    monkeypatch.setattr(provenance_gate, "read_run_events", lambda *a, **k: _PROV_EVENTS)
+
+    executor = _make_executor(tmp_path)
+    agent = SimpleNamespace(last_run_id="run-1")
+    executor._create_job_agent = AsyncMock(return_value=agent)
+    executor._build_job_system_prompt = MagicMock(return_value="sys")
+    executor._record_skill_log = MagicMock()
+    executor.delivery.deposit_job_event = AsyncMock()
+    executor.delivery.inject_to_history = AsyncMock()
+    captured = {}
+    async def _capture(result, run_id, **k):
+        captured["result"] = result
+    executor.delivery._emit_realtime = AsyncMock(side_effect=_capture)
+
+    run_agent = AsyncMock(return_value="# Gray Rhino\nHormuz (LLM stripped the link)")
+    task = SimpleNamespace(id="t1", title="Gray Rhino", description="d",
+                           timeout_seconds=30, job=None)
+
+    out = await executor._run_isolated_agent(task, "run-1", run_agent=run_agent)
+
+    assert "https://cnbc.com/x" in out                      # return value carries link
+    assert "https://cnbc.com/x" in captured["result"]       # push (_emit_realtime) carries link
+    # detail (deposit_job_event) carries it too — all three delivery paths consistent
+    _, kwargs = executor.delivery.deposit_job_event.call_args
+    assert "https://cnbc.com/x" in kwargs["detail"]
+
+
+@pytest.mark.asyncio
+async def test_isolated_agent_projection_anchor_is_milkie_run_id(tmp_path, monkeypatch):
+    """#130 T2: the delivered projection anchor must be the milkie run id (deref-able by
+    get_execution/get_lineage under milkie#200's delivered-runId allowlist), not the job
+    session id — otherwise readByRunId can't resolve it."""
+    from src.everbot.core.runtime import provenance_gate
+    monkeypatch.setattr(provenance_gate, "read_run_events", lambda *a, **k: [])
+    executor = _make_executor(tmp_path)
+    agent = SimpleNamespace(last_run_id="31850ca6-uuid")
+    executor._create_job_agent = AsyncMock(return_value=agent)
+    executor._build_job_system_prompt = MagicMock(return_value="sys")
+    executor._record_skill_log = MagicMock()
+    executor.delivery.deposit_job_event = AsyncMock()
+    executor.delivery.inject_to_history = AsyncMock()
+    executor.delivery._emit_realtime = AsyncMock()
+    run_agent = AsyncMock(return_value="# report")
+    task = SimpleNamespace(id="t1", title="gr", description="d",
+                           timeout_seconds=30, job=None)
+
+    await executor._run_isolated_agent(task, "run-1", run_agent=run_agent)
+
+    _, kwargs = executor.delivery._emit_realtime.call_args
+    assert kwargs["source_session_id"] == "31850ca6-uuid"
