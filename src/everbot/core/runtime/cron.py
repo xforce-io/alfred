@@ -655,6 +655,9 @@ class CronExecutor:
             # measure the live flag rate before any banner/block (防误杀).
             self._observe_provenance(task, agent)
 
+            # #130 T1:机械追加每信号 top1 原文链接到投递结果(独立于 LLM 散文)。
+            result = self._append_run_provenance(result, agent)
+
             summary = f"{task_title or task.id} completed"
             await self.delivery.deposit_job_event(
                 event_type="job_completed",
@@ -722,6 +725,24 @@ class CronExecutor:
             )
         except Exception:
             logger.debug("provenance observe failed", exc_info=True)
+
+    def _append_run_provenance(self, result: str, agent: Any) -> str:
+        """#130 T1:把本 run 每条信号的 top1 原文链接机械追加到报告尾部 —— 独立于
+        LLM 散文(LLM 可能把链接摘掉)。来源是 run 事件里报告脚本 stdout 的
+        PROVENANCE 块。失败一律吞掉返回原文(投递不能因溯源附加而崩)。"""
+        try:
+            from .provenance_footer import append_provenance_footer
+            from .provenance_gate import read_run_events
+            from ..agent.provider.milkie.provider import _milkie_data_dir
+
+            run_id = getattr(agent, "last_run_id", None)
+            if not run_id:
+                return result
+            events = read_run_events(_milkie_data_dir(self.agent_name), run_id)
+            return append_provenance_footer(result, events)
+        except Exception:
+            logger.debug("provenance footer failed", exc_info=True)
+            return result
 
     async def _create_job_agent(self, job_session_id: str) -> Any:
         """Create a fresh agent for isolated job execution."""

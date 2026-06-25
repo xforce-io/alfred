@@ -984,3 +984,72 @@ class TestTranscriptWorthyDelivery:
 
         assert out == "AGENT REPORT"
         assert executor.delivery._emit_realtime.call_args.kwargs.get("transcript_worthy") is True
+
+
+# ---- #130 T1: provenance footer wiring (CronExecutor._append_run_provenance) ----
+
+_PROV_BLOCK = ('<PROVENANCE>{"signals":[{"title":"Hormuz","url":"https://cnbc.com/x"}]}'
+               '</PROVENANCE>')
+_PROV_EVENTS = [{"type": "tool.responded",
+                 "payload": {"output": {"stdout": "报告正文\n" + _PROV_BLOCK}}}]
+
+
+def test_append_run_provenance_adds_footer(tmp_path, monkeypatch):
+    """LLM 散文丢了链接,机械从 run 事件取 top1 link 追加到投递结果。"""
+    from src.everbot.core.runtime import provenance_gate
+    monkeypatch.setattr(provenance_gate, "read_run_events", lambda *a, **k: _PROV_EVENTS)
+    executor = _make_executor(tmp_path)
+    agent = SimpleNamespace(last_run_id="run-1")
+
+    out = executor._append_run_provenance("# 灰犀牛报告\n信号: Hormuz(无链接)", agent)
+    assert "https://cnbc.com/x" in out
+    assert out.startswith("# 灰犀牛报告")
+
+
+def test_append_run_provenance_noop_without_run_id(tmp_path):
+    """agent 无 last_run_id → 原样返回(不读事件)。"""
+    executor = _make_executor(tmp_path)
+    result = "# 报告"
+    assert executor._append_run_provenance(result, SimpleNamespace()) == result
+
+
+def test_append_run_provenance_never_raises(tmp_path, monkeypatch):
+    """读事件抛错 → 吞掉,返回原文(投递不能因溯源附加而崩)。"""
+    from src.everbot.core.runtime import provenance_gate
+    def _boom(*a, **k):
+        raise RuntimeError("disk gone")
+    monkeypatch.setattr(provenance_gate, "read_run_events", _boom)
+    executor = _make_executor(tmp_path)
+    result = "# 报告"
+    assert executor._append_run_provenance(result, SimpleNamespace(last_run_id="r")) == result
+
+
+@pytest.mark.asyncio
+async def test_isolated_agent_delivers_footer_appended_result(tmp_path, monkeypatch):
+    """端到端接线:LLM 散文丢了链接,投递出去的报告仍带 top1 原文链接。"""
+    from src.everbot.core.runtime import provenance_gate
+    monkeypatch.setattr(provenance_gate, "read_run_events", lambda *a, **k: _PROV_EVENTS)
+
+    executor = _make_executor(tmp_path)
+    agent = SimpleNamespace(last_run_id="run-1")
+    executor._create_job_agent = AsyncMock(return_value=agent)
+    executor._build_job_system_prompt = MagicMock(return_value="sys")
+    executor._record_skill_log = MagicMock()
+    executor.delivery.deposit_job_event = AsyncMock()
+    executor.delivery.inject_to_history = AsyncMock()
+    captured = {}
+    async def _capture(result, run_id, **k):
+        captured["result"] = result
+    executor.delivery._emit_realtime = AsyncMock(side_effect=_capture)
+
+    run_agent = AsyncMock(return_value="# 灰犀牛报告\nHormuz(LLM 把链接摘了)")
+    task = SimpleNamespace(id="t1", title="灰犀牛", description="d",
+                           timeout_seconds=30, job=None)
+
+    out = await executor._run_isolated_agent(task, "run-1", run_agent=run_agent)
+
+    assert "https://cnbc.com/x" in out                      # 返回值带链接
+    assert "https://cnbc.com/x" in captured["result"]       # 推送(_emit_realtime)带链接
+    # detail(deposit_job_event)也带链接 —— 投递三路一致
+    _, kwargs = executor.delivery.deposit_job_event.call_args
+    assert "https://cnbc.com/x" in kwargs["detail"]

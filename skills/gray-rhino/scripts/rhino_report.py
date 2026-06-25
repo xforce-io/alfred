@@ -132,6 +132,22 @@ def _format_sources_line(sources: dict) -> str:
             + f" —— 信号基于 {contributing} 个有效源，请据此降级解读")
 
 
+def _build_provenance_block(signals: list) -> str:
+    """#130 T1:机械输出每条信号 top1 {title,url} 的 PROVENANCE 块,供投递侧提取成
+    推送原文链接(独立于 LLM 散文)。只收带 url 的 evidence;无则不出块。"""
+    out = []
+    for sig in signals:
+        for e in sig.get("evidence", []):
+            url = e.get("url")
+            title = e.get("title")
+            if url and title:
+                out.append({"title": title, "url": url})
+                break  # top1 per signal
+    if not out:
+        return ""
+    return "<PROVENANCE>" + json.dumps({"signals": out}, ensure_ascii=False) + "</PROVENANCE>"
+
+
 def format_text_report(report: dict) -> str:
     """Format report as human-readable text with trend focus."""
     if not report.get("ok"):
@@ -258,6 +274,11 @@ def format_text_report(report: dict) -> str:
             lines.append(f"     - {s['representative_title']} "
                          f"(×{s.get('acceleration', 0):.1f})")
     lines.append("")
+
+    # #130 T1:末尾机械追加 PROVENANCE 块(每信号 top1 原文链接),供投递侧提取。
+    block = _build_provenance_block(signals)
+    if block:
+        lines.append(block)
 
     return "\n".join(lines)
 
