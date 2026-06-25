@@ -655,7 +655,8 @@ class CronExecutor:
             # measure the live flag rate before any banner/block (防误杀).
             self._observe_provenance(task, agent)
 
-            # #130 T1:机械追加每信号 top1 原文链接到投递结果(独立于 LLM 散文)。
+            # #130 T1: mechanically append each signal's top-1 source link to the
+            # delivered result (independent of the LLM prose).
             result = self._append_run_provenance(result, agent)
 
             summary = f"{task_title or task.id} completed"
@@ -727,9 +728,10 @@ class CronExecutor:
             logger.debug("provenance observe failed", exc_info=True)
 
     def _append_run_provenance(self, result: str, agent: Any) -> str:
-        """#130 T1:把本 run 每条信号的 top1 原文链接机械追加到报告尾部 —— 独立于
-        LLM 散文(LLM 可能把链接摘掉)。来源是 run 事件里报告脚本 stdout 的
-        PROVENANCE 块。失败一律吞掉返回原文(投递不能因溯源附加而崩)。"""
+        """#130 T1: mechanically append each signal's top-1 source link to the report —
+        independent of the LLM prose (which may drop the links). Source is the trusted
+        report-script's PROVENANCE block in the run events. Any failure is swallowed and the
+        body returned unchanged (delivery must not crash on the provenance add-on)."""
         try:
             from .provenance_footer import append_provenance_footer
             from .provenance_gate import read_run_events

@@ -990,43 +990,52 @@ class TestTranscriptWorthyDelivery:
 
 _PROV_BLOCK = ('<PROVENANCE>{"signals":[{"title":"Hormuz","url":"https://cnbc.com/x"}]}'
                '</PROVENANCE>')
-_PROV_EVENTS = [{"type": "tool.responded",
-                 "payload": {"output": {"stdout": "报告正文\n" + _PROV_BLOCK}}}]
+# Trusted producer run: run_command invoking rhino_report.py, request+response paired by
+# toolCallId (only such output is honored — see provenance_footer security contract).
+_PROV_EVENTS = [
+    {"type": "tool.requested",
+     "payload": {"toolName": "run_command", "toolCallId": "c1",
+                 "input": {"command": "python /repo/skills/gray-rhino/scripts/"
+                                       "rhino_report.py --format text"}}},
+    {"type": "tool.responded",
+     "payload": {"toolName": "run_command", "toolCallId": "c1",
+                 "output": {"stdout": "report body\n" + _PROV_BLOCK}}},
+]
 
 
 def test_append_run_provenance_adds_footer(tmp_path, monkeypatch):
-    """LLM 散文丢了链接,机械从 run 事件取 top1 link 追加到投递结果。"""
+    """LLM prose dropped the links; mechanically pull top-1 link from run events."""
     from src.everbot.core.runtime import provenance_gate
     monkeypatch.setattr(provenance_gate, "read_run_events", lambda *a, **k: _PROV_EVENTS)
     executor = _make_executor(tmp_path)
     agent = SimpleNamespace(last_run_id="run-1")
 
-    out = executor._append_run_provenance("# 灰犀牛报告\n信号: Hormuz(无链接)", agent)
+    out = executor._append_run_provenance("# Gray Rhino\nSignal: Hormuz (no link)", agent)
     assert "https://cnbc.com/x" in out
-    assert out.startswith("# 灰犀牛报告")
+    assert out.startswith("# Gray Rhino")
 
 
 def test_append_run_provenance_noop_without_run_id(tmp_path):
-    """agent 无 last_run_id → 原样返回(不读事件)。"""
+    """agent without last_run_id -> returned unchanged (no event read)."""
     executor = _make_executor(tmp_path)
-    result = "# 报告"
+    result = "# report"
     assert executor._append_run_provenance(result, SimpleNamespace()) == result
 
 
 def test_append_run_provenance_never_raises(tmp_path, monkeypatch):
-    """读事件抛错 → 吞掉,返回原文(投递不能因溯源附加而崩)。"""
+    """Reading events raises -> swallowed, returns body (delivery must not crash)."""
     from src.everbot.core.runtime import provenance_gate
     def _boom(*a, **k):
         raise RuntimeError("disk gone")
     monkeypatch.setattr(provenance_gate, "read_run_events", _boom)
     executor = _make_executor(tmp_path)
-    result = "# 报告"
+    result = "# report"
     assert executor._append_run_provenance(result, SimpleNamespace(last_run_id="r")) == result
 
 
 @pytest.mark.asyncio
 async def test_isolated_agent_delivers_footer_appended_result(tmp_path, monkeypatch):
-    """端到端接线:LLM 散文丢了链接,投递出去的报告仍带 top1 原文链接。"""
+    """End-to-end wiring: LLM prose dropped links, delivered report still carries them."""
     from src.everbot.core.runtime import provenance_gate
     monkeypatch.setattr(provenance_gate, "read_run_events", lambda *a, **k: _PROV_EVENTS)
 
@@ -1042,14 +1051,14 @@ async def test_isolated_agent_delivers_footer_appended_result(tmp_path, monkeypa
         captured["result"] = result
     executor.delivery._emit_realtime = AsyncMock(side_effect=_capture)
 
-    run_agent = AsyncMock(return_value="# 灰犀牛报告\nHormuz(LLM 把链接摘了)")
-    task = SimpleNamespace(id="t1", title="灰犀牛", description="d",
+    run_agent = AsyncMock(return_value="# Gray Rhino\nHormuz (LLM stripped the link)")
+    task = SimpleNamespace(id="t1", title="Gray Rhino", description="d",
                            timeout_seconds=30, job=None)
 
     out = await executor._run_isolated_agent(task, "run-1", run_agent=run_agent)
 
-    assert "https://cnbc.com/x" in out                      # 返回值带链接
-    assert "https://cnbc.com/x" in captured["result"]       # 推送(_emit_realtime)带链接
-    # detail(deposit_job_event)也带链接 —— 投递三路一致
+    assert "https://cnbc.com/x" in out                      # return value carries link
+    assert "https://cnbc.com/x" in captured["result"]       # push (_emit_realtime) carries link
+    # detail (deposit_job_event) carries it too — all three delivery paths consistent
     _, kwargs = executor.delivery.deposit_job_event.call_args
     assert "https://cnbc.com/x" in kwargs["detail"]

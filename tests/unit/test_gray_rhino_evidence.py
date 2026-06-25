@@ -99,8 +99,8 @@ def test_text_report_lists_source_link_for_signal(tmp_path, monkeypatch):
 
 
 def test_text_report_appends_parseable_provenance_block(tmp_path, monkeypatch):
-    """#130 T1:text 报告末尾机械追加 PROVENANCE 块,且能被投递侧提取器解析。
-    每条信号 top1 {title,url},url 取自真实 evidence。"""
+    """#130 T1: the text report appends a machine PROVENANCE block parseable by the
+    delivery-side extractor. Top-1 {title,url} per signal, url from real evidence."""
     from src.everbot.core.runtime.provenance_footer import extract_provenance_block
 
     monkeypatch.setattr(rr, "NewsFetcher", _fake_fetcher_cls(_items()))
@@ -108,7 +108,7 @@ def test_text_report_appends_parseable_provenance_block(tmp_path, monkeypatch):
     text = rr.format_text_report(result)
 
     signals = extract_provenance_block(text)
-    assert signals, "text 报告末尾应有可解析的 PROVENANCE 块"
+    assert signals, "text report should end with a parseable PROVENANCE block"
     for s in signals:
         assert s["title"] and s["url"]
         assert s["url"] in {"https://finance.sina/cu1", "https://finance.sina/al2"}

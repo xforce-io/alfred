@@ -133,8 +133,9 @@ def _format_sources_line(sources: dict) -> str:
 
 
 def _build_provenance_block(signals: list) -> str:
-    """#130 T1:机械输出每条信号 top1 {title,url} 的 PROVENANCE 块,供投递侧提取成
-    推送原文链接(独立于 LLM 散文)。只收带 url 的 evidence;无则不出块。"""
+    """#130 T1: emit a machine PROVENANCE block carrying each signal's top-1 {title,url}
+    so delivery can extract source links for the push (independent of the LLM prose). Only
+    evidence with a url is included; no block is emitted when there is none."""
     out = []
     for sig in signals:
         for e in sig.get("evidence", []):
@@ -275,7 +276,8 @@ def format_text_report(report: dict) -> str:
                          f"(×{s.get('acceleration', 0):.1f})")
     lines.append("")
 
-    # #130 T1:末尾机械追加 PROVENANCE 块(每信号 top1 原文链接),供投递侧提取。
+    # #130 T1: append the machine PROVENANCE block (top-1 source link per signal) for
+    # delivery-side extraction.
     block = _build_provenance_block(signals)
     if block:
         lines.append(block)
