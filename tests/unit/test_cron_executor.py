@@ -1062,3 +1062,28 @@ async def test_isolated_agent_delivers_footer_appended_result(tmp_path, monkeypa
     # detail (deposit_job_event) carries it too — all three delivery paths consistent
     _, kwargs = executor.delivery.deposit_job_event.call_args
     assert "https://cnbc.com/x" in kwargs["detail"]
+
+
+@pytest.mark.asyncio
+async def test_isolated_agent_projection_anchor_is_milkie_run_id(tmp_path, monkeypatch):
+    """#130 T2: the delivered projection anchor must be the milkie run id (deref-able by
+    get_execution/get_lineage under milkie#200's delivered-runId allowlist), not the job
+    session id — otherwise readByRunId can't resolve it."""
+    from src.everbot.core.runtime import provenance_gate
+    monkeypatch.setattr(provenance_gate, "read_run_events", lambda *a, **k: [])
+    executor = _make_executor(tmp_path)
+    agent = SimpleNamespace(last_run_id="31850ca6-uuid")
+    executor._create_job_agent = AsyncMock(return_value=agent)
+    executor._build_job_system_prompt = MagicMock(return_value="sys")
+    executor._record_skill_log = MagicMock()
+    executor.delivery.deposit_job_event = AsyncMock()
+    executor.delivery.inject_to_history = AsyncMock()
+    executor.delivery._emit_realtime = AsyncMock()
+    run_agent = AsyncMock(return_value="# report")
+    task = SimpleNamespace(id="t1", title="gr", description="d",
+                           timeout_seconds=30, job=None)
+
+    await executor._run_isolated_agent(task, "run-1", run_agent=run_agent)
+
+    _, kwargs = executor.delivery._emit_realtime.call_args
+    assert kwargs["source_session_id"] == "31850ca6-uuid"

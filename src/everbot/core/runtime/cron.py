@@ -659,6 +659,12 @@ class CronExecutor:
             # delivered result (independent of the LLM prose).
             result = self._append_run_provenance(result, agent)
 
+            # #130 T2: the projection anchor must be the milkie run id (deref-able by the
+            # consuming agent via get_execution/get_lineage under milkie#200's
+            # delivered-runId allowlist), not the job session id — readByRunId is keyed by
+            # the milkie runId. Fall back to the session id when no run id was captured.
+            projection_anchor = getattr(agent, "last_run_id", None) or job_session_id
+
             summary = f"{task_title or task.id} completed"
             await self.delivery.deposit_job_event(
                 event_type="job_completed",
@@ -670,7 +676,7 @@ class CronExecutor:
             await self.delivery.inject_to_history(result, run_id)
             await self.delivery._emit_realtime(
                 result, run_id, transcript_worthy=True,
-                source_session_id=job_session_id,  # #122:可解析溯源锚点(归档 job session)
+                source_session_id=projection_anchor,  # #130 T2: milkie runId, deref-able
             )
 
             # SLM: record skill invocations from this isolated agent run.
