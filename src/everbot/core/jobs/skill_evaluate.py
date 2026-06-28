@@ -95,6 +95,12 @@ async def run(context: SkillContext) -> Optional[str]:
     evaluated = 0
     unavailable = 0
     for skill_id in skill_ids:
+        # #132: warn (non-blocking) when a stale per-agent override shadows the
+        # repo baseline for this skill. Best-effort — never abort evaluation.
+        try:
+            udm.check_skill_override_drift(agent_name, skill_id)
+        except Exception as e:
+            logger.debug("skill override drift check failed for %s: %s", skill_id, e)
         try:
             result = await _evaluate_one(
                 context, seg_logger, ver_mgr, skill_id, udm.sessions_dir,

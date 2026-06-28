@@ -4,7 +4,8 @@
 
 import os
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
+import hashlib
 import re
 import logging
 
@@ -147,6 +148,102 @@ class UserDataManager:
         if repo is not None:
             dirs.append(repo)
         return dirs
+
+    # --- Per-agent skill override drift detection (#132) ---
+    #
+    # The 3-tier resolution chain above lets a per-agent override silently
+    # and permanently shadow a repo fix: once the override is created it
+    # freezes at that point-in-time, so any upstream repair never reaches the
+    # agent. These helpers detect that drift so it can be surfaced (warning at
+    # load time + `bin/everbot status`) without changing resolution priority.
+
+    @staticmethod
+    def _skill_dir_fingerprint(skill_dir: Path) -> Tuple[str, float]:
+        """Return (content_hash, max_mtime) over a skill dir's .py/.md files.
+
+        The hash covers each relevant file's repo-relative path and bytes
+        (sorted for determinism); max_mtime is the newest such file's mtime.
+        Non-(.py/.md) files are ignored on purpose — generated data must not
+        register as drift. Unreadable files degrade to empty content rather
+        than raising, so a status/health check never crashes.
+        """
+        h = hashlib.sha256()
+        max_mtime = 0.0
+        files = sorted(
+            (p for p in skill_dir.rglob("*") if p.is_file() and p.suffix in (".py", ".md")),
+            key=lambda p: p.relative_to(skill_dir).as_posix(),
+        )
+        for p in files:
+            h.update(p.relative_to(skill_dir).as_posix().encode())
+            h.update(b"\0")
+            try:
+                h.update(p.read_bytes())
+            except OSError:
+                pass
+            h.update(b"\0")
+            try:
+                mt = p.stat().st_mtime
+            except OSError:
+                mt = 0.0
+            if mt > max_mtime:
+                max_mtime = mt
+        return h.hexdigest(), max_mtime
+
+    def is_skill_override_stale(
+        self, agent_name: str, skill_id: str
+    ) -> Optional[Tuple[str, str]]:
+        """Return (agent_hash_prefix, repo_hash_prefix) if the per-agent
+        override for ``skill_id`` is stale, else None.
+
+        Stale := an override exists, its content differs from the repo
+        baseline, AND it is not newer than the baseline (newest file mtime
+        <= baseline's). An override that differs but is newer is treated as
+        an intentional customization and is left alone (avoids false
+        positives for SLM-evolved skills).
+        """
+        repo_base = self.repo_skills_dir
+        if repo_base is None:
+            return None
+        override_dir = self.get_agent_writable_skills_dir(agent_name) / skill_id
+        repo_dir = repo_base / skill_id
+        if not override_dir.is_dir() or not repo_dir.is_dir():
+            return None
+        agent_hash, agent_mtime = self._skill_dir_fingerprint(override_dir)
+        repo_hash, repo_mtime = self._skill_dir_fingerprint(repo_dir)
+        if agent_hash == repo_hash:
+            return None
+        if agent_mtime > repo_mtime:
+            return None
+        return agent_hash[:8], repo_hash[:8]
+
+    def check_skill_override_drift(
+        self, agent_name: str, skill_id: str
+    ) -> Optional[Tuple[str, str]]:
+        """Emit a structured warning if the override for ``skill_id`` is stale.
+
+        Non-blocking: returns the same value as is_skill_override_stale and
+        never alters resolution. Call this at skill-load time.
+        """
+        result = self.is_skill_override_stale(agent_name, skill_id)
+        if result is not None:
+            agent_hash, repo_hash = result
+            logger.warning(
+                "skill '%s' per-agent override is stale — differs from repo "
+                "baseline (agent: %s, repo: %s)",
+                skill_id, agent_hash, repo_hash,
+            )
+        return result
+
+    def list_stale_skill_overrides(self, agent_name: str) -> List[str]:
+        """Return the sorted skill ids whose per-agent override is stale."""
+        base = self.get_agent_writable_skills_dir(agent_name)
+        if not base.is_dir():
+            return []
+        return [
+            child.name
+            for child in sorted(base.iterdir())
+            if child.is_dir() and self.is_skill_override_stale(agent_name, child.name)
+        ]
 
     @property
     def trajectories_dir(self) -> Path:

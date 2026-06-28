@@ -84,6 +84,9 @@ def cmd_status(args):
     # #93 件B:每 agent 生效模型 vs 配置目标(stale = 改了配置但未重启生效)。
     _print_agent_model_states()
 
+    # #132:陈旧的 per-agent skill 覆盖副本(静默遮蔽仓库修复)。
+    _print_stale_skill_overrides()
+
     hb = (snapshot.get("heartbeats", {}) if isinstance(snapshot, dict) else {}) or {}
     if hb:
         print("最近心跳:")
@@ -128,6 +131,29 @@ def _print_agent_model_states() -> None:
         cfg = s["configured"] or "?"
         flag = "  ⚠️ STALE 待重启生效" if s["stale"] else ""
         print(f"  - {s['agent']}: {eff} / {cfg}{flag}")
+
+
+def _print_stale_skill_overrides() -> None:
+    """打印每个配置 agent 的陈旧 skill 覆盖告警(#132)。
+
+    陈旧 = per-agent 覆盖副本内容偏离仓库内置版,且不比仓库新(即上游修复
+    被静默遮蔽)。只读自检,绝不因此崩。
+    """
+    try:
+        udm = get_user_data_manager()
+        config = get_config()
+        agents = list(((config.get("everbot") or {}).get("agents") or {}).keys())
+        rows = [(a, udm.list_stale_skill_overrides(a)) for a in agents]
+        rows = [(a, skills) for a, skills in rows if skills]
+    except Exception as e:  # status 是只读自检,绝不因此崩
+        logging.getLogger(__name__).debug("stale skill override check failed: %s", e)
+        return
+
+    if not rows:
+        return
+    print("陈旧 skill 覆盖(per-agent 副本遮蔽仓库修复,#132):")
+    for agent, skills in rows:
+        print(f"  - {agent}: {', '.join(skills)}  ⚠️ 建议同步或移除覆盖")
 
 
 async def cmd_start_async(args):
