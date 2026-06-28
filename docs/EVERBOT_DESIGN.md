@@ -1,8 +1,8 @@
 # Alfred EverBot 设计方案
 
-> **版本**: v1.2
+> **版本**: v1.3
 > **创建时间**: 2026-02-01
-> **更新时间**: 2026-03-30
+> **更新时间**: 2026-06-27（按 milkie sidecar 真实架构重写，替换过时的 dolphin 描述）
 
 ---
 
@@ -10,8 +10,8 @@
 
 1. [概述与目标](#一概述与目标)
 2. [核心概念](#二核心概念)
-3. [Dolphin Context 管理](#三dolphin-context-管理)
-4. [Skills 管理（ResourceSkillkit）](#四skills-管理resourceskillkit)
+3. [会话与上下文管理](#三会话与上下文管理)
+4. [Skills 管理（discover_skills）](#四skills-管理discover_skills)
 5. [用户数据统一管理](#五用户数据统一管理)
 6. [整体架构](#六整体架构)
 7. [模块设计](#七模块设计)
@@ -33,10 +33,11 @@
 
 ### 1.2 设计原则
 
-1. **最大化复用 Dolphin SDK**
-   - 继续使用 `AgentRuntime`、`DolphinAgent`、`Env` 等核心组件
-   - Skillkit 机制保持不变
-   - 配置系统继续使用 dolphin.yaml
+1. **统一 agent runtime：milkie sidecar**
+   - agent 执行核心为 milkie（TS/Node）。alfred 是 Python，无法进程内 `import`，故每个 agent 跑一个 `milkie serve` 子进程，经 HTTP + SSE 通信（跨进程 sidecar）
+   - alfred 侧的 provider 抽象：`MilkieProvider`（唯一实现）+ `SidecarPool`（惰性 spawn + 常驻复用）+ `SidecarLauncher`（装配启动命令/env）
+   - 技能经 `discover_skills` 扫工作区 `SKILL.md`，注入 prompt 技能段；agent 经 milkie 内建 `run_command` 跑脚本
+   - 模型路由读 `config/models.yaml`（纯 YAML），不再依赖 dolphin factory / dolphin.yaml / global_config
 
 2. **轻量化实现**
    - 不引入 WebSocket Gateway
@@ -70,8 +71,10 @@
 | 概念 | 说明 |
 |------|------|
 | EverBot Daemon | 后台服务进程 |
-| DolphinAgent | Dolphin SDK 提供的 Agent 执行核心 |
-| Session | 会话，包含 Agent 实例和对话历史 |
+| milkie serve | 每个 agent 一个的 milkie 子进程，alfred 经 HTTP + SSE 驱动 |
+| MilkieProvider | provider 中立能力 port（`AgentProvider`）的唯一实现，跨进程驱动 `milkie serve` |
+| SidecarPool | 惰性 spawn + 常驻复用 per-agent sidecar 的池 |
+| Session | 会话，由 milkie 的 `contextId` 标识，历史由 `milkie serve` 自持久化 |
 | HeartbeatRunner | 心跳运行器，定时唤醒 Agent |
 | Workspace | Agent 工作区，包含 Markdown 配置文件 |
 
@@ -87,16 +90,16 @@
 │        │                │                                   │
 │        ▼                ▼                                   │
 │  ┌──────────────────────────────────────────────┐          │
-│  │            Agent Runtime (Dolphin)           │          │
-│  │  - Env / GlobalConfig                        │          │
-│  │  - GlobalSkills + ResourceSkillkits          │          │
-│  │  - DolphinAgent 实例池                       │          │
+│  │      Agent Runtime (MilkieProvider)          │          │
+│  │  - SidecarPool（惰性 spawn + 常驻复用）      │          │
+│  │  - SidecarLauncher（装配 milkie serve）      │          │
+│  │  - turn_orchestrator（policy：重试/budget）  │          │
 │  └──────────────┬───────────────────────────────┘          │
-│                 │                                           │
+│                 │ HTTP + SSE                                │
 │  ┌──────────────▼───────────────────────────────┐          │
-│  │            Session Manager                    │          │
-│  │  - 内存缓存 + JSONL 持久化                    │          │
-│  │  - 并发锁管理                                 │          │
+│  │   milkie serve 子进程（per-agent sidecar）   │          │
+│  │  - POST /chat（SSE 驱动一轮）/resume/...     │          │
+│  │  - --state-store sqlite 自持久化历史         │          │
 │  └──────────────────────────────────────────────┘          │
 └─────────────────────────────────────────────────────────────┘
                          │
@@ -105,117 +108,91 @@
 │                       文件系统                               │
 │  ~/.alfred/                                                 │
 │  ├── config.yaml              # 主配置                       │
+│  ├── config/models.yaml       # 模型路由（纯 YAML）         │
 │  ├── agents/<name>/           # Agent 工作区                 │
-│  │   ├── agent.dph            # Agent 模板定义               │
-│  │   ├── AGENTS.md            # 行为规范                     │
+│  │   ├── SOUL.md / AGENTS.md  # 人格 / 行为规范             │
+│  │   ├── SKILLS.md            # 技能段                       │
 │  │   ├── HEARTBEAT.md         # 心跳任务清单                 │
 │  │   ├── MEMORY.md            # 长期记忆                     │
 │  │   └── USER.md              # 用户画像                     │
-│  ├── sessions/                # 会话历史 (JSONL)             │
-│  └── logs/                    # 服务日志                     │
+│  ├── milkie/<name>/agent.md   # milkie agent 定义（fsm/model）│
+│  └── logs/                    # 服务日志（含 traces/）       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 三、Dolphin Context 管理
+## 三、会话与上下文管理
 
-### 3.1 Context API 参考
+### 3.1 会话身份与跨进程上下文
 
-Dolphin SDK 的 `Context` 对象提供以下核心 API：
+milkie 是事件溯源 runtime，会话身份 = **contextId**。alfred 经 `MilkieProvider` 跨进程读写
+`milkie serve` 的会话状态，主要端点（均为 HTTP，`/chat`、`/resume` 的响应体即 SSE）：
 
-| 方法 | 参数 | 返回值 | 说明 |
-|------|------|--------|------|
-| `set_variable(name, value)` | `str`, `Any` | `None` | 设置变量，可在 .dph 模板中用 `$name` 引用 |
-| `get_variable(name)` | `str` | `Any` | 获取变量值 |
-| `get_messages()` | - | `Messages` | 获取消息集合对象 |
-| `get_history_messages(normalize)` | `bool` | `List[Dict]` | 获取历史消息列表 |
-| `set_session_id(session_id)` | `str` | `None` | 设置会话 ID |
-| `set_skills(skills)` | `List[Skill]` | `None` | 注册可用工具 |
-| `init_trajectory(path, overwrite)` | `str`, `bool` | `None` | 初始化执行轨迹记录 |
-| `clear_history()` | - | `None` | 清空历史消息 |
-| `set_history_messages(messages)` | `List[Dict]` | `None` | 设置历史消息（用于恢复） |
+| 端点 | 说明 |
+|------|------|
+| `POST /chat` | 驱动**一轮对话**（`run_turn`）。payload `{contextId, input, goal}`，响应体即 SSE 流 |
+| `POST /resume` | 用户中断后**续跑**（SSE） |
+| `POST /interrupt` | 中断当前运行 |
+| `POST /context/set` / `POST /context/get` | 跨进程读写**会话变量** |
+| `POST /context/state` | 查运行态（`paused`） |
+| `POST /session/history` | 导出**全量 canonical 历史** `Message[]` |
+| `POST /projection/attach` | 把已投递到 channel 的外部产出登记为 context projection（按 `sourceRunId` 去重） |
+| `POST /llm` | **无状态**一次性 LLM 调用，payload 含 `tier`(default/fast)+`temperature` |
 
-### 3.2 Context 注入区域
+**关键差异**：dolphin 时代的进程内 `Context.set_variable($name)` / `.dph` 模板变量插值机制
+**不存在**。alfred 不直接持有 agent 的内部 context；会话变量经 `/context/*` 端点跨进程读写，
+对话历史由 `milkie serve` 自己持久化。
+
+### 3.2 上下文注入路径
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                     Dolphin Context                              │
+│              alfred 侧（MilkieProvider / turn_orchestrator）     │
 │                                                                  │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │ 1. Variables (变量)                                       │   │
-│  │    - context.set_variable("name", value)                 │   │
-│  │    - 在 .dph 模板中用 $name 引用                          │   │
-│  │    - 适合：静态配置、模板参数、工作区指令                  │   │
+│  │ 1. system prompt（spawn 时一次性传给 milkie serve）       │   │
+│  │    - WorkspaceLoader 读 SOUL/AGENTS/SKILLS/USER/MEMORY.md │   │
+│  │      合成，落入 sidecar 的 agent.md `systemPrompt`        │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │ 2. Messages (消息历史)                                    │   │
-│  │    - 通过 arun/continue_chat 自动管理                    │   │
-│  │    - 使用 Dolphin API 操作，不直接修改内部列表           │   │
-│  │    - 适合：对话轮次、心跳交互                              │   │
+│  │ 2. input（每轮经 POST /chat 传入）                        │   │
+│  │    - 易变内容（mailbox 事件、due tasks）前置注入 input    │   │
+│  │    - 保持 system prompt 稳定，prefix cache 友好           │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │ 3. Buckets (桶 - 可选)                                    │   │
-│  │    - context_manager.add_bucket(name, content)           │   │
-│  │    - 内置桶：HISTORY, SYSTEM, RETRIEVAL                  │   │
-│  │    - 适合：检索结果、RAG 数据注入                         │   │
+│  │ 3. 会话变量（POST /context/set/get）                      │   │
+│  │    - 需跨进程持有的运行态变量                              │   │
 │  └──────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.3 .dph 模板示例
+### 3.3 milkie agent 定义
 
-EverBot 使用的 Agent 模板需要支持动态注入工作区指令：
+milkie agent 的 prompt 由其 **`agent.md`** 的 `systemPrompt`/FSM 决定（不是 per-turn override）。
+sidecar 的 agent.md 落在 `~/.alfred/milkie/<agent>/agent.md`（含 fsm/model/models 字段）。
 
-```yaml
-# ~/.alfred/agents/daily_insight/agent.dph
-
-name: daily_insight
-description: 每日市场洞察助理
-
-# 系统提示（支持变量引用）
-system_prompt: |
-  $workspace_instructions
-
-  # 当前时间
-  当前时间：$current_time
-
-# 模型配置
-model:
-  name: $model_name
-  temperature: 0.7
-
-# 工具配置
-tools:
-  - type: bash
-    enabled: true
-  - type: python
-    enabled: true
-  - type: retrieval
-    enabled: true
-```
-
-**变量注入示例**：
+alfred 侧由 `infra/workspace.py` 的 `WorkspaceLoader` 读 agent 工作区
+`~/.alfred/agents/<name>/` 的 **SOUL/AGENTS/SKILLS/USER/MEMORY.md** 合成 system prompt，
+spawn 时传给 `milkie serve`（替代了 dolphin 的 AgentFactory + `$workspace_instructions` 注入；
+dolphin 语法的 `.dph` 模板与变量插值已不存在）。
 
 ```python
-# 注入工作区指令
-workspace_instructions = workspace_loader.build_system_prompt()
-context.set_variable("workspace_instructions", workspace_instructions)
+# WorkspaceLoader 合成 system prompt（落入 sidecar agent.md 的 systemPrompt）
+system_prompt = workspace_loader.build_system_prompt()  # SOUL/AGENTS/SKILLS/USER/MEMORY.md
 
-# 注入时间
-context.set_variable("current_time", datetime.now().strftime("%Y-%m-%d %H:%M"))
-
-# 注入模型名
-context.set_variable("model_name", "gpt-4")
+# per-agent 模型：everbot.agents.<name>.model > everbot.default_model
+# 模型路由读 config/models.yaml，经 model_config.load_model_config 定位
 ```
 
 ### 3.4 Heartbeat 注入机制
 
 #### 3.4.1 注入策略
 
-心跳触发时，通过 **Variables 注入** + **User Message 触发** 的组合方式：
+心跳触发时，心跳指令进入 system prompt（spawn 时落入 sidecar agent.md），任务清单作为
+**input** 经 `POST /chat` 注入触发本轮执行：
 
 ```python
 class HeartbeatRunner:
@@ -233,31 +210,19 @@ class HeartbeatRunner:
 4. 不要询问用户确认，直接行动
 """
 
-    async def inject_heartbeat_context(
+    def build_heartbeat_input(
         self,
-        agent: DolphinAgent,
         heartbeat_content: str,
     ) -> str:
         """
-        注入心跳信息到 Context
+        构造心跳触发 input（经 POST /chat 的 `input` 字段传给 sidecar）
+
+        心跳系统指令由 ContextStrategy 拼入 system prompt（稳定，prefix cache 友好）；
+        每次到期的任务清单走 input 注入（易变）。
 
         Returns:
-            构造好的 user message，用于触发 Agent 执行
+            构造好的 input 文本，用于触发本轮执行
         """
-        context = agent.executor.context
-
-        # 1. 注入心跳系统指令（追加到 workspace_instructions）
-        current_instructions = context.get_variable("workspace_instructions") or ""
-        context.set_variable(
-            "workspace_instructions",
-            current_instructions + "\n\n" + self.HEARTBEAT_SYSTEM_INSTRUCTION
-        )
-
-        # 2. 注入心跳元数据
-        context.set_variable("heartbeat_mode", True)
-        context.set_variable("heartbeat_time", datetime.now().isoformat())
-
-        # 3. 构造触发消息
         user_message = f"""
 [系统心跳 - {datetime.now().strftime('%Y-%m-%d %H:%M')}]
 
@@ -284,61 +249,49 @@ class HeartbeatRunner:
 
 **默认推荐：独立模式**，通过 MEMORY.md 共享必要信息，避免心跳消息污染用户对话历史。
 
-### 3.5 History 管理（使用 Dolphin API）
+### 3.5 History 管理（milkie 自持久化）
 
 #### 3.5.1 核心原则
 
-**不直接操作 `msgs.messages` 列表**，而是使用 Dolphin 提供的 API：
+**对话历史由 `milkie serve` 自持久化**（`--state-store sqlite --data-dir <…>`），alfred 不再
+进程内直接操作历史列表。需要读取 canonical 历史时经 `POST /session/history` 导出 `Message[]`。
 
-```python
-# ❌ 错误：直接修改内部列表
-msgs.messages = msgs.messages[-20:]
+dolphin 时代「alfred 把存档历史灌回 agent」的恢复链路已不存在：同 contextId 跨 daemon 重启
+**自动从 checkpoint 恢复** → `needs_history_restore() == False`。归档/裁剪策略（如把陈旧历史
+沉淀到 MEMORY.md）改为基于 `/session/history` 导出后在 alfred 侧做摘要，而非回写 milkie 内部历史。
 
-# ✅ 正确：使用 Dolphin API
-context.clear_history()
-context.set_history_messages(trimmed_messages)
-```
-
-#### 3.5.2 History 裁剪实现
+#### 3.5.2 History 归档实现
 
 ```python
 class HistoryManager:
-    """History 管理器 - 使用 Dolphin API"""
+    """History 归档器 - 基于 POST /session/history 导出"""
 
-    MAX_HISTORY_ROUNDS = 10  # 最多保留 10 轮对话
+    MAX_HISTORY_ROUNDS = 10  # 触发归档的轮次阈值
 
     def __init__(self, memory_path: Path):
         self.memory_path = memory_path
 
-    def trim_if_needed(self, agent: DolphinAgent) -> bool:
+    async def archive_if_needed(self, provider: "MilkieProvider", context_id: str) -> bool:
         """
-        裁剪过长的 History
+        导出 canonical 历史，超阈值则把陈旧片段归档到 MEMORY.md
 
-        使用 Dolphin API 而非直接操作内部列表
+        历史由 milkie serve 自持久化，alfred 只读不回写；归档是 alfred 侧的记忆沉淀。
 
         Returns:
-            是否执行了裁剪
+            是否执行了归档
         """
-        context = agent.executor.context
-        history = context.get_history_messages(normalize=True)
+        history = await provider.export_history(context_id)  # POST /session/history
 
         max_messages = self.MAX_HISTORY_ROUNDS * 2  # user + assistant
 
         if len(history) <= max_messages:
             return False
 
-        # 1. 提取要归档的消息
+        # 提取要归档的消息并沉淀到 MEMORY.md
         archived_messages = history[:-max_messages]
-
-        # 2. 归档到 MEMORY.md
         self._archive_to_memory(archived_messages)
 
-        # 3. 使用 Dolphin API 重置 History
-        trimmed_messages = history[-max_messages:]
-        context.clear_history()
-        context.set_history_messages(trimmed_messages)
-
-        logger.info(f"裁剪 History: 归档 {len(archived_messages)} 条，保留 {len(trimmed_messages)} 条")
+        logger.info(f"归档历史: 沉淀 {len(archived_messages)} 条到 MEMORY.md")
         return True
 
     def _archive_to_memory(self, messages: List[Dict]):
@@ -364,17 +317,20 @@ class HistoryManager:
 
 ### 3.6 Session 持久化与恢复
 
-#### 3.6.1 Session 数据结构
+**职责分工**：对话历史的持久化/恢复由 `milkie serve` 自己负责（sqlite/jsonl）；alfred 侧只持有
+轻量的会话元数据（session_id 到 contextId 的映射、mailbox、revision 等运行态），不再保存/回灌
+完整 history_messages。
+
+#### 3.6.1 Session 元数据结构
 
 ```python
 @dataclass
 class SessionData:
-    """Session 持久化数据"""
+    """Session 元数据（不含完整历史，历史由 milkie serve 自持久化）"""
     session_id: str
     agent_name: str
-    model_name: str
-    history_messages: List[Dict]  # 对话历史
-    variables: Dict[str, Any]     # Context 变量
+    context_id: str               # milkie 会话身份；历史按此恢复
+    mailbox: List[Dict]           # 待消费的背景事件
     created_at: str
     updated_at: str
 
@@ -386,73 +342,32 @@ class SessionData:
         return cls(**data)
 ```
 
-#### 3.6.2 持久化实现
+#### 3.6.2 会话身份对齐（contextId）
+
+无需把历史灌回 agent。关键是把 contextId 对齐到稳定的 alfred `session_id`，否则每次重启会生成
+新随机 contextId、旧历史成孤儿：
 
 ```python
-class SessionPersistence:
-    """Session 持久化管理器"""
+class SessionManager:
+    """会话管理：把 contextId 锚定到稳定 session_id，保证跨重启连续性"""
 
-    def __init__(self, sessions_dir: Path):
-        self.sessions_dir = sessions_dir
-        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+    async def acquire_sidecar(self, session_id: str):
+        """从 SidecarPool 取（或惰性 spawn）该 agent 的 sidecar"""
+        sidecar = await self.pool.get_or_spawn(self.agent_name)
 
-    def _get_session_path(self, session_id: str) -> Path:
-        return self.sessions_dir / f"{session_id}.json"
-
-    async def save(self, session_id: str, agent: DolphinAgent, model_name: str):
-        """保存 Session 到文件"""
-        context = agent.executor.context
-
-        # 提取需要持久化的数据
-        data = SessionData(
-            session_id=session_id,
-            agent_name=agent.name,
-            model_name=model_name,
-            history_messages=context.get_history_messages(normalize=True),
-            variables={
-                "workspace_instructions": context.get_variable("workspace_instructions"),
-                "model_name": context.get_variable("model_name"),
-                # 其他需要持久化的变量...
-            },
-            created_at=context.get_variable("session_created_at") or datetime.now().isoformat(),
-            updated_at=datetime.now().isoformat(),
-        )
-
-        session_path = self._get_session_path(session_id)
-        with open(session_path, "w", encoding="utf-8") as f:
-            json.dump(data.to_dict(), f, ensure_ascii=False, indent=2)
-
-        logger.debug(f"Session 已保存: {session_id}")
-
-    async def load(self, session_id: str) -> Optional[SessionData]:
-        """从文件加载 Session"""
-        session_path = self._get_session_path(session_id)
-        if not session_path.exists():
-            return None
-
-        with open(session_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        return SessionData.from_dict(data)
-
-    async def restore_to_agent(self, agent: DolphinAgent, session_data: SessionData):
-        """恢复 Session 数据到 Agent"""
-        context = agent.executor.context
-
-        # 1. 恢复变量
-        for name, value in session_data.variables.items():
-            if value is not None:
-                context.set_variable(name, value)
-
-        # 2. 恢复历史消息（使用 Dolphin API）
-        if session_data.history_messages:
-            context.set_history_messages(session_data.history_messages)
-
-        # 3. 设置 session ID
-        context.set_session_id(session_data.session_id)
-
-        logger.info(f"Session 已恢复: {session_data.session_id}, 历史消息: {len(session_data.history_messages)} 条")
+        # 把 milkie contextId 对齐到稳定的 alfred session_id
+        # 同 contextId 跨 daemon 重启会自动从 checkpoint 恢复历史
+        provider.set_session_id(session_id)   # → contextId
+        return sidecar
 ```
+
+**临时路径（reflector / cron）**保留随机 contextId 做会话隔离，不对齐稳定 session_id。
+
+> 历史遗留：`~/.alfred/agents/<name>/agent.dph` 文件可能仍存在，但 dolphin 的
+> AgentFactory / AgentRuntime / Env / DolphinAgent / agent.dph 解析链路已不存在；
+> agent 配置以「工作区 Markdown + milkie agent.md」为准。`infra/dolphin_compat.py`
+> 是有意保留的兼容模块（纯字符串常量 `KEY_HISTORY*` + no-op `ensure_*_compatibility`），
+> 不 import dolphin。
 
 ### 3.7 并发控制
 
@@ -462,9 +377,9 @@ class SessionPersistence:
 class SessionManager:
     """Session 管理器 - 带并发控制"""
 
-    def __init__(self, persistence: SessionPersistence):
+    def __init__(self, persistence: SessionPersistence, pool: "SidecarPool"):
         self.persistence = persistence
-        self._agents: Dict[str, DolphinAgent] = {}  # 内存缓存
+        self.pool = pool                             # per-agent sidecar 复用
         self._locks: Dict[str, asyncio.Lock] = {}   # Session 锁
 
     def _get_lock(self, session_id: str) -> asyncio.Lock:
@@ -528,36 +443,43 @@ async def run_heartbeat(self, session_id: str):
             logger.info(f"Session {session_id} 被占用，跳过本次心跳")
             return "HEARTBEAT_SKIPPED"
 
-        # 执行心跳逻辑
-        agent = await self.session_manager.get_or_create_agent(session_id)
-        result = await self._execute_heartbeat(agent)
+        # 执行心跳逻辑（从 SidecarPool 取/惰性 spawn 该 agent 的 sidecar）
+        sidecar = await self.session_manager.acquire_sidecar(session_id)
+        result = await self._execute_heartbeat(sidecar)
         return result
 ```
 
 ---
 
-## 四、Skills 管理（ResourceSkillkit）
+## 四、Skills 管理（discover_skills）
 
-### 4.1 Dolphin Skillkit 体系
+### 4.1 技能体系
 
-| 层级 | 类型 | 说明 | 加载方式 |
-|------|------|------|---------|
-| **内置** | System Functions | `_bash`, `_python`, `_date` | `dolphin.yaml` 启用 |
-| **扩展** | ResourceSkillkit | 目录扫描加载 | 配置 `resource_skills.directories` |
-| **自定义** | Custom Skillkit | 代码定义 | `runtime.register_skillkit()` |
+milkie **没有** dolphin 的 `ResourceSkillkit` / 编程式 skillkit 注册。技能改为基于工作区
+`SKILL.md` 文件的发现与执行：
+
+| 阶段 | 机制 | 说明 |
+|------|------|------|
+| **发现** | `discover_skills`（`milkie/skills.py`） | 扫工作区 `SKILL.md` → 产出 `skill_list` manifest |
+| **注入** | `build_milkie_skills_section` | 把技能段拼入 system prompt |
+| **执行** | milkie 内建 `run_command` | agent 读 `SKILL.md` 正文并跑脚本，与 dolphin 能力对等 |
 
 ### 4.2 配置示例
 
-```yaml
-# config/dolphin.yaml
+per-agent allowlist 通过 alfred 配置控制（不再有 dolphin.yaml）：
 
-resource_skills:
-  enabled: true
-  directories:
-    # 全局技能目录
-    - "~/.alfred/skills"
-    # Agent 专属技能（运行时动态添加）
+```yaml
+# config.yaml
+everbot:
+  agents:
+    <agent_name>:
+      skills:
+        include: ["web-search", "routine-manager"]
+        exclude: []
 ```
+
+**技能指纹**（过滤后 name/title/description/abs_path 的 sha256）变化时，`SidecarPool` 只重生
+该 agent 的 sidecar，免全量重启 daemon。
 
 ### 4.3 技能目录结构
 
@@ -582,29 +504,34 @@ resource_skills:
 ```
 ~/.alfred/                           # ALFRED_HOME
 ├── config.yaml                      # 主配置
-├── dolphin.yaml                     # Dolphin 配置
+├── config/models.yaml               # 模型路由（纯 YAML）
 │
 ├── skills/                          # 全局共享技能
 │
 ├── agents/                          # Agent 工作区
 │   └── <agent_name>/
-│       ├── agent.dph                # Agent 模板
-│       ├── config.yaml              # Agent 配置
+│       ├── SOUL.md                  # 人格
 │       ├── AGENTS.md                # 行为规范
+│       ├── SKILLS.md                # 技能段
+│       ├── config.yaml              # Agent 配置
 │       ├── HEARTBEAT.md             # 心跳任务
 │       ├── MEMORY.md                # 长期记忆
 │       ├── USER.md                  # 用户画像
 │       └── skills/                  # Agent 专属技能
 │
-├── sessions/                        # 会话存储
-│   ├── <session_id>.json            # Session 数据
-│   └── metadata.json                # 索引
+├── milkie/                          # milkie sidecar 数据
+│   └── <agent_name>/
+│       ├── agent.md                 # milkie agent 定义（systemPrompt/fsm/model）
+│       └── <data-dir>/              # serve 自持久化历史（sqlite/jsonl）
 │
-├── trajectories/                    # 执行轨迹（调试用）
+├── sessions/                        # 会话元数据存储
+│   ├── <session_id>.json            # Session 元数据（含 contextId）
+│   └── metadata.json                # 索引
 │
 └── logs/                            # 服务日志
     ├── everbot.log
-    └── heartbeat.log
+    ├── heartbeat.log
+    └── traces/                      # milkie runId HTML 报告
 ```
 
 ### 5.2 UserDataManager
@@ -750,30 +677,31 @@ class UserDataManager:
     │
     ▼
 ┌──────────────────────────────────────────────────┐
-│  4. 获取/创建 Agent                               │
-│     - 尝试从缓存获取                              │
-│     - 缓存未命中则创建并恢复 Session              │
+│  4. 获取 Sidecar                                  │
+│     - SidecarPool 取/惰性 spawn                   │
+│     - contextId 对齐稳定 session_id               │
 └──────────────────────────────────────────────────┘
     │
     ▼
 ┌──────────────────────────────────────────────────┐
-│  5. 注入 Heartbeat Context                        │
-│     - workspace_instructions += heartbeat_prompt │
-│     - set heartbeat_mode = True                  │
+│  5. 构造 Heartbeat Input                          │
+│     - 心跳指令在 system prompt（agent.md）        │
+│     - 任务清单走 input（POST /chat）             │
 └──────────────────────────────────────────────────┘
     │
     ▼
 ┌──────────────────────────────────────────────────┐
-│  6. 执行 Agent                                    │
-│     - agent.arun() 或 agent.continue_chat()      │
+│  6. 执行一轮（run_turn）                          │
+│     - POST /chat (SSE) → _progress               │
 │     - 收集响应                                    │
 └──────────────────────────────────────────────────┘
     │
     ▼
 ┌──────────────────────────────────────────────────┐
 │  7. 后处理                                        │
-│     - 裁剪 History（如需要）                      │
-│     - 持久化 Session                              │
+│     - 历史由 milkie serve 自持久化               │
+│     - 归档 MEMORY.md（如需要）                    │
+│     - 持久化 Session 元数据                       │
 │     - 释放锁                                      │
 │     - 记录日志                                    │
 └──────────────────────────────────────────────────┘
@@ -814,7 +742,7 @@ class UserDataManager:
 
 **Agent 任务**（`task.job` 为空）：
 
-- 通过 Dolphin Agent turn 执行，LLM 自主推理 + 调用工具
+- 通过 milkie sidecar 的一轮对话（`POST /chat` SSE）执行，LLM 自主推理 + 调用工具
 - 需要 Agent 上下文（system prompt、对话历史、工具集）
 - 适合：开放性任务，需要 LLM 理解意图和自主执行
 
@@ -1038,44 +966,24 @@ class HeartbeatRunner:
             if not acquired:
                 return "HEARTBEAT_SKIPPED"
 
-            # 2. 获取或创建 Agent
-            agent = await self.session_manager.get_or_create_agent(
-                self.session_id,
-                self.agent_name
-            )
+            # 2. 取/惰性 spawn 该 agent 的 sidecar（contextId 对齐 session_id）
+            sidecar = await self.session_manager.acquire_sidecar(self.session_id)
 
             # 3. 读取任务清单
             heartbeat_content = self._read_heartbeat_md()
             if not heartbeat_content:
                 return "HEARTBEAT_OK"
 
-            # 4. 注入 Context
-            user_message = await self._inject_heartbeat_context(agent, heartbeat_content)
+            # 4. 构造心跳触发 input（心跳指令在 system prompt，任务清单走 input）
+            heartbeat_input = self._build_heartbeat_input(heartbeat_content)
 
-            # 5. 执行
-            result = await self._run_agent(agent, user_message)
-
-            # 6. 持久化
-            await self.session_manager.save_session(self.session_id, agent)
+            # 5. 执行（POST /chat 驱动一轮，历史由 milkie serve 自持久化）
+            result = await self._run_turn(sidecar, heartbeat_input)
 
             return result
 
-    async def _inject_heartbeat_context(self, agent, heartbeat_content: str) -> str:
-        """注入心跳上下文"""
-        context = agent.executor.context
-
-        # 追加心跳指令
-        current = context.get_variable("workspace_instructions") or ""
-        context.set_variable(
-            "workspace_instructions",
-            current + "\n\n" + self.HEARTBEAT_SYSTEM_INSTRUCTION
-        )
-
-        # 设置心跳标记
-        context.set_variable("heartbeat_mode", True)
-        context.set_variable("heartbeat_time", datetime.now().isoformat())
-
-        # 构造触发消息
+    def _build_heartbeat_input(self, heartbeat_content: str) -> str:
+        """构造心跳触发 input"""
         return f"""
 [系统心跳 - {datetime.now().strftime('%Y-%m-%d %H:%M')}]
 
@@ -1088,16 +996,17 @@ class HeartbeatRunner:
 请检查任务清单并执行。如无待办，回复"HEARTBEAT_OK"。
 """
 
-    async def _run_agent(self, agent, message: str) -> str:
-        """执行 Agent"""
+    async def _run_turn(self, sidecar, input_text: str) -> str:
+        """驱动一轮对话：MilkieProvider.run_turn → SSE → 中立 _progress → turn_orchestrator"""
         result = ""
-        async for event in agent.continue_chat(message=message, stream_mode="delta"):
+        # turn_orchestrator 在中立 _progress 流上套 policy（重试 / tool budget / 循环检测）
+        async for event in self.provider.run_turn(sidecar, input=input_text):
             if "_progress" in event:
                 for progress in event["_progress"]:
                     if progress.get("stage") == "llm":
-                        answer = progress.get("answer", "")
-                        if answer:
-                            result = answer
+                        delta = progress.get("delta", "")
+                        if delta:
+                            result += delta
         return result
 
     async def run_once(self):
@@ -1452,7 +1361,7 @@ python -c "from src.everbot.workspace import WorkspaceLoader; ..."
 **任务**：
 - [ ] 实现 `HeartbeatRunner`
 - [ ] 实现 `HistoryManager`
-- [ ] 集成 Dolphin Agent 执行
+- [ ] 集成 milkie sidecar 执行（MilkieProvider.run_turn）
 - [ ] 实现 Session 持久化
 - [ ] 添加并发控制
 
@@ -1498,19 +1407,22 @@ alfred everbot logs
 
 ## 九、技术选型
 
-### 9.1 复用组件
+### 9.1 核心组件
 
 | 组件 | 来源 | 说明 |
 |------|------|------|
-| DolphinAgent | dolphin.sdk | Agent 执行核心 |
-| AgentRuntime | dolphin.sdk | 运行时管理 |
-| ResourceSkillkit | dolphin.sdk | 技能加载 |
+| MilkieProvider | `provider/milkie/provider.py` | `AgentProvider` 唯一实现，跨进程驱动 milkie serve |
+| SidecarPool | `provider/milkie/pool.py` | 惰性 spawn + 常驻复用 per-agent sidecar |
+| SidecarLauncher | `provider/milkie/launcher.py` | 装配 milkie serve 启动命令/env |
+| milkie serve | milkie（TS/Node） | agent 执行核心子进程，经 HTTP + SSE 通信 |
+| discover_skills | `provider/milkie/skills.py` | 扫工作区 SKILL.md，发现技能 |
 
 ### 9.2 依赖
 
 **必需**：
 - Python 3.10+
-- dolphin-sdk
+- Node.js（运行 milkie serve；node_bin 经 launcher 装配）
+- milkie（TS/Node，dist 经 SidecarLauncher 定位）
 - PyYAML
 - asyncio (标准库)
 
@@ -1529,10 +1441,10 @@ alfred everbot logs
 │  └──────┬──────┘     └───────────┬─────────────┘   │
 │         │                        │                  │
 │         └────────────┬───────────┘                  │
-│                      │                              │
+│                      │ MilkieProvider (HTTP + SSE)  │
 │              ┌───────▼───────┐                      │
-│              │ Dolphin SDK   │                      │
-│              │ (共享)        │                      │
+│              │ milkie serve  │                      │
+│              │ (per-agent)   │                      │
 │              └───────────────┘                      │
 └─────────────────────────────────────────────────────┘
 ```

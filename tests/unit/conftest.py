@@ -1,7 +1,7 @@
 """Unit test configuration。
 
 #38 dolphin 移除后:
-- 不再 shim dolphin 常量(src 用 dolphin_compat 的纯常量)。
+- 不再 shim dolphin 常量(src 用 session_keys 的纯常量)。
 - 提供 `_DelegatingTestProvider`:镜像「旧 DolphinProvider 委托给 agent 自身方法」的行为,
   供大量用脚本化/fake agent(暴露 continue_chat/arun/executor.context/snapshot 等)测试
   编排器、会话、上下文逻辑的单测复用。autouse fixture 把 `provider_for` 按 agent 类型分派:
@@ -103,9 +103,6 @@ class _DelegatingTestProvider:
         return await oneshot_llm_provider().call_llm(
             context, prompt, temperature=temperature, fast=fast, raise_on_error=raise_on_error
         )
-
-    def ensure_chat_compatibility(self):
-        return False
 
     async def create_agent(self, agent_name, workspace_path, **kw):
         raise NotImplementedError("test delegating provider does not create agents")

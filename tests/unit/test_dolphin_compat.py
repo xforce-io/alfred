@@ -1,13 +1,8 @@
 """dolphin_compat 纯化后的单测(#38:无 dolphin import)。
 
-ensure_continue_chat_compatibility 是 dolphin runtime flag 专属,dolphin 移除后恒 no-op;
 KEY_HISTORY* 是主干依赖的具体常量值。
 """
 from src.everbot.infra import dolphin_compat as dc
-
-
-def test_ensure_continue_chat_compatibility_is_noop():
-    assert dc.ensure_continue_chat_compatibility() is False
 
 
 def test_history_constants_values():

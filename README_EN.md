@@ -54,7 +54,7 @@ source .venv/bin/activate        # Activate virtual environment
 ./bin/everbot heartbeat --agent my_agent --force  # Ignore active hours restriction
 ./bin/everbot config --show               # Show current configuration
 ./bin/everbot config --init               # Initialize default configuration
-./bin/everbot migrate-agent --agent my_agent  # Migrate/fix agent.dph
+./bin/everbot migrate-agent --agent my_agent  # Deprecated: dolphin removed, milkie does not use agent.dph
 ./bin/everbot cleanup-logs                # Clean up old logs and migrate legacy skill_logs
 ./bin/everbot memory stats --agent my_agent  # Inspect memory system stats
 
@@ -168,21 +168,14 @@ Defines periodically executed tasks:
 - [x] Task 0 (2026-02-01)
 ```
 
-### agent.dph - Agent Definition
+### Agent Behavior Sources
 
-Dolphin-format Agent definition file with variable injection:
+Agent behavior is no longer described by a single definition file; it is determined by two parts:
 
-```
-'''
-Agent Name
+- **Workspace Markdown**: `SOUL.md / AGENTS.md / SKILLS.md / USER.md / MEMORY.md` under `~/.alfred/agents/<name>/`, read by `WorkspaceLoader` and composed into the system prompt.
+- **milkie agent.md**: written to `~/.alfred/milkie/<agent>/agent.md` when spawning `milkie serve`; its `systemPrompt`/FSM/model fields drive milkie-side runtime behavior.
 
-$workspace_instructions
-''' -> system
-
-/explore/(model="$model_name", tools=[_bash, _python])
-...
--> answer
-```
+> A legacy `agent.dph` file may still exist, but it is no longer parsed — the agent runtime has been replaced from dolphin to milkie.
 
 ## Testing
 
@@ -215,9 +208,9 @@ Test coverage (~98 test files):
 ```
 EverBot Daemon
     │
-    ├── AgentFactory ─────────► DolphinAgent (LLM)
+    ├── MilkieProvider ───────► milkie sidecar (`milkie serve` subprocess, HTTP + SSE)
     │                               │
-    │                          SkillKit (skill loading)
+    │                          discover_skills (scan workspace SKILL.md)
     │
     ├── HeartbeatRunner (Agent A)
     │   ├── Read HEARTBEAT.md
@@ -254,7 +247,7 @@ EverBot Daemon
 
 Core components:
 
-- **AgentFactory**: Creates and initializes Dolphin Agents with workspace instruction injection
+- **MilkieProvider**: The sole agent runtime provider; drives a `milkie serve` subprocess across process boundaries (HTTP + SSE) and composes the system prompt from workspace instructions
 - **UserDataManager**: Unified data management (workspace, config, logs)
 - **WorkspaceLoader**: Workspace file loading (AGENTS.md, HEARTBEAT.md, MEMORY.md, USER.md)
 - **SessionManager**: Session management (JSONL persistence, concurrency locks, session recovery)
@@ -280,7 +273,7 @@ alfred/
 │   │   ├── static/           # Static assets
 │   │   └── templates/        # Page templates
 │   ├── core/                 # Business logic
-│   │   ├── agent/            # Agent factory & Dolphin SDK integration
+│   │   ├── agent/            # Agent provider & milkie sidecar integration
 │   │   ├── channel/          # Multi-channel access (Telegram, Web)
 │   │   ├── jobs/             # Background jobs
 │   │   ├── memory/           # Memory system (extraction, merging, storage)
@@ -354,9 +347,9 @@ A: No. `HistoryManager` automatically trims long histories, keeping the most rec
 
 A: Check `~/.alfred/logs/heartbeat.log`.
 
-### Q: How to customize an Agent's .dph file?
+### Q: How to customize an Agent's behavior?
 
-A: Edit `~/.alfred/agents/<agent_name>/agent.dph` using Dolphin syntax to define Agent behavior.
+A: Edit the workspace Markdown files (`SOUL.md / AGENTS.md / SKILLS.md / USER.md / MEMORY.md`) under `~/.alfred/agents/<agent_name>/` to shape Agent behavior; they are composed into the system prompt and passed in when spawning the milkie sidecar.
 
 ### Q: How to develop custom skills?
 

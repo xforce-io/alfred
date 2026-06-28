@@ -3,10 +3,10 @@
 everbot:
   enabled: true
 
-  # Agent 运行后端（provider）
-  # provider: dolphin       # 默认 dolphin（进程内）；可设为 milkie 切到 milkie serve sidecar 后端。
-  #                         # milkie 是软默认演进方向：未来全局默认会逐步切到 milkie。
-  # milkie:                 # provider=milkie（或任一 agent provider=milkie）时生效：
+  # Agent 运行后端：milkie（TS/Node 跨进程 sidecar）是唯一 runtime。每个 agent 由 daemon
+  # 惰性 spawn 一个 `milkie serve` 子进程，alfred 经 HTTP+SSE 驱动；dolphin 后端已移除。
+  # 下面 milkie 块按需覆盖 sidecar 运行参数（缺省可全不填）：
+  # milkie:
   #   dist_path: ~/dev/github/milkie/dist/cli/index.js  # milkie serve CLI 入口；默认 ../milkie/dist/cli/index.js（相对 alfred 仓库）
   #   data_dir_root: ~/.alfred/milkie  # 每个 agent 的 milkie 会话/状态持久化根目录
   #   node_bin: /opt/homebrew/bin/node  # 启动 milkie serve 的 node 可执行。
@@ -39,11 +39,10 @@ everbot:
     # 示例 Agent: daily_insight
     daily_insight:
       workspace: ~/.alfred/agents/daily_insight
-      # provider: milkie    # 每 agent 覆盖全局 provider（dolphin/milkie）。
-      #                      # 注意：在全局 provider=milkie 下，绑定 telegram 频道的 agent 会自动
-      #                      # 回退到 dolphin（milkie 暂不支持 telegram serving，待 milkie#87）。
-      #                      # ⚠️ 不要对 telegram-serving agent 显式设 provider: milkie —— 会绕过
-      #                      #    自动回退,收到消息时 skillkit 注册失败 → turn 被静默丢弃(待 milkie#87)。
+      # model: volcengine/glm-5.2  # 每 agent 覆盖默认模型（everbot.agents.<name>.model > everbot.default_model）。
+      # skills:                    # 每 agent 技能白/黑名单（milkie 经 discover_skills 扫工作区 SKILL.md）。
+      #   include: [daily-attractor]
+      #   exclude: []
       heartbeat:
         enabled: true
         interval: 30          # 心跳间隔（分钟）

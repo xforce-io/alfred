@@ -527,7 +527,6 @@ def test_safe_noop_methods_do_not_crash():
     h = MilkieAgentHandle("http://x", "c")
     p.init_trajectory(h, "/t", overwrite=True)
     p.finalize_trajectory_on_error(h)
-    assert p.ensure_chat_compatibility() is False
     assert p.is_paused(h) is False
     assert p.is_error(h) is False
     assert p.has_skill(h, "x") is False

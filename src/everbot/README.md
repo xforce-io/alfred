@@ -191,40 +191,32 @@ EverBot Daemon
 
 ## 开发指南
 
-### 集成真实的 Dolphin Agent
+### 集成 Agent runtime（milkie provider）
 
-`cli/daemon.py` 中的 `_default_agent_factory` 是一个 Mock 实现，需要替换为真实的 Agent 创建逻辑：
+Agent runtime 由 provider 中立的 `AgentProvider`（`core/agent/provider/base.py`）抽象，当前唯一实现是 `MilkieProvider`（跨进程驱动 `milkie serve` sidecar）。daemon 经 `get_provider()` 拿到 provider，再用 `create_agent` 惰性 spawn 单个 agent 的 sidecar，用 `run_turn` 驱动一轮对话：
 
 ```python
+from src.everbot.core.agent.provider import get_provider
+
 async def create_agent(agent_name: str, workspace_path: Path):
-    """创建真实的 Dolphin Agent"""
-    from dolphin.sdk import DolphinAgent, AgentRuntime
+    """经 provider 中立接口创建 agent（惰性 spawn milkie sidecar）。
 
-    # 加载工作区指令
-    loader = WorkspaceLoader(workspace_path)
-    workspace_instructions = loader.build_system_prompt()
-
-    # 创建 Runtime
-    runtime = AgentRuntime(config_path="path/to/dolphin.yaml")
-
-    # 创建 Agent
-    agent = DolphinAgent(
-        name=agent_name,
-        file_path=str(workspace_path / "agent.dph"),
-        global_config=runtime.global_config,
-        global_toolkits=runtime.globalToolkits,
-        variables={
-            "workspace_instructions": workspace_instructions,
-            "model_name": "gpt-4",
-            "current_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        },
+    system prompt 由工作区 Markdown（SOUL/AGENTS/SKILLS/USER/MEMORY.md）合成，
+    spawn 时传给 milkie serve；技能由 discover_skills 扫描工作区 SKILL.md 注入。
+    """
+    provider = get_provider()
+    agent = await provider.create_agent(
+        agent_name=agent_name,
+        workspace_path=workspace_path,
+        # model_name 不传则按 config/models.yaml + everbot.agents.<name>.model 路由
     )
-    await agent.initialize()
     return agent
 
-# 使用
+# 使用：daemon 拿到 agent 后用 provider.run_turn 驱动一轮对话
 daemon = EverBotDaemon(agent_factory=create_agent)
 ```
+
+> 注：milkie 是 TS/Node 库，Python 无法直接 `import`，因此形态固定为跨进程 sidecar —— 每个 agent 跑一个 `milkie serve` 子进程，alfred 经 HTTP + SSE 与之通信；会话身份为 `contextId`，`milkie serve` 自持久化历史（重启从 checkpoint 恢复）。
 
 ### 测试
 

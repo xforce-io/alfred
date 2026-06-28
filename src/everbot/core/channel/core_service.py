@@ -36,7 +36,6 @@ from ...core.runtime import events
 from ...core.session.session import SessionManager
 from ...infra.user_data import UserDataManager
 from ...infra.workspace import WorkspaceLoader
-from ...infra.dolphin_compat import ensure_continue_chat_compatibility
 
 # SLM: imported at module level to avoid per-event attribute lookup overhead.
 # handle_skill_event is called in the SKILL-completed hot path.
@@ -284,7 +283,6 @@ class ChannelCoreService:
             # Refresh current_time so the LLM always knows the actual time
             provider.set_variable(agent, "current_time", datetime.now().strftime("%Y-%m-%d %H:%M"))
             system_prompt_override = self._build_turn_system_prompt(session_data, agent_name)
-            ensure_continue_chat_compatibility()
 
             history_messages = provider.get_variable(agent, KEY_HISTORY)
             is_first_turn = (

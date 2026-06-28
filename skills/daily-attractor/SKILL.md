@@ -48,7 +48,7 @@ python scripts/main.py
 
 ## Configuration
 
-在 `config/dolphin.yaml` 中配置:
+在 `~/.alfred/config.yaml` 中配置:
 
 ```yaml
 daily_attractor:

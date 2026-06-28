@@ -540,9 +540,6 @@ class MilkieProvider:
             if owns:
                 await client.aclose()
 
-    def ensure_chat_compatibility(self) -> bool:
-        return False  # milkie 无 dolphin 的 EXPLORE_BLOCK_V2 flag
-
     # -- milkie 自带机制,no-op --
     def init_trajectory(self, agent: Any, path: str, overwrite: bool = False) -> None:
         pass  # milkie 自带 event sourcing,无需外部 trajectory

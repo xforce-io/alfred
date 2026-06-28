@@ -13,9 +13,8 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Callable
 import logging
 
-from ...infra.dolphin_state_adapter import DolphinStateAdapter
 from .compressor import SessionCompressor
-from .history_utils import _is_heartbeat, _is_placeholder, prepare_for_restore
+from .history_utils import _is_assistant_tool_call, _is_heartbeat, _is_placeholder, prepare_for_restore
 from .session_data import SessionData
 from . import session_ids as _sid
 
@@ -276,7 +275,7 @@ class SessionPersistence:
                 # when an error occurred mid-tool-execution (assistant+tool_calls
                 # was committed to context but the tool response was not).
                 history = list(serializable_history)
-                while history and DolphinStateAdapter._is_assistant_tool_call(history[-1]):
+                while history and _is_assistant_tool_call(history[-1]):
                     history.pop()
                 serializable_history = history + list(trailing_messages)
             serializable_history = self._filter_empty_assistant_messages(serializable_history)

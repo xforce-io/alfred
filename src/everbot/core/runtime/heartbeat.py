@@ -13,7 +13,6 @@ import uuid
 import logging
 from types import SimpleNamespace
 
-from ...infra.dolphin_compat import ensure_continue_chat_compatibility
 from ..models.system_event import build_system_event
 from . import RuntimeDeps, TurnExecutor
 from .heartbeat_file import HeartbeatFileManager
@@ -1470,7 +1469,6 @@ If not, reply with `HEARTBEAT_OK`.
                 # milkie: 无 .executor;workspace_instructions 走 serve(可能为 None)
                 value = provider.get_variable(agent, "workspace_instructions")
                 self._runtime_workspace_instructions = value if isinstance(value, str) else ""
-            ensure_continue_chat_compatibility()
 
             from .events import emit
             _emit_kw = dict(agent_name=self.agent_name, **self._event_scope_kwargs(),
@@ -1534,8 +1532,6 @@ If not, reply with `HEARTBEAT_OK`.
 
         provider = provider_for(agent)
         try:
-            ensure_continue_chat_compatibility()
-
             from .events import emit
             _emit_kw = dict(agent_name=self.agent_name, **self._event_scope_kwargs(),
                             source_type="heartbeat", run_id=getattr(self, '_current_run_id', None))

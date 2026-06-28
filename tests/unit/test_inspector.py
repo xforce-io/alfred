@@ -715,11 +715,6 @@ class TestRunLLMRoutesThroughProvider:
         monkeypatch.setattr(
             provider_mod, "get_provider_for_agent", lambda name: _FakeProvider()
         )
-        monkeypatch.setattr(
-            "src.everbot.core.runtime.inspector.ensure_continue_chat_compatibility",
-            lambda: None,
-        )
-
         result = await inspector._run_llm("reflect please", timeout_seconds=5.0)
 
         assert result == "Hello world"

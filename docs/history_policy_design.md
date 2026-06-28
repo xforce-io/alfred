@@ -4,7 +4,9 @@
 
 ### 1.1 现状
 
-Alfred 通过 Dolphin SDK 的 `portable_session` 协议与 LLM agent 交互。Dolphin 是通用 SDK，不为 Alfred 定制 context 策略，因此 Alfred 必须在调用 `import_portable_session` 之前，自行确保 `history_messages` 是合理的。
+Alfred 的 agent runtime 是 milkie（TS/Node，跨进程 sidecar）。每个 agent 跑一个 `milkie serve` 子进程，alfred 经 HTTP + SSE 与之通信。milkie serve 用 `--state-store sqlite --data-dir <…>` 自持久化历史（sqlite/jsonl），同 contextId 跨 daemon 重启会自动从 checkpoint 恢复，因此 alfred 侧不需要把存档历史灌回 agent（`needs_history_restore() == False`）。
+
+但 alfred 自身仍维护一份 JSONL session 档（`history_messages`），用于压缩、审计、记忆归档等本地策略。milkie 是通用 runtime，不为 Alfred 定制这些 context 策略，因此 Alfred 必须在写入和读出 `history_messages` 时自行确保其合理性。
 
 当前历史消息的写入和读出有三条独立路径，各自有独立的策略：
 
@@ -16,16 +18,20 @@ Alfred 通过 Dolphin SDK 的 `portable_session` 协议与 LLM agent 交互。Do
   频率: 高（每 2 分钟一次心跳任务结果）
 
 路径 2: save_session (用户交互后保存)
-  写入方式: export_portable_session → compress → atomic_save
+  写入方式: provider.export_session (milkie 经 POST /session/history) → compress → atomic_save
   容量保护: COMPRESS_THRESHOLD=80, WINDOW_SIZE=60
   压缩: LLM 摘要（SessionCompressor）
   频率: 低（用户主动交互时）
 
-路径 3: restore_to_agent (恢复到 Dolphin)
-  读出方式: load → filter_heartbeat → compact → import_portable_session
+路径 3: restore_to_agent (历史回灌)
+  读出方式: load → filter_heartbeat → compact
   容量保护: MAX_RESTORED_HISTORY_MESSAGES=120
   过滤: 字符串匹配去除心跳消息
   频率: 每次处理消息前
+  注: milkie serve 自持久化历史并跨重启自恢复，
+      provider.needs_history_restore() 返回 False，
+      该路径在 milkie 下被 short-circuit；下述读出策略
+      仍适用于 alfred 本地 JSONL 档的过滤与 compact 逻辑
 ```
 
 ### 1.2 核心问题
