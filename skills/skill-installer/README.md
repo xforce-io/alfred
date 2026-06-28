@@ -8,7 +8,7 @@
 - **多种安装源**: 支持注册表、Git、URL、本地路径
 - **依赖管理**: 自动安装 pip、npm、brew、uv 等依赖
 - **技能市场**: 支持本地和远程技能注册表
-- **非侵入式**: 完全基于 Dolphin 的 ResourceSkillkit，无需修改核心代码
+- **非侵入式**: 作为标准 SKILL.md 技能被工作区扫描发现，无需修改核心代码
 
 ## 快速开始
 
@@ -119,7 +119,7 @@ python scripts/install.py ~/my-skills/skill --method local
 export ALFRED_SKILL_REGISTRY="https://example.com/registry.json"
 ```
 
-或在 `config/dolphin.yaml` 中配置：
+或在 `~/.alfred/config.yaml` 中配置：
 
 ```yaml
 skill_installer:
@@ -199,7 +199,7 @@ mkdir -p ~/.alfred/skills/my-skill
 
 ## 配置
 
-在 `config/dolphin.yaml` 中添加（可选）：
+在 `~/.alfred/config.yaml` 中添加（可选）：
 
 ```yaml
 skill_installer:
@@ -245,9 +245,9 @@ brew install formula-name
 
 ## 工作原理
 
-1. **非侵入式设计**: 作为普通 skill 被 Dolphin 的 ResourceSkillkit 加载
-2. **脚本执行**: 通过 Python 脚本执行实际的安装、搜索等操作
-3. **标准格式**: 使用 SKILL.md 格式，与 Dolphin/OpenClaw 完全兼容
+1. **非侵入式设计**: 作为普通 skill 被工作区扫描（`discover_skills`）发现并注入 system prompt 技能段
+2. **脚本执行**: agent 经 milkie 内建 `run_command`（milkie#134）调用 Python 脚本执行实际的安装、搜索等操作
+3. **标准格式**: 使用通用的标准 SKILL.md 格式
 4. **目录管理**: 将技能安装到配置的 skills 目录
 5. **依赖处理**: 调用系统包管理器安装外部依赖
 

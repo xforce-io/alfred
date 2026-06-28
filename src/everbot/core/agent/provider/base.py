@@ -52,8 +52,6 @@ class AgentProvider(Protocol):
         raise_on_error: bool = True,
     ) -> str: ...
 
-    def ensure_chat_compatibility(self) -> bool: ...
-
     def run_turn(
         self,
         agent: Any,

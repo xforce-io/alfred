@@ -133,14 +133,14 @@ Registry format:
 
 ## Configuration
 
-Add to your `config/dolphin.yaml`:
+Add to your `~/.alfred/config.yaml`:
 
 ```yaml
 skill_installer:
   registry_url: "https://raw.githubusercontent.com/your-org/skill-registry/main/registry.json"
   default_method: "registry"
   auto_install_deps: true
-  skills_dir: "~/.alfred/skills"  # Will be auto-detected from resource_skills.directories
+  skills_dir: "~/.alfred/skills"  # Defaults to the skill dirs scanned by resolve_skill_dirs
 ```
 
 ## Examples

@@ -1483,8 +1483,6 @@ class TestRunHeartbeatTurnMilkieSafe:
 
     def _patch_turn(self, monkeypatch, runner):
         # Neutralize heavy turn machinery: stub executor + emit + compat.
-        import src.everbot.core.runtime.heartbeat as hb
-        monkeypatch.setattr(hb, "ensure_continue_chat_compatibility", lambda: None)
 
         async def _emit(*a, **k):
             return None
@@ -1582,8 +1580,6 @@ class TestRunAgentWithOverrideMilkieSafe:
         # heartbeat._run_agent_with_override 与 orchestrator._run_attempt 都经
         # provider_for(agent) 取 provider(均为函数内惰性 import)→ 改模块属性即生效。
         monkeypatch.setattr(provider_mod, "provider_for", lambda agent: provider)
-        import src.everbot.core.runtime.heartbeat as hb
-        monkeypatch.setattr(hb, "ensure_continue_chat_compatibility", lambda: None)
 
         async def _emit(*a, **k):
             return None

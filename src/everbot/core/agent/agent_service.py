@@ -12,7 +12,6 @@ from typing import Any, Dict
 from ..runtime.control import get_local_status, run_heartbeat_once
 from ...infra.user_data import get_user_data_manager
 from .provider import get_provider_for_agent
-from ...infra.dolphin_compat import ensure_continue_chat_compatibility
 
 
 class AgentService:
@@ -43,16 +42,11 @@ class AgentService:
     async def create_agent_instance(self, agent_name: str):
         """
         Create an agent instance with proper configuration.
-
-        IMPORTANT: Sets EXPLORE_BLOCK_V2 flag to False before creating agent.
         """
         agent_dir = self.user_data.get_agent_dir(agent_name)
 
         if not agent_dir.exists():
             raise ValueError(f"Agent {agent_name} does not exist")
-
-        # Keep runtime flags aligned for later continue_chat calls.
-        ensure_continue_chat_compatibility()
 
         agent = await get_provider_for_agent(agent_name).create_agent(agent_name, agent_dir)
         return agent

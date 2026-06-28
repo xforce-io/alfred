@@ -2,7 +2,7 @@
 
 5 分钟上手 EverBot！
 
-建议确认 `config/dolphin.yaml`（或 `~/.alfred/dolphin.yaml`）里已启用 `system_skillkit`，否则 `_read_file/_read_folder` 等工具可能不可用。
+建议确认 `config/models.yaml` 里的模型路由配置正确，并在 `~/.alfred/config.yaml` 的 `everbot.*` 键下配好 agent/skill；agent runtime 由 milkie sidecar（`milkie serve` 子进程）驱动。
 
 ## 前置：安装
 
@@ -208,8 +208,8 @@ PYTHONPATH=. python examples/everbot_demo.py
 ### 问题 2: Agent 创建失败
 
 检查：
-1. `agent.dph` 文件存在
-2. Dolphin SDK 已安装：`pip install dolphin-sdk`
+1. 工作区 Markdown（`SOUL.md / AGENTS.md` 等）存在于 `~/.alfred/agents/<name>/`
+2. milkie sidecar 可正常启动（Node 运行时与 milkie dist 就绪，daemon 启动期会做 preflight）
 3. 查看错误日志
 
 ### 问题 3: 找不到模块
@@ -333,7 +333,7 @@ everbot:
 模型解析优先级：
 1. `agents.<name>.model` — Agent 专属模型
 2. `everbot.default_model` — 全局默认
-3. Dolphin config 中的 `default` — 最终兜底
+3. `config/models.yaml` 中的默认模型 — 最终兜底
 
 ### 第 5 步：关联技能
 
@@ -409,7 +409,6 @@ export TELEGRAM_DEMO_BOT_TOKEN="从 @BotFather 获取的 token"
 ├── USER.md          # 用户画像 → 注入 system prompt
 ├── MEMORY.md        # 长期记忆（运行时按需加载）
 ├── HEARTBEAT.md     # 心跳任务（运行时按需加载）
-├── agent.dph        # Dolphin Agent 定义
 └── skills/          # Agent 专属技能目录
 ```
 

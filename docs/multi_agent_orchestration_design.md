@@ -131,8 +131,9 @@ Workflow 解决三个根本问题：
 └──────────────┬───────────────────┘
                │
 ┌──────────────▼───────────────────┐
-│        Dolphin Agent Layer       │
-│     (LLM Provider, Tool Exec)   │
+│        Milkie Sidecar Layer      │
+│  (MilkieProvider 经 milkie serve  │
+│   子进程驱动: LLM + 工具执行)     │
 └──────────────────────────────────┘
 ```
 
@@ -1869,7 +1870,10 @@ skills/<skill-name>/
 
 ### C. LLM 可用工具
 
-**已有工具**（Dolphin 内置）：`_bash`, `_python`, `_read_file`, `_read_folder`, `_date`, `_read_skill_asset`
+**已有工具**（milkie 内建）：以 `run_command`（milkie#134）为核心，可执行 shell 命令、读文件、跑
+SKILL 脚本。具体可用工具集由 milkie agent 的 `agent.md`（FSM/内建工具）决定。
+（历史注：`_bash` / `_python` / `_read_file` / `_read_folder` / `_date` / `_read_skill_asset` 是
+dolphin runtime 的内置工具名，迁移到 milkie 后不再适用，相应能力由 `run_command` 等内建工具承载。）
 
 **新增框架工具**：
 

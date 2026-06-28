@@ -19,7 +19,6 @@ async def test_create_agent_instance_routes_through_provider(monkeypatch, tmp_pa
     agent_dir = tmp_path / "alice"
     agent_dir.mkdir()
     monkeypatch.setattr(service.user_data, "get_agent_dir", lambda n: agent_dir)
-    monkeypatch.setattr(svc, "ensure_continue_chat_compatibility", lambda: None)
 
     agent = await service.create_agent_instance("alice")
     assert agent == "agent::alice"

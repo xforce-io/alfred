@@ -117,7 +117,7 @@ v1 画像记忆层解决了"了解用户是谁"的问题（偏好、事实、工
 | 编号 | 非目标 | 说明 |
 |------|--------|------|
 | N1 | 图数据库 / 知识图谱 | 实体关系网络是更远期的目标 |
-| N2 | 替代 Session 持久化 | JSONL session 文件继续作为 Dolphin Agent 状态恢复的主存储 |
+| N2 | 替代 Session 持久化 | milkie serve 用 sqlite/jsonl 自持久化对话历史并跨重启自动恢复（`needs_history_restore() == False`）；alfred 侧 JSONL session 文件继续作为压缩、审计与记忆归档的本地存档，记忆系统不替代它 |
 | N3 | 多用户隔离 | Alfred 是单用户个人助手 |
 | N4 | 云端同步 | 不做跨设备记忆同步 |
 | N5 | 自动删除/遗忘全量对话 | 全量保留，用户可手动清理 |
@@ -181,7 +181,7 @@ v1 画像记忆层解决了"了解用户是谁"的问题（偏好、事实、工
 
 #### F4: 主动召回技能
 
-注册为 Dolphin Skillkit 中的一个 tool，Agent 可在对话中主动调用：
+以 SKILL（工作区内的 `SKILL.md` + 脚本）形式提供，由 `discover_skills` 扫描发现并注入 prompt 技能段；Agent 经 milkie 内建 `run_command`（milkie#134）读 `SKILL.md` 并执行其脚本来主动召回（milkie 无 dolphin 的 ResourceSkillkit / 编程式 skillkit 注册）：
 
 ```
 用户: 我之前跟你讨论过一个关于 Redis 缓存穿透的方案，还记得吗？
@@ -898,16 +898,20 @@ class ConversationMemory:
 
 #### recall_memory 技能
 
-```python
-def register_recall_skill(skillkit, conversation_memory: ConversationMemory):
-    """注册到 Dolphin Skillkit。Agent 可主动调用检索历史对话。
+milkie 下没有 dolphin 的 `ResourceSkillkit` / 编程式 skillkit 注册机制。该技能改以工作区
+SKILL 形式提供：在 agent 工作区放置一个 `SKILL.md` + 召回脚本，由 `discover_skills` 扫描发现
+并注入 prompt 技能段，Agent 经 milkie 内建 `run_command`（milkie#134）阅读 `SKILL.md` 并执行
+脚本来检索历史对话。脚本侧调用下方 `ConversationMemory.recall`。
 
-    Tool schema:
-    - query: str — 检索关键词或问题描述
-    - time_range: str — 可选时间范围
-    - top_k: int — 返回结果数量，默认 5
-    """
 ```
+# SKILL.md（工作区内）声明的入参约定
+- query: str — 检索关键词或问题描述
+- time_range: str — 可选时间范围
+- top_k: int — 返回结果数量，默认 5
+```
+
+> 现状/限制：原 `register_recall_skill(skillkit, ...)` 编程式注册在 milkie 下无对应物；召回能力
+> 经 SKILL.md 发现 + `run_command` 实现，与 dolphin skillkit 能力对等但注册路径不同。
 
 ---
 

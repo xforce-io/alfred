@@ -18,7 +18,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ...infra.dolphin_compat import ensure_continue_chat_compatibility
 from ...infra.user_data import get_user_data_manager
 from ..models.system_event import build_system_event
 from .reflection import ReflectionManager
@@ -590,7 +589,6 @@ class Inspector:
         ``_REFLECT_SYSTEM_PROMPT``,reflection 上下文自包含在 ``prompt`` 消息里,无需业务
         workspace;池内单例、contextId 隔离。
         """
-        ensure_continue_chat_compatibility()
         from ..agent.provider import get_provider_for_agent
         from ..agent.provider.milkie.provider import REFLECTOR_AGENT
 

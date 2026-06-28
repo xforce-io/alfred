@@ -65,6 +65,11 @@ def _estimate_tokens(messages: List[dict]) -> int:
 # ── Message classification ───────────────────────────────────────────
 
 
+def _is_assistant_tool_call(msg: Dict[str, Any]) -> bool:
+    """判断是否携带 tool_calls 的 assistant message(用于裁剪悬空工具调用)。"""
+    return msg.get("role") == "assistant" and isinstance(msg.get("tool_calls"), list) and len(msg["tool_calls"]) > 0
+
+
 _HEARTBEAT_SOURCES = {"heartbeat", "heartbeat_delivery"}
 
 
