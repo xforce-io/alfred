@@ -97,6 +97,11 @@ class TurnPolicy:
     max_phantom_tool_calls: int = 1
     # Internal helper tools excluded from tool-call budget counting.
     budget_exempt_tools: frozenset = field(default_factory=frozenset)
+    # Tools whose identical repeat calls (same name + same args) are dropped as
+    # no-ops: they neither consume the tool-call budget nor trip the
+    # repeated-intent guard. Distinct calls still count. Catches benign loops
+    # like update_step marking the same step+status again.
+    idempotent_tools: frozenset = field(default_factory=frozenset)
     # Directory patterns to exclude from grep-like tool searches.
     grep_exclude_patterns: List[str] = field(default_factory=lambda: [
         ".venv", "node_modules", "__pycache__", ".git", "site-packages",
@@ -118,12 +123,21 @@ HEARTBEAT_POLICY = TurnPolicy(
     timeout_seconds=120,
 )
 
+# Provenance/plan meta-tools are not external work: `cite` scales with report
+# quality (one per sourced claim) and `create_plan` runs ~once, so counting them
+# against the data-gathering budget makes well-sourced reports fail. `update_step`
+# stays counted but identical repeats are dropped (see idempotent_tools).
+_PROVENANCE_EXEMPT = frozenset({"cite", "create_plan"})
+_IDEMPOTENT_META = frozenset({"update_step"})
+
 JOB_POLICY = TurnPolicy(
     max_attempts=1,
     max_tool_calls=20,
     max_failed_tool_outputs=5,
     max_tool_output_preview_chars=12000,
     timeout_seconds=600,
+    budget_exempt_tools=_PROVENANCE_EXEMPT,
+    idempotent_tools=_IDEMPOTENT_META,
 )
 
 WORKFLOW_POLICY = TurnPolicy(
@@ -132,6 +146,8 @@ WORKFLOW_POLICY = TurnPolicy(
     max_failed_tool_outputs=8,
     max_tool_output_preview_chars=12000,
     timeout_seconds=300,
+    budget_exempt_tools=_PROVENANCE_EXEMPT,
+    idempotent_tools=_IDEMPOTENT_META,
 )
 
 
@@ -223,6 +239,8 @@ def build_job_policy(
         max_failed_tool_outputs=JOB_POLICY.max_failed_tool_outputs,
         max_tool_output_preview_chars=JOB_POLICY.max_tool_output_preview_chars,
         timeout_seconds=timeout,
+        budget_exempt_tools=JOB_POLICY.budget_exempt_tools,
+        idempotent_tools=JOB_POLICY.idempotent_tools,
     )
 
 
@@ -238,4 +256,6 @@ def build_workflow_policy(
         max_failed_tool_outputs=WORKFLOW_POLICY.max_failed_tool_outputs,
         max_tool_output_preview_chars=WORKFLOW_POLICY.max_tool_output_preview_chars,
         timeout_seconds=timeout,
+        budget_exempt_tools=WORKFLOW_POLICY.budget_exempt_tools,
+        idempotent_tools=WORKFLOW_POLICY.idempotent_tools,
     )

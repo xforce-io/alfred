@@ -590,6 +590,25 @@ class TurnOrchestrator:
         _recent_fps: list[str] = []  # sliding window of recent fingerprints
         _LOOP_WINDOW = max(8, policy.max_consecutive_similar_llm_rounds)
         seen_progress_fingerprints: set[str] = set()
+        # Idempotent meta-tools (e.g. update_step): identical repeat calls are
+        # dropped as no-ops. Keyed by name + content-normalized args so that
+        # key-order variance in the provider's JSON serialization still dedupes.
+        seen_idempotent_calls: set[str] = set()
+
+        def _is_idempotent_noop(name: str, args: str) -> bool:
+            if name not in policy.idempotent_tools:
+                return False
+            normalized = (args or "").strip()
+            try:
+                parsed = json.loads(normalized)
+                normalized = json.dumps(parsed, sort_keys=True, ensure_ascii=False)
+            except (json.JSONDecodeError, TypeError):
+                normalized = re.sub(r"\s+", " ", normalized)
+            key = f"{name}:{normalized}"
+            if key in seen_idempotent_calls:
+                return True
+            seen_idempotent_calls.add(key)
+            return False
 
         def _flush_trajectory() -> None:
             """Save trajectory before early return (loop/error abort).
@@ -708,6 +727,10 @@ class TurnOrchestrator:
                     fail_sig = None  # set in completed/failed branch below
 
                     if status in ("running", "processing"):
+                        # Identical repeat of an idempotent meta-tool → drop as a
+                        # no-op: no budget, no intent counting, no emit.
+                        if _is_idempotent_noop(s_name, s_args):
+                            continue
                         # A *novel* tool call means the round made progress: tool-use
                         # native models legitimately call tools without any narration
                         # text, so "tool call + no text" is NOT a degradation signal on
@@ -901,6 +924,10 @@ class TurnOrchestrator:
                     # text-less round that repeats a tool intent counts toward the
                     # empty/think-only loop guards.
                     t_args_raw = progress.get("args", "")
+                    # Identical repeat of an idempotent meta-tool → drop as a no-op
+                    # (parity with the skill branch above).
+                    if status in ("running", "processing") and _is_idempotent_noop(t_name, t_args_raw):
+                        continue
                     intent_sig = _extract_tool_intent_signature(t_name, t_args_raw)
                     made_progress = bool(intent_sig) and tool_intent_signatures.get(intent_sig, 0) == 0
                     if made_progress:
