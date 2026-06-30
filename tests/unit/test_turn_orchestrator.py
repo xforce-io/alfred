@@ -2694,3 +2694,142 @@ async def test_phantom_tool_guard_disabled_without_callback():
     assert len(errors) == 0
     outputs = [e for e in events if e.type == TurnEventType.TOOL_OUTPUT]
     assert all("not a registered tool" not in o.tool_output for o in outputs)
+
+
+# ---------------------------------------------------------------------------
+# Provenance / plan meta-tools: budget exemption + idempotent dedup (issue #136)
+# ---------------------------------------------------------------------------
+
+
+def test_job_policy_exempts_provenance_and_idempotent_step():
+    """job 预算只约束外部工作:cite/create_plan 不计预算,update_step 幂等去重。"""
+    p = build_job_policy()
+    assert "cite" in p.budget_exempt_tools
+    assert "create_plan" in p.budget_exempt_tools
+    assert "update_step" in p.idempotent_tools
+
+
+def test_workflow_policy_exempts_provenance_and_idempotent_step():
+    p = build_workflow_policy()
+    assert "cite" in p.budget_exempt_tools
+    assert "create_plan" in p.budget_exempt_tools
+    assert "update_step" in p.idempotent_tools
+
+
+@pytest.mark.asyncio
+async def test_idempotent_repeated_skill_not_counted():
+    """同 stepId+status 的重复 update_step 是 no-op:不占预算、只算一次。"""
+    script = []
+    for i in range(6):  # 6 identical, > budget 3
+        script.append(_progress_event(
+            _skill_call("update_step", '{"stepId": 3, "status": "done"}', pid=f"u{i}")
+        ))
+    script.append(_progress_event(_llm_delta("done", pid="llm")))
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(TurnPolicy(
+        max_attempts=1, max_tool_calls=3,
+        idempotent_tools=frozenset({"update_step"}),
+        max_consecutive_empty_llm_rounds=99,
+    ))
+    events = [te async for te in orch.run_turn(agent, "go")]
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert errors == [], f"idempotent repeats must not trip a guard: {[e.error for e in errors]}"
+    complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
+    assert complete.tool_call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_idempotent_repeat_does_not_trip_intent_guard():
+    """重复 no-op 不应触发 REPEATED_TOOL_INTENT(否则只是把失败模式换个名字)。"""
+    script = [
+        _progress_event(_skill_call("update_step", '{"stepId": 3, "status": "done"}', pid=f"u{i}"))
+        for i in range(7)
+    ]
+    script.append(_progress_event(_llm_delta("ok", pid="llm")))
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(TurnPolicy(
+        max_attempts=1, max_tool_calls=20, max_same_tool_intent=2,
+        idempotent_tools=frozenset({"update_step"}),
+        max_consecutive_empty_llm_rounds=99,
+    ))
+    events = [te async for te in orch.run_turn(agent, "go")]
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert errors == [], f"unexpected guard: {[e.error for e in errors]}"
+
+
+@pytest.mark.asyncio
+async def test_distinct_idempotent_tool_calls_still_counted():
+    """不同 stepId 的 update_step 是真实进展,仍计预算(防无界放行)。"""
+    script = [
+        _progress_event(_skill_call("update_step", f'{{"stepId": {i}, "status": "done"}}', pid=f"u{i}"))
+        for i in range(5)  # 5 distinct, > budget 3
+    ]
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(TurnPolicy(
+        max_attempts=1, max_tool_calls=3,
+        idempotent_tools=frozenset({"update_step"}),
+        max_consecutive_empty_llm_rounds=99,
+    ))
+    events = [te async for te in orch.run_turn(agent, "go")]
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert any("TOOL_CALL_BUDGET_EXCEEDED" in e.error for e in errors)
+
+
+@pytest.mark.asyncio
+async def test_idempotent_key_ignores_json_key_order():
+    """同内容不同键序视为同一 no-op(milkie 序列化键序不稳定)。"""
+    script = [
+        _progress_event(_skill_call("update_step", '{"stepId": 1, "status": "done"}', pid="a")),
+        _progress_event(_skill_call("update_step", '{"status": "done", "stepId": 1}', pid="b")),
+        _progress_event(_llm_delta("ok", pid="llm")),
+    ]
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(TurnPolicy(
+        max_attempts=1, max_tool_calls=1,
+        idempotent_tools=frozenset({"update_step"}),
+        max_consecutive_empty_llm_rounds=99,
+    ))
+    events = [te async for te in orch.run_turn(agent, "go")]
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert errors == [], f"key-order variants must dedupe: {[e.error for e in errors]}"
+    complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
+    assert complete.tool_call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_issue136_real_run_no_longer_trips_budget():
+    """回归:复现 routine_38364fe6 失败那次的真实调用序列(milkie run
+    3023528f),在真实 JOB_POLICY 下不再误报 TOOL_CALL_BUDGET_EXCEEDED。
+
+    构成:1 create_plan(豁免) + 7 run_command(真实数据) + 11 cite(豁免)
+    + update_step(5 个不同状态 + 6 次重复 stepId3/done 应被幂等丢弃)。
+    """
+    script = [_progress_event(_skill_call("create_plan", '{"steps": ["a", "b", "c", "d"]}', pid="plan"))]
+    # 7 次真实数据采集(各不相同)
+    for i, cmd in enumerate(["cat skill", "cat rhino", "rhino_report",
+                             "inv scan", "inv infer", "value AAPL", "inv report"]):
+        script.append(_progress_event(_skill_call("run_command", cmd, pid=f"rc{i}")))
+    # update_step:5 个真实状态变更 + 6 次重复(应被幂等丢弃)
+    for sid, st, pid in [(0, "done", "s0"), (1, "done", "s1"), (1, "pending", "s2"),
+                         (1, "done", "s3"), (2, "done", "s4")]:
+        script.append(_progress_event(
+            _skill_call("update_step", f'{{"stepId": {sid}, "status": "{st}"}}', pid=pid)
+        ))
+    for i in range(7):  # stepId3/done ×7:首个计数,后 6 个重复丢弃
+        script.append(_progress_event(
+            _skill_call("update_step", '{"stepId": 3, "status": "done"}', pid=f"s3done{i}")
+        ))
+    # 11 条溯源(各不相同,均豁免)
+    for i in range(11):
+        script.append(_progress_event(_skill_call("cite", f'{{"claim": "c{i}"}}', pid=f"cite{i}")))
+    script.append(_progress_event(_llm_delta("综合信号报告已生成", pid="llm")))
+
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(JOB_POLICY)  # 真实预设,max_tool_calls=20
+    events = [te async for te in orch.run_turn(agent, "go")]
+
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert errors == [], f"must not trip any guard: {[e.error for e in errors]}"
+    complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
+    # 7 run_command + 5 个不同 update_step = 12;cite/create_plan 豁免,重复 step 丢弃
+    assert complete.tool_call_count == 12, complete.tool_call_count
