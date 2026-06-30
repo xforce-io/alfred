@@ -4,6 +4,7 @@ import json
 import pytest
 
 from src.everbot.core.agent.provider.milkie.launcher import (
+    AGENT_MANIFEST_FILENAME,
     SidecarLauncher,
     LaunchSpec,
     SKILL_MANIFEST_ENV,
@@ -47,6 +48,14 @@ def test_build_writes_agent_md_and_returns_cmd(tmp_path):
     assert spec.cmd[spec.cmd.index("--port") + 1] == "0"
     assert spec.cmd[spec.cmd.index("--state-store") + 1] == "sqlite"
     assert spec.cmd[spec.cmd.index("--data-dir") + 1] == str(spec.data_dir)
+
+
+def test_build_writes_agent_manifest_for_trace_replay(tmp_path):
+    spec = _launcher(tmp_path).build("alice", system_prompt="You are Alice.")
+    manifest = json.loads(
+        (spec.data_dir / AGENT_MANIFEST_FILENAME).read_text(encoding="utf-8")
+    )
+    assert manifest == {"agents": [{"id": "alice", "file": "agent.md"}]}
 
 
 def test_build_injects_cloud_api_key_env(tmp_path):
