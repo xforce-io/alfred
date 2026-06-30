@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 # env 告知 serve;milkie 默认 handler 读它返回真实技能列表(去 stub)。
 SKILL_MANIFEST_FILENAME = "skill-manifest.json"
 SKILL_MANIFEST_ENV = "MILKIE_SKILL_MANIFEST"
+AGENT_MANIFEST_FILENAME = "agents.json"
 
 # E2b(#108):sidecar OS 沙箱 —— launcher 给 milkie serve 套 macOS sandbox-exec,
 # 物理禁止子进程(含 run_command fork 的 shell)写共享/系统路径,半径锁在自身 workspace。
@@ -135,6 +136,15 @@ class SidecarLauncher:
         agent_md = data_dir / "agent.md"
         agent_md.write_text(
             build_milkie_agent_md(agent_name, system_prompt, tiers), encoding="utf-8"
+        )
+        agent_manifest = data_dir / AGENT_MANIFEST_FILENAME
+        agent_manifest.write_text(
+            json.dumps(
+                {"agents": [{"id": agent_name, "file": agent_md.name}]},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
         )
         cmd = [
             self._node_bin, str(self._dist_path.expanduser()), "serve",
