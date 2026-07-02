@@ -4,8 +4,14 @@ tweet 的 url 本就进了喂给 LLM 的数据,但分析 prompt 没要求报告*
 原文链接 → 生成的报告会漏。补 prompt 指令,让 Serenity 这类报告可溯源到单条推文。
 """
 import importlib.util
+import asyncio
+import json
 import sys
 from pathlib import Path
+
+import httpx
+
+from src.everbot.core.agent.provider.model_config import ModelConfig
 
 _SCRIPTS = Path(__file__).resolve().parents[2] / "skills" / "twitter-watch" / "scripts"
 if str(_SCRIPTS) not in sys.path:
@@ -43,3 +49,38 @@ def test_prompt_requires_per_tweet_source_link():
     """指令层:prompt 明确要求报告逐条带原文链接(L2a 可溯源)。"""
     prompt = az.build_prompt(_data())
     assert "原文链接" in prompt
+
+
+def test_analyze_uses_configured_openai_compatible_route(monkeypatch):
+    """twitter-watch analysis should not shell out to Claude CLI."""
+    cfg = ModelConfig(
+        llms={"m": {"cloud": "c", "model_name": "mm"}},
+        clouds={"c": {"api": "http://fake/v1", "api_key": "k"}},
+        default_model="m",
+        fast_model="m",
+    )
+    monkeypatch.setattr(az, "load_model_config", lambda: cfg)
+    cap = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cap["url"] = str(req.url)
+        cap["auth"] = req.headers.get("authorization")
+        cap["json"] = json.loads(req.content.decode("utf-8"))
+        return httpx.Response(200, json={"choices": [{"message": {"content": " 报告 "}}]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(az.httpx, "AsyncClient", lambda *a, **k: client)
+
+    out = asyncio.run(az.run_analysis("prompt", None, 30))
+
+    assert out == "报告"
+    assert cap["url"] == "http://fake/v1/chat/completions"
+    assert cap["auth"] == "Bearer k"
+    assert cap["json"]["model"] == "mm"
+    assert cap["json"]["messages"][0]["content"] == "prompt"
+
+
+def test_analyze_script_no_longer_references_claude_cli():
+    src = (_SCRIPTS / "analyze.py").read_text(encoding="utf-8")
+    assert '"claude"' not in src
+    assert "claude -p" not in src
