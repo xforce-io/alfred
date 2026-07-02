@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""把抓到的推文喂给 claude code(``claude -p`` headless)做深度分析,产出中文报告。
+"""Analyze fetched tweets with the configured OpenAI-compatible model route.
 
 输入:fetch_tweets.py 的 JSON(从 stdin 读,或 --input 指定文件)。
-输出:claude 生成的结构化深度分析报告(stdout)。
-
-纯文本分析,不开 --dangerously-skip-permissions(claude 只读 prompt、不动文件)。
+输出:模型生成的结构化深度分析报告(stdout)。
 
 用法:
     python fetch_tweets.py aleabitoreddit --count 3 | python analyze.py
@@ -13,9 +11,19 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
-import subprocess
 import sys
+from pathlib import Path
+from typing import Any
+
+import httpx
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.everbot.core.agent.provider.model_config import load_model_config  # noqa: E402
 
 _PROMPT_TEMPLATE = """你是资深投资与科技分析师。下面是 X 用户 @{handle} 最新的 {n} 条推文(含互动数据 metrics)。请做**深度分析**,用**中文**输出结构化报告。要求基于推文内容分析,保留关键原文引用,**不要编造推文未提及的信息**。
 
@@ -48,30 +56,56 @@ def build_prompt(data: dict) -> str:
     )
 
 
-def run_claude(prompt: str, model: str | None, timeout: int) -> str:
-    cmd = ["claude", "-p", prompt]
-    if model:
-        cmd += ["--model", model]
+async def run_analysis(prompt: str, model: str | None, timeout: int, fast: bool = False) -> str:
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except FileNotFoundError:
-        sys.exit("[analyze] 未找到 claude CLI — 确认 claude code 已安装且在 PATH")
-    except subprocess.TimeoutExpired:
-        sys.exit(f"[analyze] claude 分析超时(>{timeout}s)")
-    if proc.returncode != 0:
-        sys.stderr.write(proc.stderr)
-        sys.exit(f"[analyze] claude 退出码 {proc.returncode}")
-    out = proc.stdout.strip()
+        cfg = load_model_config()
+        route = cfg.route_for(model) if model else cfg.route(fast=fast)
+    except Exception as exc:
+        sys.exit(f"[analyze] 模型配置错误: {exc}")
+
+    payload: dict[str, Any] = {
+        "model": route.model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+        "stream": False,
+        **route.extra_body,
+    }
+    headers = {
+        "Authorization": f"Bearer {route.api_key}",
+        "content-type": "application/json",
+        **route.headers,
+    }
+    base = route.base_url
+    url = base if base.endswith("/chat/completions") else f"{base}/chat/completions"
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(float(timeout)), trust_env=False) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+    except httpx.TimeoutException:
+        sys.exit(f"[analyze] 模型分析超时(>{timeout}s)")
+    except Exception as exc:
+        sys.exit(f"[analyze] 模型调用失败: {exc}")
+
+    if resp.status_code >= 400:
+        sys.stderr.write(resp.text)
+        sys.exit(f"[analyze] 模型接口 HTTP {resp.status_code}")
+
+    try:
+        data = resp.json()
+        out = (data["choices"][0]["message"]["content"] or "").strip()
+    except Exception as exc:
+        sys.exit(f"[analyze] 模型返回格式无效: {exc}")
     if not out:
-        sys.exit("[analyze] claude 返回空报告")
+        sys.exit("[analyze] 模型返回空报告")
     return out
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="用 claude code 深度分析推文")
+    ap = argparse.ArgumentParser(description="用已配置模型深度分析推文")
     ap.add_argument("--input", help="推文 JSON 文件(默认从 stdin 读)")
-    ap.add_argument("--model", default=None, help="指定 claude 模型(默认用 claude 默认)")
-    ap.add_argument("--timeout", type=int, default=180, help="claude 超时秒数(默认 180)")
+    ap.add_argument("--model", default=None, help="指定 config/models.yaml 里的 llm 名称(默认用 default)")
+    ap.add_argument("--fast", action="store_true", help="未指定 --model 时使用 fast 档")
+    ap.add_argument("--timeout", type=int, default=180, help="模型调用超时秒数(默认 180)")
     args = ap.parse_args()
 
     raw = open(args.input, encoding="utf-8").read() if args.input else sys.stdin.read()
@@ -82,7 +116,7 @@ def main() -> None:
     if not data.get("tweets"):
         sys.exit("[analyze] 输入无 tweets,无可分析内容")
 
-    report = run_claude(build_prompt(data), args.model, args.timeout)
+    report = asyncio.run(run_analysis(build_prompt(data), args.model, args.timeout, fast=args.fast))
     print(report)
 
 

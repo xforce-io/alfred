@@ -1,13 +1,13 @@
 ---
 name: twitter-watch
-description: Fetch a given X (Twitter) user's latest tweets and run a deep analysis with claude code. Use when the user wants to watch/track an X account or analyze someone's recent tweets.
+description: Fetch a given X (Twitter) user's latest tweets and run a deep analysis with the configured OpenAI-compatible model route. Use when the user wants to watch/track an X account or analyze someone's recent tweets.
 version: "1.0.0"
-tags: [twitter, x, social, analysis, claude, watch]
+tags: [twitter, x, social, analysis, watch]
 ---
 
 # Twitter Watch Skill
 
-抓取指定 X(Twitter)用户的最新推文,并用 **claude code**(`claude -p`)做**深度分析**,产出结构化中文报告。可手动调用,也可注册为每日定时任务。
+抓取指定 X(Twitter)用户的最新推文,并用当前 `config/models.yaml` 配置的 OpenAI-compatible 模型做**深度分析**,产出结构化中文报告。可手动调用,也可注册为每日定时任务。
 
 ## When to Use
 
@@ -19,7 +19,7 @@ tags: [twitter, x, social, analysis, claude, watch]
 ## 前置依赖(已就绪,无需安装)
 
 - 抓取复用同级 **`web`** 技能的 Playwright 浏览器(端口 9222)及其**已登录 X** 的持久化 profile。脚本会在 server 未起时自动 `web/server.sh &` 拉起。
-- 分析用 `claude` CLI(claude code),已在 PATH。
+- 分析用 `config/models.yaml` 的模型路由；不依赖本机特定分析 CLI。
 
 ## 用法
 
@@ -31,7 +31,7 @@ TW="$SKILL_DIR/scripts"
 # 1) 抓最新 3 条(默认 handle 见 config/.env;也可显式传 handle)
 python "$TW/fetch_tweets.py" aleabitoreddit --count 3 > /tmp/tweets.json
 
-# 2) 深度分析(claude code),输出中文报告
+# 2) 深度分析(配置模型),输出中文报告
 python "$TW/analyze.py" --input /tmp/tweets.json
 
 # 或一行管道
@@ -43,7 +43,7 @@ python "$TW/fetch_tweets.py" aleabitoreddit --count 3 | python "$TW/analyze.py"
 ## 脚本
 
 - `scripts/fetch_tweets.py <handle> [--count N]` — 抓最新 N 条非置顶推文,按时间倒序,输出 JSON(正文/时间/URL/互动数)。**未登录/cookie 失效时退出码 3 并提示去 `web` profile 重登,绝不伪造内容。**
-- `scripts/analyze.py [--input f] [--model M] [--timeout S]` — 读推文 JSON(默认 stdin),调 `claude -p` 产出逐条解读 / 投资信号与标的 / 整体主题 / 作者立场 的中文报告。
+- `scripts/analyze.py [--input f] [--model LLM_NAME] [--fast] [--timeout S]` — 读推文 JSON(默认 stdin),调用 `config/models.yaml` 中的 OpenAI-compatible 路由产出逐条解读 / 投资信号与标的 / 整体主题 / 作者立场 的中文报告。`--model` 使用 `llms` 里的配置名；未指定时使用 default，`--fast` 使用 fast 档。
 
 ## 已知限制
 
