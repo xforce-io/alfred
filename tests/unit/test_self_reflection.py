@@ -279,6 +279,43 @@ class TestApplyReview:
         result = mm.load_entries()
         assert len(result) == 1
 
+    def test_self_merge_pair_skipped(self, memory_path):
+        from src.everbot.core.memory.manager import MemoryManager
+        entries = [self._make_entry("aaa111")]
+        self._create_memory_file(memory_path, entries)
+        mm = MemoryManager(memory_path)
+        review = {
+            "merge_pairs": [
+                {"id_a": "aaa111", "id_b": "aaa111", "merged_content": "invalid self merge"}
+            ],
+        }
+        stats = mm.apply_review(review)
+        assert stats["merged"] == 0
+        result = mm.load_entries()
+        assert len(result) == 1
+        assert result[0].id == "aaa111"
+
+    def test_merge_pair_reusing_consumed_id_skipped(self, memory_path):
+        from src.everbot.core.memory.manager import MemoryManager
+        entries = [
+            self._make_entry("aaa111", "user likes python"),
+            self._make_entry("bbb222", "user prefers python"),
+            self._make_entry("ccc333", "user likes concise answers"),
+        ]
+        self._create_memory_file(memory_path, entries)
+        mm = MemoryManager(memory_path)
+        review = {
+            "merge_pairs": [
+                {"id_a": "aaa111", "id_b": "bbb222", "merged_content": "user prefers Python"},
+                {"id_a": "aaa111", "id_b": "ccc333", "merged_content": "invalid reused ID"},
+            ],
+        }
+        stats = mm.apply_review(review)
+        assert stats["merged"] == 1
+        result = mm.load_entries()
+        assert len(result) == 2
+        assert any(e.id == "ccc333" for e in result)
+
     def test_refine_updates_content(self, memory_path):
         from src.everbot.core.memory.manager import MemoryManager
         entries = [self._make_entry("aaa111", "old content")]
