@@ -398,10 +398,17 @@ class MemoryManager:
                 entry_map = {e.id: e for e in entries}
 
                 # 1. Merge pairs
+                consumed_merge_ids = set()
                 for pair in review.get("merge_pairs", []):
                     id_a = pair.get("id_a", "")
                     id_b = pair.get("id_b", "")
                     merged_content = pair.get("merged_content", "")
+                    if id_a == id_b:
+                        logger.warning("Merge pair references the same ID twice: %s", id_a)
+                        continue
+                    if id_a in consumed_merge_ids or id_b in consumed_merge_ids:
+                        logger.warning("Merge pair reuses already merged ID: %s, %s", id_a, id_b)
+                        continue
                     if id_a not in entry_map or id_b not in entry_map:
                         logger.warning("Merge pair references missing ID: %s, %s", id_a, id_b)
                         continue
@@ -410,6 +417,7 @@ class MemoryManager:
                     )
                     del entry_map[id_a]
                     del entry_map[id_b]
+                    consumed_merge_ids.update((id_a, id_b))
                     entry_map[merged.id] = merged
                     stats["merged"] += 1
 
