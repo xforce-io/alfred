@@ -46,6 +46,8 @@ def task_snapshot(task: Any) -> dict[str, Any]:
         "min_execution_interval": getattr(task, "min_execution_interval", None),
         "retry": int(getattr(task, "retry", 0) or 0),
         "max_retry": int(getattr(task, "max_retry", 3) or 3),
+        "last_error_code": getattr(task, "last_error_code", None),
+        "last_error_retryable": getattr(task, "last_error_retryable", None),
         "last_run_at": getattr(task, "last_run_at", None),
     }
 

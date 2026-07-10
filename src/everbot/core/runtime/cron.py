@@ -21,7 +21,15 @@ from typing import Any, Callable, List, Optional
 
 from ..jobs.llm_errors import LLMConfigError, LLMTransientError
 from ..tasks.execution_gate import GateVerdict, TaskExecutionGate
-from ..tasks.task_manager import Task, TaskList, TaskState, get_due_tasks
+from ..tasks.task_manager import (
+    RetryDecision,
+    Task,
+    TaskList,
+    TaskState,
+    build_retry_decision,
+    format_retry_hint,
+    get_due_tasks,
+)
 from .cron_delivery import CronDelivery
 from .heartbeat_utils import (
     build_isolated_task_prompt,
@@ -71,6 +79,34 @@ def _is_permanent_error(exc: BaseException) -> bool:
         return True
     text = str(exc).lower()
     return any(marker in text for marker in _PERMANENT_ERROR_MARKERS)
+
+
+def _is_retryable_error(exc: BaseException) -> bool:
+    structured = getattr(exc, "retryable", None)
+    if isinstance(structured, bool):
+        return structured
+    if isinstance(exc, asyncio.TimeoutError):
+        return True
+    if _is_permanent_error(exc):
+        return False
+    from .heartbeat import _is_transient_llm_error
+    if _is_transient_llm_error(exc):
+        return True
+    return True
+
+
+def _decision_for_failure(task: Task, exc: BaseException) -> RetryDecision:
+    existing = getattr(exc, "_routine_retry_decision", None)
+    if isinstance(existing, RetryDecision):
+        return existing
+    return build_retry_decision(task, retryable=_is_retryable_error(exc))
+
+
+def _attach_retry_decision(exc: BaseException, decision: RetryDecision) -> None:
+    try:
+        setattr(exc, "_routine_retry_decision", decision)
+    except Exception:
+        pass
 
 
 
@@ -437,14 +473,35 @@ class CronExecutor:
             )
 
         except asyncio.TimeoutError:
-            self.routine_manager.update_task_state(task, TaskState.FAILED, error_message="timeout")
-            self._write_event("task_failed", task_id=task.id, title=task.title, error="timeout")
+            decision = build_retry_decision(task, retryable=True)
+            self.routine_manager.update_task_state(
+                task, TaskState.FAILED, error_message="timeout",
+                retryable=True, error_code="TIMEOUT", retry_decision=decision,
+            )
+            self._write_event(
+                "task_failed", task_id=task.id, title=task.title, error="timeout",
+                retryable=True, retry_number=decision.retry_number,
+                max_retry=decision.max_retry, next_run_at=decision.next_run_at,
+            )
             self.routine_manager.flush(task_list)
             return TaskResult(task_id=task.id, status="timeout", error="timeout")
 
         except Exception as exc:
-            self.routine_manager.update_task_state(task, TaskState.FAILED, error_message=str(exc))
-            self._write_event("task_failed", task_id=task.id, title=task.title, error=str(exc)[:200])
+            decision = _decision_for_failure(task, exc)
+            self.routine_manager.update_task_state(
+                task, TaskState.FAILED, error_message=str(exc),
+                retryable=_is_retryable_error(exc),
+                error_code=getattr(exc, "code", None),
+                retry_decision=decision,
+            )
+            self._write_event(
+                "task_failed", task_id=task.id, title=task.title, error=str(exc)[:200],
+                error_code=getattr(exc, "code", None),
+                retryable=_is_retryable_error(exc),
+                retry_number=decision.retry_number,
+                max_retry=decision.max_retry,
+                next_run_at=decision.next_run_at,
+            )
             self.routine_manager.flush(task_list)
             return TaskResult(task_id=task.id, status="failed", error=str(exc))
 
@@ -540,14 +597,35 @@ class CronExecutor:
                 task_id=task.id, status="done",
                 output=f"ISOLATED_DONE:{task.id}", execution_path=exec_path,
             )
-        except asyncio.TimeoutError:
-            self.routine_manager.update_task_state(task, TaskState.FAILED, error_message="timeout")
-            self._write_event("task_failed", task_id=task.id, title=task.title, error="timeout")
+        except asyncio.TimeoutError as exc:
+            decision = _decision_for_failure(task, exc)
+            self.routine_manager.update_task_state(
+                task, TaskState.FAILED, error_message="timeout",
+                retryable=True, error_code="TIMEOUT", retry_decision=decision,
+            )
+            self._write_event(
+                "task_failed", task_id=task.id, title=task.title, error="timeout",
+                error_code="TIMEOUT", retryable=True,
+                retry_number=decision.retry_number, max_retry=decision.max_retry,
+                next_run_at=decision.next_run_at,
+            )
             self.routine_manager.flush(task_list)
             return TaskResult(task_id=task.id, status="timeout", error="timeout", execution_path=exec_path)
         except Exception as exc:
-            self.routine_manager.update_task_state(task, TaskState.FAILED, error_message=str(exc))
-            self._write_event("task_failed", task_id=task.id, title=task.title, error=str(exc)[:200])
+            decision = _decision_for_failure(task, exc)
+            retryable = _is_retryable_error(exc)
+            self.routine_manager.update_task_state(
+                task, TaskState.FAILED, error_message=str(exc),
+                retryable=retryable,
+                error_code=getattr(exc, "code", None),
+                retry_decision=decision,
+            )
+            self._write_event(
+                "task_failed", task_id=task.id, title=task.title, error=str(exc)[:200],
+                error_code=getattr(exc, "code", None), retryable=retryable,
+                retry_number=decision.retry_number, max_retry=decision.max_retry,
+                next_run_at=decision.next_run_at,
+            )
             self.routine_manager.flush(task_list)
             return TaskResult(task_id=task.id, status="failed", error=str(exc), execution_path=exec_path)
 
@@ -609,8 +687,9 @@ class CronExecutor:
                 detail=str(exc),
                 run_id=run_id,
             )
-            from ..tasks.task_manager import format_retry_hint
-            retry_hint = format_retry_hint(task)
+            decision = build_retry_decision(task, retryable=_is_retryable_error(exc))
+            _attach_retry_decision(exc, decision)
+            retry_hint = format_retry_hint(task, decision)
             fail_msg = f"Task failed: {task_title or task.id}\n{exc}"
             if retry_hint:
                 fail_msg += f"\n\n{retry_hint}"
@@ -626,27 +705,10 @@ class CronExecutor:
         agent = await self._create_job_agent(job_session_id)
         job_system_prompt = self._build_job_system_prompt(agent, task)
         try:
-            max_attempts = 2
-            result = ""
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    result = await asyncio.wait_for(
-                        run_agent(agent, prompt, system_prompt_override=job_system_prompt),
-                        timeout=task.timeout_seconds,
-                    )
-                    break
-                except Exception as exc:
-                    from .heartbeat import _is_transient_llm_error
-                    if attempt >= max_attempts or not _is_transient_llm_error(exc):
-                        raise
-                    logger.warning(
-                        "Transient isolated-agent LLM failure for %s (attempt %d/%d): %s",
-                        task.id,
-                        attempt,
-                        max_attempts,
-                        exc,
-                    )
-                    await asyncio.sleep(min(3, attempt))
+            result = await asyncio.wait_for(
+                run_agent(agent, prompt, system_prompt_override=job_system_prompt),
+                timeout=task.timeout_seconds,
+            )
             await self.session_manager.save_session(job_session_id, agent)
             await self.session_manager.mark_session_archived(job_session_id)
 
@@ -697,8 +759,9 @@ class CronExecutor:
                 detail=str(exc),
                 run_id=run_id,
             )
-            from ..tasks.task_manager import format_retry_hint
-            retry_hint = format_retry_hint(task)
+            decision = build_retry_decision(task, retryable=_is_retryable_error(exc))
+            _attach_retry_decision(exc, decision)
+            retry_hint = format_retry_hint(task, decision)
             fail_msg = f"Task failed: {task_title or task.id}\n{exc}"
             if retry_hint:
                 fail_msg += f"\n\n{retry_hint}"

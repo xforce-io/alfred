@@ -10,7 +10,11 @@ import httpx
 import pytest
 
 from src.everbot.core.agent.provider.milkie import provider as provider_mod
-from src.everbot.core.agent.provider.milkie.provider import MilkieAgentHandle, MilkieProvider
+from src.everbot.core.agent.provider.milkie.provider import (
+    MilkieAgentError,
+    MilkieAgentHandle,
+    MilkieProvider,
+)
 
 
 def _sse(*frames: tuple[str, dict]) -> str:
@@ -119,6 +123,39 @@ async def test_run_turn_raises_on_error_frame():
             _ = [e async for e in p.run_turn(MilkieAgentHandle("http://sidecar", "c"), "hi")]
     finally:
         await client.aclose()
+
+
+async def test_run_turn_preserves_structured_error_and_waits_for_terminal_runid():
+    envelope = {
+        "code": "MODEL_CONNECTION_ERROR",
+        "message": "Model provider connection failed.",
+        "phase": "stream_open",
+        "provider": "volcengine",
+        "model": "glm-5.2",
+        "retryable": True,
+    }
+    sse = _sse(
+        ("error", {"message": envelope["message"], "error": envelope}),
+        ("agent.run.completed", {
+            "status": "error", "message": envelope["message"],
+            "error": envelope, "runId": "run-structured",
+        }),
+    )
+    p, client = _provider(sse)
+    handle = MilkieAgentHandle("http://sidecar", "c")
+    try:
+        with pytest.raises(MilkieAgentError) as raised:
+            _ = [e async for e in p.run_turn(handle, "hi")]
+    finally:
+        await client.aclose()
+
+    assert raised.value.code == "MODEL_CONNECTION_ERROR"
+    assert raised.value.retryable is True
+    assert raised.value.phase == "stream_open"
+    assert raised.value.provider == "volcengine"
+    assert raised.value.model == "glm-5.2"
+    assert raised.value.run_id == "run-structured"
+    assert handle.last_run_id == "run-structured"
 
 
 # ── #47: capture milkie's per-run id off the terminal frame (milkie#140) ──

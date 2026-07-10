@@ -17,6 +17,7 @@ from .task_manager import (
     Task,
     TaskList,
     TaskState,
+    RetryDecision,
     ParseStatus,
     parse_heartbeat_md,
     write_task_block,
@@ -406,9 +407,20 @@ class RoutineManager:
         *,
         error_message: Optional[str] = None,
         now: Optional[datetime] = None,
+        retryable: bool = True,
+        error_code: Optional[str] = None,
+        retry_decision: Optional[RetryDecision] = None,
     ) -> None:
         """Transition a task to a new state."""
-        update_task_state(task, new_state, error_message=error_message, now=now)
+        update_task_state(
+            task,
+            new_state,
+            error_message=error_message,
+            now=now,
+            retryable=retryable,
+            error_code=error_code,
+            retry_decision=retry_decision,
+        )
 
     def flush(self, task_list: TaskList) -> None:
         """Persist task_list state to HEARTBEAT.md atomically.
