@@ -11,6 +11,7 @@ from src.everbot.core.tasks.task_manager import (
     ParseStatus,
     _RETRY_BACKOFF,
     format_retry_hint,
+    build_retry_decision,
     parse_heartbeat_md,
     get_due_tasks,
     claim_task,
@@ -266,10 +267,10 @@ class TestTaskStateTransitions:
         # Backoff: first retry → 30s delay
         assert task.next_run_at is not None
 
-    def test_failed_at_max_retry_stays_failed(self):
+    def test_last_configured_retry_is_scheduled(self):
         task = _sample_task(retry=2, max_retry=3)
         update_task_state(task, TaskState.FAILED, error_message="timeout")
-        assert task.state == "failed"
+        assert task.state == "pending"
         assert task.retry == 3
 
     def test_timeout_marks_failed(self):
@@ -344,10 +345,30 @@ class TestTaskStateTransitions:
         expected = now + timedelta(seconds=_RETRY_BACKOFF[1])
         assert next_dt == expected, f"Expected {expected}, got {next_dt}"
 
-    def test_failed_beyond_backoff_table_stays_failed(self):
-        """After exhausting backoff table, one-shot task stays failed."""
+    def test_max_retry_is_authoritative_beyond_legacy_backoff_table(self):
         now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
-        task = _sample_task(retry=len(_RETRY_BACKOFF), max_retry=20)
+        task = _sample_task(retry=2, max_retry=5)
+        update_task_state(task, TaskState.FAILED, error_message="err", now=now)
+        assert task.state == "pending"
+        assert task.retry == 3
+        assert datetime.fromisoformat(task.next_run_at) == now + timedelta(minutes=30)
+
+    def test_non_retryable_failure_terminates_one_shot_immediately(self):
+        now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
+        task = _sample_task(retry=0, max_retry=5)
+        update_task_state(
+            task, TaskState.FAILED, error_message="auth failed", now=now,
+            retryable=False, error_code="MODEL_AUTH_ERROR",
+        )
+        assert task.state == "failed"
+        assert task.retry == 0
+        assert task.last_error_code == "MODEL_AUTH_ERROR"
+        assert task.last_error_retryable is False
+
+    def test_failed_after_max_retry_stays_failed(self):
+        """After exhausting the configured retry budget, one-shot task stays failed."""
+        now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
+        task = _sample_task(retry=20, max_retry=20)
         update_task_state(task, TaskState.FAILED, error_message="err", now=now)
         assert task.state == "failed"
 
@@ -366,7 +387,7 @@ class TestTaskStateTransitions:
         state with retry=3/3. The code at task_manager.py:287-293 should handle
         this by resetting retry=0 and re-arming as pending.
         """
-        task = _sample_task(retry=2, max_retry=3, schedule="1d")
+        task = _sample_task(retry=3, max_retry=3, schedule="1d")
         task.timezone = "Asia/Shanghai"
         now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
         update_task_state(task, TaskState.FAILED, error_message="Request timed out.", now=now)
@@ -383,7 +404,7 @@ class TestTaskStateTransitions:
     def test_scheduled_task_at_max_retry_clears_error_on_rearm(self):
         """After auto-reset, the error_message should still be set (for diagnostics)
         but the task should be schedulable."""
-        task = _sample_task(retry=2, max_retry=3, schedule="1d")
+        task = _sample_task(retry=3, max_retry=3, schedule="1d")
         now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
         update_task_state(task, TaskState.FAILED, error_message="Connection error.", now=now)
         # Task is re-armed; error_message is preserved for diagnostics
@@ -407,8 +428,13 @@ class TestTaskStateTransitions:
         assert task.state == "pending"
         assert task.retry == 2
 
-        # Fail 3: max_retry reached → scheduled task auto-resets for next cycle
+        # Fail 3: the final configured retry is scheduled.
         update_task_state(task, TaskState.FAILED, error_message="err3", now=now)
+        assert task.state == "pending"
+        assert task.retry == 3
+
+        # Fail 4: retry budget exhausted → reset for the next schedule cycle.
+        update_task_state(task, TaskState.FAILED, error_message="err4", now=now)
         assert task.state == "pending", "Scheduled task should reset, not stay failed"
         assert task.retry == 0, "Retry counter should reset after max_retry cycle"
         assert task.next_run_at is not None
@@ -420,17 +446,45 @@ class TestFormatRetryHint:
     def test_first_retry_hint(self):
         task = _sample_task(retry=0)
         hint = format_retry_hint(task)
-        assert hint == "将在5分钟后重试 (1/2)"
+        assert hint == "将在5分钟后重试 (1/3)"
 
     def test_second_retry_hint(self):
         task = _sample_task(retry=1)
         hint = format_retry_hint(task)
-        assert hint == "将在15分钟后重试 (2/2)"
+        assert hint == "将在15分钟后重试 (2/3)"
 
-    def test_no_hint_when_exhausted(self):
+    def test_third_retry_hint_uses_extended_backoff(self):
         task = _sample_task(retry=2)
         hint = format_retry_hint(task)
+        assert hint == "将在30分钟后重试 (3/3)"
+
+    def test_no_hint_when_exhausted(self):
+        task = _sample_task(retry=3)
+        hint = format_retry_hint(task)
         assert hint is None
+
+
+class TestRetryDecision:
+    @pytest.mark.parametrize("max_retry", [0, 1, 3, 5])
+    def test_respects_max_retry(self, max_retry):
+        now = datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc)
+        task = _sample_task(retry=0, max_retry=max_retry)
+        decision = build_retry_decision(task, retryable=True, now=now)
+        assert decision.should_retry is (max_retry > 0)
+        assert decision.max_retry == max_retry
+
+    def test_non_retryable_is_terminal_even_with_budget(self):
+        task = _sample_task(retry=0, max_retry=5)
+        decision = build_retry_decision(task, retryable=False)
+        assert decision.should_retry is False
+        assert decision.reason == "non_retryable"
+
+    def test_jitter_is_injectable_and_deterministic(self):
+        task = _sample_task(retry=0, max_retry=3)
+        high = build_retry_decision(task, retryable=True, jitter_ratio=0.1, random_value=1.0)
+        low = build_retry_decision(task, retryable=True, jitter_ratio=0.1, random_value=0.0)
+        assert high.delay_seconds == 330
+        assert low.delay_seconds == 270
 
 
 # ── _compute_next_run edge cases ─────────────────────────────────

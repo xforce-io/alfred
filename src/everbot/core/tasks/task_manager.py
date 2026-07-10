@@ -46,6 +46,8 @@ class Task:
     retry: int = 0
     max_retry: int = 3
     error_message: Optional[str] = None
+    last_error_code: Optional[str] = None
+    last_error_retryable: Optional[bool] = None
     created_at: Optional[str] = None
     # Job fields (internal cron job modules, e.g. memory_review, health_check)
     job: Optional[str] = None  # Job name (e.g., "memory-review")
@@ -294,23 +296,78 @@ def claim_task(task: Task, now: Optional[datetime] = None) -> bool:
 
 
 _RETRY_BACKOFF = [300, 900]  # 5 min, 15 min
+_MAX_RETRY_BACKOFF = 21600  # 6 hours
 
 
-def format_retry_hint(task: Task) -> Optional[str]:
+@dataclass(frozen=True)
+class RetryDecision:
+    """One authoritative scheduling decision for a failed task attempt."""
+
+    should_retry: bool
+    retry_number: int
+    max_retry: int
+    delay_seconds: Optional[int]
+    next_run_at: Optional[str]
+    reason: str
+
+
+def _retry_backoff_seconds(retry_number: int) -> int:
+    if retry_number <= len(_RETRY_BACKOFF):
+        return _RETRY_BACKOFF[max(0, retry_number - 1)]
+    return min(
+        _RETRY_BACKOFF[-1] * (2 ** (retry_number - len(_RETRY_BACKOFF))),
+        _MAX_RETRY_BACKOFF,
+    )
+
+
+def build_retry_decision(
+    task: Task,
+    *,
+    retryable: bool,
+    now: Optional[datetime] = None,
+    jitter_ratio: float = 0.0,
+    random_value: float = 0.5,
+) -> RetryDecision:
+    """Build the retry decision used by persistence, hints, and scheduling."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    max_retry = max(0, int(getattr(task, "max_retry", 3)))
+    retry_number = max(0, int(getattr(task, "retry", 0))) + 1
+    if not retryable:
+        return RetryDecision(False, retry_number, max_retry, None, None, "non_retryable")
+    if retry_number > max_retry:
+        return RetryDecision(False, retry_number, max_retry, None, None, "exhausted")
+
+    ratio = min(1.0, max(0.0, float(jitter_ratio)))
+    sample = min(1.0, max(0.0, float(random_value)))
+    base_delay = _retry_backoff_seconds(retry_number)
+    delay = max(1, round(base_delay * (1 + ratio * ((2 * sample) - 1))))
+    next_run_at = (now + timedelta(seconds=delay)).isoformat()
+    return RetryDecision(True, retry_number, max_retry, delay, next_run_at, "retryable")
+
+
+def format_retry_hint(
+    task: Task,
+    decision: Optional[RetryDecision] = None,
+    *,
+    retryable: bool = True,
+) -> Optional[str]:
     """Return a human-readable retry hint based on current task state.
 
     Called *before* update_task_state, so uses task.retry (pre-increment)
     to predict the next backoff.
     """
-    next_retry = task.retry + 1
-    if next_retry - 1 < len(_RETRY_BACKOFF):
-        backoff = _RETRY_BACKOFF[next_retry - 1]
-        if backoff >= 60:
-            label = f"{backoff // 60}分钟"
-        else:
-            label = f"{backoff}秒"
-        return f"将在{label}后重试 ({next_retry}/{len(_RETRY_BACKOFF)})"
-    return None
+    decision = decision or build_retry_decision(task, retryable=retryable)
+    if not decision.should_retry or decision.delay_seconds is None:
+        return None
+    if decision.delay_seconds >= 60:
+        label = f"{decision.delay_seconds // 60}分钟"
+    else:
+        label = f"{decision.delay_seconds}秒"
+    return f"将在{label}后重试 ({decision.retry_number}/{decision.max_retry})"
 
 
 def update_task_state(
@@ -319,6 +376,9 @@ def update_task_state(
     *,
     error_message: Optional[str] = None,
     now: Optional[datetime] = None,
+    retryable: bool = True,
+    error_code: Optional[str] = None,
+    retry_decision: Optional[RetryDecision] = None,
 ) -> None:
     """Transition a task to a new state, updating metadata fields."""
     if now is None:
@@ -334,6 +394,8 @@ def update_task_state(
         task.last_run_at = now.isoformat()
         task.retry = 0
         task.error_message = None
+        task.last_error_code = None
+        task.last_error_retryable = None
         if task.schedule:
             task.state = TaskState.PENDING.value
             task.next_run_at = _compute_next_run(task.schedule, now, task.timezone)
@@ -342,14 +404,17 @@ def update_task_state(
             task.state = TaskState.PENDING.value
     elif new_state == TaskState.FAILED:
         task.error_message = error_message
-        task.retry += 1
-        if task.retry - 1 < len(_RETRY_BACKOFF):
-            # Re-arm as pending for retry with fixed backoff table
-            backoff_seconds = _RETRY_BACKOFF[task.retry - 1]
+        task.last_error_code = error_code
+        task.last_error_retryable = retryable
+        decision = retry_decision or build_retry_decision(
+            task, retryable=retryable, now=now,
+        )
+        if decision.should_retry:
+            task.retry = decision.retry_number
             task.state = TaskState.PENDING.value
-            task.next_run_at = (now + timedelta(seconds=backoff_seconds)).isoformat()
+            task.next_run_at = decision.next_run_at
         elif task.schedule:
-            # Scheduled task: reset retry counter and re-arm for next cycle
+            # A scheduled task remains schedulable in its next normal cycle.
             task.retry = 0
             task.state = TaskState.PENDING.value
             task.next_run_at = _compute_next_run(task.schedule, now, task.timezone)

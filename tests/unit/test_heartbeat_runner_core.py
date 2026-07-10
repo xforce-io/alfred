@@ -639,9 +639,16 @@ class TestExecuteStructuredTasksErrors:
         task = runner._task_list.tasks[0]
         assert task.error_message == "timeout"
         # The cron executor should have recorded the failure event
-        runner._cron._write_event.assert_any_call(
-            "task_failed", task_id="timeout_task", title="Due Task", error="timeout"
+        failure = next(
+            call for call in runner._cron._write_event.call_args_list
+            if call.args == ("task_failed",)
         )
+        assert failure.kwargs["task_id"] == "timeout_task"
+        assert failure.kwargs["error"] == "timeout"
+        assert failure.kwargs["retryable"] is True
+        assert failure.kwargs["retry_number"] == 1
+        assert failure.kwargs["max_retry"] == 3
+        assert failure.kwargs["next_run_at"] is not None
 
     @pytest.mark.asyncio
     async def test_inline_task_exception(self, tmp_path: Path, monkeypatch):
@@ -676,9 +683,16 @@ class TestExecuteStructuredTasksErrors:
         # Verify error was recorded on the task (re-armed as pending due to retries/schedule)
         task = runner._task_list.tasks[0]
         assert task.error_message == "agent crashed"
-        runner._cron._write_event.assert_any_call(
-            "task_failed", task_id="fail_task", title="Due Task", error="agent crashed"
+        failure = next(
+            call for call in runner._cron._write_event.call_args_list
+            if call.args == ("task_failed",)
         )
+        assert failure.kwargs["task_id"] == "fail_task"
+        assert failure.kwargs["error"] == "agent crashed"
+        assert failure.kwargs["retryable"] is True
+        assert failure.kwargs["retry_number"] == 1
+        assert failure.kwargs["max_retry"] == 3
+        assert failure.kwargs["next_run_at"] is not None
 
 
 # ============================================================

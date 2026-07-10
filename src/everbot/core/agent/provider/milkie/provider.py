@@ -232,6 +232,28 @@ class MilkieAgentHandle:
     last_run_id: Optional[str] = None
 
 
+class MilkieAgentError(RuntimeError):
+    """A structured failure returned by the Milkie serve SSE boundary."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        envelope: Optional[dict[str, Any]] = None,
+        run_id: Optional[str] = None,
+    ) -> None:
+        super().__init__(f"milkie agent run failed: {message}")
+        detail = envelope or {}
+        self.code = detail.get("code")
+        self.retryable = detail.get("retryable")
+        self.phase = detail.get("phase")
+        self.provider = detail.get("provider")
+        self.model = detail.get("model")
+        self.status = detail.get("status")
+        self.run_id = run_id
+        self.envelope = dict(detail)
+
+
 class MilkieProvider:
     def __init__(
         self,
@@ -415,6 +437,7 @@ class MilkieProvider:
         parser = SSEParser()
         text = message if isinstance(message, str) else str(message)
         payload = {"contextId": handle.context_id, "input": text, "goal": text}
+        pending_error: Optional[dict[str, Any]] = None
         try:
             # lease 与流同生命周期(#43):turn 在飞期间该 agent 的 sidecar 重生被推迟。
             async with self._lease_base_url(handle) as base_url, client.stream(
@@ -442,9 +465,8 @@ class MilkieProvider:
                         # so the orchestrator retries transient failures, and genuine
                         # errors propagate their real cause instead of an empty string.
                         if event == "error":
-                            raise RuntimeError(
-                                f"milkie agent error: {data.get('message') or data}"
-                            )
+                            pending_error = data
+                            continue
                         if event == "agent.run.completed":
                             # #47: 捕获本轮 runId(milkie#140)到 handle —— 必须在
                             # 下面 error 抛出之前,失败 run 才同样可被留证。runId 是
@@ -453,16 +475,28 @@ class MilkieProvider:
                             if run_id:
                                 handle.last_run_id = run_id
                             if data.get("status") == "error":
+                                detail = data.get("error")
+                                if not isinstance(detail, dict) and pending_error:
+                                    candidate = pending_error.get("error")
+                                    detail = candidate if isinstance(candidate, dict) else None
                                 msg = (
-                                    data.get("error")
+                                    (detail or {}).get("message")
+                                    or data.get("message")
                                     or data.get("output")
                                     or data.get("lastTextOutput")
+                                    or (pending_error or {}).get("message")
+                                    or (data.get("error") if isinstance(data.get("error"), str) else None)
                                     or "unknown error"
                                 )
-                                raise RuntimeError(f"milkie agent run failed: {msg}")
+                                raise MilkieAgentError(msg, envelope=detail, run_id=run_id)
                         item = milkie_event_to_progress(event, data)
                         if item is not None:
                             yield {"_progress": [item]}
+                if pending_error is not None:
+                    detail = pending_error.get("error")
+                    detail = detail if isinstance(detail, dict) else None
+                    msg = (detail or {}).get("message") or pending_error.get("message") or "unknown error"
+                    raise MilkieAgentError(msg, envelope=detail)
         finally:
             if owns_client:
                 await client.aclose()

@@ -14,6 +14,7 @@ from src.everbot.core.tasks.execution_gate import GateVerdict
 from src.everbot.core.tasks.routine_manager import RoutineManager
 from src.everbot.core.tasks.task_manager import TaskState
 from src.everbot.core.jobs.llm_errors import LLMTransientError, LLMConfigError
+from src.everbot.core.agent.provider.milkie.provider import MilkieAgentError
 
 
 def _make_executor(tmp_path: Path, **overrides) -> CronExecutor:
@@ -679,7 +680,7 @@ class TestInvokeJobLLMErrorHandling:
 
 class TestIsolatedAgentRetries:
     @pytest.mark.asyncio
-    async def test_transient_remote_disconnect_retries_once(self, tmp_path):
+    async def test_transient_remote_disconnect_is_not_retried_inside_agent_runner(self, tmp_path):
         mgr = _seed_task(tmp_path, title="Transient task", execution_mode="isolated")
         executor = _make_executor(tmp_path, routine_manager=mgr)
         task = mgr.load_task_list().tasks[0]
@@ -687,18 +688,69 @@ class TestIsolatedAgentRetries:
         agent = MagicMock()
         agent.executor.context = MagicMock()
         executor._create_job_agent = AsyncMock(return_value=agent)
-        run_agent = AsyncMock(side_effect=[
-            ConnectionError("peer closed connection without sending complete message body"),
-            "final result",
-        ])
+        run_agent = AsyncMock(
+            side_effect=ConnectionError("peer closed connection without sending complete message body")
+        )
 
         with patch.object(executor, "_build_job_system_prompt", return_value="system"):
-            result = await executor._run_isolated_agent(task, "run_123", run_agent=run_agent)
+            with pytest.raises(ConnectionError):
+                await executor._run_isolated_agent(task, "run_123", run_agent=run_agent)
 
-        assert result == "final result"
-        assert run_agent.await_count == 2
+        assert run_agent.await_count == 1
         executor.session_manager.save_session.assert_awaited()
         executor.session_manager.mark_session_archived.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scheduler_owns_retry_then_delivers_success_once(self, tmp_path):
+        mgr = _seed_task(
+            tmp_path, title="Transient task", execution_mode="isolated",
+        )
+        task_list = mgr.load_task_list()
+        task = task_list.tasks[0]
+        task.max_retry = 1
+        mgr.flush(task_list)
+
+        executor = _make_executor(tmp_path, routine_manager=mgr)
+        agent = SimpleNamespace(last_run_id="milkie-run")
+        executor._create_job_agent = AsyncMock(return_value=agent)
+        executor._build_job_system_prompt = MagicMock(return_value="system")
+        executor._record_skill_log = MagicMock()
+        executor.delivery.deposit_job_event = AsyncMock()
+        executor.delivery.inject_to_history = AsyncMock()
+        executor.delivery._emit_realtime = AsyncMock()
+
+        error = MilkieAgentError(
+            "Model provider connection failed.",
+            envelope={
+                "code": "MODEL_CONNECTION_ERROR", "retryable": True,
+                "phase": "stream_open", "provider": "volcengine", "model": "glm-5.2",
+            },
+            run_id="failed-run",
+        )
+        run_agent = AsyncMock(side_effect=[error, "final report"])
+
+        first = await executor.tick(
+            task_list, run_agent=run_agent, inject_context=AsyncMock(), run_id="cron-1",
+        )
+        assert first.failed == 1
+        assert run_agent.await_count == 1
+        assert task.state == "pending"
+        assert task.retry == 1
+        assert task.last_error_code == "MODEL_CONNECTION_ERROR"
+        assert task.last_error_retryable is True
+
+        task.next_run_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        second = await executor.tick(
+            task_list, run_agent=run_agent, inject_context=AsyncMock(), run_id="cron-2",
+        )
+        assert second.executed == 1
+        assert run_agent.await_count == 2
+        successful_pushes = [
+            call for call in executor.delivery._emit_realtime.await_args_list
+            if call.kwargs.get("transcript_worthy") is True
+        ]
+        assert len(successful_pushes) == 1
+        assert successful_pushes[0].args[0] == "final report"
 
 
 class TestSkillLogRecording:
