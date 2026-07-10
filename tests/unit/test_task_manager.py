@@ -211,6 +211,25 @@ class TestTaskClaim:
         assert ok is True
         assert task.state == "running"
 
+    def test_execution_identity_survives_retry_and_clears_after_success(self):
+        scheduled_for = "2026-07-10T10:00:00+00:00"
+        task = _sample_task(next_run_at=scheduled_for)
+        now = datetime(2026, 7, 10, 10, 0, tzinfo=timezone.utc)
+
+        assert claim_task(task, now=now) is True
+        execution_id = task.execution_id
+        assert execution_id == f"{task.id}:{scheduled_for}"
+        assert task.active_scheduled_for == scheduled_for
+
+        update_task_state(task, TaskState.FAILED, now=now, retryable=True)
+        retry_at = datetime.fromisoformat(task.next_run_at)
+        assert claim_task(task, now=retry_at) is True
+        assert task.execution_id == execution_id
+
+        update_task_state(task, TaskState.DONE, now=retry_at)
+        assert task.execution_id is None
+        assert task.active_scheduled_for is None
+
     def test_claim_future_task_returns_false(self):
         task = _sample_task(next_run_at="2099-01-01T00:00:00+00:00", state="pending")
         ok = claim_task(task, now=datetime(2026, 2, 11, 9, 0, tzinfo=timezone.utc))

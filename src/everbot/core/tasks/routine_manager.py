@@ -202,6 +202,7 @@ class RoutineManager:
         job: Optional[str] = None,
         scanner: Optional[str] = None,
         min_execution_interval: Optional[str] = None,
+        staged: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Add one routine and persist task block."""
         title = str(title or "").strip()
@@ -214,6 +215,8 @@ class RoutineManager:
             description=description,
             timeout_seconds=timeout_seconds,
         )
+        if staged is not None and mode != "isolated":
+            raise ValueError("staged routines require execution_mode='isolated'")
         task_id = str(task_id or f"routine_{uuid.uuid4().hex[:8]}")
         now_dt = now or datetime.now(timezone.utc)
         if now_dt.tzinfo is None:
@@ -290,6 +293,7 @@ class RoutineManager:
             job=job,
             scanner=scanner,
             min_execution_interval=min_execution_interval,
+            staged=staged,
         )
         task_list.tasks.append(task)
         self._save_task_list(content, task_list)
