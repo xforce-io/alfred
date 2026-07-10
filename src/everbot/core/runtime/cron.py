@@ -31,6 +31,11 @@ from ..tasks.task_manager import (
     get_due_tasks,
 )
 from .cron_delivery import CronDelivery
+from .routine_checkpoint import (
+    RoutineCheckpointStore,
+    build_delivery_key,
+    content_hash,
+)
 from .heartbeat_utils import (
     build_isolated_task_prompt,
     build_job_session_id,
@@ -704,11 +709,19 @@ class CronExecutor:
 
         agent = await self._create_job_agent(job_session_id)
         job_system_prompt = self._build_job_system_prompt(agent, task)
+        checkpoint_store: Optional[RoutineCheckpointStore] = None
         try:
-            result = await asyncio.wait_for(
-                run_agent(agent, prompt, system_prompt_override=job_system_prompt),
-                timeout=task.timeout_seconds,
-            )
+            staged = getattr(task, "staged", None)
+            if staged:
+                result, checkpoint_store = await self._run_staged_agent(
+                    task, agent, run_id, run_agent=run_agent,
+                    system_prompt=job_system_prompt,
+                )
+            else:
+                result = await asyncio.wait_for(
+                    run_agent(agent, prompt, system_prompt_override=job_system_prompt),
+                    timeout=task.timeout_seconds,
+                )
             await self.session_manager.save_session(job_session_id, agent)
             await self.session_manager.mark_session_archived(job_session_id)
 
@@ -728,18 +741,43 @@ class CronExecutor:
             projection_anchor = getattr(agent, "last_run_id", None) or job_session_id
 
             summary = f"{task_title or task.id} completed"
-            await self.delivery.deposit_job_event(
-                event_type="job_completed",
-                source_session_id=job_session_id,
-                summary=summary,
-                detail=result,
-                run_id=run_id,
-            )
-            await self.delivery.inject_to_history(result, run_id)
-            await self.delivery._emit_realtime(
-                result, run_id, transcript_worthy=True,
-                source_session_id=projection_anchor,  # #130 T2: milkie runId, deref-able
-            )
+            if checkpoint_store is None:
+                await self.delivery.deposit_job_event(
+                    event_type="job_completed",
+                    source_session_id=job_session_id,
+                    summary=summary,
+                    detail=result,
+                    run_id=run_id,
+                )
+                await self.delivery.inject_to_history(result, run_id)
+                await self.delivery._emit_realtime(
+                    result, run_id, transcript_worthy=True,
+                    source_session_id=projection_anchor,  # #130 T2: milkie runId, deref-able
+                )
+            else:
+                destination = str(getattr(task, "staged", {}).get("destination") or "primary")
+                delivery_key = build_delivery_key(task.execution_id, result, destination)
+                await checkpoint_store.run_delivery_step(
+                    "mailbox", delivery_key,
+                    lambda: self.delivery.deposit_job_event(
+                        event_type="job_completed",
+                        source_session_id=job_session_id,
+                        summary=summary,
+                        detail=result,
+                        run_id=run_id,
+                    ),
+                )
+                await checkpoint_store.run_delivery_step(
+                    "history", delivery_key,
+                    lambda: self.delivery.inject_to_history(result, run_id),
+                )
+                await checkpoint_store.run_delivery_step(
+                    "realtime", delivery_key,
+                    lambda: self.delivery._emit_realtime(
+                        result, run_id, transcript_worthy=True,
+                        source_session_id=projection_anchor,
+                    ),
+                )
 
             # SLM: record skill invocations from this isolated agent run.
             # Reads the just-written trajectory to find _load_resource_skill
@@ -767,6 +805,59 @@ class CronExecutor:
                 fail_msg += f"\n\n{retry_hint}"
             await self.delivery._emit_realtime(fail_msg, run_id)
             raise
+
+    async def _run_staged_agent(
+        self,
+        task: Task,
+        agent: Any,
+        run_id: str,
+        *,
+        run_agent: Callable,
+        system_prompt: str,
+    ) -> tuple[str, RoutineCheckpointStore]:
+        """Run the fixed fetch/analyze shape and reuse valid durable artifacts."""
+        staged = getattr(task, "staged", None)
+        if not isinstance(staged, dict):
+            raise ValueError("staged routine descriptor must be an object")
+        execution_id = str(getattr(task, "execution_id", "") or "")
+        if not execution_id:
+            raise ValueError("staged routine requires a claimed execution identity")
+
+        prompts: dict[str, str] = {}
+        for name in ("fetch", "analyze"):
+            stage = staged.get(name)
+            prompt = stage.get("prompt") if isinstance(stage, dict) else None
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise ValueError(f"staged routine requires {name}.prompt")
+            prompts[name] = prompt.strip()
+
+        store = RoutineCheckpointStore(self.workspace_path, execution_id, task.id)
+
+        async def fetch() -> str:
+            return await asyncio.wait_for(
+                run_agent(agent, prompts["fetch"], system_prompt_override=system_prompt),
+                timeout=task.timeout_seconds,
+            )
+
+        fetched = await store.run_stage(
+            "fetch", prompts["fetch"], fetch,
+            run_id=getattr(agent, "last_run_id", None) or run_id,
+        )
+        analyze_prompt = f"{prompts['analyze']}\n\nFetch artifact:\n{fetched}"
+
+        async def analyze() -> str:
+            return await asyncio.wait_for(
+                run_agent(agent, analyze_prompt, system_prompt_override=system_prompt),
+                timeout=task.timeout_seconds,
+            )
+
+        analyzed = await store.run_stage(
+            "analyze",
+            f"{prompts['analyze']}\0{content_hash(fetched)}",
+            analyze,
+            run_id=getattr(agent, "last_run_id", None) or run_id,
+        )
+        return analyzed, store
 
     def _observe_provenance(self, task: Task, agent: Any) -> None:
         """#127 L1 (observe-only): log a backing verdict for this isolated report

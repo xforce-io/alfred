@@ -752,6 +752,48 @@ class TestIsolatedAgentRetries:
         assert len(successful_pushes) == 1
         assert successful_pushes[0].args[0] == "final report"
 
+    @pytest.mark.asyncio
+    async def test_staged_agent_resumes_from_analyze_after_restart(self, tmp_path):
+        executor = _make_executor(tmp_path)
+        agent = SimpleNamespace(last_run_id="milkie-run")
+        executor._create_job_agent = AsyncMock(return_value=agent)
+        executor._build_job_system_prompt = MagicMock(return_value="system")
+        executor._append_run_provenance = MagicMock(side_effect=lambda result, _agent: result)
+        executor._observe_provenance = MagicMock()
+        executor._record_skill_log = MagicMock()
+        executor.delivery.deposit_job_event = AsyncMock()
+        executor.delivery.inject_to_history = AsyncMock()
+        executor.delivery._emit_realtime = AsyncMock()
+        task = SimpleNamespace(
+            id="staged", title="Staged", description="", timeout_seconds=30,
+            job=None, execution_id="staged:2026-07-10T10:00:00Z",
+            staged={
+                "fetch": {"prompt": "fetch fixture"},
+                "analyze": {"prompt": "analyze fixture"},
+                "destination": "primary",
+            },
+        )
+        run_agent = AsyncMock(side_effect=["fetched artifact", ConnectionError("model down"), "final report"])
+
+        with pytest.raises(ConnectionError):
+            await executor._run_isolated_agent(task, "cron-1", run_agent=run_agent)
+        await executor._run_isolated_agent(task, "cron-2", run_agent=run_agent)
+
+        assert run_agent.await_count == 3
+        assert run_agent.await_args_list[2].args[1].startswith("analyze fixture")
+        assert "fetched artifact" in run_agent.await_args_list[2].args[1]
+        completed_events = [
+            call for call in executor.delivery.deposit_job_event.await_args_list
+            if call.kwargs.get("event_type") == "job_completed"
+        ]
+        assert len(completed_events) == 1
+        executor.delivery.inject_to_history.assert_awaited_once()
+        successful_pushes = [
+            call for call in executor.delivery._emit_realtime.await_args_list
+            if call.kwargs.get("transcript_worthy") is True
+        ]
+        assert len(successful_pushes) == 1
+
 
 class TestSkillLogRecording:
     """Lock in: isolated-agent runs MUST record skill invocations to skill_logs.

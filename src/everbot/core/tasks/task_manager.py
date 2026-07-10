@@ -48,7 +48,10 @@ class Task:
     error_message: Optional[str] = None
     last_error_code: Optional[str] = None
     last_error_retryable: Optional[bool] = None
+    active_scheduled_for: Optional[str] = None
+    execution_id: Optional[str] = None
     created_at: Optional[str] = None
+    staged: Optional[Dict[str, Any]] = None
     # Job fields (internal cron job modules, e.g. memory_review, health_check)
     job: Optional[str] = None  # Job name (e.g., "memory-review")
     scanner: Optional[str] = None  # Optional scanner gate type (e.g., "session")
@@ -291,6 +294,9 @@ def claim_task(task: Task, now: Optional[datetime] = None) -> bool:
         if next_run_dt is not None and next_run_dt > now:
             return False
 
+    if not task.execution_id:
+        task.active_scheduled_for = task.next_run_at or now.isoformat()
+        task.execution_id = f"{task.id}:{task.active_scheduled_for}"
     update_task_state(task, TaskState.RUNNING, now=now)
     return True
 
@@ -396,6 +402,8 @@ def update_task_state(
         task.error_message = None
         task.last_error_code = None
         task.last_error_retryable = None
+        task.active_scheduled_for = None
+        task.execution_id = None
         if task.schedule:
             task.state = TaskState.PENDING.value
             task.next_run_at = _compute_next_run(task.schedule, now, task.timezone)
@@ -418,6 +426,8 @@ def update_task_state(
             task.retry = 0
             task.state = TaskState.PENDING.value
             task.next_run_at = _compute_next_run(task.schedule, now, task.timezone)
+            task.active_scheduled_for = None
+            task.execution_id = None
         else:
             task.state = TaskState.FAILED.value
 
