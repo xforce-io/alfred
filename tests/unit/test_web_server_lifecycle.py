@@ -9,6 +9,10 @@ from pathlib import Path
 SERVER = Path("skills/web/server.sh").resolve()
 
 
+def test_health_check_bypasses_host_proxy():
+    assert "curl --noproxy '*'" in SERVER.read_text()
+
+
 def _env(tmp_path: Path) -> dict[str, str]:
     return {
         **os.environ,
