@@ -43,6 +43,7 @@ def test_start_status_stop_uses_one_owned_pid(tmp_path):
     started = _run("start", tmp_path)
     assert started.returncode == 0, started.stderr
     pid = (tmp_path / "server.pid").read_text().strip()
+    assert os.getsid(int(pid)) == int(pid)
 
     status = _run("status", tmp_path)
     assert status.returncode == 0
