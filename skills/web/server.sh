@@ -28,7 +28,7 @@ done
 mkdir -p "$TMP_DIR"
 
 health_ready() {
-    [[ "${WEB_SERVER_SKIP_HEALTH:-0}" == "1" ]] || curl -fsS --max-time 1 "$HEALTH_URL" >/dev/null 2>&1
+    [[ "${WEB_SERVER_SKIP_HEALTH:-0}" == "1" ]] || curl --noproxy '*' -fsS --max-time 1 "$HEALTH_URL" >/dev/null 2>&1
 }
 
 owned_pid() {
