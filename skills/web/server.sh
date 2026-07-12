@@ -71,12 +71,8 @@ start_server() {
         (cd "$SCRIPT_DIR" && npm install) || return 1
     fi
     local command="${WEB_SERVER_COMMAND:-exec npx tsx scripts/start-server.ts}"
-    (
-        cd "$SCRIPT_DIR" || exit 1
-        export HEADLESS="$HEADLESS"
-        nohup bash -c "$command" >>"$LOG_FILE" 2>&1 &
-        echo $! >"$PID_FILE"
-    )
+    export HEADLESS="$HEADLESS"
+    python3 "$SCRIPT_DIR/scripts/launch-server.py" "$SCRIPT_DIR" "$LOG_FILE" "$command" >"$PID_FILE" || return 1
     local waited=0
     while [[ $waited -lt $START_TIMEOUT ]]; do
         if owned_pid && health_ready; then
