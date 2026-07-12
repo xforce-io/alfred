@@ -143,5 +143,20 @@ def test_main_exits_on_empty_tweets(capsys, monkeypatch):
             m.main()
 
 
+def test_browser_start_uses_the_owned_lifecycle_entrypoint_once():
+    """A missing server is started once through server.sh, never through an ad-hoc Popen."""
+    m = _load_module()
+    started = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
+
+    with patch.object(m, "_port_open", side_effect=[False, True]), \
+         patch("subprocess.run", started), \
+         patch("time.sleep", return_value=None):
+        m._ensure_browser_server()
+
+    started.assert_called_once()
+    command = started.call_args.args[0]
+    assert command[:3] == ["bash", str(Path(m.WEB_SKILL_DIR) / "server.sh"), "start"]
+
+
 # Make pytest available in namespace for the last test
 import pytest
