@@ -45,18 +45,19 @@ def _ensure_browser_server() -> None:
     server_sh = os.path.join(WEB_SKILL_DIR, "server.sh")
     if not os.path.isfile(server_sh):
         sys.exit(f"[fetch_tweets] web 技能 server.sh 不存在: {server_sh}")
-    log = open(os.path.join(WEB_SKILL_DIR, "server.log"), "ab")
-    subprocess.Popen(
-        ["bash", server_sh],
-        cwd=WEB_SKILL_DIR, stdout=log, stderr=log,
-        start_new_session=True,
+    proc = subprocess.run(
+        ["bash", server_sh, "start", "--headless"],
+        cwd=WEB_SKILL_DIR, capture_output=True, text=True, timeout=150,
     )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip()
+        sys.exit(f"[fetch_tweets] 浏览器 server 启动失败: {detail}")
     for _ in range(60):  # 首次会装 chromium,放宽到 ~120s
         if _port_open(SERVER_PORT):
             time.sleep(1.0)  # 端口起来后给 HTTP API 一点初始化时间
             return
         time.sleep(2.0)
-    sys.exit("[fetch_tweets] 浏览器 server 启动超时(:9222 未就绪)")
+    sys.exit("[fetch_tweets] 浏览器 server 启动后未就绪(:9222)")
 
 
 # 内联 Playwright 抓取脚本(经 stdin 喂给 cwd=web 技能目录的 npx tsx)。

@@ -57,6 +57,7 @@ Wait for the `Ready` message. First run installs dependencies and Chromium.
 3. **Never try to "repair" the browser by reinstalling chromium or pkill-ing `Google Chrome for Testing`.** If `connect()` fails, read `skills/web/server.log`, check `lsof -iTCP:9222` — `localhost:teamcoherence` in `lsof` output **is** port 9222, don't kill it.
 4. **If a site needs login** (x.com, twitter.com, github private, etc.) and the first snapshot shows only `Sign in / Sign up / Join today` — **stop and tell the user**. Do NOT fabricate content from search results and present it as the page content. Ask the user to log in once via the persistent profile; thereafter headless sessions reuse the cookies.
 5. **Don't retry the same failing command with only the timeout changed.** After 2 identical failures, change strategy or report the failure.
+6. **Never inspect or kill browser PIDs from an agent task.** Use `bash "$SKILL_DIR/server.sh" status` and at most one `start` or `restart`; lifecycle ownership belongs to `server.sh`.
 
 ### Run scripts
 
