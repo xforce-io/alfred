@@ -65,6 +65,24 @@ wait_for_exit() {
   return 0
 }
 
+# Return listener PID on host:port if any (best-effort, macOS/Linux lsof).
+_port_listener_pid() {
+  local host="$1"
+  local port="$2"
+  # Prefer bound local listeners; strip non-digits.
+  lsof -nP -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null \
+    | awk 'NR>1 {print $2; exit}' \
+    | tr -cd '0-9' || true
+}
+
+# True if command line looks like EverBot's uvicorn web app.
+_is_everbot_web_cmd() {
+  local pid="$1"
+  local cmd
+  cmd="$(ps -p "${pid}" -o command= 2>/dev/null || true)"
+  [[ "${cmd}" == *"uvicorn"* && "${cmd}" == *"src.everbot.web.app"* ]]
+}
+
 start_web_background() {
   local host="$1"
   local port="$2"
@@ -79,6 +97,22 @@ start_web_background() {
       return 0
     fi
     rm -f "${WEB_PID_FILE}" || true
+  fi
+
+  # #157: port conflict detection — adopt our uvicorn, refuse foreign owners.
+  local listener
+  listener="$(_port_listener_pid "${host}" "${port}")"
+  if [[ -n "${listener}" ]]; then
+    if _is_everbot_web_cmd "${listener}"; then
+      echo "${listener}" > "${WEB_PID_FILE}"
+      echo "EverBot Web already listening (pid=${listener}, port=${port})."
+      return 0
+    fi
+    local foreign_cmd
+    foreign_cmd="$(ps -p "${listener}" -o command= 2>/dev/null | head -c 160 || true)"
+    echo "ERROR: port ${port} is in use by pid=${listener} (not EverBot web): ${foreign_cmd}" >&2
+    echo "       Free the port or start with: bin/everbot start --web-port <free-port>" >&2
+    return 1
   fi
 
   # 检查 uvicorn 是否安装
@@ -403,6 +437,21 @@ case "${cmd}" in
             done
             if [[ -n "${_new_pid}" && "${_new_pid}" != "${_old_pid}" ]]; then
               echo "restart OK: pid ${_old_pid:-none} → ${_new_pid}"
+              # #157: LaunchAgent only runs the daemon (python -m src.everbot.cli start).
+              # Web is owned by bin/everbot — always (re)start it after kickstart.
+              # Stop stale tracked web first so port is free for a clean listen.
+              if [[ -f "${WEB_PID_FILE}" ]]; then
+                _web_old="$(read_pid_file "${WEB_PID_FILE}")"
+                if is_running "${_web_old}" && _is_everbot_web_cmd "${_web_old}"; then
+                  kill "${_web_old}" >/dev/null 2>&1 || true
+                  wait_for_exit "${_web_old}" 5 || kill -9 "${_web_old}" >/dev/null 2>&1 || true
+                fi
+                rm -f "${WEB_PID_FILE}" || true
+              fi
+              if ! start_web_background "${WEB_HOST_DEFAULT}" "${WEB_PORT_DEFAULT}" "" ""; then
+                echo "WARNING: daemon restarted but web failed to start on :${WEB_PORT_DEFAULT}" >&2
+                exit 1
+              fi
               exit 0
             fi
             echo "restart FAILED: daemon pid 未变更 (still ${_old_pid:-none}) —— 重启可能未生效" >&2
