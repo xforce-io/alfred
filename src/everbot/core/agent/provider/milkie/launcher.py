@@ -152,6 +152,9 @@ class SidecarLauncher:
             "--state-store", "sqlite", "--data-dir", str(data_dir),
         ]
         env = dict(os.environ)
+        # #155: skill scripts (analyze.py) inherit agent model intent via env.
+        env["EVERBOT_AGENT"] = agent_name
+        env["ALFRED_AGENT"] = agent_name
         default_cloud = self._llms[default]["cloud"]  # per-agent 模型的 cloud(决定 key/VOLCENGINE 处理)
         api_key = self._clouds[default_cloud].get("api_key")
         if api_key:

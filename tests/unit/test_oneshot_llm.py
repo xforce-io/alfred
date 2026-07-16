@@ -3,18 +3,18 @@ import httpx
 import pytest
 
 from src.everbot.core.agent.provider import oneshot_llm as os_mod
-from src.everbot.core.agent.provider.model_config import ModelConfig
+from src.everbot.core.agent.provider.model_config import ModelRoute, ResolvedModel
 from src.everbot.core.agent.provider.oneshot_llm import OneshotLLMProvider
 
 
 def _patch_route(monkeypatch):
-    cfg = ModelConfig(
-        llms={"m": {"cloud": "c", "model_name": "mm"}},
-        clouds={"c": {"api": "http://fake/v1", "api_key": "k"}},
-        default_model="m", fast_model="m",
+    resolved = ResolvedModel(
+        logical_name="m",
+        route=ModelRoute(base_url="http://fake/v1", api_key="k", model="mm"),
+        source="system_default",
     )
-    # oneshot_llm 直接绑定了 load_model_config,故 patch 其模块内引用。
-    monkeypatch.setattr(os_mod, "load_model_config", lambda *a, **k: cfg)
+    # oneshot_llm binds resolve_model; patch the module reference.
+    monkeypatch.setattr(os_mod, "resolve_model", lambda **k: resolved)
 
 
 async def test_returns_content_on_success(monkeypatch):
@@ -48,8 +48,10 @@ async def test_raise_on_error_false_returns_error_string(monkeypatch):
 
 
 async def test_bad_config_raises_when_raise_on_error(monkeypatch):
-    monkeypatch.setattr(os_mod, "load_model_config",
-                        lambda *a, **k: ModelConfig({}, {}, "", ""))  # 空配置 → route KeyError
+    def _boom(**k):
+        raise ValueError("No model resolved")
+
+    monkeypatch.setattr(os_mod, "resolve_model", _boom)
     p = OneshotLLMProvider()
     with pytest.raises(RuntimeError):
         await p.call_llm(None, "x", raise_on_error=True)

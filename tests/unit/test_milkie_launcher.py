@@ -63,6 +63,13 @@ def test_build_injects_cloud_api_key_env(tmp_path):
     assert spec.env.get("OPENAI_API_KEY") == "sk-real"
 
 
+def test_build_injects_everbot_agent_env_for_skill_model_intent(tmp_path):
+    """#155: skill scripts inherit agent model via EVERBOT_AGENT / ALFRED_AGENT."""
+    spec = _launcher(tmp_path).build("demo_agent", system_prompt="x")
+    assert spec.env.get("EVERBOT_AGENT") == "demo_agent"
+    assert spec.env.get("ALFRED_AGENT") == "demo_agent"
+
+
 def test_build_unknown_model_fails_fast(tmp_path):
     launcher = SidecarLauncher(
         dist_path=tmp_path / "x.js", data_dir_root=tmp_path / "d", node_bin="node",

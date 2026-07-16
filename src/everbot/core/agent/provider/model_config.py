@@ -5,18 +5,24 @@
 仍耦合 dolphin;本模块用同样的查找顺序独立定位,去掉该耦合(#38 去 dolphin)。
 
 文件 schema(``config/models.yaml``):
-    default: <llm-name>        # 默认档(亦兼容旧键 default_model)
-    fast:    <llm-name>        # 快速档(亦兼容旧键 fast_llm)
+    default: <llm-name>        # 系统级 fallback(无 agent 上下文时;亦兼容旧键 default_model)
+    fast:    <llm-name>        # 后台/打分档(亦兼容旧键 fast_llm)
     clouds:  {name: {api, api_key}}
     llms:    {name: {cloud, model_name, type_api}}
 ``api``/``api_key`` 可含 ``${ENV}`` 占位符,读取时按环境变量展开。
+
+#155 单一真相源:
+- **意图**: ``everbot.agents.<name>.model`` (via :func:`resolve_agent_model`)
+- **解析表**: 本文件 ``llms`` / ``clouds``
+- **统一入口**: :func:`resolve_model` / :func:`resolve_logical_model_name`
+- skill/oneshot 有 agent 上下文时必须走 agent 意图,不得静默用顶层 ``default``
 """
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
 import yaml
 
@@ -125,3 +131,86 @@ def load_model_config(path: Optional[Path] = None) -> ModelConfig:
     default_model = raw.get("default_model") or raw.get("default") or next(iter(llms), "")
     fast_model = raw.get("fast_llm") or raw.get("fast") or default_model
     return ModelConfig(llms=llms, clouds=clouds, default_model=default_model, fast_model=fast_model)
+
+
+ModelTier = Literal["default", "fast"]
+ModelSource = Literal["override", "agent", "system_fast", "system_default"]
+
+
+@dataclass(frozen=True)
+class ResolvedModel:
+    """Logical name + routed credentials; ``source`` explains which intent won (#155)."""
+
+    logical_name: str
+    route: ModelRoute
+    source: ModelSource
+
+
+def resolve_logical_model_name(
+    *,
+    agent_name: Optional[str] = None,
+    tier: ModelTier = "default",
+    override: Optional[str] = None,
+    model_config: Optional[ModelConfig] = None,
+) -> tuple[str, ModelSource]:
+    """Resolve the logical llm name only (no network).
+
+    Priority (#155):
+    1. ``override`` (CLI ``--model`` / explicit call)
+    2. ``tier=default`` + agent → ``everbot.agents.<name>.model``
+    3. ``tier=fast`` → models.yaml ``fast`` (skill-eval / scoring); if empty, agent then system default
+    4. system ``default`` from models.yaml (no agent context only for default tier)
+    """
+    if override:
+        return str(override), "override"
+
+    mc = model_config or load_model_config()
+
+    if tier == "fast":
+        if mc.fast_model:
+            return mc.fast_model, "system_fast"
+        if agent_name:
+            from ..agent_config import resolve_agent_model
+
+            agent_model = resolve_agent_model(agent_name)
+            if agent_model:
+                return agent_model, "agent"
+        if mc.default_model:
+            return mc.default_model, "system_default"
+        raise ValueError("No model resolved: empty fast/default and no agent model")
+
+    # tier == default
+    if agent_name:
+        # Lazy import avoids circular import at module load
+        # (agent_config → config; model_config stays free of app config at import).
+        from ..agent_config import resolve_agent_model
+
+        agent_model = resolve_agent_model(agent_name)
+        if agent_model:
+            return agent_model, "agent"
+
+    if mc.default_model:
+        return mc.default_model, "system_default"
+    raise ValueError("No model resolved: set everbot.agents.<name>.model or models.yaml default")
+
+
+def resolve_model(
+    *,
+    agent_name: Optional[str] = None,
+    tier: ModelTier = "default",
+    override: Optional[str] = None,
+    model_config: Optional[ModelConfig] = None,
+) -> ResolvedModel:
+    """Single entry: intent → route table → :class:`ModelRoute` (#155)."""
+    mc = model_config or load_model_config()
+    logical_name, source = resolve_logical_model_name(
+        agent_name=agent_name,
+        tier=tier,
+        override=override,
+        model_config=mc,
+    )
+    return ResolvedModel(
+        logical_name=logical_name,
+        route=mc.route_for(logical_name),
+        source=source,
+    )
