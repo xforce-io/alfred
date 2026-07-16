@@ -273,21 +273,22 @@ class CronExecutor:
         return result
 
     def _resolve_skill_model(self) -> str:
-        """Resolve the model for skill LLM calls.
+        """Resolve the model for skill LLM calls via #155 single entry.
 
-        Uses the 'fast' model from models.yaml (model_config) — skill jobs
-        (eval, reflection) are simple scoring tasks that don't need
-        a reasoning model.  Falls back to agent model if 'fast' is unset.
+        ``tier=fast``: models.yaml fast (scoring), then agent, then system default.
         """
-        from ..agent.provider.model_config import load_model_config
-        from ..agent.agent_config import resolve_agent_model
+        from ..agent.provider.model_config import resolve_logical_model_name
+
         try:
-            fast_model = load_model_config().fast_model
-            if fast_model:
-                return fast_model
+            name, _source = resolve_logical_model_name(
+                agent_name=self.agent_name,
+                tier="fast",
+            )
+            return name
         except Exception:
-            pass
-        return resolve_agent_model(self.agent_name)
+            from ..agent.agent_config import resolve_agent_model
+
+            return resolve_agent_model(self.agent_name)
 
     # ── Scheduler-facing task listing ─────────────────────────
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from src.everbot.core.agent.provider.model_config import load_model_config  # noqa: E402
+from src.everbot.core.agent.provider.model_config import resolve_model  # noqa: E402
 
 _PROMPT_TEMPLATE = """你是资深投资与科技分析师。下面是 X 用户 @{handle} 最新的 {n} 条推文(含互动数据 metrics)。请做**深度分析**,用**中文**输出结构化报告。要求基于推文内容分析,保留关键原文引用,**不要编造推文未提及的信息**。
 
@@ -56,10 +57,21 @@ def build_prompt(data: dict) -> str:
     )
 
 
-async def run_analysis(prompt: str, model: str | None, timeout: int, fast: bool = False) -> str:
+async def run_analysis(
+    prompt: str,
+    model: str | None,
+    timeout: int,
+    fast: bool = False,
+    agent_name: str | None = None,
+) -> str:
     try:
-        cfg = load_model_config()
-        route = cfg.route_for(model) if model else cfg.route(fast=fast)
+        # #155: agent context wins over models.yaml top-level default (no more silent kimi).
+        resolved = resolve_model(
+            agent_name=agent_name,
+            override=model,
+            tier="fast" if fast else "default",
+        )
+        route = resolved.route
     except Exception as exc:
         sys.exit(f"[analyze] 模型配置错误: {exc}")
 
@@ -103,8 +115,17 @@ async def run_analysis(prompt: str, model: str | None, timeout: int, fast: bool 
 def main() -> None:
     ap = argparse.ArgumentParser(description="用已配置模型深度分析推文")
     ap.add_argument("--input", help="推文 JSON 文件(默认从 stdin 读)")
-    ap.add_argument("--model", default=None, help="指定 config/models.yaml 里的 llm 名称(默认用 default)")
-    ap.add_argument("--fast", action="store_true", help="未指定 --model 时使用 fast 档")
+    ap.add_argument(
+        "--model",
+        default=None,
+        help="logical llm name in models.yaml (overrides agent/system default)",
+    )
+    ap.add_argument(
+        "--agent",
+        default=None,
+        help="agent name for model intent (#155); default env EVERBOT_AGENT / ALFRED_AGENT",
+    )
+    ap.add_argument("--fast", action="store_true", help="use models.yaml fast tier when no --model")
     ap.add_argument("--timeout", type=int, default=180, help="模型调用超时秒数(默认 180)")
     args = ap.parse_args()
 
@@ -116,7 +137,21 @@ def main() -> None:
     if not data.get("tweets"):
         sys.exit("[analyze] 输入无 tweets,无可分析内容")
 
-    report = asyncio.run(run_analysis(build_prompt(data), args.model, args.timeout, fast=args.fast))
+    agent = (
+        args.agent
+        or os.environ.get("EVERBOT_AGENT")
+        or os.environ.get("ALFRED_AGENT")
+        or None
+    )
+    report = asyncio.run(
+        run_analysis(
+            build_prompt(data),
+            args.model,
+            args.timeout,
+            fast=args.fast,
+            agent_name=agent,
+        )
+    )
     print(report)
 
 

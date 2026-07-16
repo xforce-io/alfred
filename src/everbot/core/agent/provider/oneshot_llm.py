@@ -15,7 +15,7 @@ from typing import Any
 
 import httpx
 
-from .model_config import load_model_config
+from .model_config import resolve_model
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +23,15 @@ logger = logging.getLogger(__name__)
 class OneshotLLMProvider:
     """无状态一次性 LLM provider(只实现 ``call_llm``)。"""
 
-    def __init__(self, *, client: "httpx.AsyncClient | None" = None) -> None:
+    def __init__(
+        self,
+        *,
+        client: "httpx.AsyncClient | None" = None,
+        agent_name: str | None = None,
+    ) -> None:
         self._client = client  # 注入便于测试;None → 每次调用一个 client
+        # #155: optional agent intent; None → system default/fast only
+        self._agent_name = agent_name
 
     async def call_llm(
         self,
@@ -35,7 +42,10 @@ class OneshotLLMProvider:
         raise_on_error: bool = True,
     ) -> str:
         try:
-            route = load_model_config().route(fast=fast)
+            route = resolve_model(
+                agent_name=self._agent_name,
+                tier="fast" if fast else "default",
+            ).route
         except Exception as exc:  # 配置缺失/模型名不存在
             msg = f"oneshot LLM 配置错误: {exc}"
             if raise_on_error:

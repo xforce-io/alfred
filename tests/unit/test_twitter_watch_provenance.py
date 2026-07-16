@@ -11,8 +11,6 @@ from pathlib import Path
 
 import httpx
 
-from src.everbot.core.agent.provider.model_config import ModelConfig
-
 _SCRIPTS = Path(__file__).resolve().parents[2] / "skills" / "twitter-watch" / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
@@ -53,13 +51,14 @@ def test_prompt_requires_per_tweet_source_link():
 
 def test_analyze_uses_configured_openai_compatible_route(monkeypatch):
     """twitter-watch analysis should not shell out to Claude CLI."""
-    cfg = ModelConfig(
-        llms={"m": {"cloud": "c", "model_name": "mm"}},
-        clouds={"c": {"api": "http://fake/v1", "api_key": "k"}},
-        default_model="m",
-        fast_model="m",
+    from src.everbot.core.agent.provider.model_config import ModelRoute, ResolvedModel
+
+    resolved = ResolvedModel(
+        logical_name="m",
+        route=ModelRoute(base_url="http://fake/v1", api_key="k", model="mm"),
+        source="system_default",
     )
-    monkeypatch.setattr(az, "load_model_config", lambda: cfg)
+    monkeypatch.setattr(az, "resolve_model", lambda **k: resolved)
     cap = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -78,6 +77,33 @@ def test_analyze_uses_configured_openai_compatible_route(monkeypatch):
     assert cap["auth"] == "Bearer k"
     assert cap["json"]["model"] == "mm"
     assert cap["json"]["messages"][0]["content"] == "prompt"
+
+
+def test_analyze_passes_agent_name_into_resolve_model(monkeypatch):
+    """#155: agent context must be forwarded so default is not models.yaml top-level."""
+    from src.everbot.core.agent.provider.model_config import ModelRoute, ResolvedModel
+
+    seen = {}
+
+    def fake_resolve(**kwargs):
+        seen.update(kwargs)
+        return ResolvedModel(
+            logical_name="deepseek-volcengine",
+            route=ModelRoute(base_url="http://fake/v1", api_key="k", model="glm-5.2"),
+            source="agent",
+        )
+
+    monkeypatch.setattr(az, "resolve_model", fake_resolve)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(az.httpx, "AsyncClient", lambda *a, **k: client)
+
+    asyncio.run(az.run_analysis("p", None, 30, agent_name="demo_agent"))
+    assert seen.get("agent_name") == "demo_agent"
+    assert seen.get("override") is None
 
 
 def test_analyze_script_no_longer_references_claude_cli():

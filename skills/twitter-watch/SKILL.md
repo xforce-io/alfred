@@ -43,7 +43,7 @@ python "$TW/fetch_tweets.py" aleabitoreddit --count 3 | python "$TW/analyze.py"
 ## 脚本
 
 - `scripts/fetch_tweets.py <handle> [--count N]` — 抓最新 N 条非置顶推文,按时间倒序,输出 JSON(正文/时间/URL/互动数)。**未登录/cookie 失效时退出码 3 并提示去 `web` profile 重登,绝不伪造内容。**
-- `scripts/analyze.py [--input f] [--model LLM_NAME] [--fast] [--timeout S]` — 读推文 JSON(默认 stdin),调用 `config/models.yaml` 中的 OpenAI-compatible 路由产出逐条解读 / 投资信号与标的 / 整体主题 / 作者立场 的中文报告。`--model` 使用 `llms` 里的配置名；未指定时使用 default，`--fast` 使用 fast 档。
+- `scripts/analyze.py [--input f] [--model LLM_NAME] [--agent NAME] [--fast] [--timeout S]` — 读推文 JSON(默认 stdin),经 **#155 `resolve_model`** 调 OpenAI-compatible 路由产出中文报告。优先级:`--model` > agent 意图(`--agent` / 环境变量 `EVERBOT_AGENT`) > `models.yaml` 系统 fallback。milkie sidecar 会注入 `EVERBOT_AGENT`,isolated 任务默认跟随 agent 模型,不再静默打顶层 kimi default。
 
 ## 已知限制
 
