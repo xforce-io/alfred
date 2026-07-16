@@ -1,0 +1,72 @@
+# 模型路由配置(#74 正名,前身 dolphin.yaml —— dolphin 已于 #38 移除,本文件是纯数据)
+# 消费方:src/everbot/core/agent/provider/model_config.py(_SkillLLMClient / OneshotLLMProvider)
+# 查找顺序:~/.alfred/models.yaml → ./config/models.yaml → repo config/models.yaml
+#         (同位置内旧名 dolphin.yaml 兜底)
+
+# #155: top-level default/fast are SYSTEM FALLBACK only (no agent context).
+# Agent intent lives in everbot.agents.<name>.model — skill scripts inherit via
+# resolve_model(agent_name=...) / EVERBOT_AGENT. Do not treat this default as
+# "the product default model".
+# Prefer volcengine glm alias (deepseek-volcengine → glm-5.2) so unattended
+# skill runs without agent env match demo_agent rather than expired kimi membership.
+default: deepseek-volcengine
+# fast 档用于后台技能任务(skill-evaluate 的 LLM Judge、reflection 打分),
+# 见 cron.py:_resolve_skill_model()。原 qwen-turbo 走阿里云,账户 key 失效后
+# 持续 403 access_denied 导致技能评估全部失败;改用 volcengine(已验证可用)。
+# #71:doubao-seed-2-0-pro 是深思模型,与 fast 档"简单打分无需 reasoning"的定位
+# 不符 —— 独立条目 doubao-nothink 经 extra_body 关 thinking,不影响主对话模型。
+fast: doubao-nothink
+
+clouds:
+  default: aliyun
+  aliyun:
+    user_id: "${ALIYUN_USER_ID}"
+    api: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: "${ALIYUN_API_KEY}"
+  deepseek:
+    api: https://api.deepseek.com/v1
+    api_key: "${DEEPSEEK_API_KEY}"
+  kimi:
+    api: "${KIMI_API_BASE}"
+    api_key: "${KIMI_API_KEY}"
+    headers:
+      User-Agent: "KimiCLI/0.77"
+  volcengine:
+    api: "${VOLCENGINE_API_BASE}"
+    api_key: "${VOLCENGINE_TOKEN}"
+
+llms:
+  qwen-plus:
+    cloud: aliyun
+    id: 18928543177492439044
+    model_name: qwen-plus-2025-07-28
+    type_api: openai
+  qwen-turbo:
+    cloud: aliyun
+    id: 18928543177492439044
+    model_name: qwen-turbo-latest
+    type_api: openai
+  deepseek-chat:
+    cloud: deepseek
+    model_name: deepseek-chat
+    type_api: openai
+  kimi-code:
+    cloud: kimi
+    model_name: kimi-for-coding
+    type_api: openai
+  kimi-k2.5:
+    cloud: kimi
+    model_name: kimi-k2.5
+    type_api: openai
+  deepseek-volcengine:
+    cloud: volcengine
+    model_name: glm-5.2
+    type_api: openai
+  # #71:fast 档专用 —— 同模型但关 thinking(简单打分任务不需要,且省 reasoning 计费)。
+  doubao-nothink:
+    cloud: volcengine
+    model_name: doubao-seed-2-0-pro-260215
+    type_api: openai
+    extra_body:
+      thinking:
+        type: disabled
