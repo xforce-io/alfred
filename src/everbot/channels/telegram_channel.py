@@ -498,13 +498,26 @@ class TelegramChannel:
                 raise
             except Exception as exc:
                 consecutive_errors += 1
-                logger.error(
+                # #153: transient network blips are expected on long-poll; log
+                # WARNING until the consecutive threshold, then ERROR + rebuild.
+                err_name = type(exc).__name__
+                transient = err_name in {
+                    "ReadTimeout",
+                    "ConnectTimeout",
+                    "ConnectError",
+                    "RemoteProtocolError",
+                    "WriteTimeout",
+                    "PoolTimeout",
+                }
+                at_threshold = consecutive_errors >= POLLING_MAX_CONSECUTIVE_ERRORS
+                log_fn = logger.error if (at_threshold or not transient) else logger.warning
+                log_fn(
                     "Telegram polling error (attempt %d, %s): %r",
                     consecutive_errors,
-                    type(exc).__name__,
+                    err_name,
                     exc,
                 )
-                if consecutive_errors >= POLLING_MAX_CONSECUTIVE_ERRORS:
+                if at_threshold:
                     logger.warning(
                         "Telegram polling: %d consecutive errors, recreating httpx client",
                         consecutive_errors,

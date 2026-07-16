@@ -25,6 +25,14 @@ def _load_module() -> ModuleType:
 # TSX script structure — verify browser-side behaviour
 # ---------------------------------------------------------------------------
 
+def test_tsx_supports_new_and_legacy_article_selectors():
+    """#153: X DOM uses data-tweet-id; keep legacy data-testid=tweet as fallback."""
+    m = _load_module()
+    assert "data-tweet-id" in m._TSX
+    assert 'article[data-testid="tweet"]' in m._TSX
+    assert "SocialMediaPosting" in m._TSX
+
+
 def test_tsx_detects_show_more_link():
     """_TSX must query tweet-text-show-more-link to detect truncated tweets."""
     m = _load_module()
@@ -139,8 +147,11 @@ def test_main_exits_on_empty_tweets(capsys, monkeypatch):
     with patch("subprocess.run", return_value=fake_proc), \
          patch.object(m, "_ensure_browser_server", return_value=None), \
          patch("sys.argv", ["fetch_tweets.py", "nobody"]):
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit) as ei:
             m.main()
+    msg = str(ei.value)
+    assert "SELECTOR_OR_STRUCTURE_CHANGED" in msg
+    assert "Fail-fast" in msg or "fail-fast" in msg.lower()
 
 
 def test_browser_start_uses_the_owned_lifecycle_entrypoint_once():

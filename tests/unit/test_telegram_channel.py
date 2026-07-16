@@ -1067,6 +1067,57 @@ class TestPollingDecoupling:
         return ch
 
     @pytest.mark.asyncio
+    async def test_polling_transient_errors_log_warning_then_error(self, channel, caplog):
+        """#153: transient ReadTimeout is WARNING until consecutive threshold."""
+        import logging
+
+        channel._running = True
+        channel._base_url = "https://api.telegram.org/botTEST"
+
+        call_count = {"n": 0}
+
+        async def fake_get(*args, **kwargs):
+            call_count["n"] += 1
+            # First call is drain (timeout=0); subsequent are long-polls.
+            if kwargs.get("params", {}).get("timeout") == 0:
+                resp = MagicMock()
+                resp.json.return_value = {"result": []}
+                return resp
+            if call_count["n"] <= 4:  # drain + 3 poll failures
+                raise httpx.ReadTimeout("")
+            channel._running = False
+            resp = MagicMock()
+            resp.json.return_value = {"result": []}
+            return resp
+
+        channel._client = MagicMock()
+        channel._client.get = AsyncMock(side_effect=fake_get)
+        channel._client.aclose = AsyncMock()
+
+        with (
+            caplog.at_level(logging.WARNING),
+            patch("src.everbot.channels.telegram_channel.POLLING_ERROR_SLEEP", 0),
+            patch("src.everbot.channels.telegram_channel.POLLING_MAX_CONSECUTIVE_ERRORS", 3),
+            patch(
+                "src.everbot.channels.telegram_channel.httpx.AsyncClient",
+                return_value=channel._client,
+            ),
+        ):
+            await channel._polling_loop()
+
+        warning_polls = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "Telegram polling error" in r.getMessage()
+        ]
+        error_polls = [
+            r for r in caplog.records
+            if r.levelno == logging.ERROR and "Telegram polling error" in r.getMessage()
+        ]
+        # First two consecutive transient errors → WARNING; 3rd hits threshold → ERROR
+        assert len(warning_polls) >= 2
+        assert len(error_polls) >= 1
+
+    @pytest.mark.asyncio
     async def test_polling_enqueues_instead_of_blocking(self, channel):
         """Polling loop should put updates into inbound queue."""
         update = {

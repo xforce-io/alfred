@@ -34,3 +34,13 @@ def test_build_isolated_task_prompt_includes_cite_convention():
     assert "objectId" in prompt
     # 明确是"溯源/来源"语义,而非泛泛
     assert ("溯源" in prompt) or ("来源" in prompt)
+
+
+def test_build_isolated_task_prompt_includes_fail_fast():
+    """#153: isolated prompt must stop on clear skill/tool failure instead of shell archaeology."""
+    prompt = build_isolated_task_prompt(
+        _Task(id="routine_3d785e79", title="Serenity账号定时分析", description="twitter-watch")
+    )
+    assert "FAIL-FAST" in prompt
+    assert "SELECTOR_OR_STRUCTURE_CHANGED" in prompt
+    assert "STOP" in prompt
