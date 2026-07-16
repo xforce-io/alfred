@@ -96,35 +96,89 @@ if (loggedOut > 0 && handleVisible === 0) {
 // Progressively scroll to trigger lazy-load. Count only non-pinned tweets
 // toward the goal — pinned tweets are excluded from the final result, so
 // counting them would cause the loop to exit early and under-collect.
+// X DOM has shifted (#153): articles use data-tweet-id + schema.org meta
+// (often no <time> / data-testid="tweet"). Keep legacy selectors as fallback.
 const seen = new Map();
-const nonPinnedCount = () =>
-  Array.from(seen.values()).filter((t) => !t.is_pinned && t.ts).length;
+const usableCount = () =>
+  Array.from(seen.values()).filter((t) => !t.is_pinned && (t.ts || t.text)).length;
 
-for (let scroll = 0; scroll < 8 && nonPinnedCount() < count; scroll++) {
+for (let scroll = 0; scroll < 8 && usableCount() < count; scroll++) {
   const batch = await page.evaluate(() => {
-    const arts = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+    let arts = Array.from(document.querySelectorAll("article[data-tweet-id]"));
+    if (!arts.length) {
+      arts = Array.from(
+        document.querySelectorAll('article[itemtype*="SocialMediaPosting"]')
+      );
+    }
+    if (!arts.length) {
+      arts = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+    }
     return arts.map((a) => {
+      const tweetId = a.getAttribute("data-tweet-id") || "";
+      // Timestamp: legacy <time datetime>, or schema.org meta content.
+      const timeEl = a.querySelector("time");
+      let ts = timeEl ? timeEl.getAttribute("datetime") : null;
+      if (!ts) {
+        const metas = Array.from(a.querySelectorAll("meta[content]"));
+        for (const m of metas) {
+          const c = m.getAttribute("content") || "";
+          if (/^\d{4}-\d{2}-\d{2}T/.test(c)) {
+            ts = c;
+            break;
+          }
+        }
+      }
+      const linkEl =
+        (timeEl ? timeEl.closest("a") : null) ||
+        a.querySelector('a[href*="/status/"]');
+      let url = linkEl ? linkEl.href : null;
+      if (!url && tweetId) {
+        const handleMatch = (window.location.pathname || "").match(/^\/([^/]+)/);
+        const h = handleMatch ? handleMatch[1] : "i";
+        url = "https://x.com/" + h + "/status/" + tweetId;
+      }
+      // Text: prefer classic tweetText; else article innerText (new DOM).
       const textEl = a.querySelector('[data-testid="tweetText"]');
-      const timeEl = a.querySelector('time');
-      const linkEl = timeEl ? timeEl.closest('a') : null;
+      let text = textEl
+        ? (textEl.innerText || textEl.textContent || "").trim()
+        : (a.innerText || "").trim();
+      // Drop leading author/handle/date chrome when using full article text.
+      if (!textEl && text) {
+        const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+        const isHandle = (s) => /^@\w+/i.test(s);
+        const isDate = (s) =>
+          /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d/i.test(s) ||
+          /^\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i.test(s);
+        // display name + @handle + date
+        if (lines.length >= 3 && isHandle(lines[1]) && isDate(lines[2])) {
+          lines.splice(0, 3);
+        } else if (lines.length >= 2 && isHandle(lines[0]) && isDate(lines[1])) {
+          lines.splice(0, 2);
+        }
+        text = lines.join("\n").trim();
+      }
       const social = a.querySelector('[role="group"]');
-      const pinned = !!Array.from(a.querySelectorAll('span'))
-        .find((e) => /^Pinned/i.test((e.textContent || "").trim()));
-      // Detect tweets truncated by X's "Show more" fold — full text requires
-      // navigating to the individual tweet page.
-      const truncated = !!a.querySelector('[data-testid="tweet-text-show-more-link"]');
+      const pinned = !!Array.from(a.querySelectorAll("span")).find((e) =>
+        /^(Pinned|已置顶)/i.test((e.textContent || "").trim())
+      );
+      const truncated = !!(
+        a.querySelector('[data-testid="tweet-text-show-more-link"]') ||
+        Array.from(a.querySelectorAll("span, a")).find((e) =>
+          /show more|显示更多/i.test((e.textContent || "").trim())
+        )
+      );
       return {
-        text: textEl ? textEl.innerText : "",
-        ts: timeEl ? timeEl.getAttribute("datetime") : null,
-        url: linkEl ? linkEl.href : null,
+        text,
+        ts,
+        url,
         is_pinned: pinned,
-        metrics: social ? (social.getAttribute("aria-label") || "") : "",
+        metrics: social ? social.getAttribute("aria-label") || "" : "",
         truncated,
       };
-    });
+    }).filter((t) => t.text || t.url || t.ts);
   });
   for (const t of batch) {
-    const key = t.url || t.ts || t.text.slice(0, 40);
+    const key = t.url || t.ts || (t.text || "").slice(0, 40);
     if (key && !seen.has(key)) seen.set(key, t);
   }
   await page.evaluate(() => window.scrollBy(0, window.innerHeight * 1.5));
@@ -133,8 +187,13 @@ for (let scroll = 0; scroll < 8 && nonPinnedCount() < count; scroll++) {
 
 // Exclude pinned tweets; sort by timestamp descending; take the newest count.
 let tweets = Array.from(seen.values());
-const nonPinned = tweets.filter((t) => !t.is_pinned && t.ts);
-nonPinned.sort((a, b) => (a.ts < b.ts ? 1 : -1));
+const nonPinned = tweets.filter((t) => !t.is_pinned && (t.ts || t.text));
+nonPinned.sort((a, b) => {
+  if (a.ts && b.ts) return a.ts < b.ts ? 1 : -1;
+  if (a.ts) return -1;
+  if (b.ts) return 1;
+  return 0;
+});
 const out = nonPinned.slice(0, count);
 
 // Expand truncated tweets: navigate to the individual tweet page for full text.
@@ -145,8 +204,10 @@ for (const t of out) {
       await waitForPageLoad(page).catch(() => {});
       await page.waitForTimeout(2000);
       const fullText = await page.evaluate(() => {
-        const textEl = document.querySelector('[data-testid="tweetText"]');
-        return textEl ? textEl.innerText : null;
+        const textEl =
+          document.querySelector('[data-testid="tweetText"]') ||
+          document.querySelector("article");
+        return textEl ? (textEl.innerText || textEl.textContent || null) : null;
       });
       if (fullText) t.text = fullText;
     } catch (_) {
@@ -190,7 +251,14 @@ def main() -> None:
         sys.exit("[fetch_tweets] 未拿到 JSON 输出")
     data = json.loads(line)
     if not data.get("tweets"):
-        sys.exit(f"[fetch_tweets] @{handle} 未抓到推文(账号不存在/受保护/页面结构变化?)")
+        # Structured failure code for isolated fail-fast (#153). Do not invite
+        # the agent to rewrite selectors / shell-debug the scraper.
+        sys.exit(
+            f"[fetch_tweets] SELECTOR_OR_STRUCTURE_CHANGED: @{handle} 未抓到推文"
+            f"(账号不存在/受保护/页面结构变化)。"
+            f"Fail-fast: do NOT rewrite the scraper or debug via shell; "
+            f"report this error and stop."
+        )
     print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
