@@ -1,12 +1,16 @@
-"""milkie 侧 skill 发现 —— 把磁盘上的 shell 型 markdown skill 注入 milkie agent 提示。
+"""Milkie-side skill discovery: inject shell-style markdown skills into agent prompts.
 
-dolphin 靠 ResourceSkillkit 扫目录发现 SKILL.md + `_load_resource_skill` 工具加载;
-milkie 没有这套(skill_list 是空 stub)。本模块在 alfred 侧(skill 目录所在地)做发现,
-渲染成一段「可用技能」提示,让 milkie agent 用内建 ``run_command``(milkie#134)读
-SKILL.md 并执行其脚本 —— 与 dolphin 的能力对等,但不耦合 dolphin。
+This module runs **discovery** on the alfred host (where skill directories live):
+scan skill roots, render the installed-skills prompt section, and emit the
+skill-manifest consumed by milkie ``skill_list`` / ``skill_request``.
 
-目录优先级同 dolphin factory:``<workspace>/skills`` > ``~/.alfred/skills`` > 仓库内置
-``skills/``。同名 skill 高优先级目录胜出。
+Load time (#164 closed-world): agents should prefer ``skill_request(name)`` to
+obtain ``instructions`` + authoritative ``dir``. ``run_command`` runs scripts
+under ``dir``; it is not used to discover SKILL.md.
+
+Directory priority: ``<workspace>/skills`` > ``~/.alfred/skills`` > repo
+built-in ``skills/``. Same-name skills: higher-priority dir wins. Load time only
+does name → manifest.dir (no re-scan).
 """
 from __future__ import annotations
 
@@ -219,15 +223,26 @@ def discover_skills(
 
 
 def build_milkie_skills_section(skills: List[Dict[str, Any]], workspace_root: Path) -> str:
-    """渲染面向 ``run_command`` 的「可用技能」提示段。空列表 → ""。"""
+    """Render the installed-skills prompt section for milkie agents. Empty list → "".
+
+    Load path is closed-world (#164): prefer ``skill_request(name)`` so the runtime
+    returns ``instructions`` + authoritative ``dir``. Do not guide shell find/cat
+    as the primary way to discover SKILL.md. ``run_command`` is for executing
+    scripts under ``dir`` (or known-absolute-path continuation when truncated).
+    """
     if not skills:
         return ""
     lines = [
-        "# 已安装技能（用 run_command 调用）",
+        "# 已安装技能（用 skill_request 加载说明）",
         "",
-        "下列技能可用。使用方法：用 `run_command` 执行 `cat \"<技能目录>/SKILL.md\"` 阅读其文档，"
-        "再按文档用 `run_command` 执行其脚本（用脚本的绝对路径）。文档里的 "
-        f"`$SKILL_DIR` 指该技能目录、`$WORKSPACE_ROOT` 指 `{workspace_root}`。",
+        "下列技能可用。加载说明时**优先**调用 `skill_request(\"<name>\")`，"
+        "使用返回的 `instructions` 正文与权威 `dir`；"
+        "**不要**用 `find`/`$HOME` 扫描或全盘搜索去发现 `SKILL.md`。",
+        "若返回 `truncated: true`，可对返回的 `instructionPath`（已知绝对路径）续读，"
+        "仍禁止搜索式发现。",
+        "执行脚本时用 `run_command` 调用该技能 `dir` 下脚本的绝对路径。"
+        f"文档里的 `$SKILL_DIR` 指 `skill_request`/`skill_list` 给出的 `dir`、"
+        f"`$WORKSPACE_ROOT` 指 `{workspace_root}`。",
         "",
         # 列举意图 → 走 skill_list 工具(权威完整),而非凭本段落手抄(手抄是非确定性的,
         # 实测会漏列;skill_list 由 manifest 背书,见 milkie#139 / alfred#50)。
