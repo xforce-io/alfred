@@ -78,15 +78,33 @@ def test_build_section_includes_run_command_and_paths(tmp_path):
         {"name": "web", "title": "Web", "description": "", "abs_path": "/abs/web"},
     ]
     section = msk.build_milkie_skills_section(skills, Path("/ws"))
-    assert "run_command" in section
+    assert "run_command" in section  # still for executing scripts under dir
     assert "ops" in section and "/abs/ops" in section
     # 空 description 退回 title
     assert "Web" in section
     assert "$WORKSPACE_ROOT" in section and "/ws" in section
 
 
+def test_build_section_prefers_skill_request_over_cat_skill_md(tmp_path):
+    """A1 (#164): load path is skill_request, not cat .../SKILL.md as primary."""
+    skills = [
+        {"name": "ops", "title": "Ops", "description": "运维脚本", "abs_path": "/abs/ops"},
+        {"name": "web", "title": "Web", "description": "", "abs_path": "/abs/web"},
+    ]
+    section = msk.build_milkie_skills_section(skills, Path("/ws"))
+    assert "skill_request" in section
+    assert "instructions" in section
+    # Must not teach cat SKILL.md as the primary load path
+    assert 'cat "<技能目录>/SKILL.md"' not in section
+    assert "cat " not in section or "skill_request" in section
+    # Explicit ban on HOME/find discovery
+    assert "find" in section or "搜索" in section
+    # run_command still OK for scripts
+    assert "run_command" in section
+
+
 def test_build_section_nudges_enumeration_to_skill_list(tmp_path):
-    """列举意图引导到 skill_list 工具(确定性,防漏列;alfred#50)。"""
+    """A2: 列举意图引导到 skill_list 工具(确定性,防漏列;alfred#50)。"""
     skills = [{"name": "ops", "title": "Ops", "description": "运维", "abs_path": "/abs/ops"}]
     section = msk.build_milkie_skills_section(skills, Path("/ws"))
     assert "skill_list" in section            # 指向工具
@@ -95,8 +113,31 @@ def test_build_section_nudges_enumeration_to_skill_list(tmp_path):
 
 
 def test_build_section_empty_when_no_skills():
-    # 空技能集仍 ""（不渲染指令，行为不变）。
+    # A4: 空技能集仍 ""（不渲染指令，行为不变）。
     assert msk.build_milkie_skills_section([], Path("/ws")) == ""
+
+
+def test_discover_and_manifest_dir_uses_winning_priority_path(tmp_path, monkeypatch):
+    """A3 (#164): same-name skill — discover + manifest dir from high-priority path."""
+    from src.everbot.core.agent.provider.milkie.launcher import _render_skill_manifest
+
+    hi = tmp_path / "hi"
+    lo = tmp_path / "lo"
+    _make_skill(hi, "shared", "高优先级版", "workspace 版正文应胜出")
+    _make_skill(lo, "shared", "低优先级版", "全局版")
+    monkeypatch.setattr(msk, "resolve_skill_dirs", lambda _ws: [hi, lo])
+
+    found = msk.discover_skills(tmp_path)
+    by_name = {s["name"]: s for s in found}
+    assert by_name["shared"]["abs_path"] == str((hi / "shared").resolve())
+
+    manifest = _render_skill_manifest(found)
+    shared = next(s for s in manifest["skills"] if s["name"] == "shared")
+    assert shared["dir"] == str((hi / "shared").resolve())
+    # Winning body is the hi SKILL.md content
+    hi_body = (hi / "shared" / "SKILL.md").read_text(encoding="utf-8")
+    assert "workspace 版正文应胜出" in hi_body
+    assert "低优先级版" not in hi_body
 
 
 def _setup_three(tmp_path, monkeypatch):
