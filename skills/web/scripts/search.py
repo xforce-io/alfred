@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Unified multi-backend web search CLI for agent workflows."""
+"""Unified multi-backend web search CLI for agent workflows.
+
+Default extract path stores full page text in a content-addressed cache and
+returns a short structured material card (shared visible text budget).
+"""
 
 from __future__ import annotations
 
@@ -8,14 +12,48 @@ import json
 import logging
 import os
 import sys
-from dataclasses import asdict, dataclass
-from typing import Iterable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterable
+
+# Allow running as script
+_SCRIPTS = Path(__file__).resolve().parent
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+
+from extract_cache import (  # noqa: E402
+    CacheError,
+    CacheFullError,
+    CacheUnavailableError,
+    ExtractCache,
+    MAX_READ_LIMIT,
+    format_content_id,
+    normalize_text,
+    parse_content_id,
+)
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_VISIBLE_CHARS = 4000
+TITLE_MAX = 300
+URL_MAX = 2000
+META_MAX = 200
+SCHEMA_VERSION = 2
 
 
 class SearchError(RuntimeError):
     """Raised when a backend search operation fails."""
+
+
+@dataclass
+class ExtractInfo:
+    """Successful extract payload for one result."""
+
+    preview: str
+    preview_truncated: bool
+    chars_full: int
+    content_id: str
+    read_command: str
 
 
 @dataclass
@@ -30,7 +68,12 @@ class SearchResult:
     backend: str
     search_type: str
     rank: int
-    extracted_text: str | None = None
+    extracted_text: str | None = None  # deprecated alias of extract.preview
+    extract: ExtractInfo | None = None
+    extract_error: str | None = None
+    snippet_truncated: bool = False
+    # Internal: full text held until budget allocation (not serialized raw)
+    _full_text: str | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -45,19 +88,54 @@ class SearchResponse:
     count: int
     results: list[SearchResult]
     errors: list[dict]
+    materials_hint: str = "no_extract"
+    stats: dict[str, int] | None = None
+    schema_version: int = SCHEMA_VERSION
 
     def to_dict(self) -> dict:
-        """Return a JSON-serializable response."""
-        return {
+        """Return a JSON-serializable response (schema v2)."""
+        results_out: list[dict[str, Any]] = []
+        for item in self.results:
+            entry: dict[str, Any] = {
+                "title": item.title,
+                "url": item.url,
+                "snippet": item.snippet,
+                "snippet_truncated": item.snippet_truncated,
+                "source": item.source,
+                "published": item.published,
+                "backend": item.backend,
+                "search_type": item.search_type,
+                "rank": item.rank,
+                "extract": None,
+                "extracted_text": item.extracted_text,
+                "extract_error": item.extract_error,
+            }
+            if item.extract is not None:
+                entry["extract"] = {
+                    "preview": item.extract.preview,
+                    "preview_truncated": item.extract.preview_truncated,
+                    "chars_full": item.extract.chars_full,
+                    "content_id": item.extract.content_id,
+                    "read_command": item.extract.read_command,
+                }
+            results_out.append(entry)
+
+        payload: dict[str, Any] = {
+            "schema_version": self.schema_version,
             "ok": self.ok,
             "query": self.query,
             "search_type": self.search_type,
             "backend": self.backend,
             "attempted_backends": self.attempted_backends,
             "count": self.count,
-            "results": [asdict(item) for item in self.results],
+            "result_count": self.count,
+            "materials_hint": self.materials_hint,
+            "results": results_out,
             "errors": self.errors,
         }
+        if self.stats is not None:
+            payload["stats"] = self.stats
+        return payload
 
 
 class BaseBackend:
@@ -228,6 +306,130 @@ def normalize_url(url: str) -> str:
     return url.strip().rstrip("/").lower()
 
 
+def truncate_field(value: str | None, max_len: int) -> str | None:
+    """Truncate a short metadata field to a conservative max length."""
+    if value is None:
+        return None
+    if len(value) <= max_len:
+        return value
+    return value[:max_len]
+
+
+def clamp_short_fields(results: list[SearchResult]) -> None:
+    """Apply independent caps on title/url/source/published."""
+    for item in results:
+        item.title = truncate_field(item.title or "", TITLE_MAX) or ""
+        item.url = truncate_field(item.url or "", URL_MAX) or ""
+        item.source = truncate_field(item.source, META_MAX)
+        item.published = truncate_field(item.published, META_MAX)
+
+
+def resolve_visible_budget(args: argparse.Namespace | None = None) -> int:
+    """CLI --visible-chars > env > default 4000."""
+    if args is not None:
+        cli_val = getattr(args, "visible_chars", None)
+        if cli_val is not None:
+            return max(0, int(cli_val))
+    env = os.environ.get("ALFRED_WEB_EXTRACT_VISIBLE_CHARS")
+    if env:
+        try:
+            return max(0, int(env))
+        except ValueError:
+            pass
+    return DEFAULT_VISIBLE_CHARS
+
+
+def make_read_command(content_id: str) -> str:
+    """Build portable read_command using $SKILL_DIR (no absolute paths)."""
+    hex_digest = parse_content_id(content_id)
+    return (
+        f"python $SKILL_DIR/scripts/read_extract.py "
+        f"--content-id {hex_digest} --offset 0 --limit {MAX_READ_LIMIT}"
+    )
+
+
+def allocate_visible_text(
+    results: list[SearchResult],
+    budget: int,
+    *,
+    full_extract: bool = False,
+) -> dict[str, int]:
+    """Allocate shared snippet+preview budget by rank ascending.
+
+    Mutates results in place. Returns stats dict with visible_text_chars,
+    visible_text_budget, and full_chars_total.
+    """
+    remaining = max(0, budget)
+    full_chars_total = 0
+    visible = 0
+
+    for item in sorted(results, key=lambda r: r.rank):
+        snip_src = item.snippet or ""
+        if len(snip_src) <= remaining:
+            item.snippet = snip_src
+            item.snippet_truncated = False
+            remaining -= len(item.snippet)
+            visible += len(item.snippet)
+        else:
+            item.snippet = snip_src[:remaining]
+            item.snippet_truncated = True
+            visible += len(item.snippet)
+            remaining = 0
+
+        if item.extract is None and item._full_text is None:
+            continue
+
+        full_body = item._full_text
+        if full_body is None and item.extract is not None:
+            preview = item.extract.preview
+            full_chars_total += item.extract.chars_full
+            visible += len(preview)
+            item.extracted_text = preview
+            continue
+
+        assert full_body is not None
+        chars_full = len(full_body)
+        full_chars_total += chars_full
+
+        if full_extract:
+            preview = full_body
+            truncated = False
+        elif remaining <= 0:
+            preview = ""
+            truncated = chars_full > 0
+        elif len(full_body) <= remaining:
+            preview = full_body
+            truncated = False
+            remaining -= len(preview)
+        else:
+            preview = full_body[:remaining]
+            truncated = True
+            remaining = 0
+
+        visible += len(preview)
+
+        content_id = item.extract.content_id if item.extract is not None else ""
+        read_command = (
+            item.extract.read_command
+            if item.extract is not None
+            else (make_read_command(content_id) if content_id else "")
+        )
+        item.extract = ExtractInfo(
+            preview=preview,
+            preview_truncated=truncated,
+            chars_full=chars_full,
+            content_id=content_id,
+            read_command=read_command,
+        )
+        item.extracted_text = preview
+
+    return {
+        "visible_text_chars": visible,
+        "visible_text_budget": budget,
+        "full_chars_total": full_chars_total,
+    }
+
+
 def build_backend_order(selected: str) -> list[str]:
     """Resolve backend order for the requested mode."""
     if selected != "auto":
@@ -240,7 +442,12 @@ def build_backend_order(selected: str) -> list[str]:
     return order
 
 
-def search_with_fallback(args: argparse.Namespace, backend_map: dict[str, BaseBackend]) -> SearchResponse:
+def search_with_fallback(
+    args: argparse.Namespace,
+    backend_map: dict[str, BaseBackend],
+    *,
+    cache: ExtractCache | None = None,
+) -> SearchResponse:
     """Try backends in order until one succeeds."""
     attempted: list[str] = []
     errors: list[dict] = []
@@ -259,8 +466,29 @@ def search_with_fallback(args: argparse.Namespace, backend_map: dict[str, BaseBa
 
         try:
             results = backend.search(args)
+            clamp_short_fields(results)
+            budget = resolve_visible_budget(args)
+            full_extract = bool(getattr(args, "full_extract", False))
+
             if args.extract and results:
-                extract_result_pages(results, top_n=args.extract_top, timeout=args.timeout)
+                extract_result_pages(
+                    results,
+                    top_n=args.extract_top,
+                    timeout=args.timeout,
+                    cache=cache,
+                )
+
+            stats = allocate_visible_text(
+                results,
+                budget,
+                full_extract=full_extract and bool(args.extract),
+            )
+            materials_hint = (
+                "extract_available"
+                if any(r.extract is not None for r in results)
+                else "no_extract"
+            )
+
             return SearchResponse(
                 ok=True,
                 query=args.query,
@@ -270,9 +498,14 @@ def search_with_fallback(args: argparse.Namespace, backend_map: dict[str, BaseBa
                 count=len(results),
                 results=results,
                 errors=errors,
+                materials_hint=materials_hint,
+                stats=stats,
             )
         except SearchError as exc:
-            logger.warning("Search backend failed", extra={"backend": backend_name, "error": str(exc)})
+            logger.warning(
+                "Search backend failed",
+                extra={"backend": backend_name, "error": str(exc)},
+            )
             errors.append({"backend": backend_name, "error": str(exc)})
 
     return SearchResponse(
@@ -284,40 +517,109 @@ def search_with_fallback(args: argparse.Namespace, backend_map: dict[str, BaseBa
         count=0,
         results=[],
         errors=errors,
+        materials_hint="no_extract",
+        stats={
+            "visible_text_chars": 0,
+            "visible_text_budget": resolve_visible_budget(args),
+            "full_chars_total": 0,
+        },
     )
 
 
-def extract_result_pages(results: list[SearchResult], top_n: int, timeout: int) -> None:
-    """Fetch and extract readable text from top result pages."""
-    requests = _load_requests()
-    BeautifulSoup = _load_bs4()
+def extract_result_pages(
+    results: list[SearchResult],
+    top_n: int,
+    timeout: int,
+    cache: ExtractCache | None = None,
+    *,
+    html_fetcher=None,
+) -> None:
+    """Fetch and extract readable text from top result pages; store full text.
 
+    On success sets item.extract skeleton (preview filled later by budget) and
+    item._full_text. On failure sets extract=None and extract_error.
+    """
+    cache = cache or ExtractCache()
     limit = max(0, min(top_n, len(results)))
+
     for item in results[:limit]:
         try:
-            response = requests.get(
-                item.url,
-                headers={"User-Agent": "Mozilla/5.0 (everbot-web-search)"},
-                timeout=timeout,
-            )
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, "html.parser")
+            if html_fetcher is not None:
+                html = html_fetcher(item.url)
+            else:
+                requests = _load_requests()
+                response = requests.get(
+                    item.url,
+                    headers={"User-Agent": "Mozilla/5.0 (everbot-web-search)"},
+                    timeout=timeout,
+                )
+                response.raise_for_status()
+                html = response.text
+
+            BeautifulSoup = _load_bs4()
+            soup = BeautifulSoup(html, "html.parser")
             for tag in soup(["script", "style", "noscript"]):
                 tag.decompose()
-            text = " ".join(soup.get_text(" ", strip=True).split())
-            item.extracted_text = text[:1200] if text else None
+            text = normalize_text(soup.get_text(" ", strip=True))
+            if not text:
+                item.extract = None
+                item.extracted_text = None
+                item.extract_error = "empty_body"
+                item._full_text = None
+                continue
+
+            try:
+                content_id = cache.store(text)
+            except CacheFullError:
+                item.extract = None
+                item.extracted_text = None
+                item.extract_error = "cache_full"
+                item._full_text = None
+                continue
+            except CacheUnavailableError:
+                item.extract = None
+                item.extracted_text = None
+                item.extract_error = "cache_unavailable"
+                item._full_text = None
+                continue
+            except CacheError:
+                item.extract = None
+                item.extracted_text = None
+                item.extract_error = "cache_error"
+                item._full_text = None
+                continue
+
+            # Stored text may re-normalize identically
+            stored = normalize_text(text)
+            item._full_text = stored
+            item.extract = ExtractInfo(
+                preview="",  # filled by allocate_visible_text
+                preview_truncated=True,
+                chars_full=len(stored),
+                content_id=content_id,
+                read_command=make_read_command(content_id),
+            )
+            item.extracted_text = None  # set after budget
+            item.extract_error = None
         except Exception as exc:  # pragma: no cover - network behavior
+            item.extract = None
             item.extracted_text = None
-            logger.warning("Page extraction failed", extra={"url": item.url, "error": str(exc)})
+            item.extract_error = "extract_failed"
+            item._full_text = None
+            logger.warning(
+                "Page extraction failed",
+                extra={"url": item.url, "error": str(exc)},
+            )
 
 
 def format_text(response: SearchResponse) -> str:
-    """Render a human-readable text report."""
+    """Render a human-readable text report (material card style)."""
     lines = [
         f"Query: {response.query}",
         f"Type: {response.search_type}",
         f"Backend: {response.backend or 'none'}",
         f"Results: {response.count}",
+        f"materials_hint: {response.materials_hint}",
     ]
     if response.errors:
         lines.append("Errors:")
@@ -334,8 +636,23 @@ def format_text(response: SearchResponse) -> str:
             lines.append(f"Published: {item.published}")
         if item.snippet:
             lines.append(f"Snippet: {item.snippet}")
-        if item.extracted_text:
+        if item.extract is not None:
+            lines.append(f"Extracted: {item.extract.preview}")
+            lines.append(f"content_id: {item.extract.content_id}")
+            lines.append(f"Read: {item.extract.read_command}")
+            lines.append(f"chars_full: {item.extract.chars_full}")
+        elif item.extract_error:
+            lines.append(f"extract_error: {item.extract_error}")
+        elif item.extracted_text:
             lines.append(f"Extracted: {item.extracted_text}")
+
+    if response.stats:
+        lines.append("")
+        lines.append(
+            "Stats: "
+            f"visible_text_chars={response.stats.get('visible_text_chars', 0)} "
+            f"full_chars_total={response.stats.get('full_chars_total', 0)}"
+        )
     return "\n".join(lines)
 
 
@@ -368,6 +685,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=15, help="HTTP timeout in seconds")
     parser.add_argument("--extract", action="store_true", help="Extract readable page text")
     parser.add_argument("--extract-top", type=int, default=2, help="Number of top results to extract")
+    parser.add_argument(
+        "--visible-chars",
+        type=int,
+        default=None,
+        help=f"Shared snippet+preview budget (default {DEFAULT_VISIBLE_CHARS})",
+    )
+    parser.add_argument(
+        "--full-extract",
+        action="store_true",
+        help="DEBUG only: include full extract text in stdout (not for agent cite path)",
+    )
     parser.add_argument(
         "--no-fallback",
         dest="fallback",

@@ -27,16 +27,60 @@ $S "OpenAI latest news"
 # News search
 $S "Fed rate decision" --type news --timelimit d
 
-# Extract page text from top results
-$S "Python PEP 723" --extract --extract-top 2
+# Extract top pages → material cards (summary + content_id), not full text
+$S "Python PEP 723" --extract --extract-top 2 --output json
 
-# JSON output
-$S "TSLA delivery" --output json
+# Read one page of a cached extract (limit ≤ 6000 chars)
+python $SKILL_DIR/scripts/read_extract.py \
+  --content-id <64-hex> --offset 0 --limit 6000
 ```
 
-Arguments: `--backend auto|ddgs|tavily`, `--type text|news`, `--max-results N`, `--timelimit d|w|m|y`, `--extract`, `--extract-top N`, `--output text|json`, `--no-fallback`
+Arguments: `--backend auto|ddgs|tavily`, `--type text|news`, `--max-results N`, `--timelimit d|w|m|y`, `--extract`, `--extract-top N`, `--visible-chars N` (default 4000), `--output text|json`, `--no-fallback`, `--full-extract` (**debug only**)
 
-Env: `TAVILY_API_KEY` (optional, enables tavily backend)
+Env:
+
+- `TAVILY_API_KEY` (optional, enables tavily backend)
+- `ALFRED_WEB_EXTRACT_CACHE_DIR` (default `~/.alfred/cache/web-extract`)
+- `ALFRED_WEB_EXTRACT_CACHE_MAX_BYTES` (default 128 MiB)
+- `ALFRED_WEB_EXTRACT_VISIBLE_CHARS` (default 4000 when CLI not set)
+
+### Material cards (default extract output)
+
+With `--extract`, stdout is a **short structured material card**, not the full page body:
+
+- Fields: title, url, snippet, `extract.preview`, `extract.content_id`, `extract.chars_full`, `extract.read_command`, `stats`
+- All LLM-visible free text (`snippet` + `extract.preview`) shares a budget: default **≤ 4000** characters (`--visible-chars` / `ALFRED_WEB_EXTRACT_VISIBLE_CHARS`)
+- JSON is authoritative (`schema_version: 2`). `extracted_text` is a **deprecated** alias of `extract.preview` (compat only)
+- `materials_hint`: `extract_available` | `no_extract`
+  - `extract_available` only means **readable extract material exists**
+  - It does **not** mean the user's question is fully covered
+
+### Full text via content_id (paged read)
+
+1. Take `content_id` (`sha256:<hex>`) from a successful extract
+2. Page with `read_extract.py --content-id <hex> --offset N --limit 6000` (max limit **6000**)
+3. Loop `offset += limit` until `eof` / empty page; concatenate pages to restore the full body
+4. When quoting a passage, **cite the page's runtime objectId** from that `run_command` call — do **not** treat the summary-card objectId as a full-text handle
+
+**Never** `cat` cache files, invent filesystem paths, or pass `--all`. The reader only accepts a validated SHA-256 `content_id` and a safe range. Absolute cache paths are never printed.
+
+### Stop searching when materials suffice (agent judgment)
+
+After you already have **≥1 useful extract** (`materials_hint=extract_available`) and the materials cover:
+
+- key entities / claims needed for the task
+- freshness when time-sensitive
+- source diversity when required
+
+→ **stop** issuing more search queries and move to analysis. Coverage is judged by the agent, not by a forced binary “done” flag. Do not keep rotating queries just because more pages exist.
+
+### Relationship to #160 (run_command projection)
+
+Milkie/run_command may still apply a generic projection (e.g. `tail@8000`) and a raw stream cap (~30k). This skill **proactively** keeps default visible free text ≤ 4000 and requires paged reads for long bodies so agents do not rely on stuffing full extracts into one stdout.
+
+### Debug escape hatch
+
+`--full-extract` dumps large extract text into stdout for offline debugging only. **Do not use it in agent runtime** as a cite/trace path — it inflates context and may still be truncated by #160 projection.
 
 ---
 
