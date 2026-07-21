@@ -142,7 +142,13 @@ class ChatService:
             # Heartbeat body content must be visible only via primary-session mailbox drain.
             if event_type in {"message", "delta", "skill"} or "_progress" in data:
                 return
-        bypass_idle_gate = source_type in {"time_reminder", "heartbeat", "heartbeat_delivery"}
+        # deferred_result must bypass the idle gate: soft-timeout users are
+        # still "active" within 20s, and the final answer often arrives ~+30s
+        # after timeout (issue #168). Dropping it here makes deferred delivery
+        # appear broken even when history inject succeeded.
+        bypass_idle_gate = source_type in {
+            "time_reminder", "heartbeat", "heartbeat_delivery", "deferred_result",
+        }
 
         if routing.scope == "agent" and agent_name:
             # Agent-scope idle gate: throttle by last broadcast time (not user activity)

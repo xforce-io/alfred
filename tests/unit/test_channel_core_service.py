@@ -527,3 +527,732 @@ class TestWorkspaceInstructionsHelpersMilkieSafe:
             agent = SimpleNamespace(executor=SimpleNamespace(context=ctx))
             core._cache_runtime_workspace_instructions(agent, "test_agent")
             assert core._runtime_workspace_instructions_by_agent.get("test_agent") == "DOLPHIN WS"
+
+
+# ---------------------------------------------------------------------------
+# Issue #168: soft-timeout copy, turn_end stats, deferred delivery
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_soft_timeout_user_message_semantics(monkeypatch):
+    """S1: Soft-timeout copy must say background continues + auto-push; not hard-fail."""
+    agent = _TurnErrorAgent()
+
+    class _FakeTurnOrchestrator:
+        def __init__(self, _policy, **_kw):
+            self.accumulated_failures = {}
+
+        async def run_turn(self, *_args, **_kwargs):
+            from src.everbot.core.runtime.turn_policy import TurnEvent, TurnEventType
+            yield TurnEvent(
+                type=TurnEventType.TURN_ERROR,
+                error="Turn exceeded 0.3s timeout",
+                status="timeout",
+                tool_call_count=5,
+                tool_names_executed=["_bash", "search"],
+                failed_tool_outputs=0,
+            )
+
+    monkeypatch.setattr(
+        "src.everbot.core.channel.core_service.TurnOrchestrator",
+        _FakeTurnOrchestrator,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        core = _make_core_service(Path(tmp))
+        collector = _EventCollector()
+        await core.process_message(
+            agent, "demo_agent", "web_session_demo_agent", "hi", collector,
+        )
+
+    texts = [t.content for t in collector.payloads_by_type("text")]
+    assert texts, "expected a soft-timeout text outbound"
+    joined = "\n".join(texts)
+    assert "后台" in joined and "继续" in joined
+    assert any(k in joined for k in ("自动推送", "推送到本会话", "推送结果"))
+    assert "未能完成处理" not in joined
+    assert "执行失败" not in joined
+
+    # Hard-fail stack bubble must not be the primary conclusion for soft timeout
+    errors = collector.payloads_by_type("error")
+    assert not errors, f"soft timeout must not emit error payload: {errors}"
+
+
+@pytest.mark.asyncio
+async def test_soft_timeout_turn_end_status_and_tool_count(monkeypatch):
+    """S3: turn_end on soft timeout has status=timeout and tool_call_count from orchestrator."""
+    agent = _TurnErrorAgent()
+
+    class _FakeTurnOrchestrator:
+        def __init__(self, _policy, **_kw):
+            self.accumulated_failures = {}
+
+        async def run_turn(self, *_args, **_kwargs):
+            from src.everbot.core.runtime.turn_policy import TurnEvent, TurnEventType
+            # Skill-stage tools never increment core_service local counters;
+            # stats only arrive on TURN_ERROR from the orchestrator.
+            yield TurnEvent(
+                type=TurnEventType.TURN_ERROR,
+                error="Turn exceeded 600s timeout",
+                status="timeout",
+                tool_call_count=8,
+                tool_execution_count=8,
+                tool_names_executed=["a", "b", "c", "d", "e", "f", "g", "h"],
+                failed_tool_outputs=0,
+            )
+
+    monkeypatch.setattr(
+        "src.everbot.core.channel.core_service.TurnOrchestrator",
+        _FakeTurnOrchestrator,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        core = _make_core_service(Path(tmp))
+        collector = _EventCollector()
+        await core.process_message(
+            agent, "demo_agent", "web_session_demo_agent", "long task", collector,
+        )
+
+    timeline = core.session_manager._timeline_events
+    turn_ends = [e for e in timeline if e.get("type") == "turn_end" or e.get("event_type") == "turn_end"]
+    # append_timeline_event stores the event dict as passed
+    if not turn_ends:
+        # Event may store type under different keys depending on _record_timeline_event
+        turn_ends = [e for e in timeline if "turn_end" in str(e.get("type", e.get("event", "")))]
+    assert turn_ends, f"expected turn_end in timeline, got: {timeline}"
+    te = turn_ends[-1]
+    assert te.get("tool_call_count") == 8, te
+    assert te.get("status") == "timeout", te
+
+
+@pytest.mark.asyncio
+async def test_soft_timeout_end_to_end_drain_history_and_timeline(monkeypatch):
+    """S2 integration path: short timeout → soft copy → deferred final → history + emit.
+
+    Uses a real TurnOrchestrator with a scripted agent (mock channel sink).
+    """
+    import asyncio
+    from src.everbot.core.runtime.turn_policy import TurnPolicy
+
+    final_text = "DEFERRED_FINAL_ANSWER_168"
+    emitted = []
+
+    class _SlowFinishAgent:
+        name = "dummy_agent"
+
+        def __init__(self):
+            self.executor = SimpleNamespace(context=_DummyContext())
+            self.state = AgentState.INITIALIZED
+
+        async def continue_chat(self, **_kwargs):
+            # Two skill tools (count as N=2 in orchestrator, not local core_service)
+            for i in range(2):
+                yield {
+                    "_progress": [{
+                        "id": f"sk{i}",
+                        "stage": "skill",
+                        "status": "processing",
+                        "skill_info": {"name": f"tool_{i}", "args": f"a{i}"},
+                    }],
+                }
+                yield {
+                    "_progress": [{
+                        "id": f"sk{i}",
+                        "stage": "skill",
+                        "status": "completed",
+                        "skill_info": {"name": f"tool_{i}"},
+                        "output": f"out{i}",
+                    }],
+                }
+            await asyncio.sleep(0.35)
+            yield {
+                "_progress": [{
+                    "id": "llm1",
+                    "stage": "llm",
+                    "status": "running",
+                    "delta": final_text,
+                }],
+            }
+
+    def _short_policy(*_a, **_k):
+        return TurnPolicy(
+            max_attempts=1,
+            timeout_seconds=0.15,
+            drain_extra_seconds=2.0,
+            max_tool_calls=50,
+            max_same_tool_intent=50,
+        )
+
+    async def _fake_emit(source_session_id, data, **kwargs):
+        emitted.append((source_session_id, data, kwargs))
+
+    monkeypatch.setattr(
+        "src.everbot.core.channel.core_service.build_chat_policy",
+        _short_policy,
+    )
+    monkeypatch.setattr(
+        "src.everbot.core.channel.core_service.events.emit",
+        _fake_emit,
+    )
+
+    agent = _SlowFinishAgent()
+    with tempfile.TemporaryDirectory() as tmp:
+        core = _make_core_service(Path(tmp))
+        collector = _EventCollector()
+        await core.process_message(
+            agent, "demo_agent", "web_session_demo_agent", "run long", collector,
+        )
+
+        # Soft-timeout copy first
+        texts = [t.content for t in collector.payloads_by_type("text")]
+        assert texts, "expected soft-timeout text"
+        assert any("后台" in t and "继续" in t for t in texts)
+
+        # turn_end stats
+        timeline = core.session_manager._timeline_events
+        turn_ends = [
+            e for e in timeline
+            if e.get("type") == "turn_end" or e.get("event_type") == "turn_end"
+        ]
+        assert turn_ends, timeline
+        te = turn_ends[-1]
+        assert te.get("status") == "timeout", te
+        assert te.get("tool_call_count") == 2, te
+
+        # Wait for deferred drain
+        for _ in range(40):
+            if emitted:
+                break
+            await asyncio.sleep(0.1)
+
+        assert emitted, "deferred_result must be emitted after drain"
+        _sid, data, kwargs = emitted[0]
+        assert data.get("source_type") == "deferred_result"
+        assert final_text in data.get("detail", "")
+        assert kwargs.get("source_type") == "deferred_result"
+        assert kwargs.get("scope") == "session"
+        assert kwargs.get("target_session_id") == "web_session_demo_agent"
+
+        core.session_manager.inject_history_message.assert_awaited()
+        inj_args = core.session_manager.inject_history_message.await_args
+        msg = inj_args.args[1] if inj_args.args and len(inj_args.args) > 1 else inj_args.kwargs.get("message")
+        assert msg is not None
+        assert msg.get("metadata", {}).get("source") == "deferred_result"
+        assert final_text in msg.get("content", "")
+        assert "超时后台任务完成后自动生成" in msg.get("content", "")
+
+
+@pytest.mark.asyncio
+async def test_soft_timeout_deferred_persists_to_real_session_history(monkeypatch):
+    """S2 E2E: real SessionManager history is readable after deferred delivery.
+
+    Uses a real SessionManager (disk-backed) + mock channel sink. After soft
+    timeout and drain, the deferred final must be loadable from history and
+    available as context for a subsequent turn.
+    """
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from src.everbot.core.runtime.turn_policy import TurnPolicy
+    from src.everbot.core.session.session import SessionManager
+    from src.everbot.infra.dolphin_compat import KEY_HISTORY
+
+    final_text = "PERSISTED_DEFERRED_FINAL_168"
+    session_id = "web_session_demo_agent"
+    emitted = []
+
+    class _StubProvider:
+        """In-memory provider so process_message does not need milkie serve."""
+
+        def __init__(self):
+            self._vars: dict = {KEY_HISTORY: []}
+
+        def is_paused(self, _agent):
+            return False
+
+        def is_error(self, _agent):
+            return False
+
+        def set_variable(self, _agent, key, value):
+            self._vars[key] = value
+
+        def get_variable(self, _agent, key):
+            return self._vars.get(key)
+
+        def set_session_id(self, agent, session_id_):
+            agent.context_id = session_id_
+
+        def init_trajectory(self, *_a, **_k):
+            return None
+
+        def needs_history_restore(self):
+            return True
+
+        def export_session(self, _agent):
+            return {
+                "history_messages": list(self._vars.get(KEY_HISTORY) or []),
+                "variables": dict(self._vars),
+            }
+
+        def restore_history(self, _agent, history):
+            self._vars[KEY_HISTORY] = list(history or [])
+
+    stub = _StubProvider()
+
+    class _SlowFinishAgent:
+        name = "demo_agent"
+
+        def __init__(self):
+            self.executor = SimpleNamespace(context=_DummyContext())
+            self.state = AgentState.INITIALIZED
+            self.context_id = "unset"
+            self.base_url = "http://stub"
+
+        async def continue_chat(self, **_kwargs):
+            # One internal resource tool + two visible tools → user-visible N=2
+            yield {
+                "_progress": [{
+                    "id": "sk_int",
+                    "stage": "skill",
+                    "status": "processing",
+                    "skill_info": {"name": "_load_resource_skill", "args": "x"},
+                }],
+            }
+            yield {
+                "_progress": [{
+                    "id": "sk_int",
+                    "stage": "skill",
+                    "status": "completed",
+                    "skill_info": {"name": "_load_resource_skill"},
+                    "output": "skill md",
+                }],
+            }
+            for i in range(2):
+                yield {
+                    "_progress": [{
+                        "id": f"sk{i}",
+                        "stage": "skill",
+                        "status": "processing",
+                        "skill_info": {"name": f"tool_{i}", "args": f"a{i}"},
+                    }],
+                }
+                yield {
+                    "_progress": [{
+                        "id": f"sk{i}",
+                        "stage": "skill",
+                        "status": "completed",
+                        "skill_info": {"name": f"tool_{i}"},
+                        "output": f"out{i}",
+                    }],
+                }
+            await asyncio.sleep(0.35)
+            yield {
+                "_progress": [{
+                    "id": "llm1",
+                    "stage": "llm",
+                    "status": "running",
+                    "delta": final_text,
+                }],
+            }
+
+    def _short_policy(*_a, **_k):
+        return TurnPolicy(
+            max_attempts=1,
+            timeout_seconds=0.15,
+            drain_extra_seconds=2.0,
+            max_tool_calls=50,
+            max_same_tool_intent=50,
+        )
+
+    async def _fake_emit(source_session_id, data, **kwargs):
+        emitted.append((source_session_id, data, kwargs))
+
+    monkeypatch.setattr(
+        "src.everbot.core.channel.core_service.build_chat_policy",
+        _short_policy,
+    )
+    monkeypatch.setattr(
+        "src.everbot.core.channel.core_service.events.emit",
+        _fake_emit,
+    )
+    monkeypatch.setattr(
+        "src.everbot.core.channel.core_service.provider_for",
+        lambda _agent: stub,
+    )
+    # save_session may still talk to provider; keep it lightweight via real SM
+    # but stub export used on error path.
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        sm = SessionManager(tmp_path)
+        ud = _make_user_data_mock(tmp_path)
+        core = ChannelCoreService.__new__(ChannelCoreService)
+        core.session_manager = sm
+        core.user_data = ud
+        core.agent_service = None
+        core._session_failure_memory = {}
+        # Avoid full WorkspaceLoader / strategy init paths that need config
+        core._primary_context_strategy = MagicMock()
+        core._primary_context_strategy.build_system_prompt = MagicMock(return_value=None)
+        core._runtime_deps = MagicMock()
+
+        collector = _EventCollector()
+        agent = _SlowFinishAgent()
+        await core.process_message(
+            agent, "demo_agent", session_id, "run long real history", collector,
+        )
+
+        texts = [t.content for t in collector.payloads_by_type("text")]
+        assert texts and any("后台" in t and "继续" in t for t in texts)
+
+        # Wait for deferred drain + real inject_history_message
+        for _ in range(40):
+            if emitted:
+                break
+            await asyncio.sleep(0.1)
+        assert emitted, "deferred_result must be emitted"
+
+        # --- Read back real persisted history ---
+        history = await core.load_history(session_id)
+        deferred_msgs = [
+            m for m in history
+            if isinstance(m, dict)
+            and (m.get("metadata") or {}).get("source") == "deferred_result"
+        ]
+        assert deferred_msgs, f"expected deferred_result in history, got: {history}"
+        assert final_text in deferred_msgs[-1].get("content", "")
+        assert "超时后台任务完成后自动生成" in deferred_msgs[-1].get("content", "")
+
+        # turn_end tool_call_count is user-visible N=2 (internal loader excluded)
+        # Timeline lives on SessionManager; collect from disk session if present
+        session_data = await sm.load_session(session_id)
+        assert session_data is not None
+        # Timeline may be in-memory and/or persisted depending on save path
+        timeline = []
+        if hasattr(sm, "_timeline_events"):
+            tl = sm._timeline_events
+            if isinstance(tl, dict):
+                timeline = list(tl.get(session_id) or [])
+            elif isinstance(tl, list):
+                timeline = list(tl)
+        if not timeline and session_data.timeline:
+            timeline = list(session_data.timeline)
+        turn_ends = [
+            e for e in timeline
+            if isinstance(e, dict) and (
+                e.get("type") == "turn_end" or e.get("event_type") == "turn_end"
+            )
+        ]
+        assert turn_ends, f"expected turn_end, timeline={timeline}"
+        te = turn_ends[-1]
+        assert te.get("status") == "timeout", te
+        assert te.get("tool_call_count") == 2, te
+
+        # Subsequent turn context: history still carries deferred final
+        history2 = await core.load_history(session_id)
+        assert any(final_text in (m.get("content") or "") for m in history2 if isinstance(m, dict))
+        # Provider-facing restore path would see the same messages
+        stub.restore_history(agent, history2)
+        restored = stub.get_variable(agent, KEY_HISTORY)
+        assert any(
+            final_text in (m.get("content") or "")
+            for m in (restored or [])
+            if isinstance(m, dict)
+        )
+
+
+@pytest.mark.asyncio
+async def test_non_soft_timeout_error_not_promised_as_deferred(monkeypatch):
+    """F-006: plain TimeoutError / 'timeout' text must not send soft-timeout copy.
+
+    Agent/tool/provider timeouts do not start deferred-drain; users must not
+    be told background work continues or that a result will auto-push.
+    """
+    agent = _TurnErrorAgent()
+
+    class _FakeTurnOrchestrator:
+        def __init__(self, _policy, **_kw):
+            self.accumulated_failures = {}
+
+        async def run_turn(self, *_args, **_kwargs):
+            from src.everbot.core.runtime.turn_policy import TurnEvent, TurnEventType
+            # status intentionally not "timeout" — not a wrapper soft-timeout
+            yield TurnEvent(
+                type=TurnEventType.TURN_ERROR,
+                error="TimeoutError: provider request timed out after 30s",
+                status="error",
+                tool_call_count=2,
+                tool_names_executed=["search", "fetch"],
+                failed_tool_outputs=0,
+            )
+
+    monkeypatch.setattr(
+        "src.everbot.core.channel.core_service.TurnOrchestrator",
+        _FakeTurnOrchestrator,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        core = _make_core_service(Path(tmp))
+        collector = _EventCollector()
+        await core.process_message(
+            agent, "demo_agent", "web_session_demo_agent", "search stuff", collector,
+        )
+
+    texts = [t.content for t in collector.payloads_by_type("text")]
+    joined = "\n".join(texts)
+    assert "后台" not in joined or "继续" not in joined, (
+        f"must not promise background continuation for non-soft timeout: {joined!r}"
+    )
+    assert "自动推送" not in joined
+    assert "推送到本会话" not in joined
+    # Hard-failure path should be used
+    assert any("未能完成处理" in t for t in texts) or collector.payloads_by_type("error")
+
+    timeline = core.session_manager._timeline_events
+    turn_ends = [
+        e for e in timeline
+        if e.get("type") == "turn_end" or e.get("event_type") == "turn_end"
+    ]
+    assert turn_ends, timeline
+    assert turn_ends[-1].get("status") == "error", turn_ends[-1]
+    assert turn_ends[-1].get("status") != "timeout"
+
+
+@pytest.mark.asyncio
+async def test_deferred_history_retries_while_session_lock_held(monkeypatch):
+    """F-005 / S2: follow-up turn holding lock longer than inject timeout still lands history.
+
+    inject_history_message may return False while another turn holds the session
+    lock past a single 5s attempt. Delivery must retry and only emit after
+    history is written.
+    """
+    import asyncio
+    from unittest.mock import MagicMock
+
+    import src.everbot.core.channel.core_service as core_mod
+    from src.everbot.core.runtime.turn_policy import TurnPolicy
+    from src.everbot.core.session.session import SessionManager
+
+    final_text = "DEFERRED_AFTER_LOCK_CONTENTION_168"
+    session_id = "web_session_demo_agent"
+    emitted: list = []
+    inject_attempts = {"n": 0}
+
+    # Shorten only retry backoffs (s >= 1.0); leave agent hang sleep intact.
+    _real_sleep = core_mod.asyncio.sleep
+
+    async def _selective_sleep(s):
+        if s >= 1.0:
+            return None
+        return await _real_sleep(s)
+
+    monkeypatch.setattr(core_mod.asyncio, "sleep", _selective_sleep)
+
+    class _StubProvider:
+        def __init__(self):
+            self._vars: dict = {KEY_HISTORY: []}
+
+        def is_paused(self, _agent):
+            return False
+
+        def is_error(self, _agent):
+            return False
+
+        def set_variable(self, _agent, key, value):
+            self._vars[key] = value
+
+        def get_variable(self, _agent, key):
+            return self._vars.get(key)
+
+        def set_session_id(self, agent, session_id_):
+            agent.context_id = session_id_
+
+        def init_trajectory(self, *_a, **_k):
+            return None
+
+        def needs_history_restore(self):
+            return True
+
+        def export_session(self, _agent):
+            return {
+                "history_messages": list(self._vars.get(KEY_HISTORY) or []),
+                "variables": dict(self._vars),
+            }
+
+        def restore_history(self, _agent, history):
+            self._vars[KEY_HISTORY] = list(history or [])
+
+    stub = _StubProvider()
+
+    class _SlowFinishAgent:
+        name = "demo_agent"
+
+        def __init__(self):
+            self.executor = SimpleNamespace(context=_DummyContext())
+            self.state = AgentState.INITIALIZED
+            self.context_id = "unset"
+            self.base_url = "http://stub"
+
+        async def continue_chat(self, **_kwargs):
+            yield {
+                "_progress": [{
+                    "id": "sk0",
+                    "stage": "skill",
+                    "status": "processing",
+                    "skill_info": {"name": "tool_0", "args": "a0"},
+                }],
+            }
+            yield {
+                "_progress": [{
+                    "id": "sk0",
+                    "stage": "skill",
+                    "status": "completed",
+                    "skill_info": {"name": "tool_0"},
+                    "output": "out0",
+                }],
+            }
+            await asyncio.sleep(0.35)
+            yield {
+                "_progress": [{
+                    "id": "llm1",
+                    "stage": "llm",
+                    "status": "running",
+                    "delta": final_text,
+                }],
+            }
+
+    def _short_policy(*_a, **_k):
+        return TurnPolicy(
+            max_attempts=1,
+            timeout_seconds=0.15,
+            drain_extra_seconds=3.0,
+            max_tool_calls=50,
+            max_same_tool_intent=50,
+        )
+
+    async def _fake_emit(source_session_id, data, **kwargs):
+        emitted.append((source_session_id, data, kwargs))
+
+    monkeypatch.setattr(
+        "src.everbot.core.channel.core_service.build_chat_policy",
+        _short_policy,
+    )
+    monkeypatch.setattr(
+        "src.everbot.core.channel.core_service.events.emit",
+        _fake_emit,
+    )
+    monkeypatch.setattr(
+        "src.everbot.core.channel.core_service.provider_for",
+        lambda _agent: stub,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        sm = SessionManager(tmp_path)
+
+        real_inject = sm.inject_history_message
+
+        async def _contended_inject(sid, message, *, timeout=5.0, blocking=True):
+            inject_attempts["n"] += 1
+            # First two attempts fail as if lock held past inject timeout
+            # (follow-up turn longer than one inject_timeout).
+            if inject_attempts["n"] <= 2:
+                return False
+            return await real_inject(sid, message, timeout=timeout, blocking=blocking)
+
+        sm.inject_history_message = _contended_inject  # type: ignore[method-assign]
+
+        ud = _make_user_data_mock(tmp_path)
+        core = ChannelCoreService.__new__(ChannelCoreService)
+        core.session_manager = sm
+        core.user_data = ud
+        core.agent_service = None
+        core._session_failure_memory = {}
+        core._primary_context_strategy = MagicMock()
+        core._primary_context_strategy.build_system_prompt = MagicMock(return_value=None)
+        core._runtime_deps = MagicMock()
+
+        collector = _EventCollector()
+        agent = _SlowFinishAgent()
+        await core.process_message(
+            agent, "demo_agent", session_id, "run under contention", collector,
+        )
+
+        # Wait for deferred drain + retries
+        for _ in range(60):
+            if emitted:
+                break
+            await asyncio.sleep(0.1)
+
+        assert inject_attempts["n"] >= 3, (
+            f"expected retries under lock contention, got {inject_attempts['n']}"
+        )
+        assert emitted, "emit only after successful history inject; expected emit after retries"
+
+        history = await core.load_history(session_id)
+        deferred_msgs = [
+            m for m in history
+            if isinstance(m, dict)
+            and (m.get("metadata") or {}).get("source") == "deferred_result"
+        ]
+        assert deferred_msgs, f"expected deferred_result in history after contention, got: {history}"
+        assert final_text in deferred_msgs[-1].get("content", "")
+
+
+@pytest.mark.asyncio
+async def test_deferred_skips_emit_when_history_inject_never_succeeds(monkeypatch):
+    """F-005: if history inject exhausts retries, do not emit deferred_result."""
+    import src.everbot.core.channel.core_service as core_mod
+
+    agent = _TurnErrorAgent()
+    emitted: list = []
+    inject_calls = {"n": 0}
+    captured: dict = {}
+
+    class _FakeTurnOrchestrator:
+        def __init__(self, _policy, **_kw):
+            self.accumulated_failures = {}
+
+        async def run_turn(self, *_args, **kwargs):
+            from src.everbot.core.runtime.turn_policy import TurnEvent, TurnEventType
+            captured["on_deferred"] = kwargs.get("on_deferred_result")
+            yield TurnEvent(
+                type=TurnEventType.TURN_ERROR,
+                error="Turn exceeded 0.3s timeout",
+                status="timeout",
+                tool_call_count=1,
+            )
+
+    async def _fake_emit(*_a, **_k):
+        emitted.append((_a, _k))
+
+    async def _always_fail_inject(*_a, **_k):
+        inject_calls["n"] += 1
+        return False
+
+    async def _fast_sleep(_s):
+        return None
+
+    monkeypatch.setattr(
+        "src.everbot.core.channel.core_service.TurnOrchestrator",
+        _FakeTurnOrchestrator,
+    )
+    monkeypatch.setattr(
+        "src.everbot.core.channel.core_service.events.emit",
+        _fake_emit,
+    )
+    monkeypatch.setattr(core_mod, "DEFERRED_HISTORY_INJECT_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(core_mod.asyncio, "sleep", _fast_sleep)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        core = _make_core_service(Path(tmp))
+        core.session_manager.inject_history_message = _always_fail_inject
+        collector = _EventCollector()
+        await core.process_message(
+            agent, "demo_agent", "web_session_demo_agent", "hi", collector,
+        )
+        assert captured.get("on_deferred") is not None
+        # Invoke deliver path directly (same closure used by drain callback).
+        await captured["on_deferred"]("SHOULD_NOT_EMIT_WITHOUT_HISTORY")
+
+    assert inject_calls["n"] >= 3, f"expected exhausted retries, got {inject_calls['n']}"
+    assert not emitted, f"must not emit without durable history, got {emitted}"

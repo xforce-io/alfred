@@ -28,6 +28,7 @@ from ...core.runtime.context_strategy import PrimaryContextStrategy, RuntimeDeps
 from ...core.runtime.mailbox import compose_message_with_mailbox_updates
 from ...core.runtime.turn_orchestrator import (
     CHAT_POLICY,
+    USER_HIDDEN_INTERNAL_TOOLS,
     TurnEventType,
     TurnOrchestrator,
     build_chat_policy,
@@ -45,6 +46,20 @@ except Exception:  # pragma: no cover
     _slm_handle_skill_event = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+# Soft-timeout user-facing copy (S1 / issue #168). Shared by all channels so
+# Telegram and Web present the same semantics; do not invent per-channel variants.
+SOFT_TIMEOUT_USER_MESSAGE = (
+    "本轮前台等待已超时，后台任务仍在继续执行。\n"
+    "若在后续处理窗口内完成，我会自动把结果推送到本会话（并写入历史，可供后续引用）。\n"
+    "你无需重复发送同一指令；若长时间未收到结果，可再追问或换更具体的指令。"
+)
+
+# Deferred history inject retry budget (F-005 / S2). Each attempt blocks up to
+# DEFERRED_HISTORY_INJECT_TIMEOUT for the session lock; total wall time covers a
+# long follow-up turn holding the lock past a single inject timeout.
+DEFERRED_HISTORY_INJECT_MAX_ATTEMPTS = 12
+DEFERRED_HISTORY_INJECT_TIMEOUT = 5.0
 
 
 def _build_circuit_break_summary(exc: Exception, kind: str) -> str:
@@ -305,11 +320,13 @@ class ChannelCoreService:
             async def _deliver_deferred_result(result_text: str) -> None:
                 """Deliver deferred result from a timed-out turn via history + events.
 
-                History injection persists the result for LLM context;
-                events.emit pushes it to connected channels in real-time.
-                Mailbox deposit is intentionally omitted — the result is
-                already in history_messages so prepending it again as a
-                "Background Updates" prefix would be redundant.
+                History injection is a hard prerequisite for successful delivery
+                (S2): subsequent turns must be able to cite the final text. A
+                follow-up turn may hold the session lock longer than a single
+                inject timeout, so we retry with blocking waits. run_id dedup
+                keeps re-injects idempotent. Real-time emit only runs after
+                history is durable so we never promise a result that is not
+                in context.
                 """
                 try:
                     msg = {
@@ -324,10 +341,55 @@ class ChannelCoreService:
                             "injected_at": datetime.now(timezone.utc).isoformat(),
                         },
                     }
+                    injected = True
                     if hasattr(self.session_manager, "inject_history_message"):
-                        await self.session_manager.inject_history_message(
-                            session_id, msg, timeout=5.0, blocking=False,
-                        )
+                        injected = False
+                        # Each attempt blocks up to inject_timeout for the lock;
+                        # total budget covers a long follow-up turn holding it.
+                        max_attempts = DEFERRED_HISTORY_INJECT_MAX_ATTEMPTS
+                        inject_timeout = DEFERRED_HISTORY_INJECT_TIMEOUT
+                        for attempt in range(1, max_attempts + 1):
+                            try:
+                                ok = await self.session_manager.inject_history_message(
+                                    session_id,
+                                    msg,
+                                    timeout=inject_timeout,
+                                    blocking=True,
+                                )
+                            except Exception as inject_exc:
+                                logger.warning(
+                                    "Deferred history inject attempt %s/%s raised "
+                                    "(session=%s run_id=%s): %s",
+                                    attempt,
+                                    max_attempts,
+                                    session_id,
+                                    run_id,
+                                    inject_exc,
+                                )
+                                ok = False
+                            if ok:
+                                injected = True
+                                break
+                            logger.warning(
+                                "Deferred history inject attempt %s/%s failed "
+                                "(session=%s run_id=%s); will retry after lock release",
+                                attempt,
+                                max_attempts,
+                                session_id,
+                                run_id,
+                            )
+                            if attempt < max_attempts:
+                                await asyncio.sleep(min(1.0 * attempt, 5.0))
+                        if not injected:
+                            logger.error(
+                                "Failed to inject deferred result into history after "
+                                "%s attempts (session=%s run_id=%s); skipping "
+                                "real-time emit so history remains the source of truth",
+                                max_attempts,
+                                session_id,
+                                run_id,
+                            )
+                            return
                     await events.emit(
                         session_id,
                         {
@@ -404,9 +466,13 @@ class ChannelCoreService:
                     }))
 
                 elif te.type == TurnEventType.TOOL_CALL:
-                    tool_call_count += 1
-                    tool_execution_count += 1
-                    tool_names_executed.append(te.tool_name)
+                    # Align with orchestrator / Telegram user-visible N: hide
+                    # framework-internal resource loaders from command counts.
+                    _visible = (te.tool_name or "") not in USER_HIDDEN_INTERNAL_TOOLS
+                    if _visible:
+                        tool_call_count += 1
+                        tool_execution_count += 1
+                        tool_names_executed.append(te.tool_name)
                     self._record_timeline_event(
                         session_id, "tool_call", tool_name=te.tool_name,
                         args_preview=te.tool_args, args_truncated=te.args_truncated,
@@ -443,11 +509,23 @@ class ChannelCoreService:
                     await on_event(OutboundMessage(session_id, te.content, msg_type="status"))
 
                 elif te.type == TurnEventType.TURN_ERROR:
-                    # Preserve structured stats from the orchestrator
+                    # Write orchestrator stats back to locals before raising so
+                    # turn_end (and channel summaries) see skill-stage tool
+                    # counts that never flowed through TOOL_CALL events.
+                    if te.tool_call_count:
+                        tool_call_count = te.tool_call_count
+                    if te.tool_execution_count:
+                        tool_execution_count = te.tool_execution_count
+                    if te.tool_names_executed:
+                        tool_names_executed = list(te.tool_names_executed)
+                    if te.failed_tool_outputs:
+                        failed_tool_outputs = te.failed_tool_outputs
                     err = RuntimeError(te.error)
-                    err.turn_tool_call_count = te.tool_call_count or tool_call_count
-                    err.turn_tool_names = list(te.tool_names_executed or tool_names_executed)
-                    err.turn_failed_count = te.failed_tool_outputs or failed_tool_outputs
+                    err.turn_tool_call_count = tool_call_count
+                    err.turn_tool_names = list(tool_names_executed)
+                    err.turn_failed_count = failed_tool_outputs
+                    # Only wrapper soft-timeout sets status="timeout" (drain started).
+                    err.is_soft_timeout = (te.status == "timeout")
                     raise err
 
                 elif te.type == TurnEventType.TURN_COMPLETE:
@@ -540,20 +618,31 @@ class ChannelCoreService:
             logger.error("Agent execution error:\n%s", traceback.format_exc())
             should_send_end = True
             try:
+                # Prefer stats attached on the exception (orchestrator TURN_ERROR)
+                # over locals, which may be 0 for skill-stage tool calls.
+                end_tool_call_count = getattr(e, "turn_tool_call_count", None) or tool_call_count
+                end_tool_names = getattr(e, "turn_tool_names", None) or tool_names_executed
+                end_failed = getattr(e, "turn_failed_count", None)
+                if end_failed is None:
+                    end_failed = failed_tool_outputs
+                err_msg = str(e)
+                # Soft-timeout UX only when orchestrator marked status="timeout"
+                # (foreground SoftTimeoutError from _timeout_wrapper). Generic
+                # agent/tool/provider timeouts must not promise deferred delivery.
+                is_soft_timeout = bool(getattr(e, "is_soft_timeout", False))
                 self._record_timeline_event(
                     session_id,
                     "turn_end",
-                    tool_call_count=tool_call_count,
+                    tool_call_count=end_tool_call_count,
                     tool_execution_count=tool_execution_count,
-                    tool_names_executed=tool_names_executed,
-                    failed_tool_outputs=failed_tool_outputs,
+                    tool_names_executed=end_tool_names,
+                    failed_tool_outputs=end_failed,
                     response_length=len(response or ""),
-                    status="error",
-                    error=str(e),
+                    status="timeout" if is_soft_timeout else "error",
+                    error=err_msg,
                     source_type="chat_user",
                     run_id=run_id,
                 )
-                err_msg = str(e)
                 if err_msg.startswith("REPEATED_TOOL_INTENT"):
                     summary = _build_circuit_break_summary(e, "intent")
                     await on_event(OutboundMessage(session_id, summary, msg_type="text"))
@@ -570,10 +659,10 @@ class ChannelCoreService:
                 elif err_msg.startswith("REPEATED_TOOL_FAILURES"):
                     summary = _build_circuit_break_summary(e, "failure")
                     await on_event(OutboundMessage(session_id, summary, msg_type="text"))
-                elif "timeout" in err_msg.lower():
-                    await on_event(OutboundMessage(session_id, (
-                        "本轮执行超时，但后台任务仍在继续。如果任务完成，我会自动推送结果给你。"
-                    ), msg_type="text"))
+                elif is_soft_timeout:
+                    await on_event(OutboundMessage(
+                        session_id, SOFT_TIMEOUT_USER_MESSAGE, msg_type="text",
+                    ))
                 else:
                     await on_event(OutboundMessage(session_id, (
                         "本轮执行遇到错误，未能完成处理。"
