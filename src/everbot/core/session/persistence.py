@@ -307,15 +307,37 @@ class SessionPersistence:
                 failure_memory=failure_memory or {},
             )
 
-            # Compress history for long-lived sessions before persisting.
-            if data.session_type in ("primary", "channel") and provider.needs_history_restore():
-                # dolphin: 进程内 history 压缩(需 context)。
-                # milkie: serve 返回全量 history,无 in-process 压缩(由 serve 端负责)。
+            # Compress history for long-lived sessions before persisting (#166).
+            # Shared policy for all providers; disk mirror stays lean.
+            if data.session_type in ("primary", "channel"):
                 try:
-                    compressor = SessionCompressor(agent.executor.context)
-                    data.history_messages = await compressor.compress_history(
-                        data.history_messages
+                    from ...infra.config import get_config
+                    from .history_compaction import (
+                        HistoryCompactionPolicy,
+                        resolve_history_compaction_config,
                     )
+                    from .history_utils import _estimate_tokens, _is_heartbeat, _is_placeholder
+
+                    agent_name = getattr(agent, "name", "") or ""
+                    cfg = resolve_history_compaction_config(get_config(), agent_name)
+                    chat_est = [
+                        m for m in (data.history_messages or [])
+                        if isinstance(m, dict)
+                        and not _is_heartbeat(m)
+                        and not _is_placeholder(m)
+                    ]
+                    # Only construct compressor / call LLM path when over trigger.
+                    if cfg.enabled and _estimate_tokens(chat_est) > cfg.trigger_tokens:
+                        compressor = SessionCompressor(
+                            getattr(getattr(agent, "executor", None), "context", None),
+                            max_summary_tokens=cfg.max_summary_tokens,
+                        )
+                        policy = HistoryCompactionPolicy()
+                        result = await policy.ensure_within_budget(
+                            data.history_messages, cfg, summarize=compressor
+                        )
+                        if result.changed:
+                            data.history_messages = result.history
                 except Exception:
                     logger.warning("History compression failed; saving uncompressed", exc_info=True)
 

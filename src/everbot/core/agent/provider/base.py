@@ -89,6 +89,15 @@ class AgentProvider(Protocol):
         """
         ...
 
+    def import_session(self, agent: Any, portable_state: dict) -> None:
+        """Apply portable session / compacted history into the live provider.
+
+        Optional capability (#166). Implementations may accept alfred-style
+        ``{history_messages, variables}`` and/or provider-native portable
+        payloads. Missing method is tolerated by callers.
+        """
+        ...
+
     def needs_history_restore(self) -> bool:
         """是否需要 alfred 把存档历史灌回 agent。
 

@@ -28,6 +28,15 @@ from .....infra.user_data import get_user_data_manager
 
 logger = logging.getLogger(__name__)
 
+# Keep the synchronous provider request below the SessionManager's 15 s outer
+# deadline. The server-side expectedLatestRunId check is still authoritative:
+# a client disconnect cannot prove the server did not finish the import.
+_SESSION_IMPORT_HTTP_TIMEOUT_SECONDS = 14.0
+
+
+class MilkieSessionImportConflict(RuntimeError):
+    """The sidecar rejected an import because the session advanced."""
+
 
 def _milkie_data_dir(agent_name: str) -> Path:
     """该 agent 的 milkie sidecar 数据目录(= 传给 ``serve --data-dir`` 的目录,
@@ -656,6 +665,130 @@ class MilkieProvider:
             "variables": {},
         }
 
+    def import_session(self, agent: Any, portable_state: dict) -> None:
+        """Apply compacted / portable session into milkie serve (#166 / milkie#124).
+
+        Accepts:
+        - milkie PortableSession (has ``manifest``) → POST /session/import as-is
+        - alfred ``{history_messages, ...}`` → export current portable, rewrite
+          checkpoint history regions from compacted messages, re-import under
+          the same contextId so the next LLM call uses the reduced base.
+        """
+        if not isinstance(portable_state, dict):
+            raise TypeError("portable_state must be a dict")
+
+        client = self._sync_client or self._new_sync_client()
+        owns = self._sync_client is None
+        base = self._agent_base_url(agent)
+        try:
+            if "manifest" in portable_state:
+                session = portable_state
+                expected_latest_run_id = None
+            else:
+                session, expected_latest_run_id = self._portable_from_compacted_history(
+                    client, base, agent, portable_state
+                )
+            payload = {"session": session}
+            if expected_latest_run_id:
+                payload["expectedLatestRunId"] = expected_latest_run_id
+            resp = client.post(
+                f"{base}/session/import",
+                json=payload,
+                timeout=_SESSION_IMPORT_HTTP_TIMEOUT_SECONDS,
+            )
+            if resp.status_code == 409:
+                raise MilkieSessionImportConflict(
+                    "milkie /session/import rejected stale session snapshot"
+                )
+            resp.raise_for_status()
+            if expected_latest_run_id and resp.json().get("conditionApplied") is not True:
+                raise RuntimeError(
+                    "milkie /session/import lacks conditional-import support; "
+                    "refusing an unsafe history rewrite"
+                )
+        finally:
+            if owns:
+                client.close()
+
+    def _portable_from_compacted_history(
+        self,
+        client: Any,
+        base: str,
+        agent: Any,
+        portable_state: dict,
+    ) -> tuple[dict, Optional[str]]:
+        """Export live portable session and rewrite history regions."""
+        import copy
+        import uuid
+
+        context_id = getattr(agent, "context_id", None) or portable_state.get(
+            "session_id"
+        )
+        exp = client.post(
+            f"{base}/session/export",
+            json={"contextId": context_id},
+            timeout=_SESSION_IMPORT_HTTP_TIMEOUT_SECONDS,
+        )
+        if exp.status_code == 404:
+            raise RuntimeError(
+                f"milkie /session/export: no session for contextId={context_id!r}"
+            )
+        exp.raise_for_status()
+        session = exp.json()
+        if not isinstance(session, dict) or "manifest" not in session:
+            raise RuntimeError("milkie /session/export returned unexpected payload")
+
+        history = portable_state.get("history_messages") or []
+        session = copy.deepcopy(session)
+        new_run_id = f"compact-{uuid.uuid4().hex[:16]}"
+        old_run_id = session.get("manifest", {}).get("latestRunId")
+
+        for event in session.get("events") or []:
+            if not isinstance(event, dict):
+                continue
+            # New identities so append-on-import does not collide.
+            event["id"] = str(uuid.uuid4())
+            if event.get("runId") == old_run_id:
+                event["runId"] = new_run_id
+            if event.get("type") == "agent.checkpoint":
+                payload = event.get("payload") or {}
+                checkpoint = payload.get("checkpoint") if isinstance(payload, dict) else None
+                if isinstance(checkpoint, dict):
+                    ctx = checkpoint.get("context") or {}
+                    regions_snap = ctx.get("regions") if isinstance(ctx, dict) else None
+                    rewritten = _rewrite_history_regions(regions_snap, history)
+                    if rewritten is not None and isinstance(ctx, dict):
+                        ctx = dict(ctx)
+                        ctx["regions"] = rewritten
+                        checkpoint = dict(checkpoint)
+                        checkpoint["context"] = ctx
+                        checkpoint["checkpointId"] = str(uuid.uuid4())
+                        event["payload"] = {**payload, "checkpoint": checkpoint}
+            if event.get("type") == "agent.run.started":
+                # Break previousRunId chain so getSessionHistory does not walk
+                # the pre-compaction runs (graceful degradation on import).
+                p = event.get("payload")
+                if isinstance(p, dict) and "previousRunId" in p:
+                    p = dict(p)
+                    p.pop("previousRunId", None)
+                    event["payload"] = p
+
+        manifest = dict(session.get("manifest") or {})
+        manifest["contextId"] = context_id
+        manifest["latestRunId"] = new_run_id
+        manifest["exportedAt"] = int(__import__("time").time() * 1000)
+        if "schemaVersion" not in manifest:
+            manifest["schemaVersion"] = 1
+        session["manifest"] = manifest
+
+        # Merge alfred variables if provided
+        variables = portable_state.get("variables")
+        if isinstance(variables, dict) and variables:
+            merged = dict(session.get("variables") or {})
+            merged.update(variables)
+            session["variables"] = merged
+        return session, old_run_id
+
     def needs_history_restore(self) -> bool:
         return False  # serve 用 sqlite/jsonl 自持久化(#130),同 contextId 重启自动恢复
 
@@ -787,3 +920,97 @@ def _milkie_messages_to_history(messages: list) -> list:
     out = SessionPersistence._filter_empty_assistant_messages(out)
     out = SessionPersistence._heal_orphan_tool_messages(out)
     return out
+
+
+def _rewrite_history_regions(regions_snap: Any, history_messages: list) -> Any:
+    """Replace ``history:turn-*`` regions in a checkpoint region snapshot.
+
+    Keeps non-history regions (header, skills, tools, wm, …). Converts alfred
+    OpenAI-style history into milkie history-pair region content
+    ``{userInput, assistantText}``. Tool messages are folded into the preceding
+    assistant text so tool-chain semantics survive as prose (milkie inter-turn
+    regions only store user/assistant pairs).
+    """
+    if regions_snap is None:
+        return None
+
+    # Snapshot shape: {epoch, regions: [Region, ...]} or bare list
+    if isinstance(regions_snap, dict):
+        regions_list = list(regions_snap.get("regions") or [])
+        epoch = regions_snap.get("epoch", 0)
+        as_dict = True
+    elif isinstance(regions_snap, list):
+        regions_list = list(regions_snap)
+        epoch = 0
+        as_dict = False
+    else:
+        return regions_snap
+
+    kept = [
+        r
+        for r in regions_list
+        if isinstance(r, dict) and not str(r.get("id") or "").startswith("history:turn-")
+    ]
+
+    pairs = _history_messages_to_pairs(history_messages)
+    import time as _time
+
+    now = int(_time.time() * 1000)
+    for i, (user_input, asst_text) in enumerate(pairs):
+        rid = f"history:turn-compact-{i}"
+        kept.append(
+            {
+                "id": rid,
+                "target": "message",
+                "section": "history",
+                "intraTurn": "turn-persistent",
+                "interTurn": "session-persistent",
+                "stability": "session-stable",
+                "createdAt": now + i,
+                "content": {"userInput": user_input, "assistantText": asst_text},
+            }
+        )
+
+    if as_dict:
+        return {"epoch": epoch + 1, "regions": kept}
+    return kept
+
+
+def _history_messages_to_pairs(history_messages: list) -> list:
+    """Fold alfred history into (user, assistant_text) pairs for milkie regions."""
+    pairs: list = []
+    i = 0
+    msgs = [m for m in history_messages if isinstance(m, dict)]
+    while i < len(msgs):
+        m = msgs[i]
+        role = m.get("role")
+        if role == "user":
+            user_text = m.get("content") if isinstance(m.get("content"), str) else ""
+            asst_parts: list = []
+            i += 1
+            while i < len(msgs) and msgs[i].get("role") != "user":
+                cur = msgs[i]
+                if cur.get("role") == "assistant":
+                    content = cur.get("content")
+                    if isinstance(content, str) and content:
+                        asst_parts.append(content)
+                    for tc in cur.get("tool_calls") or []:
+                        fn = (tc or {}).get("function") or {}
+                        name = fn.get("name") or ""
+                        args = fn.get("arguments") or ""
+                        asst_parts.append(f"[tool_call {name}({args})]")
+                elif cur.get("role") == "tool":
+                    body = cur.get("content") if isinstance(cur.get("content"), str) else ""
+                    tcid = cur.get("tool_call_id") or ""
+                    # Bound tool body so a single region cannot re-inflate the base
+                    if len(body) > 2000:
+                        body = body[:2000] + "…"
+                    asst_parts.append(f"[tool_result {tcid}] {body}")
+                i += 1
+            pairs.append((user_text or "", "\n".join(asst_parts)))
+        else:
+            # Leading assistant/tool without user — wrap as system-ish pair
+            content = m.get("content") if isinstance(m.get("content"), str) else ""
+            pairs.append(("", content or json.dumps(m, ensure_ascii=False)[:500]))
+            i += 1
+    return pairs

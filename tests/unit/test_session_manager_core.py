@@ -1553,7 +1553,7 @@ class TestPersistenceSaveMilkieSafe:
 
     - export_session routes through provider (serve /session/history).
     - session_created_at routes through provider.get_variable.
-    - SessionCompressor (in-process) is guarded by needs_history_restore → skipped.
+    - Under-threshold history does not construct SessionCompressor (#166).
     """
 
     def _patch_provider(self, monkeypatch, provider):
@@ -1596,13 +1596,13 @@ class TestPersistenceSaveMilkieSafe:
         self._patch_provider(monkeypatch, _MilkieProvider())
 
         p = SessionPersistence(tmp_path)
-        # primary session_type → would normally compress (dolphin) — must skip for milkie.
+        # Short history is under trigger → compressor not constructed; save still works.
         handle = SimpleNamespace(name="test_agent", base_url="http://x", context_id="c1")
 
         await p.save("web_session_test_agent", handle, model_name="m")
 
-        # No crash; compression skipped (milkie); data persisted with exported history.
-        assert compressor_built["n"] == 0, "SessionCompressor must be skipped for milkie"
+        # No crash; under-threshold skip; data persisted with exported history.
+        assert compressor_built["n"] == 0, "SessionCompressor must not run under trigger"
         loaded = await p.load("web_session_test_agent")
         assert loaded is not None
         assert loaded.history_messages == [{"role": "user", "content": "hi"}]

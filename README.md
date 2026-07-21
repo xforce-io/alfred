@@ -375,3 +375,4 @@ A: 参考 [docs/SKILLS_GUIDE.md](docs/SKILLS_GUIDE.md)，在 `skills/` 下创建
 - 多渠道设计: [docs/channel_design.md](docs/channel_design.md)
 - 技能生命周期: [docs/skill_lifecycle_design.md](docs/skill_lifecycle_design.md)
 - 技能开发: [docs/SKILLS_GUIDE.md](docs/SKILLS_GUIDE.md)
+- 长会话历史压缩: [docs/usage/guides/history_compaction.md](docs/usage/guides/history_compaction.md)

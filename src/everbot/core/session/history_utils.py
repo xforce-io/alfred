@@ -11,7 +11,7 @@ Public API:
 
 from __future__ import annotations
 
-from typing import List
+from typing import Any, Dict, List
 
 MAX_HEARTBEAT_MESSAGES = 20
 COMPACT_TOKEN_BUDGET = 40_000

@@ -1,6 +1,12 @@
 """Session persistence and lifecycle management."""
 
 from .compressor import SessionCompressor
+from .history_compaction import (
+    CompactionResult,
+    HistoryCompactionConfig,
+    HistoryCompactionPolicy,
+    resolve_history_compaction_config,
+)
 from .session_data import SessionData
 from .persistence import SessionPersistence
 from .session import SessionManager
@@ -16,6 +22,10 @@ from .session_ids import (
 
 __all__ = [
     "SessionCompressor",
+    "CompactionResult",
+    "HistoryCompactionConfig",
+    "HistoryCompactionPolicy",
+    "resolve_history_compaction_config",
     "SessionData",
     "SessionManager",
     "SessionPersistence",
