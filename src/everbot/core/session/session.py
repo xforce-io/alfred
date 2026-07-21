@@ -1033,6 +1033,7 @@ class SessionManager:
 
             # Apply to live provider history (bounded I/O)
             apply_ok = True
+            apply_failure_reason = "provider_import_failed"
             try:
                 import_fn = getattr(provider, "import_session", None)
                 if callable(import_fn):
@@ -1091,6 +1092,7 @@ class SessionManager:
                 return result
             except Exception:
                 apply_ok = False
+                apply_failure_reason = "provider_import_failed"
                 logger.warning(
                     "history_compaction apply failed (session=%s)",
                     session_id,
@@ -1102,7 +1104,7 @@ class SessionManager:
                     history=history,
                     changed=False,
                     outcome="apply_failed",
-                    reason=result.reason or "provider_import_failed",
+                    reason=apply_failure_reason,
                     before_tokens=result.before_tokens,
                     after_tokens=result.before_tokens,
                     summary_tokens=result.summary_tokens,

@@ -14,6 +14,7 @@ from src.everbot.core.agent.provider.milkie.provider import (
     MilkieAgentError,
     MilkieAgentHandle,
     MilkieProvider,
+    MilkieSessionImportConflict,
 )
 
 
@@ -1424,7 +1425,9 @@ def test_import_session_from_compacted_history_rewrites_and_imports():
             assert body == {"contextId": "c1"}
             return httpx.Response(200, json=live)
         if path.endswith("/session/import"):
-            return httpx.Response(200, json={"ok": True})
+            return httpx.Response(
+                200, json={"contextId": "c1", "conditionApplied": True}
+            )
         return httpx.Response(404, json={"error": f"unexpected {path}"})
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -1442,6 +1445,7 @@ def test_import_session_from_compacted_history_rewrites_and_imports():
     assert any(p.endswith("/session/import") for p in paths)
 
     import_body = next(c["body"] for c in calls if c["path"].endswith("/session/import"))
+    assert import_body["expectedLatestRunId"] == "run-old"
     session = import_body["session"]
     assert session["manifest"]["contextId"] == "c1"
     # New run id so append-on-import does not collide with pre-compact history.
@@ -1472,6 +1476,34 @@ def test_import_session_from_compacted_history_rewrites_and_imports():
     started = [e for e in session["events"] if e.get("type") == "agent.run.started"]
     assert started
     assert "previousRunId" not in (started[0].get("payload") or {})
+
+
+def test_import_session_sends_expected_latest_run_and_surfaces_conflict():
+    """A late compaction import must be rejected instead of rewinding a newer turn."""
+    live = _sample_portable_session(context_id="c1", run_id="run-old")
+    cap: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else {}
+        if request.url.path.endswith("/session/export"):
+            return httpx.Response(200, json=live)
+        if request.url.path.endswith("/session/import"):
+            cap["body"] = body
+            return httpx.Response(409, json={"error": "session advanced"})
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        provider = MilkieProvider("http://x", sync_client=client)
+        with pytest.raises(MilkieSessionImportConflict):
+            provider.import_session(
+                MilkieAgentHandle("http://sidecar", "c1"),
+                {"history_messages": [{"role": "user", "content": "summary"}]},
+            )
+    finally:
+        client.close()
+
+    assert cap["body"]["expectedLatestRunId"] == "run-old"
 
 
 def test_import_session_export_404_raises():

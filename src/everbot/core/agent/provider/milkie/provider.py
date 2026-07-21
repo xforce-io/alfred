@@ -28,6 +28,15 @@ from .....infra.user_data import get_user_data_manager
 
 logger = logging.getLogger(__name__)
 
+# Keep the synchronous provider request below the SessionManager's 15 s outer
+# deadline. The server-side expectedLatestRunId check is still authoritative:
+# a client disconnect cannot prove the server did not finish the import.
+_SESSION_IMPORT_HTTP_TIMEOUT_SECONDS = 14.0
+
+
+class MilkieSessionImportConflict(RuntimeError):
+    """The sidecar rejected an import because the session advanced."""
+
 
 def _milkie_data_dir(agent_name: str) -> Path:
     """该 agent 的 milkie sidecar 数据目录(= 传给 ``serve --data-dir`` 的目录,
@@ -674,12 +683,29 @@ class MilkieProvider:
         try:
             if "manifest" in portable_state:
                 session = portable_state
+                expected_latest_run_id = None
             else:
-                session = self._portable_from_compacted_history(
+                session, expected_latest_run_id = self._portable_from_compacted_history(
                     client, base, agent, portable_state
                 )
-            resp = client.post(f"{base}/session/import", json={"session": session})
+            payload = {"session": session}
+            if expected_latest_run_id:
+                payload["expectedLatestRunId"] = expected_latest_run_id
+            resp = client.post(
+                f"{base}/session/import",
+                json=payload,
+                timeout=_SESSION_IMPORT_HTTP_TIMEOUT_SECONDS,
+            )
+            if resp.status_code == 409:
+                raise MilkieSessionImportConflict(
+                    "milkie /session/import rejected stale session snapshot"
+                )
             resp.raise_for_status()
+            if expected_latest_run_id and resp.json().get("conditionApplied") is not True:
+                raise RuntimeError(
+                    "milkie /session/import lacks conditional-import support; "
+                    "refusing an unsafe history rewrite"
+                )
         finally:
             if owns:
                 client.close()
@@ -690,7 +716,7 @@ class MilkieProvider:
         base: str,
         agent: Any,
         portable_state: dict,
-    ) -> dict:
+    ) -> tuple[dict, Optional[str]]:
         """Export live portable session and rewrite history regions."""
         import copy
         import uuid
@@ -698,7 +724,11 @@ class MilkieProvider:
         context_id = getattr(agent, "context_id", None) or portable_state.get(
             "session_id"
         )
-        exp = client.post(f"{base}/session/export", json={"contextId": context_id})
+        exp = client.post(
+            f"{base}/session/export",
+            json={"contextId": context_id},
+            timeout=_SESSION_IMPORT_HTTP_TIMEOUT_SECONDS,
+        )
         if exp.status_code == 404:
             raise RuntimeError(
                 f"milkie /session/export: no session for contextId={context_id!r}"
@@ -757,7 +787,7 @@ class MilkieProvider:
             merged = dict(session.get("variables") or {})
             merged.update(variables)
             session["variables"] = merged
-        return session
+        return session, old_run_id
 
     def needs_history_restore(self) -> bool:
         return False  # serve 用 sqlite/jsonl 自持久化(#130),同 contextId 重启自动恢复

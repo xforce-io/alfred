@@ -910,7 +910,10 @@ class TestSessionManagerCompact:
                     session = body.get("session") or {}
                     self.imported.append(session)
                     self.history = _history_from_portable(session)
-                    return httpx.Response(200, json={"ok": True})
+                    return httpx.Response(
+                        200,
+                        json={"contextId": "c1", "conditionApplied": True},
+                    )
                 if path.endswith("/chat"):
                     # First LLM request base = live serve history after import.
                     self.chat_history_snapshots.append(list(self.history))
