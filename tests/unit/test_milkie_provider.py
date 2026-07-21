@@ -1301,3 +1301,194 @@ def test_agent_sandbox_no_override_follows_global(monkeypatch):
 def test_agent_sandbox_defaults_false_when_unset(monkeypatch):
     _set_cfg(monkeypatch, {"everbot": {}})
     assert provider_mod._agent_sandbox_enabled("a") is False
+
+
+# ── #166 import_session: export → rewrite history regions → /session/import ──
+
+
+def _sample_portable_session(context_id: str = "c1", run_id: str = "run-old") -> dict:
+    """Minimal milkie PortableSession with one history region in a checkpoint."""
+    return {
+        "manifest": {
+            "schemaVersion": 1,
+            "contextId": context_id,
+            "latestRunId": run_id,
+            "exportedAt": 1_700_000_000_000,
+        },
+        "events": [
+            {
+                "id": "evt-start",
+                "type": "agent.run.started",
+                "runId": run_id,
+                "payload": {"previousRunId": "run-prev", "contextId": context_id},
+            },
+            {
+                "id": "evt-cp",
+                "type": "agent.checkpoint",
+                "runId": run_id,
+                "payload": {
+                    "checkpoint": {
+                        "checkpointId": "cp-1",
+                        "context": {
+                            "regions": {
+                                "epoch": 3,
+                                "regions": [
+                                    {
+                                        "id": "header",
+                                        "section": "header",
+                                        "content": {"text": "system"},
+                                    },
+                                    {
+                                        "id": "history:turn-0",
+                                        "section": "history",
+                                        "target": "message",
+                                        "content": {
+                                            "userInput": "old bulk message " + ("x" * 200),
+                                            "assistantText": "old reply " + ("y" * 200),
+                                        },
+                                    },
+                                    {
+                                        "id": "history:turn-1",
+                                        "section": "history",
+                                        "target": "message",
+                                        "content": {
+                                            "userInput": "another old",
+                                            "assistantText": "another reply",
+                                        },
+                                    },
+                                ],
+                            }
+                        },
+                    }
+                },
+            },
+        ],
+        "variables": {"k": "v"},
+    }
+
+
+def test_import_session_with_manifest_posts_import_as_is():
+    """Native PortableSession (has manifest) is POSTed to /session/import unchanged."""
+    session = _sample_portable_session()
+    cap: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cap["url"] = str(request.url)
+        cap["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        p = MilkieProvider("http://x", sync_client=client)
+        p.import_session(MilkieAgentHandle("http://sidecar", "c1"), session)
+    finally:
+        client.close()
+
+    assert cap["url"].endswith("/session/import")
+    assert cap["body"]["session"]["manifest"]["contextId"] == "c1"
+    assert cap["body"]["session"]["manifest"]["latestRunId"] == "run-old"
+
+
+def test_import_session_from_compacted_history_rewrites_and_imports():
+    """#166 S4: alfred {history_messages} → export live portable → rewrite
+    history:turn-* regions → POST /session/import under same contextId.
+
+    Asserts the next serve history base is the compacted set (not the bulk).
+    """
+    live = _sample_portable_session(context_id="c1", run_id="run-old")
+    compacted = [
+        {"role": "user", "content": "[summary] CRITICAL_CONSTRAINT: use Python 3.11"},
+        {"role": "assistant", "content": "ack summary"},
+        {"role": "user", "content": "search the repo for open task"},
+        {
+            "role": "assistant",
+            "content": "searching",
+            "tool_calls": [
+                {
+                    "id": "tc_live",
+                    "type": "function",
+                    "function": {"name": "search", "arguments": '{"q":"open"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "tc_live", "content": "found A B C"},
+        {"role": "assistant", "content": "working on open task"},
+    ]
+    calls: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        body = json.loads(request.content) if request.content else {}
+        calls.append({"path": path, "body": body})
+        if path.endswith("/session/export"):
+            assert body == {"contextId": "c1"}
+            return httpx.Response(200, json=live)
+        if path.endswith("/session/import"):
+            return httpx.Response(200, json={"ok": True})
+        return httpx.Response(404, json={"error": f"unexpected {path}"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        p = MilkieProvider("http://x", sync_client=client)
+        p.import_session(
+            MilkieAgentHandle("http://sidecar", "c1"),
+            {"history_messages": compacted, "variables": {}, "session_id": "c1"},
+        )
+    finally:
+        client.close()
+
+    paths = [c["path"] for c in calls]
+    assert any(p.endswith("/session/export") for p in paths)
+    assert any(p.endswith("/session/import") for p in paths)
+
+    import_body = next(c["body"] for c in calls if c["path"].endswith("/session/import"))
+    session = import_body["session"]
+    assert session["manifest"]["contextId"] == "c1"
+    # New run id so append-on-import does not collide with pre-compact history.
+    assert session["manifest"]["latestRunId"] != "run-old"
+    assert str(session["manifest"]["latestRunId"]).startswith("compact-")
+
+    # Checkpoint history regions rewritten from compacted messages; bulk gone.
+    cp_events = [
+        e for e in session["events"] if e.get("type") == "agent.checkpoint"
+    ]
+    assert cp_events
+    regions = (
+        cp_events[0]["payload"]["checkpoint"]["context"]["regions"]["regions"]
+    )
+    hist_regions = [
+        r for r in regions if str(r.get("id") or "").startswith("history:turn-")
+    ]
+    # Header kept; old bulk turn content replaced.
+    assert any(r.get("id") == "header" for r in regions)
+    hist_blob = json.dumps(hist_regions, ensure_ascii=False)
+    assert "old bulk message" not in hist_blob
+    assert "CRITICAL_CONSTRAINT" in hist_blob or "Python 3.11" in hist_blob
+    assert "open task" in hist_blob.lower() or "search" in hist_blob.lower()
+    # Tool chain folded into assistant text (milkie pair regions).
+    assert "tc_live" in hist_blob or "tool_call" in hist_blob or "tool_result" in hist_blob
+
+    # previousRunId chain broken so getSessionHistory does not walk old runs.
+    started = [e for e in session["events"] if e.get("type") == "agent.run.started"]
+    assert started
+    assert "previousRunId" not in (started[0].get("payload") or {})
+
+
+def test_import_session_export_404_raises():
+    """Missing serve session must raise so apply_failed is observable upstream."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/session/export"):
+            return httpx.Response(404, json={"error": "not found"})
+        return httpx.Response(500, json={"error": "unexpected"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        p = MilkieProvider("http://x", sync_client=client)
+        with pytest.raises(RuntimeError, match="no session"):
+            p.import_session(
+                MilkieAgentHandle("http://sidecar", "missing"),
+                {"history_messages": [{"role": "user", "content": "x"}]},
+            )
+    finally:
+        client.close()

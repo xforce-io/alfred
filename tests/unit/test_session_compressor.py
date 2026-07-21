@@ -89,21 +89,36 @@ class TestFormatMessages:
         assert "用户: 你好" in text
         assert "助手: 你好！" in text
 
-    def test_skips_tool_messages(self):
+    def test_includes_tool_messages_and_calls(self):
+        """#166 F-004: tool conclusions must enter the summary prompt."""
         msgs = [
             {"role": "user", "content": "搜索"},
-            {"role": "assistant", "content": "ok", "tool_calls": [{"id": "1"}]},
-            {"role": "tool", "content": "result", "tool_call_id": "1"},
+            {
+                "role": "assistant",
+                "content": "ok",
+                "tool_calls": [
+                    {
+                        "id": "1",
+                        "type": "function",
+                        "function": {"name": "search", "arguments": '{"q":"x"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "content": "TOOL_FACT_ABC", "tool_call_id": "1"},
             {"role": "assistant", "content": "结果"},
         ]
         text = _format_messages_for_prompt(msgs)
-        assert "tool" not in text.lower()
-        assert "result" not in text
+        assert "TOOL_FACT_ABC" in text
+        assert "search" in text
+        assert "工具结果" in text
 
-    def test_truncation(self):
-        msgs = [{"role": "user", "content": "a" * 5000} for _ in range(10)]
+    def test_truncation_covers_tail_not_prefix_only(self):
+        """Over budget: head+tail packing retains late lines (F-004)."""
+        msgs = [{"role": "user", "content": f"early-{i} " + ("a" * 400)} for i in range(20)]
+        msgs.append({"role": "user", "content": "LATE_CONSTRAINT_Z9 use Python 3.11"})
         text = _format_messages_for_prompt(msgs, max_chars=8000)
         assert "省略" in text
+        assert "LATE_CONSTRAINT_Z9" in text
 
 
 # ── Threshold / compression logic tests ──────────────────────────────

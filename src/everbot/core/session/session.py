@@ -13,10 +13,19 @@ from contextlib import asynccontextmanager
 import logging
 
 from .compressor import SessionCompressor
+from .history_compaction import (
+    CompactionResult,
+    HistoryCompactionPolicy,
+    resolve_history_compaction_config,
+)
 from . import session_ids as _sid
 from . import session_mailbox as _mailbox
 
 logger = logging.getLogger(__name__)
+
+# Bound provider export/import during pre-turn compaction so a stalled
+# sidecar cannot block the event loop forever (issue #166 / review F-007).
+_COMPACTION_PROVIDER_IO_TIMEOUT_SECONDS = 15.0
 
 
 # Re-export SessionData for backward compatibility
@@ -369,14 +378,29 @@ class SessionManager:
         timeout: float = 10.0,
         blocking: bool = True,
         bump_updated_at: bool = True,
+        lock_already_held: bool = False,
     ) -> Optional[SessionData]:
         """Atomic read-modify-write with dual-layer locking.
 
         Layer 1: asyncio.Lock (in-process, reduces contention among coroutines).
         Layer 2: fcntl.flock (cross-process, protects daemon vs web).
 
+        When the caller already holds both locks (e.g. core_service chat turn),
+        pass ``lock_already_held=True`` to skip re-acquisition and avoid
+        self-deadlock on the non-reentrant asyncio lock / flock.
+
         Returns updated SessionData on success, None if lock not acquired.
         """
+        if lock_already_held:
+            return await self.persistence.update_atomic(
+                session_id,
+                mutator,
+                timeout=timeout,
+                blocking=blocking,
+                bump_updated_at=bump_updated_at,
+                lock_already_held=True,
+            )
+
         lock = self._get_lock(session_id)
         wait_started = time.perf_counter()
         try:
@@ -575,15 +599,34 @@ class SessionManager:
         created_at_hint = provider.get_variable(agent, "session_created_at")
 
         # Compress history for long-lived sessions before entering the lock.
-        if (
-            SessionManager.infer_session_type(session_id) in ("primary", "channel")
-            and provider.needs_history_restore()
-        ):
-            # dolphin: 进程内 history 压缩(需 context)。
-            # milkie: serve 返回全量 history,无 in-process 压缩。
+        # Shared policy for all providers (milkie included); applies to alfred mirror.
+        if SessionManager.infer_session_type(session_id) in ("primary", "channel"):
             try:
-                compressor = SessionCompressor(agent.executor.context)
-                serializable_history = await compressor.compress_history(serializable_history)
+                from ...infra.config import get_config
+                from .history_utils import _estimate_tokens, _is_heartbeat, _is_placeholder
+
+                agent_name = getattr(agent, "name", "") or ""
+                cfg = resolve_history_compaction_config(get_config(), agent_name)
+                chat_est = [
+                    m for m in serializable_history
+                    if isinstance(m, dict)
+                    and not _is_heartbeat(m)
+                    and not _is_placeholder(m)
+                ]
+                if cfg.enabled and _estimate_tokens(chat_est) > cfg.trigger_tokens:
+                    compressor = SessionCompressor(
+                        getattr(getattr(agent, "executor", None), "context", None),
+                        max_summary_tokens=cfg.max_summary_tokens,
+                    )
+                    policy = HistoryCompactionPolicy()
+                    result = await policy.ensure_within_budget(
+                        serializable_history, cfg, summarize=compressor
+                    )
+                    if result.changed:
+                        serializable_history = result.history
+                        self._emit_compaction_event(
+                            session_id, result, provider_name=type(provider).__name__
+                        )
             except Exception:
                 logger.warning("History compression failed; saving uncompressed", exc_info=True)
 
@@ -858,6 +901,7 @@ class SessionManager:
             - tool_output: 工具输出返回
             - skill: Skill 执行
             - turn_end: 本轮处理结束
+            - history_compaction: long-session history budget apply (#166)
         """
         with self._timeline_lock:
             if session_id not in self._timeline_events:
@@ -867,6 +911,279 @@ class SessionManager:
             # 防止内存泄漏：超过上限时移除最早的事件
             if len(events) > self.MAX_TIMELINE_EVENTS:
                 self._timeline_events[session_id] = events[-self.MAX_TIMELINE_EVENTS:]
+
+    def _emit_compaction_event(
+        self,
+        session_id: str,
+        result: CompactionResult,
+        *,
+        provider_name: str = "",
+    ) -> None:
+        """Write history_compaction timeline + log (no history body)."""
+        if result.outcome == "skipped" and not result.changed:
+            return
+        event = result.to_event_payload(provider=provider_name, session_id=session_id)
+        self.append_timeline_event(session_id, event)
+        logger.info(
+            "history_compaction session=%s outcome=%s before_tokens=%s after_tokens=%s "
+            "summary_tokens=%s retained_messages=%s reason=%s provider=%s",
+            session_id,
+            result.outcome,
+            result.before_tokens,
+            result.after_tokens,
+            result.summary_tokens,
+            result.retained_messages,
+            result.reason,
+            provider_name,
+        )
+
+    async def maybe_compact_session_history(
+        self,
+        agent: Any,
+        session_id: str,
+        agent_name: str,
+        *,
+        config: Optional[Dict[str, Any]] = None,
+        lock_already_held: bool = False,
+    ) -> CompactionResult:
+        """Pre-turn history compaction: export → policy → apply → persist mirror.
+
+        Never raises into the chat path: failures become ``kept_original`` /
+        ``apply_failed`` outcomes with timeline observability (S5).
+
+        When invoked from a chat turn that already holds the session lock
+        (core_service), pass ``lock_already_held=True`` so the atomic mirror
+        write does not re-enter the non-reentrant lock.
+        """
+        from ..agent.provider import provider_for
+        from ...infra.config import get_config
+
+        cfg = resolve_history_compaction_config(
+            config if config is not None else get_config(),
+            agent_name,
+        )
+        empty = CompactionResult(
+            history=[],
+            changed=False,
+            outcome="skipped",
+            reason="no_history",
+            before_tokens=0,
+            after_tokens=0,
+            summary_tokens=0,
+            retained_messages=0,
+        )
+        # Gate before any provider I/O — disabled sessions must not export.
+        if not cfg.enabled:
+            empty.outcome = "skipped"
+            empty.reason = "disabled"
+            return empty
+
+        try:
+            provider = provider_for(agent)
+            provider_name = type(provider).__name__
+            try:
+                # Off-loop + hard deadline: milkie sync client uses timeout=None.
+                portable = await asyncio.wait_for(
+                    asyncio.to_thread(provider.export_session, agent),
+                    timeout=_COMPACTION_PROVIDER_IO_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "history_compaction export timed out after %.1fs (session=%s)",
+                    _COMPACTION_PROVIDER_IO_TIMEOUT_SECONDS,
+                    session_id,
+                )
+                empty.reason = "export_timeout"
+                empty.outcome = "kept_original"
+                self._emit_compaction_event(
+                    session_id, empty, provider_name=provider_name
+                )
+                return empty
+            except Exception as exc:
+                logger.warning(
+                    "history_compaction export failed (session=%s): %s",
+                    session_id,
+                    exc,
+                )
+                empty.reason = f"export_failed:{exc}"[:200]
+                empty.outcome = "kept_original"
+                self._emit_compaction_event(session_id, empty, provider_name=provider_name)
+                return empty
+
+            history = list(portable.get("history_messages") or [])
+            if not history:
+                return empty
+
+            compressor = SessionCompressor(
+                getattr(getattr(agent, "executor", None), "context", None),
+                max_summary_tokens=cfg.max_summary_tokens,
+            )
+            policy = HistoryCompactionPolicy()
+            result = await policy.ensure_within_budget(
+                history, cfg, summarize=compressor
+            )
+
+            if not result.changed:
+                # Still emit fail-closed outcomes for observability
+                if result.outcome not in ("skipped",):
+                    self._emit_compaction_event(
+                        session_id, result, provider_name=provider_name
+                    )
+                return result
+
+            # Apply to live provider history (bounded I/O)
+            apply_ok = True
+            try:
+                import_fn = getattr(provider, "import_session", None)
+                if callable(import_fn):
+                    await asyncio.wait_for(
+                        asyncio.to_thread(
+                            import_fn,
+                            agent,
+                            {
+                                "history_messages": result.history,
+                                "variables": portable.get("variables") or {},
+                                "session_id": session_id,
+                            },
+                        ),
+                        timeout=_COMPACTION_PROVIDER_IO_TIMEOUT_SECONDS,
+                    )
+                else:
+                    # Fallback: process-local history variable when present
+                    from ...infra.dolphin_compat import KEY_HISTORY
+
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(
+                                provider.set_variable,
+                                agent,
+                                KEY_HISTORY,
+                                result.history,
+                            ),
+                            timeout=_COMPACTION_PROVIDER_IO_TIMEOUT_SECONDS,
+                        )
+                    except Exception:
+                        apply_ok = False
+                        logger.warning(
+                            "history_compaction apply fallback set_variable failed",
+                            exc_info=True,
+                        )
+            except asyncio.TimeoutError:
+                apply_ok = False
+                logger.warning(
+                    "history_compaction apply timed out after %.1fs (session=%s)",
+                    _COMPACTION_PROVIDER_IO_TIMEOUT_SECONDS,
+                    session_id,
+                )
+                result = CompactionResult(
+                    history=history,
+                    changed=False,
+                    outcome="apply_failed",
+                    reason="import_timeout",
+                    before_tokens=result.before_tokens,
+                    after_tokens=result.before_tokens,
+                    summary_tokens=result.summary_tokens,
+                    retained_messages=len(history),
+                )
+                self._emit_compaction_event(
+                    session_id, result, provider_name=provider_name
+                )
+                return result
+            except Exception:
+                apply_ok = False
+                logger.warning(
+                    "history_compaction apply failed (session=%s)",
+                    session_id,
+                    exc_info=True,
+                )
+
+            if not apply_ok:
+                result = CompactionResult(
+                    history=history,
+                    changed=False,
+                    outcome="apply_failed",
+                    reason=result.reason or "provider_import_failed",
+                    before_tokens=result.before_tokens,
+                    after_tokens=result.before_tokens,
+                    summary_tokens=result.summary_tokens,
+                    retained_messages=len(history),
+                )
+                self._emit_compaction_event(
+                    session_id, result, provider_name=provider_name
+                )
+                return result
+
+            # Persist alfred session mirror (history + timeline) without re-export.
+            # Must use lock_already_held when the chat turn already owns the locks.
+            persist_ok = True
+            try:
+                def _mutator(session_data: SessionData) -> None:
+                    session_data.history_messages = list(result.history)
+                    meta = dict(session_data.variables or {})
+                    meta["_history_compaction"] = {
+                        "outcome": result.outcome,
+                        "before_tokens": result.before_tokens,
+                        "after_tokens": result.after_tokens,
+                        "summary_tokens": result.summary_tokens,
+                    }
+                    session_data.variables = meta
+
+                updated = await self.update_atomic(
+                    session_id,
+                    _mutator,
+                    timeout=10.0,
+                    blocking=True,
+                    lock_already_held=lock_already_held,
+                )
+                if updated is None:
+                    persist_ok = False
+                    logger.warning(
+                        "history_compaction persist mirror failed (session=%s): "
+                        "lock not acquired (lock_already_held=%s)",
+                        session_id,
+                        lock_already_held,
+                    )
+            except Exception:
+                persist_ok = False
+                logger.warning(
+                    "history_compaction persist mirror failed (session=%s)",
+                    session_id,
+                    exc_info=True,
+                )
+
+            if not persist_ok:
+                # Live provider already has compacted history; mirror write failed.
+                # Keep changed=True so chat continues on reduced base, but mark
+                # outcome for observability (do not silently claim full success).
+                result = CompactionResult(
+                    history=result.history,
+                    changed=True,
+                    outcome="persist_failed",
+                    reason=result.reason or "atomic_mirror_write_failed",
+                    before_tokens=result.before_tokens,
+                    after_tokens=result.after_tokens,
+                    summary_tokens=result.summary_tokens,
+                    retained_messages=result.retained_messages,
+                )
+
+            self._emit_compaction_event(
+                session_id, result, provider_name=provider_name
+            )
+            return result
+        except Exception as exc:
+            logger.warning(
+                "history_compaction unexpected failure (session=%s): %s",
+                session_id,
+                exc,
+                exc_info=True,
+            )
+            empty.outcome = "kept_original"
+            empty.reason = f"unexpected:{exc}"[:200]
+            try:
+                self._emit_compaction_event(session_id, empty, provider_name="")
+            except Exception:
+                pass
+            return empty
 
     def get_timeline(self, session_id: str) -> list:
         """Get in-memory timeline events for a session."""

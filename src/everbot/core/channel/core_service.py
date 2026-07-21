@@ -415,6 +415,24 @@ class ChannelCoreService:
             _prior_failures = self._session_failure_memory.get(session_id, {})
             _turn_orchestrator = TurnOrchestrator(_turn_policy, prior_failures=_prior_failures)
 
+            # #166: pre-turn history compaction — reduce fixed history base before
+            # the first LLM request. Failures never block chat (S5).
+            # lock_already_held: this turn already owns in-process + flock locks.
+            try:
+                await self.session_manager.maybe_compact_session_history(
+                    agent,
+                    session_id,
+                    agent_name,
+                    config=get_config(),
+                    lock_already_held=True,
+                )
+            except Exception:
+                logger.warning(
+                    "Pre-turn history compaction failed (session=%s); continuing chat",
+                    session_id,
+                    exc_info=True,
+                )
+
             async for te in _turn_orchestrator.run_turn(
                 agent,
                 effective_message,

@@ -26,6 +26,15 @@ everbot:
     job_cleanup_interval_seconds: 600  # 清理轮询间隔（秒）
     scheduler_cron_jobs: true       # true=inline/isolated 分流；false=回退 heartbeat 统一执行
 
+  # 长会话历史压缩（#166）：chat turn 首轮 LLM 前按 token 预算摘要+安全窗口。
+  # 关闭风险：长会话每轮 input 底座回到全量，易超时/触顶。详见 docs/usage/guides/history_compaction.md
+  # session:
+  #   history_compaction:
+  #     enabled: true
+  #     trigger_tokens: 40000
+  #     target_recent_tokens: 20000
+  #     max_summary_tokens: 2000
+
   # Channel 配置
   channels:
     telegram:
