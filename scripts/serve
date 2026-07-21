@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# alfred / EverBot 本地 Web 启停（与 researcher/kairo/petri 统一的本仓入口）
+#
+# 用法:
+#   ./scripts/serve start|stop|status|logs|restart
+#
+# 实现委托 bin/everbot（已有 nohup、pid 文件、端口占用检测、日志目录）。
+# 本脚本只统一子命令与日志路径展示，不重复造 daemon。
+#
+# 环境变量（可选，透传 everbot）:
+#   ALFRED_HOME          默认 ~/.alfred
+#   EVERBOT_WEB_PORT     若设置则作为 --web-port（默认 8765）
+set -euo pipefail
+
+NAME=alfred
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+EVERBOT="$REPO_ROOT/bin/everbot"
+ALFRED_HOME="${ALFRED_HOME:-$HOME/.alfred}"
+LOG_DIR="${ALFRED_HOME}/logs"
+WEB_OUT="${LOG_DIR}/everbot-web.out"
+WEB_ERR="${LOG_DIR}/everbot.err"
+DAEMON_OUT="${LOG_DIR}/everbot.out"
+WEB_PORT="${EVERBOT_WEB_PORT:-8765}"
+
+if [[ ! -x "$EVERBOT" && -f "$EVERBOT" ]]; then
+  chmod +x "$EVERBOT" 2>/dev/null || true
+fi
+if [[ ! -f "$EVERBOT" ]]; then
+  echo "error: missing $EVERBOT" >&2
+  exit 1
+fi
+
+cmd_start() {
+  local args=(start)
+  if [[ -n "${EVERBOT_WEB_PORT:-}" ]]; then
+    args+=(--web-port "$EVERBOT_WEB_PORT")
+  fi
+  # everbot start: nohup daemon + web，写 pid / logs
+  (cd "$REPO_ROOT" && "$EVERBOT" "${args[@]}")
+  printf '  log(web): %s\n' "$WEB_OUT"
+  printf '  url:      http://127.0.0.1:%s/\n' "$WEB_PORT"
+}
+
+cmd_stop() {
+  (cd "$REPO_ROOT" && "$EVERBOT" stop)
+}
+
+cmd_status() {
+  (cd "$REPO_ROOT" && "$EVERBOT" status) || true
+  printf '  log(web):    %s\n' "$WEB_OUT"
+  printf '  log(err):    %s\n' "$WEB_ERR"
+  printf '  log(daemon): %s\n' "$DAEMON_OUT"
+  printf '  url:         http://127.0.0.1:%s/\n' "$WEB_PORT"
+}
+
+cmd_logs() {
+  local n="${1:-40}"
+  local any=0
+  for path_tag in "$WEB_OUT|" "$WEB_ERR| [err]" "$DAEMON_OUT| [daemon]"; do
+    local path="${path_tag%%|*}"
+    local tag="${path_tag#*|}"
+    if [[ -f "$path" ]]; then
+      any=1
+      printf '── %s%s (last %s lines) ──\n' "$path" "$tag" "$n"
+      tail -n "$n" "$path"
+      echo
+    else
+      printf '·· %s (missing)\n' "$path"
+    fi
+  done
+  if [[ "$any" -eq 0 ]]; then
+    echo "no log files yet under $LOG_DIR"
+    echo "  tip: ./scripts/serve start  (via bin/everbot, nohup + pid)"
+  fi
+}
+
+cmd_restart() {
+  cmd_stop || true
+  cmd_start
+}
+
+usage() {
+  cat <<EOF
+$NAME / EverBot web control (repo-local, delegates to bin/everbot)
+
+  $(basename "$0") start|stop|status|logs|restart
+
+  Robustness: pid files, nohup, port conflict checks live in bin/everbot.
+  logs: $WEB_OUT
+EOF
+}
+
+main() {
+  local cmd="${1:-status}"
+  shift || true
+  case "$cmd" in
+    start)   cmd_start ;;
+    stop)    cmd_stop ;;
+    status)  cmd_status ;;
+    logs)    cmd_logs "${1:-40}" ;;
+    restart) cmd_restart ;;
+    -h|--help|help) usage ;;
+    *) echo "unknown: $cmd" >&2; usage >&2; exit 1 ;;
+  esac
+}
+
+main "$@"
