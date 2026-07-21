@@ -298,3 +298,76 @@ async def test_process_message_stops_on_repeated_tool_failures():
     )
     assert websocket.sent[-1]["type"] == "end"
     service.session_manager.save_session.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Issue #168: Web idle gate must bypass deferred_result
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_deferred_result_bypasses_web_idle_gate():
+    """S2: deferred_result must be pushed even when last_activity is within 20s.
+
+    Soft-timeout users are necessarily "active"; the idle gate would otherwise
+    drop the +N-second deferred final that arrives after timeout.
+    """
+    import time
+    from unittest.mock import MagicMock
+
+    service = ChatService.__new__(ChatService)
+    service._active_connections = {}
+    service._connections_by_agent = {}
+    service._last_activity = {}
+    service._last_agent_broadcast = {}
+    service._bootstrap_locks = {}
+
+    sid = "web_session_demo_agent"
+    ws = _DummyWebSocket()
+    service._active_connections[sid] = {ws}
+    # Simulate recent user activity (within idle window)
+    service._last_activity[sid] = time.time()
+
+    payload = {
+        "detail": "FINAL after timeout",
+        "source_type": "deferred_result",
+        "deliver": True,
+        "scope": "session",
+        "target_session_id": sid,
+        "target_channel": "web",
+        "agent_name": "demo_agent",
+        "run_id": "chat_abc123",
+    }
+    await service._on_background_event(sid, payload)
+    assert ws.sent, "deferred_result must bypass idle gate and be pushed to WS"
+    assert ws.sent[0]["source_type"] == "deferred_result"
+    assert "FINAL after timeout" in ws.sent[0]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_non_bypass_source_still_idle_gated():
+    """Control: ordinary session-scope events remain idle-gated within 20s."""
+    import time
+
+    service = ChatService.__new__(ChatService)
+    service._active_connections = {}
+    service._connections_by_agent = {}
+    service._last_activity = {}
+    service._last_agent_broadcast = {}
+    service._bootstrap_locks = {}
+
+    sid = "web_session_demo_agent"
+    ws = _DummyWebSocket()
+    service._active_connections[sid] = {ws}
+    service._last_activity[sid] = time.time()
+
+    payload = {
+        "detail": "should be gated",
+        "source_type": "inspector_push",
+        "deliver": True,
+        "scope": "session",
+        "target_session_id": sid,
+        "target_channel": "web",
+        "agent_name": "demo_agent",
+    }
+    await service._on_background_event(sid, payload)
+    assert not ws.sent, "non-bypass source_type must still be idle-gated"

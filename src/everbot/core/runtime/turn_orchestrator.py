@@ -35,6 +35,14 @@ from .turn_policy import (  # noqa: F401 — re-exported
 logger = logging.getLogger(__name__)
 
 
+class SoftTimeoutError(asyncio.TimeoutError):
+    """Foreground soft-timeout raised only by :func:`_timeout_wrapper`.
+
+    Distinct from agent/tool/provider ``TimeoutError`` so channel UX can promise
+    deferred-drain delivery only when drain was actually started (issue #168).
+    """
+
+
 def _progress_fingerprint(progress: Dict[str, Any]) -> str:
     """Build a stable fingerprint for one progress item.
 
@@ -87,6 +95,25 @@ def _progress_fingerprint(progress: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 # Helpers (stateless, extracted from ChatService)
 # ---------------------------------------------------------------------------
+
+# Framework-internal tools hidden from user-visible channels (Telegram hides
+# these in skill progress UI). They must not count toward tool_call_count so
+# timeline turn_end.N matches "N commands executed" (issue #168 / S3).
+USER_HIDDEN_INTERNAL_TOOLS = frozenset({
+    "_load_resource_skill",
+    "_read_skill_asset",
+})
+
+
+def _counts_toward_tool_call_budget(tool_name: str, policy: TurnPolicy) -> bool:
+    """Return True if *tool_name* should increment user-visible tool_call_count."""
+    name = tool_name or ""
+    if name in USER_HIDDEN_INTERNAL_TOOLS:
+        return False
+    if name in policy.budget_exempt_tools:
+        return False
+    return True
+
 
 def _is_retryable(exc: Exception, markers: List[str]) -> bool:
     # Turn-level timeouts are NOT transient network errors — retrying would
@@ -640,109 +667,321 @@ class TurnOrchestrator:
             window = _recent_fps[-_LOOP_WINDOW:]
             return len(set(window)) <= 3
 
-        async for event in event_stream:
-            # External cancellation — emit partial results instead of
-            # discarding all work done so far.
-            if cancel_event is not None and cancel_event.is_set():
-                estimated_tokens = max(1, output_chars // 4) if output_chars > 0 else 0
-                yield TurnEvent(
-                    type=TurnEventType.TURN_COMPLETE,
-                    answer=_last_round_response or response or last_successful_tool_output,
-                    tool_call_count=tool_call_count,
-                    tool_execution_count=tool_execution_count,
-                    tool_names_executed=list(tool_names_executed),
-                    failed_tool_outputs=failed_tool_outputs,
-                    output_tokens=estimated_tokens,
-                    status="cancelled",
-                )
-                return
+        def _timeout_error_event(exc: BaseException, *, soft: bool) -> TurnEvent:
+            """Build TURN_ERROR for timeout with stats accumulated so far.
 
-            if not isinstance(event, dict) or "_progress" not in event:
-                non_progress_count += 1
-                if non_progress_count >= policy.max_non_progress_events:
+            Soft-timeout (from ``_timeout_wrapper``) sets ``status="timeout"`` so
+            channels can show deferred-drain UX. Other TimeoutError sources must
+            not set that marker (issue #168 / F-006).
+            """
+            err_msg = str(exc).strip() or "Turn timeout"
+            if "timeout" not in err_msg.lower():
+                err_msg = f"Turn timeout: {err_msg}"
+            return TurnEvent(
+                type=TurnEventType.TURN_ERROR,
+                error=err_msg,
+                status="timeout" if soft else "error",
+                answer=_last_round_response or response,
+                tool_call_count=tool_call_count,
+                tool_execution_count=tool_execution_count,
+                tool_names_executed=list(tool_names_executed),
+                failed_tool_outputs=failed_tool_outputs,
+            )
+
+        try:
+            async for event in event_stream:
+                # External cancellation — emit partial results instead of
+                # discarding all work done so far.
+                if cancel_event is not None and cancel_event.is_set():
+                    estimated_tokens = max(1, output_chars // 4) if output_chars > 0 else 0
                     yield TurnEvent(
-                        type=TurnEventType.TURN_ERROR,
-                        error="TOO_MANY_NON_PROGRESS_EVENTS",
+                        type=TurnEventType.TURN_COMPLETE,
+                        answer=_last_round_response or response or last_successful_tool_output,
+                        tool_call_count=tool_call_count,
+                        tool_execution_count=tool_execution_count,
+                        tool_names_executed=list(tool_names_executed),
+                        failed_tool_outputs=failed_tool_outputs,
+                        output_tokens=estimated_tokens,
+                        status="cancelled",
                     )
                     return
-                continue
 
-            non_progress_count = 0
-            for progress in event.get("_progress", []):
-                stage = progress.get("stage")
-                # LLM deltas are token-level increments: the provider streams each
-                # token exactly once, and identical token text (spaces, digits, URL
-                # fragments, emoji, repeated words) recurs constantly. Content-based
-                # dedup — meant for legacy providers that resent the full accumulated
-                # _progress list on every event — would silently drop those repeats
-                # and corrupt the streamed text (regression: "共6篇"→"共篇",
-                # ".../abs/2606.04923"→"abs93", papers merged). Never dedup llm deltas;
-                # round boundaries are handled by LLM_ROUND_RESET, not by fingerprints.
-                if stage != "llm":
-                    progress_fp = _progress_fingerprint(progress)
-                    if progress_fp in seen_progress_fingerprints:
-                        continue
-                    seen_progress_fingerprints.add(progress_fp)
-                pid = progress.get("id") or ""
-                status = progress.get("status") or ""
+                if not isinstance(event, dict) or "_progress" not in event:
+                    non_progress_count += 1
+                    if non_progress_count >= policy.max_non_progress_events:
+                        yield TurnEvent(
+                            type=TurnEventType.TURN_ERROR,
+                            error="TOO_MANY_NON_PROGRESS_EVENTS",
+                        )
+                        return
+                    continue
 
-                if stage == "llm":
-                    delta = progress.get("delta", "")
-                    answer = progress.get("answer", "")
-                    think = progress.get("think", "")
-                    output_chars += len(delta) + len(think)
-                    if delta:
-                        if not llm_started:
-                            llm_started = True
-                        llm_had_output_this_round = True
-                        consecutive_empty_llm_rounds = 0
-                        consecutive_think_only_rounds = 0
-                        response += delta
-                        _last_round_response += delta
-                        _round_text += delta
-                        yield TurnEvent(type=TurnEventType.LLM_DELTA, content=delta)
-                    if answer and not response:
-                        response = answer
-                        if not llm_started:
-                            llm_started = True
-                        llm_had_output_this_round = True
-                        consecutive_empty_llm_rounds = 0
-                        consecutive_think_only_rounds = 0
-                    # Reasoning output (think) means the model is actively
-                    # working, but it is NOT user-visible text.  We track it
-                    # separately: a few think-only rounds are normal (model
-                    # reasons before calling a tool), but sustained think-only
-                    # rounds with no visible delta indicate a loop.
-                    if think and not llm_had_output_this_round:
-                        llm_had_think_this_round = True
-
-                elif stage == "skill":
-                    if pid and sent_progress.get(pid) == status:
-                        continue
-                    skill_info = progress.get("skill_info") or {}
-                    s_name = skill_info.get("name") or progress.get("tool_name") or ""
-                    s_args = skill_info.get("args") or progress.get("args") or ""
-                    s_output = progress.get("answer") or progress.get("block_answer") or progress.get("output") or ""
-
-                    fail_sig = None  # set in completed/failed branch below
-
-                    if status in ("running", "processing"):
-                        # Identical repeat of an idempotent meta-tool → drop as a
-                        # no-op: no budget, no intent counting, no emit.
-                        if _is_idempotent_noop(s_name, s_args):
+                non_progress_count = 0
+                for progress in event.get("_progress", []):
+                    stage = progress.get("stage")
+                    # LLM deltas are token-level increments: the provider streams each
+                    # token exactly once, and identical token text (spaces, digits, URL
+                    # fragments, emoji, repeated words) recurs constantly. Content-based
+                    # dedup — meant for legacy providers that resent the full accumulated
+                    # _progress list on every event — would silently drop those repeats
+                    # and corrupt the streamed text (regression: "共6篇"→"共篇",
+                    # ".../abs/2606.04923"→"abs93", papers merged). Never dedup llm deltas;
+                    # round boundaries are handled by LLM_ROUND_RESET, not by fingerprints.
+                    if stage != "llm":
+                        progress_fp = _progress_fingerprint(progress)
+                        if progress_fp in seen_progress_fingerprints:
                             continue
-                        # A *novel* tool call means the round made progress: tool-use
-                        # native models legitimately call tools without any narration
-                        # text, so "tool call + no text" is NOT a degradation signal on
-                        # its own. Only a text-less round that ALSO makes no progress
-                        # (a repeated tool intent — going in circles) counts toward the
-                        # empty/think-only loop guards. Repeated intents are additionally
-                        # bounded by the intent-dedup guard below, and distinct runaway
-                        # calls by the tool-call budget. (Fixes EMPTY_OUTPUT_LOOP false
-                        # positives on legitimate multi-step skill workflows; a genuine
-                        # empty LLM response under the streaming model ends the turn
-                        # rather than looping back here.)
-                        intent_sig = _extract_tool_intent_signature(s_name, s_args)
+                        seen_progress_fingerprints.add(progress_fp)
+                    pid = progress.get("id") or ""
+                    status = progress.get("status") or ""
+
+                    if stage == "llm":
+                        delta = progress.get("delta", "")
+                        answer = progress.get("answer", "")
+                        think = progress.get("think", "")
+                        output_chars += len(delta) + len(think)
+                        if delta:
+                            if not llm_started:
+                                llm_started = True
+                            llm_had_output_this_round = True
+                            consecutive_empty_llm_rounds = 0
+                            consecutive_think_only_rounds = 0
+                            response += delta
+                            _last_round_response += delta
+                            _round_text += delta
+                            yield TurnEvent(type=TurnEventType.LLM_DELTA, content=delta)
+                        if answer and not response:
+                            response = answer
+                            if not llm_started:
+                                llm_started = True
+                            llm_had_output_this_round = True
+                            consecutive_empty_llm_rounds = 0
+                            consecutive_think_only_rounds = 0
+                        # Reasoning output (think) means the model is actively
+                        # working, but it is NOT user-visible text.  We track it
+                        # separately: a few think-only rounds are normal (model
+                        # reasons before calling a tool), but sustained think-only
+                        # rounds with no visible delta indicate a loop.
+                        if think and not llm_had_output_this_round:
+                            llm_had_think_this_round = True
+
+                    elif stage == "skill":
+                        if pid and sent_progress.get(pid) == status:
+                            continue
+                        skill_info = progress.get("skill_info") or {}
+                        s_name = skill_info.get("name") or progress.get("tool_name") or ""
+                        s_args = skill_info.get("args") or progress.get("args") or ""
+                        s_output = progress.get("answer") or progress.get("block_answer") or progress.get("output") or ""
+
+                        fail_sig = None  # set in completed/failed branch below
+
+                        if status in ("running", "processing"):
+                            # Identical repeat of an idempotent meta-tool → drop as a
+                            # no-op: no budget, no intent counting, no emit.
+                            if _is_idempotent_noop(s_name, s_args):
+                                continue
+                            # A *novel* tool call means the round made progress: tool-use
+                            # native models legitimately call tools without any narration
+                            # text, so "tool call + no text" is NOT a degradation signal on
+                            # its own. Only a text-less round that ALSO makes no progress
+                            # (a repeated tool intent — going in circles) counts toward the
+                            # empty/think-only loop guards. Repeated intents are additionally
+                            # bounded by the intent-dedup guard below, and distinct runaway
+                            # calls by the tool-call budget. (Fixes EMPTY_OUTPUT_LOOP false
+                            # positives on legitimate multi-step skill workflows; a genuine
+                            # empty LLM response under the streaming model ends the turn
+                            # rather than looping back here.)
+                            intent_sig = _extract_tool_intent_signature(s_name, s_args)
+                            made_progress = bool(intent_sig) and tool_intent_signatures.get(intent_sig, 0) == 0
+                            if made_progress:
+                                consecutive_empty_llm_rounds = 0
+                                consecutive_think_only_rounds = 0
+                            else:
+                                # Empty-output loop detection (only when not progressing)
+                                err = self._check_empty_output_loop(
+                                    llm_had_output_this_round, llm_had_think_this_round,
+                                    tool_execution_count,
+                                    consecutive_empty_llm_rounds, consecutive_think_only_rounds,
+                                    response,
+                                    tool_call_count, tool_names_executed, failed_tool_outputs,
+                                )
+                                if err:
+                                    _flush_trajectory()
+                                    yield err
+                                    return
+                            # Repeated-text loop detection
+                            if tool_execution_count > 0 and _check_round_text_loop():
+                                _flush_trajectory()
+                                yield TurnEvent(
+                                    type=TurnEventType.TURN_ERROR,
+                                    error=f"REPEATED_TEXT_LOOP: {len(_recent_fps)} rounds with {len(set(_recent_fps[-_LOOP_WINDOW:]))} distinct outputs in last {_LOOP_WINDOW}",
+                                    answer=response, tool_call_count=tool_call_count,
+                                    tool_execution_count=tool_execution_count,
+                                    tool_names_executed=list(tool_names_executed),
+                                    failed_tool_outputs=failed_tool_outputs,
+                                )
+                                return
+                            if not made_progress and not llm_had_output_this_round and tool_execution_count > 0:
+                                if llm_had_think_this_round:
+                                    consecutive_think_only_rounds += 1
+                                else:
+                                    consecutive_empty_llm_rounds += 1
+                            # Emit round reset when a new tool call follows LLM output,
+                            # so channel consumers can discard intermediate text.
+                            if llm_had_output_this_round and _last_round_response:
+                                yield TurnEvent(type=TurnEventType.LLM_ROUND_RESET)
+                                _last_round_response = ""
+                            llm_had_output_this_round = False
+                            llm_had_think_this_round = False
+
+                            # Skill invocation → count as tool call (unless exempt /
+                            # user-hidden internal resource loaders).
+                            if _counts_toward_tool_call_budget(s_name, policy):
+                                tool_call_count += 1
+                            if tool_call_count > policy.max_tool_calls:
+                                yield TurnEvent(
+                                    type=TurnEventType.TURN_ERROR,
+                                    error=f"TOOL_CALL_BUDGET_EXCEEDED: tool_calls={tool_call_count}, limit={policy.max_tool_calls}",
+                                    answer=response,
+                                    tool_call_count=tool_call_count,
+                                    tool_execution_count=tool_execution_count,
+                                    tool_names_executed=list(tool_names_executed),
+                                    failed_tool_outputs=failed_tool_outputs,
+                                )
+                                return
+
+                            # Intent dedup check (intent_sig computed above)
+                            err = self._check_intent_dedup(
+                                intent_sig, tool_intent_signatures, warned_intents,
+                                response, tool_call_count, tool_execution_count,
+                                tool_names_executed, failed_tool_outputs,
+                            )
+                            if err:
+                                yield err
+                                return
+                            if pid and intent_sig:
+                                pid_to_intent[pid] = intent_sig
+
+                            tool_execution_count += 1
+                            # Keep tool_names_executed aligned with user-visible
+                            # command counts (exclude framework-internal loaders).
+                            if s_name not in USER_HIDDEN_INTERNAL_TOOLS:
+                                tool_names_executed.append(s_name)
+
+                        elif status in ("completed", "failed"):
+                            # Skill result → track failures
+                            fail_sig = _extract_failure_signature(s_output)
+                            if fail_sig:
+                                failed_tool_outputs += 1
+                                failure_signatures[fail_sig] = failure_signatures.get(fail_sig, 0) + 1
+                                self.accumulated_failures[fail_sig] = failure_signatures[fail_sig]
+                                if (
+                                    failed_tool_outputs >= policy.max_failed_tool_outputs
+                                    or failure_signatures[fail_sig] >= effective_same_failure_limit
+                                ):
+                                    yield TurnEvent(
+                                        type=TurnEventType.TURN_ERROR,
+                                        error=(
+                                            f"REPEATED_TOOL_FAILURES: failed={failed_tool_outputs}, "
+                                            f"signature={fail_sig}, count={failure_signatures[fail_sig]}"
+                                        ),
+                                        answer=response,
+                                        tool_call_count=tool_call_count,
+                                        tool_execution_count=tool_execution_count,
+                                        tool_names_executed=list(tool_names_executed),
+                                        failed_tool_outputs=failed_tool_outputs,
+                                    )
+                                    return
+
+                        # Track last successful skill output for fallback
+                        # Check both: no failure signature AND status is not explicitly "failed"
+                        if not fail_sig and s_output and status != "failed":
+                            last_successful_tool_output = s_output[:policy.max_tool_output_preview_chars]
+
+                        # Inject failure count warning for skill outputs
+                        warn_output = s_output
+                        if fail_sig and failed_tool_outputs >= 1:
+                            sig_count = failure_signatures.get(fail_sig, 0)
+                            sig_max = effective_same_failure_limit
+                            total_max = policy.max_failed_tool_outputs
+                            warn_output = s_output + (
+                                f"\n[⚠ tool_failure {failed_tool_outputs}/{total_max}"
+                                f" (sig {sig_count}/{sig_max}): {fail_sig}."
+                                f" Switch strategy to avoid circuit break.]"
+                            )
+                        # Inject repeated-intent warning so LLM can self-correct
+                        _pid_intent = pid_to_intent.get(pid)
+                        if _pid_intent and not fail_sig:
+                            _out_hash = hashlib.sha256(s_output[:256].encode()).hexdigest()[:12]
+                            _prev_hash = tool_intent_last_output.get(_pid_intent)
+                            if _prev_hash == _out_hash:
+                                warned_intents.add(_pid_intent)
+                                warn_output += (
+                                    f"\n[⚠ repeated_intent: This command returned the same result as"
+                                    f" last time. You already have this output."
+                                    f" Do NOT call it again — include it in your reply now.]"
+                                )
+                            elif _pid_intent in warned_intents:
+                                warn_output += (
+                                    f"\n[⚠ repeated_intent: You have already run this"
+                                    f" same command {tool_intent_signatures.get(_pid_intent, 0)} times."
+                                    f" Do NOT call it again. Respond to the user based"
+                                    f" on information you already have.]"
+                                )
+                            tool_intent_last_output[_pid_intent] = _out_hash
+                        elif _pid_intent and _pid_intent in warned_intents:
+                            warn_output += (
+                                f"\n[⚠ repeated_intent: You have already run this"
+                                f" same command {tool_intent_signatures.get(_pid_intent, 0)} times."
+                                f" Do NOT call it again. Respond to the user based"
+                                f" on information you already have.]"
+                            )
+
+                        yield TurnEvent(
+                            type=TurnEventType.SKILL,
+                            pid=pid, status=status,
+                            skill_name=s_name, skill_args=s_args, skill_output=warn_output,
+                        )
+                        if pid:
+                            sent_progress[pid] = status
+
+                    elif stage == "tool_call":
+                        t_name = progress.get("tool_name", "")
+
+                        # Phantom tool guard: detect calls to unregistered tools
+                        if self._get_registered_tools is not None:
+                            registered = self._get_registered_tools()
+                            if t_name and t_name not in registered:
+                                phantom_tool_counts[t_name] = phantom_tool_counts.get(t_name, 0) + 1
+                                if phantom_tool_counts[t_name] > policy.max_phantom_tool_calls:
+                                    _flush_trajectory()
+                                    yield TurnEvent(
+                                        type=TurnEventType.TURN_ERROR,
+                                        error=(
+                                            f"PHANTOM_TOOL: tool `{t_name}` is not registered, "
+                                            f"called {phantom_tool_counts[t_name]} times, "
+                                            f"limit={policy.max_phantom_tool_calls}"
+                                        ),
+                                        answer=response,
+                                        tool_call_count=tool_call_count,
+                                        tool_execution_count=tool_execution_count,
+                                        tool_names_executed=list(tool_names_executed),
+                                        failed_tool_outputs=failed_tool_outputs,
+                                    )
+                                    return
+                                if pid:
+                                    phantom_pids[pid] = t_name
+
+                        # A novel tool call means progress (see the skill branch above):
+                        # tool-use without narration is not a degradation signal; only a
+                        # text-less round that repeats a tool intent counts toward the
+                        # empty/think-only loop guards.
+                        t_args_raw = progress.get("args", "")
+                        # Identical repeat of an idempotent meta-tool → drop as a no-op
+                        # (parity with the skill branch above).
+                        if status in ("running", "processing") and _is_idempotent_noop(t_name, t_args_raw):
+                            continue
+                        intent_sig = _extract_tool_intent_signature(t_name, t_args_raw)
                         made_progress = bool(intent_sig) and tool_intent_signatures.get(intent_sig, 0) == 0
                         if made_progress:
                             consecutive_empty_llm_rounds = 0
@@ -777,16 +1016,13 @@ class TurnOrchestrator:
                                 consecutive_think_only_rounds += 1
                             else:
                                 consecutive_empty_llm_rounds += 1
-                        # Emit round reset when a new tool call follows LLM output,
-                        # so channel consumers can discard intermediate text.
                         if llm_had_output_this_round and _last_round_response:
                             yield TurnEvent(type=TurnEventType.LLM_ROUND_RESET)
                             _last_round_response = ""
                         llm_had_output_this_round = False
                         llm_had_think_this_round = False
 
-                        # Skill invocation → count as tool call (unless exempt)
-                        if s_name not in policy.budget_exempt_tools:
+                        if _counts_toward_tool_call_budget(t_name, policy):
                             tool_call_count += 1
                         if tool_call_count > policy.max_tool_calls:
                             yield TurnEvent(
@@ -799,6 +1035,8 @@ class TurnOrchestrator:
                                 failed_tool_outputs=failed_tool_outputs,
                             )
                             return
+                        if pid and sent_progress.get(pid) == status:
+                            continue
 
                         # Intent dedup check (intent_sig computed above)
                         err = self._check_intent_dedup(
@@ -812,12 +1050,24 @@ class TurnOrchestrator:
                         if pid and intent_sig:
                             pid_to_intent[pid] = intent_sig
 
+                        args_preview, args_trunc, args_total = _truncate_preview(t_args_raw, policy.max_tool_args_preview_chars)
                         tool_execution_count += 1
-                        tool_names_executed.append(s_name)
+                        if t_name not in USER_HIDDEN_INTERNAL_TOOLS:
+                            tool_names_executed.append(t_name)
+                        yield TurnEvent(
+                            type=TurnEventType.TOOL_CALL,
+                            pid=pid, status=status,
+                            tool_name=t_name, tool_args=args_preview,
+                            args_truncated=args_trunc, args_total_chars=args_total,
+                        )
+                        if pid:
+                            sent_progress[pid] = status
 
-                    elif status in ("completed", "failed"):
-                        # Skill result → track failures
-                        fail_sig = _extract_failure_signature(s_output)
+                    elif stage == "tool_output":
+                        if pid and sent_progress.get(pid) == status:
+                            continue
+                        t_output_raw = progress.get("output", "")
+                        fail_sig = _extract_failure_signature(t_output_raw)
                         if fail_sig:
                             failed_tool_outputs += 1
                             failure_signatures[fail_sig] = failure_signatures.get(fail_sig, 0) + 1
@@ -840,265 +1090,78 @@ class TurnOrchestrator:
                                 )
                                 return
 
-                    # Track last successful skill output for fallback
-                    # Check both: no failure signature AND status is not explicitly "failed"
-                    if not fail_sig and s_output and status != "failed":
-                        last_successful_tool_output = s_output[:policy.max_tool_output_preview_chars]
+                        out_preview, out_trunc, out_total = _truncate_preview(t_output_raw, policy.max_tool_output_preview_chars)
 
-                    # Inject failure count warning for skill outputs
-                    warn_output = s_output
-                    if fail_sig and failed_tool_outputs >= 1:
-                        sig_count = failure_signatures.get(fail_sig, 0)
-                        sig_max = effective_same_failure_limit
-                        total_max = policy.max_failed_tool_outputs
-                        warn_output = s_output + (
-                            f"\n[⚠ tool_failure {failed_tool_outputs}/{total_max}"
-                            f" (sig {sig_count}/{sig_max}): {fail_sig}."
-                            f" Switch strategy to avoid circuit break.]"
-                        )
-                    # Inject repeated-intent warning so LLM can self-correct
-                    _pid_intent = pid_to_intent.get(pid)
-                    if _pid_intent and not fail_sig:
-                        _out_hash = hashlib.sha256(s_output[:256].encode()).hexdigest()[:12]
-                        _prev_hash = tool_intent_last_output.get(_pid_intent)
-                        if _prev_hash == _out_hash:
-                            warned_intents.add(_pid_intent)
-                            warn_output += (
-                                f"\n[⚠ repeated_intent: This command returned the same result as"
-                                f" last time. You already have this output."
-                                f" Do NOT call it again — include it in your reply now.]"
+                        # Inject failure count warning so LLM can see how close
+                        # it is to the circuit breaker and switch strategy.
+                        if fail_sig and failed_tool_outputs >= 1:
+                            sig_count = failure_signatures.get(fail_sig, 0)
+                            sig_max = effective_same_failure_limit
+                            total_max = policy.max_failed_tool_outputs
+                            out_preview += (
+                                f"\n[⚠ tool_failure {failed_tool_outputs}/{total_max}"
+                                f" (sig {sig_count}/{sig_max}): {fail_sig}."
+                                f" Switch strategy to avoid circuit break.]"
                             )
-                        elif _pid_intent in warned_intents:
-                            warn_output += (
-                                f"\n[⚠ repeated_intent: You have already run this"
-                                f" same command {tool_intent_signatures.get(_pid_intent, 0)} times."
-                                f" Do NOT call it again. Respond to the user based"
-                                f" on information you already have.]"
-                            )
-                        tool_intent_last_output[_pid_intent] = _out_hash
-                    elif _pid_intent and _pid_intent in warned_intents:
-                        warn_output += (
-                            f"\n[⚠ repeated_intent: You have already run this"
-                            f" same command {tool_intent_signatures.get(_pid_intent, 0)} times."
-                            f" Do NOT call it again. Respond to the user based"
-                            f" on information you already have.]"
-                        )
-
-                    yield TurnEvent(
-                        type=TurnEventType.SKILL,
-                        pid=pid, status=status,
-                        skill_name=s_name, skill_args=s_args, skill_output=warn_output,
-                    )
-                    if pid:
-                        sent_progress[pid] = status
-
-                elif stage == "tool_call":
-                    t_name = progress.get("tool_name", "")
-
-                    # Phantom tool guard: detect calls to unregistered tools
-                    if self._get_registered_tools is not None:
-                        registered = self._get_registered_tools()
-                        if t_name and t_name not in registered:
-                            phantom_tool_counts[t_name] = phantom_tool_counts.get(t_name, 0) + 1
-                            if phantom_tool_counts[t_name] > policy.max_phantom_tool_calls:
-                                _flush_trajectory()
-                                yield TurnEvent(
-                                    type=TurnEventType.TURN_ERROR,
-                                    error=(
-                                        f"PHANTOM_TOOL: tool `{t_name}` is not registered, "
-                                        f"called {phantom_tool_counts[t_name]} times, "
-                                        f"limit={policy.max_phantom_tool_calls}"
-                                    ),
-                                    answer=response,
-                                    tool_call_count=tool_call_count,
-                                    tool_execution_count=tool_execution_count,
-                                    tool_names_executed=list(tool_names_executed),
-                                    failed_tool_outputs=failed_tool_outputs,
+                        # Inject repeated-intent warning so LLM can self-correct
+                        _pid_intent = pid_to_intent.get(pid)
+                        if _pid_intent and not fail_sig:
+                            _out_hash = hashlib.sha256(t_output_raw[:256].encode()).hexdigest()[:12]
+                            _prev_hash = tool_intent_last_output.get(_pid_intent)
+                            if _prev_hash == _out_hash:
+                                # Same successful output as last time — agent is stuck
+                                warned_intents.add(_pid_intent)
+                                out_preview += (
+                                    f"\n[⚠ repeated_intent: This command returned the same result as"
+                                    f" last time. You already have this output."
+                                    f" Do NOT call it again — include it in your reply now.]"
                                 )
-                                return
-                            if pid:
-                                phantom_pids[pid] = t_name
-
-                    # A novel tool call means progress (see the skill branch above):
-                    # tool-use without narration is not a degradation signal; only a
-                    # text-less round that repeats a tool intent counts toward the
-                    # empty/think-only loop guards.
-                    t_args_raw = progress.get("args", "")
-                    # Identical repeat of an idempotent meta-tool → drop as a no-op
-                    # (parity with the skill branch above).
-                    if status in ("running", "processing") and _is_idempotent_noop(t_name, t_args_raw):
-                        continue
-                    intent_sig = _extract_tool_intent_signature(t_name, t_args_raw)
-                    made_progress = bool(intent_sig) and tool_intent_signatures.get(intent_sig, 0) == 0
-                    if made_progress:
-                        consecutive_empty_llm_rounds = 0
-                        consecutive_think_only_rounds = 0
-                    else:
-                        # Empty-output loop detection (only when not progressing)
-                        err = self._check_empty_output_loop(
-                            llm_had_output_this_round, llm_had_think_this_round,
-                            tool_execution_count,
-                            consecutive_empty_llm_rounds, consecutive_think_only_rounds,
-                            response,
-                            tool_call_count, tool_names_executed, failed_tool_outputs,
-                        )
-                        if err:
-                            _flush_trajectory()
-                            yield err
-                            return
-                    # Repeated-text loop detection
-                    if tool_execution_count > 0 and _check_round_text_loop():
-                        _flush_trajectory()
-                        yield TurnEvent(
-                            type=TurnEventType.TURN_ERROR,
-                            error=f"REPEATED_TEXT_LOOP: {len(_recent_fps)} rounds with {len(set(_recent_fps[-_LOOP_WINDOW:]))} distinct outputs in last {_LOOP_WINDOW}",
-                            answer=response, tool_call_count=tool_call_count,
-                            tool_execution_count=tool_execution_count,
-                            tool_names_executed=list(tool_names_executed),
-                            failed_tool_outputs=failed_tool_outputs,
-                        )
-                        return
-                    if not made_progress and not llm_had_output_this_round and tool_execution_count > 0:
-                        if llm_had_think_this_round:
-                            consecutive_think_only_rounds += 1
-                        else:
-                            consecutive_empty_llm_rounds += 1
-                    if llm_had_output_this_round and _last_round_response:
-                        yield TurnEvent(type=TurnEventType.LLM_ROUND_RESET)
-                        _last_round_response = ""
-                    llm_had_output_this_round = False
-                    llm_had_think_this_round = False
-
-                    if t_name not in policy.budget_exempt_tools:
-                        tool_call_count += 1
-                    if tool_call_count > policy.max_tool_calls:
-                        yield TurnEvent(
-                            type=TurnEventType.TURN_ERROR,
-                            error=f"TOOL_CALL_BUDGET_EXCEEDED: tool_calls={tool_call_count}, limit={policy.max_tool_calls}",
-                            answer=response,
-                            tool_call_count=tool_call_count,
-                            tool_execution_count=tool_execution_count,
-                            tool_names_executed=list(tool_names_executed),
-                            failed_tool_outputs=failed_tool_outputs,
-                        )
-                        return
-                    if pid and sent_progress.get(pid) == status:
-                        continue
-
-                    # Intent dedup check (intent_sig computed above)
-                    err = self._check_intent_dedup(
-                        intent_sig, tool_intent_signatures, warned_intents,
-                        response, tool_call_count, tool_execution_count,
-                        tool_names_executed, failed_tool_outputs,
-                    )
-                    if err:
-                        yield err
-                        return
-                    if pid and intent_sig:
-                        pid_to_intent[pid] = intent_sig
-
-                    args_preview, args_trunc, args_total = _truncate_preview(t_args_raw, policy.max_tool_args_preview_chars)
-                    tool_execution_count += 1
-                    tool_names_executed.append(t_name)
-                    yield TurnEvent(
-                        type=TurnEventType.TOOL_CALL,
-                        pid=pid, status=status,
-                        tool_name=t_name, tool_args=args_preview,
-                        args_truncated=args_trunc, args_total_chars=args_total,
-                    )
-                    if pid:
-                        sent_progress[pid] = status
-
-                elif stage == "tool_output":
-                    if pid and sent_progress.get(pid) == status:
-                        continue
-                    t_output_raw = progress.get("output", "")
-                    fail_sig = _extract_failure_signature(t_output_raw)
-                    if fail_sig:
-                        failed_tool_outputs += 1
-                        failure_signatures[fail_sig] = failure_signatures.get(fail_sig, 0) + 1
-                        self.accumulated_failures[fail_sig] = failure_signatures[fail_sig]
-                        if (
-                            failed_tool_outputs >= policy.max_failed_tool_outputs
-                            or failure_signatures[fail_sig] >= effective_same_failure_limit
-                        ):
-                            yield TurnEvent(
-                                type=TurnEventType.TURN_ERROR,
-                                error=(
-                                    f"REPEATED_TOOL_FAILURES: failed={failed_tool_outputs}, "
-                                    f"signature={fail_sig}, count={failure_signatures[fail_sig]}"
-                                ),
-                                answer=response,
-                                tool_call_count=tool_call_count,
-                                tool_execution_count=tool_execution_count,
-                                tool_names_executed=list(tool_names_executed),
-                                failed_tool_outputs=failed_tool_outputs,
-                            )
-                            return
-
-                    out_preview, out_trunc, out_total = _truncate_preview(t_output_raw, policy.max_tool_output_preview_chars)
-
-                    # Inject failure count warning so LLM can see how close
-                    # it is to the circuit breaker and switch strategy.
-                    if fail_sig and failed_tool_outputs >= 1:
-                        sig_count = failure_signatures.get(fail_sig, 0)
-                        sig_max = effective_same_failure_limit
-                        total_max = policy.max_failed_tool_outputs
-                        out_preview += (
-                            f"\n[⚠ tool_failure {failed_tool_outputs}/{total_max}"
-                            f" (sig {sig_count}/{sig_max}): {fail_sig}."
-                            f" Switch strategy to avoid circuit break.]"
-                        )
-                    # Inject repeated-intent warning so LLM can self-correct
-                    _pid_intent = pid_to_intent.get(pid)
-                    if _pid_intent and not fail_sig:
-                        _out_hash = hashlib.sha256(t_output_raw[:256].encode()).hexdigest()[:12]
-                        _prev_hash = tool_intent_last_output.get(_pid_intent)
-                        if _prev_hash == _out_hash:
-                            # Same successful output as last time — agent is stuck
-                            warned_intents.add(_pid_intent)
-                            out_preview += (
-                                f"\n[⚠ repeated_intent: This command returned the same result as"
-                                f" last time. You already have this output."
-                                f" Do NOT call it again — include it in your reply now.]"
-                            )
-                        elif _pid_intent in warned_intents:
+                            elif _pid_intent in warned_intents:
+                                out_preview += (
+                                    f"\n[⚠ repeated_intent: You have already run this"
+                                    f" same command {tool_intent_signatures.get(_pid_intent, 0)} times."
+                                    f" Do NOT call it again. Respond to the user based"
+                                    f" on information you already have.]"
+                                )
+                            tool_intent_last_output[_pid_intent] = _out_hash
+                        elif _pid_intent and _pid_intent in warned_intents:
                             out_preview += (
                                 f"\n[⚠ repeated_intent: You have already run this"
                                 f" same command {tool_intent_signatures.get(_pid_intent, 0)} times."
                                 f" Do NOT call it again. Respond to the user based"
                                 f" on information you already have.]"
                             )
-                        tool_intent_last_output[_pid_intent] = _out_hash
-                    elif _pid_intent and _pid_intent in warned_intents:
-                        out_preview += (
-                            f"\n[⚠ repeated_intent: You have already run this"
-                            f" same command {tool_intent_signatures.get(_pid_intent, 0)} times."
-                            f" Do NOT call it again. Respond to the user based"
-                            f" on information you already have.]"
-                        )
 
-                    # Phantom tool correction: tell LLM this tool doesn't exist
-                    _phantom_name = phantom_pids.pop(pid, None) if pid else None
-                    if _phantom_name:
-                        out_preview += (
-                            f"\n[⚠ PHANTOM_TOOL: `{_phantom_name}` is not a registered tool"
-                            f" and cannot be called. Use registered tools"
-                            f" (_bash, _python, _grep, etc.) to complete the task.]"
-                        )
+                        # Phantom tool correction: tell LLM this tool doesn't exist
+                        _phantom_name = phantom_pids.pop(pid, None) if pid else None
+                        if _phantom_name:
+                            out_preview += (
+                                f"\n[⚠ PHANTOM_TOOL: `{_phantom_name}` is not a registered tool"
+                                f" and cannot be called. Use registered tools"
+                                f" (_bash, _python, _grep, etc.) to complete the task.]"
+                            )
 
-                    yield TurnEvent(
-                        type=TurnEventType.TOOL_OUTPUT,
-                        pid=pid, status="failed" if fail_sig else "success",
-                        tool_name=progress.get("tool_name", ""),
-                        tool_output=out_preview,
-                        output_truncated=out_trunc, output_total_chars=out_total,
-                        reference_id=progress.get("reference_id", ""),
-                    )
-                    if not fail_sig and t_output_raw:
-                        last_successful_tool_output = t_output_raw[:policy.max_tool_output_preview_chars]
-                    if pid:
-                        sent_progress[pid] = status
+                        yield TurnEvent(
+                            type=TurnEventType.TOOL_OUTPUT,
+                            pid=pid, status="failed" if fail_sig else "success",
+                            tool_name=progress.get("tool_name", ""),
+                            tool_output=out_preview,
+                            output_truncated=out_trunc, output_total_chars=out_total,
+                            reference_id=progress.get("reference_id", ""),
+                        )
+                        if not fail_sig and t_output_raw:
+                            last_successful_tool_output = t_output_raw[:policy.max_tool_output_preview_chars]
+                        if pid:
+                            sent_progress[pid] = status
+
+        except SoftTimeoutError as exc:
+            # Foreground soft-timeout from _timeout_wrapper (drain started).
+            yield _timeout_error_event(exc, soft=True)
+            return
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            # Agent/tool/provider timeout — not deferred-drain soft-timeout.
+            yield _timeout_error_event(exc, soft=False)
+            return
 
         # Fallback: if LLM produced no text but the last tool returned
         # substantial output, use that output as the response so the user
@@ -1150,97 +1213,160 @@ async def _timeout_wrapper(
     Uses manual ``__anext__()`` instead of ``async for`` so that when a
     timeout occurs the underlying iterator is **not** closed via
     ``athrow()``—it can be handed off to a background drain task.
+
+    Critical: do **not** use ``asyncio.wait_for`` on ``__anext__`` when a
+    drain callback is registered. ``wait_for`` cancels the in-flight
+    ``__anext__`` on timeout, which injects ``CancelledError`` into the
+    agent async generator and aborts work that deferred-drain is supposed
+    to finish. Instead we race a non-cancelling wait and hand the pending
+    task to drain.
     """
     loop = asyncio.get_event_loop()
     deadline = loop.time() + timeout
     aiter = stream.__aiter__()
-    while True:
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            # Already past deadline
-            if on_timeout_drain is not None:
-                asyncio.create_task(
-                    _drain_after_timeout(aiter, on_timeout_drain, drain_extra_seconds),
-                    name="deferred-drain",
-                )
-            else:
-                try:
-                    await aiter.aclose()
-                except Exception:
-                    pass
-            raise asyncio.TimeoutError(f"Turn exceeded {timeout}s timeout")
-        try:
-            item = await asyncio.wait_for(aiter.__anext__(), timeout=remaining)
-        except StopAsyncIteration:
-            return
-        except asyncio.TimeoutError:
-            if on_timeout_drain is not None:
-                asyncio.create_task(
-                    _drain_after_timeout(aiter, on_timeout_drain, drain_extra_seconds),
-                    name="deferred-drain",
-                )
-            else:
-                try:
-                    await aiter.aclose()
-                except Exception:
-                    pass
-            raise asyncio.TimeoutError(f"Turn exceeded {timeout}s timeout")
-        yield item
+    pending_anext: Optional[asyncio.Task] = None
+
+    def _start_drain(pending: Optional[asyncio.Task]) -> None:
+        if on_timeout_drain is not None:
+            asyncio.create_task(
+                _drain_after_timeout(
+                    aiter,
+                    on_timeout_drain,
+                    drain_extra_seconds,
+                    pending_anext=pending,
+                ),
+                name="deferred-drain",
+            )
+        else:
+            if pending is not None and not pending.done():
+                pending.cancel()
+            try:
+                # Best-effort close when no drain path will continue the stream.
+                close = getattr(aiter, "aclose", None)
+                if close is not None:
+                    asyncio.create_task(close())
+            except Exception:
+                pass
+
+    try:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                _start_drain(pending_anext)
+                pending_anext = None
+                raise SoftTimeoutError(f"Turn exceeded {timeout}s timeout")
+
+            if pending_anext is None:
+                pending_anext = asyncio.ensure_future(aiter.__anext__())
+
+            done, _ = await asyncio.wait({pending_anext}, timeout=remaining)
+            if not done:
+                # Soft timeout: leave pending_anext running for drain.
+                _start_drain(pending_anext)
+                pending_anext = None
+                raise SoftTimeoutError(f"Turn exceeded {timeout}s timeout")
+
+            task = pending_anext
+            pending_anext = None
+            try:
+                item = task.result()
+            except StopAsyncIteration:
+                return
+            yield item
+    except GeneratorExit:
+        if pending_anext is not None and not pending_anext.done():
+            pending_anext.cancel()
+        raise
 
 
 async def _drain_after_timeout(
     aiter: AsyncIterator,
     on_result: Callable,
     extra_timeout: float,
+    *,
+    pending_anext: Optional[asyncio.Task] = None,
 ) -> None:
-    """Continue consuming an event stream after timeout and deliver collected results."""
+    """Continue consuming an event stream after timeout and deliver collected results.
+
+    ``pending_anext`` is an in-flight ``__anext__`` task that must not be
+    cancelled on soft timeout (see ``_timeout_wrapper``). Drain awaits it
+    first, then continues with further ``__anext__`` calls.
+    """
     deadline = asyncio.get_event_loop().time() + extra_timeout
     collected_outputs: list[str] = []
     final_response = ""
     seen_progress_fingerprints: set[str] = set()
+
+    def _ingest(item: Any) -> None:
+        nonlocal final_response
+        if not isinstance(item, dict) or "_progress" not in item:
+            return
+        for progress in item.get("_progress", []):
+            progress_fp = _progress_fingerprint(progress)
+            if progress_fp in seen_progress_fingerprints:
+                continue
+            seen_progress_fingerprints.add(progress_fp)
+            stage = progress.get("stage")
+            status = progress.get("status", "")
+            if stage == "skill" and status in ("completed", "failed"):
+                # Skip internal resource-loading tools — their output
+                # is framework-internal (contains [PIN] markers, full
+                # SKILL.md content) and must not be forwarded to the user.
+                skill_info = progress.get("skill_info") or {}
+                skill_name = skill_info.get("name") or progress.get("tool_name") or ""
+                if skill_name in ("_load_resource_skill", "_read_skill_asset"):
+                    continue
+                output = (
+                    progress.get("answer")
+                    or progress.get("block_answer")
+                    or progress.get("output")
+                    or ""
+                )
+                if output:
+                    collected_outputs.append(output)
+            elif stage == "llm":
+                delta = progress.get("delta", "")
+                answer = progress.get("answer", "")
+                if delta:
+                    final_response += delta
+                elif answer:
+                    final_response = answer
+
+    in_flight: Optional[asyncio.Task] = pending_anext
     try:
+        # Drain must never cancel an in-flight __anext__ until the whole drain
+        # window expires. asyncio.wait_for without shield would cancel the
+        # generator mid-tool, aborting work that still has remaining budget
+        # (e.g. progress then >60s silence before final text within 300s).
         while asyncio.get_event_loop().time() < deadline:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                break
+            if in_flight is None:
+                in_flight = asyncio.ensure_future(aiter.__anext__())
+            done, _ = await asyncio.wait({in_flight}, timeout=remaining)
+            if not done:
+                # Drain window exhausted while __anext__ still running.
+                break
+            task = in_flight
+            in_flight = None
             try:
-                item = await asyncio.wait_for(aiter.__anext__(), timeout=60)
+                item = task.result()
             except StopAsyncIteration:
                 break
-            except asyncio.TimeoutError:
-                continue
-            if not isinstance(item, dict) or "_progress" not in item:
-                continue
-            for progress in item.get("_progress", []):
-                progress_fp = _progress_fingerprint(progress)
-                if progress_fp in seen_progress_fingerprints:
-                    continue
-                seen_progress_fingerprints.add(progress_fp)
-                stage = progress.get("stage")
-                status = progress.get("status", "")
-                if stage == "skill" and status in ("completed", "failed"):
-                    # Skip internal resource-loading tools — their output
-                    # is framework-internal (contains [PIN] markers, full
-                    # SKILL.md content) and must not be forwarded to the user.
-                    skill_info = progress.get("skill_info") or {}
-                    skill_name = skill_info.get("name") or progress.get("tool_name") or ""
-                    if skill_name in ("_load_resource_skill", "_read_skill_asset"):
-                        continue
-                    output = (
-                        progress.get("answer")
-                        or progress.get("block_answer")
-                        or progress.get("output")
-                        or ""
-                    )
-                    if output:
-                        collected_outputs.append(output)
-                elif stage == "llm":
-                    delta = progress.get("delta", "")
-                    answer = progress.get("answer", "")
-                    if delta:
-                        final_response += delta
-                    elif answer:
-                        final_response = answer
+            except Exception as e:
+                logger.warning("Deferred drain anext error: %s", e)
+                break
+            _ingest(item)
     except Exception as e:
         logger.warning("Deferred drain error: %s", e)
     finally:
+        if in_flight is not None and not in_flight.done():
+            in_flight.cancel()
+            try:
+                await in_flight
+            except (asyncio.CancelledError, Exception):
+                pass
         try:
             await aiter.aclose()
         except Exception:

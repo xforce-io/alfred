@@ -1413,9 +1413,12 @@ Telegram/Web subscriber 的路由逻辑已统一：都先调用 `resolve_routing
                    target_session_id=session_id,
                    target_channel=extract_channel_type(session_id))
         → 实时推送（见 Flow ③ 的 deferred_result 分支）
-        → Telegram: 仅当 target_channel=telegram 时推送到对应 chat
-        → Web: 仅当 target_channel=web 时推到该 session 的 ws 连接
+        → Telegram: 仅当 target_channel=telegram 时推送到对应 chat（active-turn 闸已 exempt deferred_result）
+        → Web: 仅当 target_channel=web 时推到该 session 的 ws 连接；
+               **idle gate（20s）对 deferred_result bypass**，避免超时后用户仍活跃时吞掉终稿推送
 ```
+
+前台软超时路径：`turn_end.status="timeout"`，`tool_call_count` 取编排层累计值（`_run_attempt` 内捕获 TimeoutError 并带统计 yield，避免 skill 阶段计数丢失）；用户可见 N **排除**框架内部 resource tools（`_load_resource_skill` / `_read_skill_asset`，与 Telegram 隐藏列表一致）；`_timeout_wrapper` 超时**不** cancel 进行中的 `__anext__`，将 pending task 交给 deferred-drain；drain 在整个 `drain_extra_seconds` 窗口内对后续 `__anext__` 同样使用非取消等待（不以 60s 分段 cancel）。
 
 注：不使用 mailbox deposit——结果已在 history_messages 中，再通过 mailbox 以 "Background Updates" 前缀重复呈现给 LLM 是纯冗余。
 

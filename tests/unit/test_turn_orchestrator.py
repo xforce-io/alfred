@@ -11,11 +11,14 @@ from src.everbot.core.runtime.turn_orchestrator import (
     CHAT_POLICY,
     HEARTBEAT_POLICY,
     JOB_POLICY,
+    SoftTimeoutError,
+    USER_HIDDEN_INTERNAL_TOOLS,
     WORKFLOW_POLICY,
     TurnEvent,
     TurnEventType,
     TurnOrchestrator,
     TurnPolicy,
+    _counts_toward_tool_call_budget,
     _drain_after_timeout,
     _extract_failure_signature,
     _extract_tool_intent_signature,
@@ -2833,3 +2836,291 @@ async def test_issue136_real_run_no_longer_trips_budget():
     complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
     # 7 run_command + 5 个不同 update_step = 12;cite/create_plan 豁免,重复 step 丢弃
     assert complete.tool_call_count == 12, complete.tool_call_count
+
+
+# ---------------------------------------------------------------------------
+# Issue #168: soft-timeout stats + deferred drain end-to-end
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_timeout_turn_error_preserves_tool_call_count():
+    """S3: Timeout after N tool calls must yield TURN_ERROR with tool_call_count=N.
+
+    Root cause: TimeoutError bubbled out of _run_attempt and the outer
+    run_turn handler emitted a bare TURN_ERROR without stats, so skill-stage
+    tool counts (only held inside _run_attempt) were lost.
+    """
+    n = 3
+    script = []
+    for i in range(n):
+        script.append(_progress_event(_skill_call(f"tool_{i}", f"arg{i}", pid=f"sk{i}")))
+        script.append(_progress_event(_skill_output(f"tool_{i}", f"out{i}", pid=f"sk{i}")))
+
+    class _HangAfterTools:
+        async def continue_chat(self, **kwargs):
+            for item in script:
+                yield item
+            await asyncio.sleep(999999)
+            yield _progress_event(_llm_delta("never"))
+
+    orch = TurnOrchestrator(TurnPolicy(
+        max_attempts=1,
+        timeout_seconds=0.25,
+        max_tool_calls=50,
+        max_same_tool_intent=50,
+    ))
+    events: list[TurnEvent] = []
+    try:
+        async for te in orch.run_turn(_HangAfterTools(), "hi"):
+            events.append(te)
+    except asyncio.TimeoutError:
+        pytest.fail("TimeoutError must be converted to TURN_ERROR with stats, not re-raised")
+
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert len(errors) == 1, f"Expected 1 TURN_ERROR, got {[e.type for e in events]}"
+    assert "timeout" in (errors[0].error or "").lower()
+    assert errors[0].status == "timeout", "wrapper soft-timeout must set status=timeout"
+    assert errors[0].tool_call_count == n, (
+        f"Expected tool_call_count={n}, got {errors[0].tool_call_count}"
+    )
+    assert len(errors[0].tool_names_executed) == n
+
+
+@pytest.mark.asyncio
+async def test_non_wrapper_timeout_error_is_not_soft_timeout():
+    """F-006: agent/tool TimeoutError must not be marked as soft-timeout.
+
+    Soft-timeout UX promises deferred drain delivery; only SoftTimeoutError
+    from _timeout_wrapper starts that drain. Generic TimeoutError must yield
+    TURN_ERROR without status=timeout.
+    """
+
+    class _AgentTimeout:
+        async def continue_chat(self, **kwargs):
+            yield _progress_event(_skill_call("search", "q", pid="sk0"))
+            yield _progress_event(_skill_output("search", "partial", pid="sk0"))
+            raise TimeoutError("provider request timed out after 30s")
+
+    orch = TurnOrchestrator(TurnPolicy(
+        max_attempts=1,
+        # No wrapper timeout — the agent itself raises TimeoutError.
+        timeout_seconds=None,
+        max_tool_calls=50,
+        max_same_tool_intent=50,
+    ))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(_AgentTimeout(), "hi"):
+        events.append(te)
+
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert len(errors) == 1, f"expected TURN_ERROR, got {[e.type for e in events]}"
+    assert "timeout" in (errors[0].error or "").lower()
+    assert errors[0].status != "timeout", (
+        f"non-wrapper TimeoutError must not set soft-timeout status, got {errors[0].status!r}"
+    )
+    # Stats still preserved for diagnostics
+    assert errors[0].tool_call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_timeout_wrapper_raises_soft_timeout_error():
+    """F-006: _timeout_wrapper raises SoftTimeoutError, not bare TimeoutError."""
+
+    async def _hang():
+        await asyncio.sleep(999)
+        yield _progress_event(_llm_delta("never"))
+
+    items = []
+    with pytest.raises(SoftTimeoutError) as ei:
+        async for item in _timeout_wrapper(_hang(), timeout=0.05):
+            items.append(item)
+    assert "timeout" in str(ei.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_timeout_turn_error_preserves_tool_call_stage_count():
+    """S3: Same as above but with stage=tool_call/tool_output events."""
+    n = 2
+    script = []
+    for i in range(n):
+        script.append(_progress_event(_tool_call(f"_bash", f"echo {i}", pid=f"tc{i}")))
+        script.append(_progress_event(_tool_output(f"_bash", f"ok{i}", pid=f"to{i}")))
+
+    class _HangAfterTools:
+        async def continue_chat(self, **kwargs):
+            for item in script:
+                yield item
+            await asyncio.sleep(999999)
+
+    orch = TurnOrchestrator(TurnPolicy(
+        max_attempts=1,
+        timeout_seconds=0.25,
+        max_tool_calls=50,
+        max_same_tool_intent=50,
+    ))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(_HangAfterTools(), "hi"):
+        events.append(te)
+
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert len(errors) == 1
+    assert errors[0].tool_call_count == n
+    assert "timeout" in errors[0].error.lower()
+    assert errors[0].status == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_timeout_drain_delivers_final_llm_text():
+    """S2: After soft timeout, drain continues the stream and delivers final text."""
+    deferred: list[str] = []
+
+    class _ToolsThenFinal:
+        async def continue_chat(self, **kwargs):
+            yield _progress_event(_skill_call("search", "q", pid="sk0"))
+            yield _progress_event(_skill_output("search", "partial", pid="sk0"))
+            # Hang past the foreground timeout, then finish with final text.
+            await asyncio.sleep(0.4)
+            yield _progress_event(_llm_delta("FINAL_DRAFT_FOR_USER"))
+
+    async def _on_deferred(text: str):
+        deferred.append(text)
+
+    orch = TurnOrchestrator(TurnPolicy(
+        max_attempts=1,
+        timeout_seconds=0.15,
+        drain_extra_seconds=2.0,
+        max_tool_calls=50,
+        max_same_tool_intent=50,
+    ))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(
+        _ToolsThenFinal(), "hi", on_deferred_result=_on_deferred,
+    ):
+        events.append(te)
+
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert len(errors) == 1
+    assert errors[0].tool_call_count == 1
+
+    # Wait for background drain task
+    for _ in range(30):
+        if deferred:
+            break
+        await asyncio.sleep(0.1)
+
+    assert deferred, "deferred drain must deliver final LLM text"
+    assert "FINAL_DRAFT_FOR_USER" in deferred[0]
+
+
+@pytest.mark.asyncio
+async def test_timeout_tool_call_count_excludes_internal_resource_tools():
+    """S3: user-visible N excludes _load_resource_skill / _read_skill_asset.
+
+    Telegram hides these; timeline turn_end.tool_call_count must match the
+    channel command count (filtered N), not raw milkie tool.responded.
+    """
+    script = [
+        _progress_event(_skill_call("_load_resource_skill", "paper-discovery", pid="sk0")),
+        _progress_event(_skill_output("_load_resource_skill", "SKILL.md", pid="sk0")),
+        _progress_event(_skill_call("_read_skill_asset", "refs.md", pid="sk1")),
+        _progress_event(_skill_output("_read_skill_asset", "asset", pid="sk1")),
+        _progress_event(_skill_call("web_search", "q", pid="sk2")),
+        _progress_event(_skill_output("web_search", "hits", pid="sk2")),
+        _progress_event(_skill_call("_bash", "echo 1", pid="sk3")),
+        _progress_event(_skill_output("_bash", "1", pid="sk3")),
+    ]
+
+    class _HangAfterMix:
+        async def continue_chat(self, **kwargs):
+            for item in script:
+                yield item
+            await asyncio.sleep(999999)
+
+    orch = TurnOrchestrator(TurnPolicy(
+        max_attempts=1,
+        timeout_seconds=0.25,
+        max_tool_calls=50,
+        max_same_tool_intent=50,
+    ))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(_HangAfterMix(), "hi"):
+        events.append(te)
+
+    errors = [e for e in events if e.type == TurnEventType.TURN_ERROR]
+    assert len(errors) == 1
+    assert "timeout" in (errors[0].error or "").lower()
+    # Only web_search + _bash are user-visible → N=2
+    assert errors[0].tool_call_count == 2, errors[0].tool_call_count
+    assert "_load_resource_skill" not in (errors[0].tool_names_executed or [])
+    assert "_read_skill_asset" not in (errors[0].tool_names_executed or [])
+    # Sanity: filter helper matches Telegram hide list
+    assert USER_HIDDEN_INTERNAL_TOOLS == frozenset({
+        "_load_resource_skill", "_read_skill_asset",
+    })
+    policy = TurnPolicy()
+    assert not _counts_toward_tool_call_budget("_load_resource_skill", policy)
+    assert _counts_toward_tool_call_budget("web_search", policy)
+
+
+@pytest.mark.asyncio
+async def test_drain_long_gap_within_window_delivers_without_cancel():
+    """S2: progress then long silence still within drain window → final delivered.
+
+    Regression for cancelling wait_for(timeout=60) on subsequent __anext__:
+    the agent generator must not be cancelled while remaining drain budget
+    still allows completion.
+    """
+    cancelled = {"hit": False}
+    results: list[str] = []
+
+    async def _stream():
+        try:
+            yield _progress_event(_skill_call("search", "q", pid="sk0"))
+            yield _progress_event(_skill_output("search", "partial", pid="sk0"))
+            # Gap longer than the old hard-coded 60s intermediate would cancel
+            # in production; here we use a short drain window and a gap that
+            # still fits inside it to prove non-cancelling wait.
+            await asyncio.sleep(0.9)
+            yield _progress_event(_llm_delta("LATE_FINAL_WITHIN_WINDOW"))
+        except asyncio.CancelledError:
+            cancelled["hit"] = True
+            raise
+
+    async def _on_result(text: str):
+        results.append(text)
+
+    await _drain_after_timeout(_stream(), _on_result, extra_timeout=2.0)
+
+    assert not cancelled["hit"], "drain must not cancel in-flight __anext__ within window"
+    assert results, "final text must be delivered after long mid-window gap"
+    assert "LATE_FINAL_WITHIN_WINDOW" in results[0]
+
+
+@pytest.mark.asyncio
+async def test_drain_pending_anext_long_gap_delivers():
+    """S2: in-flight pending_anext that finishes late but in-window is delivered."""
+    cancelled = {"hit": False}
+    results: list[str] = []
+
+    async def _gen():
+        try:
+            await asyncio.sleep(0.8)
+            yield _progress_event(_llm_delta("FROM_PENDING_ANEXT"))
+        except asyncio.CancelledError:
+            cancelled["hit"] = True
+            raise
+
+    aiter = _gen().__aiter__()
+    pending = asyncio.ensure_future(aiter.__anext__())
+    # Let the anext start sleeping before drain attaches.
+    await asyncio.sleep(0.05)
+
+    async def _on_result(text: str):
+        results.append(text)
+
+    await _drain_after_timeout(
+        aiter, _on_result, extra_timeout=2.0, pending_anext=pending,
+    )
+
+    assert not cancelled["hit"]
+    assert results and "FROM_PENDING_ANEXT" in results[0]
