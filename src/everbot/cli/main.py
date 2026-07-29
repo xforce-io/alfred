@@ -6,12 +6,14 @@ import asyncio
 import argparse
 import logging
 import signal
+import sys
 from pathlib import Path
 
 from ..infra.user_data import get_user_data_manager
 from ..infra.config import load_config, get_config, save_config, get_default_config
 from ..infra.log_cleanup import cleanup_alfred_logs
 from ..infra.logging_utils import configure_daemon_logging
+from ..infra.process import DaemonAlreadyRunningError, rotate_file_if_large
 from .daemon import EverBotDaemon
 from .launch_agent import cmd_service_install, cmd_service_status, cmd_service_uninstall
 from ..core.runtime.control import get_local_status, run_heartbeat_once
@@ -171,8 +173,17 @@ def cmd_start(args):
     log_level = args.log_level or "INFO"
     configure_daemon_logging(level=log_level)
 
-    # 启动守护进程
-    asyncio.run(cmd_start_async(args))
+    # Bound launchd StandardErrorPath growth before the process attaches (#177).
+    user_data = get_user_data_manager()
+    rotate_file_if_large(user_data.logs_dir / "everbot.err")
+    rotate_file_if_large(user_data.logs_dir / "everbot.out")
+
+    # 启动守护进程. Already-running is success for KeepAlive supervisors.
+    try:
+        asyncio.run(cmd_start_async(args))
+    except DaemonAlreadyRunningError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(0) from None
 
 
 def cmd_config(args):

@@ -90,7 +90,9 @@ def build_launch_agent_plist(*, project_root: Path, alfred_home: Path) -> Dict[s
 
     return {
         "Label": LAUNCH_AGENT_LABEL,
-        "ProgramArguments": ["/bin/bash", "-lc", shell_command],
+        # Non-login, non-interactive bash avoids sourcing ~/.zshrc / Oh My Zsh
+        # when launchd restarts the job (#177).
+        "ProgramArguments": ["/bin/bash", "--noprofile", "--norc", "-c", shell_command],
         "WorkingDirectory": str(project_root),
         "RunAtLoad": True,
         "KeepAlive": True,
