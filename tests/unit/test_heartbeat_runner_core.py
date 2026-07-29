@@ -1354,6 +1354,137 @@ class TestIdleCooldown:
         assert result == "HEARTBEAT_SKIPPED_USER_ACTIVE"
 
 
+# ── ops on_result decoupled from user delivery (#176) ─────────
+
+
+class TestOpsResultCallbackDecoupled:
+    """Ops status callback must fire even when user delivery suppresses HEARTBEAT_OK."""
+
+    def _idle_session_manager(self):
+        sm = _make_session_manager_with_locks()
+        sm.get_last_activity_time = MagicMock(return_value=None)
+        return sm
+
+    @pytest.mark.asyncio
+    async def test_suppressed_heartbeat_ok_still_emits_on_result(self, tmp_path: Path, monkeypatch):
+        """HEARTBEAT_OK that is suppressed for users must still refresh ops status via on_result."""
+        calls: list[tuple[str, str]] = []
+
+        async def _on_result(agent_name: str, result: str):
+            calls.append((agent_name, result))
+
+        runner = _make_runner(
+            workspace_path=tmp_path,
+            session_manager=self._idle_session_manager(),
+            on_result=_on_result,
+        )
+        monkeypatch.setattr(runner, "_execute_with_retry", AsyncMock(return_value="HEARTBEAT_OK"))
+        monkeypatch.setattr(runner, "_should_skip_response", lambda r: True)
+
+        result = await runner.run_once_with_options()
+
+        assert result == "HEARTBEAT_OK"
+        assert calls == [("test_agent", "HEARTBEAT_OK")]
+
+    @pytest.mark.asyncio
+    async def test_deliverable_result_emits_on_result_once(self, tmp_path: Path, monkeypatch):
+        """Deliverable results still invoke on_result exactly once."""
+        calls: list[str] = []
+
+        async def _on_result(agent_name: str, result: str):
+            calls.append(result)
+
+        runner = _make_runner(
+            workspace_path=tmp_path,
+            session_manager=self._idle_session_manager(),
+            on_result=_on_result,
+        )
+        monkeypatch.setattr(
+            runner,
+            "_execute_with_retry",
+            AsyncMock(return_value="需要关注：磁盘将满"),
+        )
+        monkeypatch.setattr(runner, "_should_skip_response", lambda r: False)
+
+        result = await runner.run_once_with_options()
+
+        assert result == "需要关注：磁盘将满"
+        assert calls == ["需要关注：磁盘将满"]
+
+    @pytest.mark.asyncio
+    async def test_skipped_user_active_does_not_emit_on_result(self, tmp_path: Path):
+        """SKIPPED_* gates must not overwrite ops status with a skip token."""
+        import time
+
+        calls: list[tuple[str, str]] = []
+
+        async def _on_result(agent_name: str, result: str):
+            calls.append((agent_name, result))
+
+        recent_activity = time.time() - 60
+        sm = _make_session_manager_with_locks()
+        sm.get_last_activity_time = MagicMock(return_value=recent_activity)
+        runner = _make_runner(
+            workspace_path=tmp_path,
+            session_manager=sm,
+            on_result=_on_result,
+        )
+
+        result = await runner.run_once_with_options()
+
+        assert result == "HEARTBEAT_SKIPPED_USER_ACTIVE"
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_non_transient_failure_emits_on_result(self, tmp_path: Path, monkeypatch):
+        """Permanent heartbeat failures still notify ops via on_result."""
+        calls: list[str] = []
+
+        async def _on_result(agent_name: str, result: str):
+            calls.append(result)
+
+        runner = _make_runner(
+            workspace_path=tmp_path,
+            session_manager=self._idle_session_manager(),
+            on_result=_on_result,
+        )
+        monkeypatch.setattr(
+            runner,
+            "_execute_with_retry",
+            AsyncMock(side_effect=RuntimeError("invalid api key")),
+        )
+
+        result = await runner.run_once_with_options()
+
+        assert result == "HEARTBEAT_FAILED"
+        assert len(calls) == 1
+        assert calls[0].startswith("HEARTBEAT_FAILED: RuntimeError: invalid api key")
+
+    @pytest.mark.asyncio
+    async def test_transient_failure_does_not_emit_on_result(self, tmp_path: Path, monkeypatch):
+        """Transient LLM transport errors stay silent for ops/user notification."""
+        calls: list[str] = []
+
+        async def _on_result(agent_name: str, result: str):
+            calls.append(result)
+
+        runner = _make_runner(
+            workspace_path=tmp_path,
+            session_manager=self._idle_session_manager(),
+            on_result=_on_result,
+        )
+        monkeypatch.setattr(
+            runner,
+            "_execute_with_retry",
+            AsyncMock(side_effect=ConnectionError("Connection error")),
+        )
+
+        result = await runner.run_once_with_options()
+
+        assert result == "HEARTBEAT_FAILED"
+        assert calls == []
+
+
 # ── _is_transient_llm_error ────────────────────────────────────
 
 
