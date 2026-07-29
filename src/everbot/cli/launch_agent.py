@@ -90,10 +90,14 @@ def build_launch_agent_plist(*, project_root: Path, alfred_home: Path) -> Dict[s
 
     return {
         "Label": LAUNCH_AGENT_LABEL,
-        "ProgramArguments": ["/bin/bash", "-lc", shell_command],
+        # Non-login, non-interactive bash avoids sourcing ~/.zshrc / Oh My Zsh
+        # when launchd restarts the job (#177).
+        "ProgramArguments": ["/bin/bash", "--noprofile", "--norc", "-c", shell_command],
         "WorkingDirectory": str(project_root),
         "RunAtLoad": True,
-        "KeepAlive": True,
+        # Restart only after crash/non-zero exit. exit 0 (including
+        # already-running) must not thrash KeepAlive (#177).
+        "KeepAlive": {"SuccessfulExit": False},
         "StandardOutPath": str(logs_dir / "everbot.out"),
         "StandardErrorPath": str(logs_dir / "everbot.err"),
         "EnvironmentVariables": environment,

@@ -17,10 +17,18 @@ def test_build_launch_agent_plist_contains_expected_fields(tmp_path: Path) -> No
 
     assert plist["Label"] == LAUNCH_AGENT_LABEL
     assert plist["RunAtLoad"] is True
-    assert plist["KeepAlive"] is True
+    assert plist["KeepAlive"] == {"SuccessfulExit": False}
     assert plist["WorkingDirectory"] == str(project_root.resolve())
-    assert plist["ProgramArguments"][:2] == ["/bin/bash", "-lc"]
-    shell_command = plist["ProgramArguments"][2]
+    # Non-login, non-interactive bash: never load ~/.zshrc / Oh My Zsh (#177).
+    assert plist["ProgramArguments"][:4] == [
+        "/bin/bash",
+        "--noprofile",
+        "--norc",
+        "-c",
+    ]
+    shell_command = plist["ProgramArguments"][4]
     assert "exec python -m src.everbot.cli start" in shell_command
     assert f"export ALFRED_HOME='{alfred_home.resolve()}'" in shell_command
+    assert "-lc" not in plist["ProgramArguments"]
+    assert "-l" not in plist["ProgramArguments"]
     assert plist["EnvironmentVariables"]["PYTHONPATH"] == str(project_root.resolve())

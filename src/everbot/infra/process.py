@@ -10,6 +10,14 @@ from pathlib import Path
 from typing import Optional
 
 
+class DaemonAlreadyRunningError(RuntimeError):
+    """Raised when another EverBot daemon already holds the singleton lock.
+
+    Callers that implement launchd KeepAlive should treat this as a successful
+    no-op (exit 0) so the service manager does not thrash restart loops.
+    """
+
+
 class DaemonLock:
     """File-lock based singleton guard for the daemon process.
 
@@ -22,8 +30,11 @@ class DaemonLock:
         self._fd: Optional[int] = None
 
     def acquire(self) -> None:
-        """Acquire an exclusive lock. Raises ``RuntimeError`` if another
-        daemon instance already holds the lock."""
+        """Acquire an exclusive lock.
+
+        Raises:
+            DaemonAlreadyRunningError: another daemon instance already holds the lock.
+        """
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         self._fd = os.open(str(self._lock_path), os.O_CREAT | os.O_RDWR)
         try:
@@ -31,7 +42,7 @@ class DaemonLock:
         except OSError:
             os.close(self._fd)
             self._fd = None
-            raise RuntimeError(
+            raise DaemonAlreadyRunningError(
                 f"Another EverBot daemon is already running (lock: {self._lock_path})"
             )
 
@@ -104,3 +115,57 @@ def is_pid_running(pid: int) -> bool:
         return True
     return True
 
+
+def rotate_file_if_large(
+    path: Path,
+    *,
+    max_bytes: int = 10 * 1024 * 1024,
+    backups: int = 3,
+) -> bool:
+    """Rotate ``path`` when it exceeds ``max_bytes``.
+
+    Copies the live file to ``.1`` (shifting older backups) and **truncates the
+    original inode in place**. launchd keeps StandardErrorPath FDs open across
+    exec, so rename-and-recreate would leave writers attached to the backup.
+    Returns True if a rotation happened.
+    """
+    if max_bytes <= 0:
+        return False
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    if size <= max_bytes:
+        return False
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Drop the oldest backup first, then shift .N -> .(N+1).
+    oldest = path.with_name(f"{path.name}.{backups}")
+    if oldest.exists():
+        try:
+            oldest.unlink()
+        except OSError:
+            pass
+    for index in range(backups - 1, 0, -1):
+        src = path.with_name(f"{path.name}.{index}")
+        dst = path.with_name(f"{path.name}.{index + 1}")
+        if src.exists():
+            try:
+                src.replace(dst)
+            except OSError:
+                pass
+
+    backup = path.with_name(f"{path.name}.1")
+    try:
+        # Copy then truncate the same inode so open FDs keep writing the live path.
+        with path.open("rb") as src_fh:
+            payload = src_fh.read()
+        with backup.open("wb") as dst_fh:
+            dst_fh.write(payload)
+        with path.open("r+b") as live_fh:
+            live_fh.truncate(0)
+    except OSError:
+        return False
+    return True
