@@ -124,9 +124,10 @@ def rotate_file_if_large(
 ) -> bool:
     """Rotate ``path`` when it exceeds ``max_bytes``.
 
-    Renames existing backups upward (``.N`` -> ``.N+1``), moves the live file to
-    ``.1``, then creates a fresh empty file at ``path``. Returns True if a
-    rotation happened.
+    Copies the live file to ``.1`` (shifting older backups) and **truncates the
+    original inode in place**. launchd keeps StandardErrorPath FDs open across
+    exec, so rename-and-recreate would leave writers attached to the backup.
+    Returns True if a rotation happened.
     """
     if max_bytes <= 0:
         return False
@@ -155,9 +156,16 @@ def rotate_file_if_large(
                 src.replace(dst)
             except OSError:
                 pass
+
+    backup = path.with_name(f"{path.name}.1")
     try:
-        path.replace(path.with_name(f"{path.name}.1"))
+        # Copy then truncate the same inode so open FDs keep writing the live path.
+        with path.open("rb") as src_fh:
+            payload = src_fh.read()
+        with backup.open("wb") as dst_fh:
+            dst_fh.write(payload)
+        with path.open("r+b") as live_fh:
+            live_fh.truncate(0)
     except OSError:
         return False
-    path.write_bytes(b"")
     return True

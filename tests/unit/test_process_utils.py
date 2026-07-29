@@ -50,13 +50,15 @@ def test_daemon_lock_second_acquire_raises_already_running(tmp_path: Path):
 
 
 def test_rotate_file_if_large_rotates_and_truncates(tmp_path: Path):
-    """Oversized log files are rotated aside and replaced with an empty file."""
+    """Oversized logs are copied to .1 and the live inode is truncated in place."""
     err = tmp_path / "everbot.err"
     err.write_bytes(b"x" * 100)
+    live_inode = err.stat().st_ino
     rotated = rotate_file_if_large(err, max_bytes=50, backups=2)
     assert rotated is True
     assert err.exists()
     assert err.stat().st_size == 0
+    assert err.stat().st_ino == live_inode
     assert (tmp_path / "everbot.err.1").exists()
     assert (tmp_path / "everbot.err.1").stat().st_size == 100
 

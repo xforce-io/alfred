@@ -17,7 +17,7 @@ def test_build_launch_agent_plist_contains_expected_fields(tmp_path: Path) -> No
 
     assert plist["Label"] == LAUNCH_AGENT_LABEL
     assert plist["RunAtLoad"] is True
-    assert plist["KeepAlive"] is True
+    assert plist["KeepAlive"] == {"SuccessfulExit": False}
     assert plist["WorkingDirectory"] == str(project_root.resolve())
     # Non-login, non-interactive bash: never load ~/.zshrc / Oh My Zsh (#177).
     assert plist["ProgramArguments"][:4] == [
