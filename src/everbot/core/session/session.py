@@ -193,6 +193,51 @@ class SessionManager:
                     latest = ts
         return latest
 
+    def get_active_channel_session_id(self, agent_name: str) -> Optional[str]:
+        """Return newest non-web channel session id for one agent, if any.
+
+        Used to mirror primary mailbox deposits so Telegram-active users can
+        drain background events without opening the web primary session.
+        """
+        from ..channel.session_resolver import ChannelSessionResolver
+
+        patterns: list[str] = []
+        for channel_type, prefix in ChannelSessionResolver._PREFIX_MAP.items():
+            if channel_type == "web":
+                continue
+            patterns.append(f"{prefix}{agent_name}{ChannelSessionResolver._SEP}*.json")
+
+        best_id: Optional[str] = None
+        best_ts: Optional[float] = None
+        seen_paths: set[Path] = set()
+        for pattern in patterns:
+            for session_path in self.persistence.sessions_dir.glob(pattern):
+                if session_path in seen_paths or not session_path.is_file():
+                    continue
+                seen_paths.add(session_path)
+                try:
+                    raw = json.loads(session_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                session_type = raw.get("session_type") or self.infer_session_type(
+                    raw.get("session_id") or session_path.stem
+                )
+                if session_type != "channel":
+                    continue
+                if raw.get("agent_name") not in {None, "", agent_name}:
+                    continue
+                ua = raw.get("updated_at")
+                if not ua:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(ua).timestamp()
+                except (ValueError, TypeError):
+                    continue
+                if best_ts is None or ts > best_ts:
+                    best_ts = ts
+                    best_id = str(raw.get("session_id") or session_path.stem)
+        return best_id
+
     def record_metric(self, name: str, delta: float = 1.0) -> None:
         """Increment one runtime metric counter."""
         key = str(name or "").strip()

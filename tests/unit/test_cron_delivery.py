@@ -194,3 +194,42 @@ class TestRealtimeEmit:
             events._subscribers.clear()
 
         assert captured[0].get("projection_source_id") is None
+
+
+class TestDepositJobEventActiveChannelMirror:
+    @pytest.mark.asyncio
+    async def test_mirrors_to_active_channel_session(self):
+        sm = AsyncMock()
+        sm.deposit_mailbox_event.return_value = True
+        sm.get_active_channel_session_id = lambda agent_name: "tg_session_test_agent__1"
+        d = _make_delivery(session_manager=sm)
+
+        await d.deposit_job_event(
+            event_type="job_failed",
+            source_session_id="job_abc_123",
+            summary="failed",
+            detail="connection failed",
+            run_id="run_x",
+        )
+
+        assert sm.deposit_mailbox_event.await_count == 2
+        targets = [c.args[0] for c in sm.deposit_mailbox_event.await_args_list]
+        assert targets == ["web_session_test", "tg_session_test_agent__1"]
+
+    @pytest.mark.asyncio
+    async def test_no_mirror_when_no_active_channel(self):
+        sm = AsyncMock()
+        sm.deposit_mailbox_event.return_value = True
+        sm.get_active_channel_session_id = lambda agent_name: None
+        d = _make_delivery(session_manager=sm)
+
+        await d.deposit_job_event(
+            event_type="job_failed",
+            source_session_id="job_abc_123",
+            summary="failed",
+            detail="x",
+            run_id="run_y",
+        )
+
+        sm.deposit_mailbox_event.assert_awaited_once()
+        assert sm.deposit_mailbox_event.await_args.args[0] == "web_session_test"

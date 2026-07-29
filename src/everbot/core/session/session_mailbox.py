@@ -19,6 +19,38 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_MAX_MAILBOX_EVENTS = 50
+
+
+def trim_mailbox_events(
+    events: list[Dict[str, Any]],
+    *,
+    max_events: int | None = None,
+) -> list[Dict[str, Any]]:
+    """Keep at most ``max_events`` mailbox items, preferring newest + higher priority."""
+    limit = DEFAULT_MAX_MAILBOX_EVENTS if max_events is None else int(max_events)
+    if limit <= 0:
+        return []
+    items = [e for e in events if isinstance(e, dict)]
+    if len(items) <= limit:
+        return items
+
+    def _sort_key(event: Dict[str, Any]) -> tuple:
+        ts = parse_iso_datetime(event.get("timestamp"))
+        # Missing timestamps sort as oldest.
+        ts_ord = ts.timestamp() if ts is not None else float("-inf")
+        try:
+            priority = int(event.get("priority") or 0)
+        except (TypeError, ValueError):
+            priority = 0
+        return (ts_ord, priority)
+
+    ranked = sorted(items, key=_sort_key, reverse=True)
+    kept = ranked[:limit]
+    kept_ids = {id(e) for e in kept}
+    # Preserve relative order of survivors from the original list.
+    return [e for e in items if id(e) in kept_ids]
+
 def parse_iso_datetime(value: Any) -> Optional[datetime]:
     """Parse an ISO datetime string → UTC datetime, or None."""
     if not isinstance(value, str) or not value.strip():
@@ -101,7 +133,7 @@ async def deposit_mailbox_event(
                 dropped_duplicate["value"] = True
 
         mailbox.append(dict(event_obj))
-        session_data.mailbox = mailbox
+        session_data.mailbox = trim_mailbox_events(mailbox)
         inserted["value"] = True
 
     # bump_updated_at=False: mailbox deposits are background writes and must not
