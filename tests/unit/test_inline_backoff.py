@@ -365,3 +365,67 @@ class TestProbeCooldown:
         runner._last_probe_at = datetime.now() - timedelta(seconds=120)  # < 300s
         assert asyncio.run(runner._probe_llm()) is False
         assert client.complete.await_count == 0
+
+
+
+class TestDaemonIsolatedHealthGate:
+    def _build(self, runner, tmp_path):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from src.everbot.cli.daemon import EverBotDaemon
+
+        daemon = EverBotDaemon.__new__(EverBotDaemon)
+        daemon.heartbeat_runners = {"a": runner}
+        daemon._scheduler_cron_jobs = True
+        daemon._scheduler_run_heartbeat = AsyncMock()
+        daemon.user_data = SimpleNamespace(alfred_home=tmp_path)
+        return daemon._build_scheduler()
+
+    def test_claim_skips_when_llm_unavailable(self, tmp_path):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from datetime import datetime
+
+        runner = SimpleNamespace(
+            is_llm_unavailable=True,
+            claim_isolated_task=AsyncMock(return_value=True),
+            execute_isolated_claimed_task=AsyncMock(),
+            list_due_inline_tasks=lambda now=None: [],
+            list_due_isolated_tasks=lambda now=None: [{"id": "t1", "timeout_seconds": 30}],
+            interval_minutes=30,
+            night_interval_minutes=None,
+            active_hours=(0, 24),
+            inspect_interval_minutes=30,
+            inspect_night_interval_minutes=None,
+        )
+        sched = self._build(runner, tmp_path)
+        due = list(sched._get_due_tasks(datetime.now()) or [])
+        assert any(t.id == "a:t1" for t in due)
+        assert asyncio.run(sched._claim_task("a:t1")) is False
+        runner.claim_isolated_task.assert_not_awaited()
+
+    def test_claim_and_run_when_llm_available(self, tmp_path):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from datetime import datetime
+        from src.everbot.core.runtime.scheduler import SchedulerTask
+
+        runner = SimpleNamespace(
+            is_llm_unavailable=False,
+            claim_isolated_task=AsyncMock(return_value=True),
+            execute_isolated_claimed_task=AsyncMock(),
+            list_due_inline_tasks=lambda now=None: [],
+            list_due_isolated_tasks=lambda now=None: [{"id": "t1", "timeout_seconds": 30}],
+            interval_minutes=30,
+            night_interval_minutes=None,
+            active_hours=(0, 24),
+            inspect_interval_minutes=30,
+            inspect_night_interval_minutes=None,
+        )
+        sched = self._build(runner, tmp_path)
+        list(sched._get_due_tasks(datetime.now()) or [])
+        assert asyncio.run(sched._claim_task("a:t1")) is True
+        runner.claim_isolated_task.assert_awaited_once()
+        task = SchedulerTask(id="a:t1", agent_name="a", execution_mode="isolated")
+        asyncio.run(sched._run_isolated(task, datetime.now()))
+        runner.execute_isolated_claimed_task.assert_awaited_once()
