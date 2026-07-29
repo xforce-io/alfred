@@ -183,6 +183,14 @@ class EverBotDaemon:
             if target is None:
                 return False
             runner, snapshot = target
+            # Share the heartbeat probe health gate with isolated work (#180).
+            # Gate before claim so due tasks are not stuck claimed during outages.
+            if getattr(runner, "is_llm_unavailable", False):
+                logger.info(
+                    "Skip isolated claim for %s: LLM unavailable",
+                    task_key,
+                )
+                return False
             claim = getattr(runner, "claim_isolated_task", None)
             if not callable(claim):
                 return False
@@ -197,6 +205,12 @@ class EverBotDaemon:
             if target is None:
                 return
             runner, snapshot = target
+            if getattr(runner, "is_llm_unavailable", False):
+                logger.info(
+                    "Skip isolated run for %s: LLM unavailable",
+                    task.id,
+                )
+                return
             execute = getattr(runner, "execute_isolated_claimed_task", None)
             if not callable(execute):
                 return
