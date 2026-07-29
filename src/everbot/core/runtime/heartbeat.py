@@ -1643,8 +1643,11 @@ If not, reply with `HEARTBEAT_OK`.
                 self._last_result = result
                 logger.info("[%s] 心跳结果: %s...", self.agent_name, result[:100])
 
-                if self.on_result:
-                    await self._emit_result(result)
+            # Ops status/log callback is independent of user-delivery suppress.
+            # SKIPPED_* early-returns above never reach here, so they do not
+            # overwrite the last real heartbeat result in everbot.status.json.
+            if self.on_result:
+                await self._emit_result(result)
             return result
 
         except Exception as e:
