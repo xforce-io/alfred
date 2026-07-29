@@ -49,6 +49,9 @@ from ...infra.user_data import get_user_data_manager
 
 logger = logging.getLogger(__name__)
 
+# Sample high-frequency inactive skips so heartbeat_events.jsonl stays usable (#178).
+INACTIVE_EVENT_SAMPLE_SECONDS = 60.0
+
 # Error markers that indicate non-retryable (permanent) failures.
 # Matching is case-insensitive against ``str(exception)``.
 _PERMANENT_ERROR_MARKERS: list[str] = [
@@ -393,6 +396,17 @@ If not, reply with `HEARTBEAT_OK`.
     def _write_heartbeat_event(self, event_type: str, **kwargs: Any) -> None:
         """Write a structured heartbeat event to the JSONL events file."""
         try:
+            # Throttle inactive skips: keep observability without 1Hz floods.
+            if event_type == "skipped" and str(kwargs.get("reason") or "") == "inactive":
+                now = datetime.now()
+                last = getattr(self, "_last_inactive_event_at", None)
+                if (
+                    last is not None
+                    and (now - last).total_seconds() < float(INACTIVE_EVENT_SAMPLE_SECONDS)
+                ):
+                    return
+                self._last_inactive_event_at = now
+
             from ...infra.logging_utils import rotate_log_file_if_needed
             user_data = get_user_data_manager()
             events_file = user_data.heartbeat_events_file
