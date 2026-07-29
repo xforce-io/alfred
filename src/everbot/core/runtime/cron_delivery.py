@@ -145,7 +145,7 @@ class CronDelivery:
         detail: Optional[str],
         run_id: str,
     ) -> bool:
-        """Deposit isolated job result to primary mailbox."""
+        """Deposit isolated job result to primary mailbox and active channel."""
         event = build_system_event(
             event_type=event_type,
             source_session_id=source_session_id,
@@ -156,12 +156,42 @@ class CronDelivery:
             suppress_if_stale=False,
             dedupe_key=f"{event_type}:{self.agent_name}:{run_id}:{source_session_id}",
         )
-        return await self.session_manager.deposit_mailbox_event(
+        ok = await self.session_manager.deposit_mailbox_event(
             self.primary_session_id,
             event,
             timeout=5.0,
             blocking=True,
         )
+        # Mirror to the newest active non-web channel so TG users can drain it.
+        getter = getattr(self.session_manager, "get_active_channel_session_id", None)
+        channel_session_id = None
+        if callable(getter):
+            try:
+                maybe = getter(self.agent_name)
+                if inspect.isawaitable(maybe):
+                    maybe = await maybe
+                if isinstance(maybe, str) and maybe.strip():
+                    channel_session_id = maybe.strip()
+            except Exception:
+                logger.debug(
+                    "[%s] active channel lookup failed", self.agent_name, exc_info=True
+                )
+        if channel_session_id and channel_session_id != self.primary_session_id:
+            try:
+                await self.session_manager.deposit_mailbox_event(
+                    channel_session_id,
+                    dict(event),
+                    timeout=5.0,
+                    blocking=True,
+                )
+            except Exception:
+                logger.warning(
+                    "[%s] Failed to mirror job event to channel session %s",
+                    self.agent_name,
+                    channel_session_id,
+                    exc_info=True,
+                )
+        return ok
 
     def _event_scope_kwargs(self) -> dict[str, Optional[str]]:
         """Build routing kwargs for realtime events."""

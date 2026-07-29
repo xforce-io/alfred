@@ -283,3 +283,82 @@ async def test_ack_mailbox_does_not_update_activity_time(tmp_path: Path):
     assert after == before, (
         f"Ack mailbox should not update activity time: {before!r} -> {after!r}."
     )
+
+
+def test_trim_mailbox_events_keeps_newest_within_limit():
+    from src.everbot.core.session.session_mailbox import trim_mailbox_events
+
+    events = [
+        {"event_id": f"e{i}", "timestamp": f"2026-07-29T10:00:{i:02d}+00:00", "priority": 0}
+        for i in range(5)
+    ]
+    trimmed = trim_mailbox_events(events, max_events=3)
+    assert [e["event_id"] for e in trimmed] == ["e2", "e3", "e4"]
+
+
+def test_trim_mailbox_events_prefers_higher_priority_when_tied():
+    from src.everbot.core.session.session_mailbox import trim_mailbox_events
+
+    events = [
+        {"event_id": "low", "timestamp": "2026-07-29T10:00:00+00:00", "priority": 0},
+        {"event_id": "high", "timestamp": "2026-07-29T10:00:00+00:00", "priority": 10},
+        {"event_id": "mid", "timestamp": "2026-07-29T09:00:00+00:00", "priority": 1},
+    ]
+    trimmed = trim_mailbox_events(events, max_events=2)
+    ids = {e["event_id"] for e in trimmed}
+    assert ids == {"low", "high"}
+
+
+@pytest.mark.asyncio
+async def test_deposit_mailbox_enforces_max_events(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "src.everbot.core.session.session_mailbox.DEFAULT_MAX_MAILBOX_EVENTS",
+        3,
+    )
+    manager = SessionManager(tmp_path)
+    session_id = "web_session_demo_agent"
+    for i in range(5):
+        ok = await manager.deposit_mailbox_event(
+            session_id,
+            {
+                "event_id": f"evt_{i}",
+                "event_type": "job_failed",
+                "summary": f"fail {i}",
+                "timestamp": f"2026-07-29T10:0{i}:00+00:00",
+            },
+        )
+        assert ok is True
+
+    loaded = await manager.load_session(session_id)
+    assert loaded is not None
+    assert len(loaded.mailbox) == 3
+    assert [e["event_id"] for e in loaded.mailbox] == ["evt_2", "evt_3", "evt_4"]
+
+
+@pytest.mark.asyncio
+async def test_get_active_channel_session_id_picks_newest(tmp_path: Path):
+    manager = SessionManager(tmp_path)
+    # seed two channel sessions via raw files
+    old = {
+        "session_id": "tg_session_demo_agent__1",
+        "agent_name": "demo_agent",
+        "model_name": "x",
+        "session_type": "channel",
+        "history_messages": [],
+        "mailbox": [],
+        "variables": {},
+        "created_at": "2026-07-01T00:00:00+00:00",
+        "updated_at": "2026-07-20T00:00:00+00:00",
+        "state": "active",
+        "events": [],
+        "timeline": [],
+        "context_trace": {},
+        "revision": 1,
+    }
+    new = dict(old)
+    new["session_id"] = "tg_session_demo_agent__2"
+    new["updated_at"] = "2026-07-28T00:00:00+00:00"
+    (tmp_path / "tg_session_demo_agent__1.json").write_text(json.dumps(old), encoding="utf-8")
+    (tmp_path / "tg_session_demo_agent__2.json").write_text(json.dumps(new), encoding="utf-8")
+
+    assert manager.get_active_channel_session_id("demo_agent") == "tg_session_demo_agent__2"
