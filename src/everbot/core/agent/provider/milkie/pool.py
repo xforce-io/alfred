@@ -13,12 +13,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from .sidecar import MilkieSidecar
 
 logger = logging.getLogger(__name__)
+
+# After consecutive spawn failures, fail-fast for this many seconds (#178).
+SIDECAR_SPAWN_COOLDOWN_SECONDS = 60.0
 
 
 def _default_factory(cmd, env):
@@ -40,6 +44,8 @@ class SidecarPool:
         self._locks: Dict[str, asyncio.Lock] = {}
         self._fingerprints: Dict[str, Optional[str]] = {}
         self._inflight: Dict[str, int] = {}
+        self._cooldown_until: Dict[str, float] = {}
+        self._fail_counts: Dict[str, int] = {}
 
     def _lock(self, agent_name: str) -> asyncio.Lock:
         lock = self._locks.get(agent_name)
@@ -105,13 +111,22 @@ class SidecarPool:
     async def _spawn_locked(self, agent_name: str, fingerprint: Optional[str] = None) -> Any:
         # 指纹在 _build 之前取(_build 自己会再跑 discover):若两者之间技能恰好又变,
         # 指纹偏旧 → 下一轮多一次重生(冗余但安全);反向(指纹偏新)会漏刷新,不可取。
+        now = time.monotonic()
+        cool_until = float(self._cooldown_until.get(agent_name, 0.0) or 0.0)
+        if cool_until > now:
+            remaining = cool_until - now
+            raise RuntimeError(
+                f"sidecar spawn cooldown active for '{agent_name}' "
+                f"({remaining:.0f}s remaining)"
+            )
+
         if fingerprint is None and self._fingerprint is not None:
             fingerprint = await self._current_fingerprint(agent_name)
         cmd, env = self._build(agent_name)
         sidecar = self._factory(cmd, env)
         try:
             await sidecar.start()
-        except BaseException:
+        except BaseException as exc:
             # start() 已 spawn 子进程后才失败(如 ready 超时)→ 子进程已存活
             # 但未入池。必须 close() 回收,否则 orphan milkie serve 泄漏。
             # close 错误吞掉(best-effort),re-raise 原始异常。
@@ -119,9 +134,32 @@ class SidecarPool:
                 await sidecar.close()
             except BaseException:
                 pass
+            fails = int(self._fail_counts.get(agent_name, 0) or 0) + 1
+            self._fail_counts[agent_name] = fails
+            # Enter cooldown after repeated failures to stop thrash storms (#178).
+            # First failure remains immediately retryable (existing pool contract).
+            if fails >= 2:
+                self._cooldown_until[agent_name] = now + float(SIDECAR_SPAWN_COOLDOWN_SECONDS)
+                logger.warning(
+                    "sidecar pool: spawn failed for '%s' (failures=%d); cooldown %.0fs: %s",
+                    agent_name,
+                    fails,
+                    float(SIDECAR_SPAWN_COOLDOWN_SECONDS),
+                    exc,
+                )
+            else:
+                logger.warning(
+                    "sidecar pool: spawn failed for '%s' (failures=%d): %s",
+                    agent_name,
+                    fails,
+                    exc,
+                )
             raise
         self._sidecars[agent_name] = sidecar
-        self._fingerprints[agent_name] = fingerprint
+        self._fail_counts[agent_name] = 0
+        self._cooldown_until.pop(agent_name, None)
+        if self._fingerprint is not None:
+            self._fingerprints[agent_name] = fingerprint
         return sidecar
 
     async def _current_fingerprint(self, agent_name: str) -> Optional[str]:
