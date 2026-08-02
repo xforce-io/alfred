@@ -53,6 +53,20 @@ class TestReadFrontmatterVersion:
     def test_nonexistent(self, tmp_path):
         assert read_frontmatter_version(tmp_path / "nope.md") == "baseline"
 
+    def test_duplicate_version_is_ambiguous(self, tmp_path):
+        p = tmp_path / "SKILL.md"
+        p.write_text(
+            '---\nname: foo\nversion: "1.0"\nversion: "2.0"\n---\nbody\n'
+        )
+        assert read_frontmatter_version(p) == "baseline"
+
+    def test_body_version_text_is_ignored(self, tmp_path):
+        p = tmp_path / "SKILL.md"
+        p.write_text(
+            '---\nname: foo\nversion: "1.0"\n---\nbody version: "9.9"\n'
+        )
+        assert read_frontmatter_version(p) == "1.0"
+
 
 class TestVersionManager:
     def _make_mgr(self, tmp_path) -> VersionManager:
@@ -83,6 +97,43 @@ class TestVersionManager:
         assert ptr is not None
         assert ptr.current_version == "1.0"
         assert ptr.repo_baseline is True  # first version, no prior stable
+
+    @pytest.mark.parametrize(
+        "invalid_content",
+        [
+            SKILL_CONTENT_V1,
+            "---\nname: test-skill\n---\nbody\n",
+            '---\nname: test-skill\nversion: "2.0"\nversion: "3.0"\n---\nbody\n',
+        ],
+    )
+    def test_publish_rejects_invalid_version_before_first_write(
+        self, tmp_path, invalid_content,
+    ):
+        mgr = self._make_mgr(tmp_path)
+
+        with pytest.raises(ValueError, match="frontmatter version"):
+            mgr.publish("test-skill", "2.0", invalid_content)
+
+        assert not (tmp_path / "skills" / "test-skill").exists()
+        assert mgr.list_versions("test-skill") == []
+        assert mgr.get_pointer("test-skill") is None
+
+    def test_publish_mismatch_preserves_existing_state(self, tmp_path):
+        mgr = self._make_mgr(tmp_path)
+        mgr.publish("test-skill", "1.0", SKILL_CONTENT_V1)
+        mgr.activate("test-skill", "1.0")
+        skill_md = tmp_path / "skills" / "test-skill" / "SKILL.md"
+        live_before = skill_md.read_text()
+        pointer_before = mgr.get_pointer("test-skill").to_json()
+        versions_before = mgr.list_versions("test-skill")
+
+        with pytest.raises(ValueError, match="frontmatter version"):
+            mgr.publish("test-skill", "2.0", SKILL_CONTENT_V1)
+
+        assert skill_md.read_text() == live_before
+        assert mgr.get_pointer("test-skill").to_json() == pointer_before
+        assert mgr.list_versions("test-skill") == versions_before
+        assert not mgr._version_dir("test-skill", "2.0").exists()
 
     def test_publish_second_testing_version_does_not_promote_previous_testing(self, tmp_path):
         """Publishing a new TESTING version must not bless the previous one.

@@ -376,3 +376,35 @@ class TestSLMHumanOverrideFlow:
         ver_mgr.save_eval_report("test-skill", "1.0", report)
         loaded = ver_mgr.get_eval_report("test-skill", "1.0")
         assert loaded.critical_issue_rate == 0.0
+
+
+class TestPublishVersionInvariant:
+    @pytest.mark.parametrize(
+        "invalid_content",
+        [
+            '---\nname: example-skill\nversion: "stale"\n---\nbody\n',
+            "---\nname: example-skill\n---\nbody\n",
+            '---\nname: example-skill\nversion: "2.0"\nversion: "3.0"\n---\nbody\n',
+        ],
+    )
+    def test_invalid_candidate_is_rejected_without_partial_state(
+        self, tmp_path: Path, invalid_content: str,
+    ):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        ver_mgr = VersionManager(skills_dir)
+        ver_mgr.publish("example-skill", "1.0", SKILL_V1)
+        ver_mgr.activate("example-skill", "1.0")
+
+        skill_md = skills_dir / "example-skill" / "SKILL.md"
+        live_before = skill_md.read_text()
+        pointer_before = ver_mgr.get_pointer("example-skill").to_json()
+        versions_before = ver_mgr.list_versions("example-skill")
+
+        with pytest.raises(ValueError, match="frontmatter version"):
+            ver_mgr.publish("example-skill", "2.0", invalid_content)
+
+        assert skill_md.read_text() == live_before
+        assert ver_mgr.get_pointer("example-skill").to_json() == pointer_before
+        assert ver_mgr.list_versions("example-skill") == versions_before
+        assert not ver_mgr._version_dir("example-skill", "2.0").exists()
