@@ -1,6 +1,6 @@
 """Memory entry data model."""
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 import uuid
@@ -29,6 +29,9 @@ class MemoryEntry:
     kind: str = "profile"
     event_at: Optional[str] = None
     due_at: Optional[str] = None
+    status: str = "active"
+    supersedes: list[str] = field(default_factory=list)
+    superseded_by: list[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to JSON-serializable dictionary."""
@@ -51,9 +54,24 @@ class MemoryEntry:
             kind=str(data.get("kind", "profile")),
             event_at=str(event_at_raw) if event_at_raw else None,
             due_at=str(due_at_raw) if due_at_raw else None,
+            status=(
+                str(data.get("status", "active"))
+                if str(data.get("status", "active")) in {"active", "superseded"}
+                else "active"
+            ),
+            supersedes=_relation_list(data.get("supersedes", [])),
+            superseded_by=_relation_list(data.get("superseded_by", [])),
         )
 
 
 def new_id() -> str:
     """Generate a short uuid4 ID (6 chars)."""
     return uuid.uuid4().hex[:6]
+
+
+def _relation_list(raw: Any) -> list[str]:
+    if isinstance(raw, str):
+        return [value.strip() for value in raw.split(",") if value.strip()]
+    if isinstance(raw, (list, tuple, set)):
+        return [str(value) for value in raw if value]
+    return []

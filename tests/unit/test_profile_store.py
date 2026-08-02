@@ -145,6 +145,29 @@ class TestProfileStoreSave:
         content = md.read_text(encoding="utf-8")
         assert content.index("[high]") < content.index("[mid]") < content.index("[low]")
 
+    def test_superseded_trace_does_not_consume_active_capacity(self, tmp_path: Path):
+        md = tmp_path / "MEMORY.md"
+        store = ProfileStore(md)
+        active = [
+            _make_entry(id=f"active{i:02d}", score=0.9 - i / 1000)
+            for i in range(store.MAX_ENTRIES)
+        ]
+        traces = [
+            _make_entry(
+                id=f"trace{i:02d}", status="superseded", score=0.01,
+                last_activated=f"2026-08-{i + 1:02d}T00:00:00+00:00",
+            )
+            for i in range(7)
+        ]
+
+        store.save(active + traces)
+        loaded = store.load()
+
+        assert {entry.id for entry in loaded if entry.status == "active"} == {
+            entry.id for entry in active
+        }
+        assert len([entry for entry in loaded if entry.status == "superseded"]) == 5
+
 
 class TestProfileStoreRoundTrip:
     """Save then load should preserve data."""
@@ -166,6 +189,33 @@ class TestProfileStoreRoundTrip:
             orig = next(e for e in original if e.id == entry.id)
             assert entry.content == orig.content
             assert abs(entry.score - orig.score) < 0.01
+
+    def test_round_trip_preserves_supersede_relations_and_source(self, tmp_path: Path):
+        md = tmp_path / "MEMORY.md"
+        store = ProfileStore(md)
+        replacement = _make_entry(
+            id="new123",
+            content="用户现在不负责项目 A",
+            source_session="web_session_demo_42",
+            supersedes=["old123"],
+        )
+        obsolete = _make_entry(
+            id="old123",
+            content="用户负责项目 A",
+            status="superseded",
+            superseded_by=["new123"],
+            score=0.01,
+        )
+
+        store.save([replacement, obsolete])
+        loaded = {entry.id: entry for entry in store.load()}
+
+        assert loaded["new123"].status == "active"
+        assert loaded["new123"].supersedes == ["old123"]
+        assert loaded["new123"].source_session == "web_session_demo_42"
+        assert loaded["old123"].status == "superseded"
+        assert loaded["old123"].superseded_by == ["new123"]
+        assert "## Archived Memories" in md.read_text(encoding="utf-8")
 
 
 class TestMemoryEntryKind:

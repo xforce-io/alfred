@@ -16,6 +16,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.everbot.core.runtime.heartbeat import HeartbeatRunner
+from src.everbot.core.memory.manager import MemoryManager
+from src.everbot.core.memory.models import MemoryEntry
 
 
 class _StubUserDataManager:
@@ -424,11 +426,20 @@ class TestReflectPromptInlinesMemory:
     so the agent does not need to call _read_file with a bare path."""
 
     @pytest.mark.asyncio
-    async def test_reflect_prompt_contains_memory_content(self, tmp_path: Path):
-        """Reflect prompt should inline MEMORY.md content."""
+    async def test_reflect_prompt_contains_only_active_memory_projection(self, tmp_path: Path):
+        """Reflect prompt must not re-inject superseded MEMORY trace."""
         runner = _make_runner(workspace_path=tmp_path)
         _write_heartbeat_md(tmp_path)
-        (tmp_path / "MEMORY.md").write_text("important-memory-payload", encoding="utf-8")
+        MemoryManager(tmp_path / "MEMORY.md").store.save([
+            MemoryEntry.from_dict({
+                "id": "active1", "content": "用户现在不负责项目 A",
+                "category": "fact", "score": 0.9, "status": "active",
+            }),
+            MemoryEntry.from_dict({
+                "id": "old001", "content": "用户负责项目 A",
+                "category": "fact", "score": 0.19, "status": "superseded",
+            }),
+        ])
 
         fake_agent = SimpleNamespace(
             executor=SimpleNamespace(
@@ -446,8 +457,8 @@ class TestReflectPromptInlinesMemory:
             fake_agent, heartbeat_content, mode="reflect"
         )
 
-        assert "important-memory-payload" in prompt
-        assert "MEMORY.md" in prompt
+        assert "用户现在不负责项目 A" in prompt
+        assert "用户负责项目 A" not in prompt
 
     @pytest.mark.asyncio
     async def test_reflect_prompt_works_without_memory_file(self, tmp_path: Path):
@@ -476,11 +487,18 @@ class TestReflectPromptInlinesMemory:
         assert "routine 反思阶段" in prompt
         assert "HEARTBEAT.md" in prompt or heartbeat_content in prompt
 
-    def test_read_memory_md_returns_content(self, tmp_path: Path):
-        """_read_memory_md should return file content when file exists."""
+    def test_read_memory_md_returns_active_projection(self, tmp_path: Path):
+        """_read_memory_md should parse rather than return raw file content."""
         runner = _make_runner(workspace_path=tmp_path)
-        (tmp_path / "MEMORY.md").write_text("test-content", encoding="utf-8")
-        assert runner._read_memory_md() == "test-content"
+        MemoryManager(tmp_path / "MEMORY.md").store.save([
+            MemoryEntry.from_dict({
+                "id": "active1", "content": "用户偏好简洁输出",
+                "category": "preference", "score": 0.9, "status": "active",
+            }),
+        ])
+        projection = runner._read_memory_md()
+        assert "用户偏好简洁输出" in projection
+        assert "memory_meta" not in projection
 
     def test_read_memory_md_returns_none_when_missing(self, tmp_path: Path):
         """_read_memory_md should return None when file doesn't exist."""

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import logging
 
 logger = logging.getLogger(__name__)
+_DERIVED_MEMORY_PROFILE_MARKER = "<!-- derived_from_memory: true -->"
 
 
 @dataclass
@@ -147,7 +148,10 @@ class WorkspaceLoader:
 
         # Inject memory when available and within budget.
         # Once memory-review populates USER.md, this becomes redundant.
-        if instructions.memory_md:
+        if instructions.memory_md and not (
+            instructions.user_md
+            and _DERIVED_MEMORY_PROFILE_MARKER in instructions.user_md
+        ):
             memory_text = instructions.memory_md.strip()
             if len(memory_text) <= self.MAX_MEMORY_PROMPT_CHARS:
                 parts.append(f"# 记忆\n\n{memory_text}")

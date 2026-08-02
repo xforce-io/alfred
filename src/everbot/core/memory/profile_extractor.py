@@ -103,8 +103,13 @@ class ProfileExtractor:
         if not messages:
             return ExtractResult()
 
-        # Build existing memories summary (top 50 by score)
-        top_existing = sorted(existing_entries, key=lambda e: e.score, reverse=True)[:50]
+        # Defense in depth: callers should pass active entries, but stale trace
+        # must never be shown to the extractor even if another caller forgets.
+        top_existing = sorted(
+            [entry for entry in existing_entries if entry.status == "active"],
+            key=lambda e: e.score,
+            reverse=True,
+        )[:50]
         if top_existing:
             existing_lines = []
             for e in top_existing:

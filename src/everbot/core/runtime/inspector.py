@@ -305,7 +305,9 @@ class Inspector:
         memory_content = None
         if memory_path.exists():
             try:
-                memory_content = memory_path.read_text(encoding="utf-8")
+                from ..memory.manager import MemoryManager
+
+                memory_content = MemoryManager(memory_path).get_prompt_profile() or None
             except Exception as exc:
                 logger.debug("Failed to read MEMORY.md: %s", exc)
                 gather_errors.append(f"MEMORY.md: {exc}")

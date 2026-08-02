@@ -8,13 +8,16 @@ layer never block the other.
 
 import logging
 import re
+import json
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .event_extractor import EventExtractor
 from .event_store import EventStore
 from .merger import MemoryMerger
-from .models import MemoryEntry
+from .models import MemoryEntry, new_id
 from .profile_extractor import ProfileExtractor
 from .profile_store import ProfileStore
 
@@ -163,27 +166,40 @@ class MemoryManager:
     ) -> Dict[str, Any]:
         """Profile pipeline: extract → decay → merge → save."""
         extractor = ProfileExtractor(self._context)
-        extract_result = await extractor.extract(new_messages, existing)
+        active_snapshot = [entry for entry in existing if entry.status == "active"]
+        extract_result = await extractor.extract(new_messages, active_snapshot)
 
-        existing = self.merger.apply_profile_decay(existing)
+        expected = self.entries_fingerprint(existing)
+        with self.review_lock():
+            current = self.store.load()
+            if self.entries_fingerprint(current) != expected:
+                raise IntegrityError("Memory changed concurrently; session extraction must retry")
 
-        merge_result = self.merger.merge(
-            existing=existing,
-            new_extractions=extract_result.new_memories,
-            reinforcements=extract_result.reinforced_ids,
-            source_session=session_id,
-            content_filter=_is_internal_content,
-        )
+            superseded = [entry for entry in current if entry.status == "superseded"]
+            active_existing = self.merger.apply_profile_decay(
+                [entry for entry in current if entry.status == "active"]
+            )
 
-        # Save advances the watermark even when extraction produced
-        # nothing new — otherwise the same messages would be re-extracted
-        # on the next call.
-        self.store.save(merge_result.entries, last_processed_count=total_messages)
+            merge_result = self.merger.merge(
+                existing=active_existing,
+                new_extractions=extract_result.new_memories,
+                reinforcements=extract_result.reinforced_ids,
+                source_session=session_id,
+                content_filter=_is_internal_content,
+            )
+
+            # Save advances the watermark even when extraction produced
+            # nothing new — otherwise the same messages would be re-extracted
+            # on the next call.
+            self.store.save(
+                merge_result.entries + superseded,
+                last_processed_count=total_messages,
+            )
 
         return {
             "new_count": merge_result.new_count,
             "updated_count": merge_result.updated_count,
-            "total": len(merge_result.entries),
+            "total": len(merge_result.entries) + len(superseded),
         }
 
     async def _process_events(
@@ -239,6 +255,10 @@ class MemoryManager:
             sections.append(event_block)
         return "\n\n".join(sections)
 
+    def get_prompt_profile(self, top_k: int = 20) -> str:
+        """Return the canonical active-only profile projection for prompts."""
+        return self._format_profile_block(top_k)
+
     def _format_profile_block(self, top_k: int) -> str:
         """High-scoring profile entries, deduplicated by token similarity."""
         from .merger import token_similarity, _SIMILARITY_THRESHOLD
@@ -250,7 +270,8 @@ class MemoryManager:
         candidates = sorted(
             [
                 e for e in entries
-                if e.score >= _PROFILE_INJECT_THRESHOLD
+                if e.status == "active"
+                and e.score >= _PROFILE_INJECT_THRESHOLD
                 and not _is_internal_content(e.content)
             ],
             key=lambda e: e.score,
@@ -343,7 +364,7 @@ class MemoryManager:
 
         pool: List[MemoryEntry] = []
         if kind in ("profile", "both"):
-            pool.extend(self.store.load())
+            pool.extend(entry for entry in self.store.load() if entry.status == "active")
         if kind in ("event", "both"):
             if days is not None:
                 pool.extend(self._event_store.load_recent(days=days))
@@ -369,94 +390,306 @@ class MemoryManager:
         """Load all profile entries (events are queried via ``recall``)."""
         return self.store.load()
 
+    def preview_review(
+        self,
+        review: dict,
+        existing_entries: Optional[List[MemoryEntry]] = None,
+    ) -> tuple[List[MemoryEntry], dict]:
+        """Project a review without writing, including correction/split relations."""
+        entries = existing_entries if existing_entries is not None else self.store.load()
+        entry_map = {
+            entry.id: MemoryEntry.from_dict(entry.to_dict())
+            for entry in entries
+        }
+        active_before = sum(1 for entry in entry_map.values() if entry.status == "active")
+        stats = {
+            "merged": 0,
+            "deprecated": 0,
+            "reinforced": 0,
+            "refined": 0,
+            "corrected": 0,
+            "split": 0,
+        }
+
+        # Explicit corrections have priority over ordinary consolidation.
+        for item in review.get("corrections", []):
+            if not isinstance(item, dict):
+                continue
+            content = str(item.get("content", "")).strip()
+            category = str(item.get("category", "fact")).strip()
+            source_ids = list(dict.fromkeys(
+                str(value) for value in item.get("supersedes_ids", []) if value
+            ))
+            if not content or category not in _PROFILE_CATEGORIES or not source_ids:
+                logger.warning("Skipping invalid memory correction for IDs %s", source_ids)
+                continue
+
+            normalized_content = _normalize_fact(content)
+            replacement = next((
+                entry
+                for entry in entry_map.values()
+                if entry.status == "active"
+                and entry.id not in source_ids
+                and entry.category == category
+                and _normalize_fact(entry.content) == normalized_content
+            ), None)
+            sources = [
+                entry_map[source_id]
+                for source_id in source_ids
+                if source_id in entry_map and entry_map[source_id].status == "active"
+            ]
+            if replacement is not None:
+                new_sources = [
+                    source for source in sources if source.id != replacement.id
+                ]
+                if new_sources:
+                    replacement.supersedes = list(dict.fromkeys(
+                        replacement.supersedes
+                        + [source.id for source in new_sources]
+                    ))
+                    for source in new_sources:
+                        source.status = "superseded"
+                        source.superseded_by = [replacement.id]
+                        source.score = min(source.score, 0.19)
+                    stats["corrected"] += 1
+                    continue
+
+                already_replaced = all(
+                    source_id in replacement.supersedes
+                    or (
+                        source_id in entry_map
+                        and replacement.id in entry_map[source_id].superseded_by
+                    )
+                    for source_id in source_ids
+                )
+                if already_replaced:
+                    continue
+
+            if not sources:
+                logger.warning("Skipping invalid memory correction for IDs %s", source_ids)
+                continue
+            replacement = _new_review_entry(
+                content=content,
+                category=category,
+                importance="high",
+                source_session=str(item.get("source_session", "")),
+                supersedes=[source.id for source in sources],
+            )
+            entry_map[replacement.id] = replacement
+            for source in sources:
+                source.status = "superseded"
+                source.superseded_by = [replacement.id]
+                source.score = min(source.score, 0.19)
+            stats["corrected"] += 1
+
+        # Split giant mixed entries into independently invalidatable facts.
+        for item in review.get("split_entries", []):
+            if not isinstance(item, dict):
+                continue
+            source_id = str(item.get("id", ""))
+            source = entry_map.get(source_id)
+            raw_children = item.get("entries", [])
+            if source is None or source.status != "active" or not isinstance(raw_children, list):
+                continue
+            children: List[MemoryEntry] = []
+            seen_content: set[str] = set()
+            for child in raw_children[:8]:
+                if not isinstance(child, dict):
+                    continue
+                content = str(child.get("content", "")).strip()
+                category = str(child.get("category", "fact")).strip()
+                normalized = _normalize_fact(content)
+                if (
+                    not content
+                    or category not in _PROFILE_CATEGORIES
+                    or normalized in seen_content
+                    or _is_internal_content(content)
+                ):
+                    continue
+                seen_content.add(normalized)
+                children.append(_new_review_entry(
+                    content=content,
+                    category=category,
+                    importance=str(child.get("importance", "medium")),
+                    source_session=str(child.get("source_session") or source.source_session),
+                    supersedes=[source.id],
+                ))
+            if not children:
+                continue
+            source.status = "superseded"
+            source.superseded_by = [child.id for child in children]
+            source.score = min(source.score, 0.19)
+            for child in children:
+                entry_map[child.id] = child
+            stats["split"] += 1
+
+        # Existing consolidation operations remain backward compatible.
+        consumed_merge_ids = set()
+        for pair in review.get("merge_pairs", []):
+            id_a = pair.get("id_a", "")
+            id_b = pair.get("id_b", "")
+            merged_content = pair.get("merged_content", "")
+            if id_a == id_b or id_a in consumed_merge_ids or id_b in consumed_merge_ids:
+                continue
+            if id_a not in entry_map or id_b not in entry_map:
+                continue
+            if entry_map[id_a].status != "active" or entry_map[id_b].status != "active":
+                continue
+            merged = self.merger.merge_entries(entry_map[id_a], entry_map[id_b], merged_content)
+            del entry_map[id_a]
+            del entry_map[id_b]
+            consumed_merge_ids.update((id_a, id_b))
+            entry_map[merged.id] = merged
+            stats["merged"] += 1
+
+        for entry_id in review.get("deprecate_ids", []):
+            entry = entry_map.get(entry_id)
+            if entry is None or entry.status != "active":
+                continue
+            entry.score *= 0.3
+            stats["deprecated"] += 1
+
+        for entry_id in review.get("reinforce_ids", []):
+            entry = entry_map.get(entry_id)
+            if entry is None or entry.status != "active":
+                continue
+            self.merger.reinforce(entry)
+            stats["reinforced"] += 1
+
+        for item in review.get("refined_entries", []):
+            entry = entry_map.get(item.get("id", "")) if isinstance(item, dict) else None
+            content = str(item.get("content", "")).strip() if isinstance(item, dict) else ""
+            if entry is None or entry.status != "active" or not content:
+                continue
+            entry.content = content
+            stats["refined"] += 1
+
+        result_entries = list(entry_map.values())
+        active_after = sum(1 for entry in result_entries if entry.status == "active")
+        allowed_growth = sum(
+            max(0, len(item.get("entries", [])) - 1)
+            for item in review.get("split_entries", [])
+            if isinstance(item, dict)
+        )
+        if active_after > active_before + allowed_growth:
+            raise IntegrityError(
+                f"Review unexpectedly increased active entries: {active_before} → {active_after}"
+            )
+        return result_entries, stats
+
+    @staticmethod
+    def entries_fingerprint(entries: List[MemoryEntry]) -> str:
+        """Stable optimistic-concurrency fingerprint for profile entries."""
+        # Fingerprint only fields persisted by ProfileStore. created_at and
+        # source_session are absent from legacy MEMORY.md and are synthesized
+        # on load, so including them would create false concurrency failures.
+        payload = [
+            {
+                "id": entry.id,
+                "content": entry.content,
+                "category": entry.category,
+                "score": round(entry.score, 2),
+                "last_activated": entry.last_activated[:10],
+                "activation_count": entry.activation_count,
+                "source_session": entry.source_session,
+                "status": entry.status,
+                "supersedes": entry.supersedes,
+                "superseded_by": entry.superseded_by,
+            }
+            for entry in sorted(entries, key=lambda item: item.id)
+        ]
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    def commit_review(
+        self,
+        projected_entries: List[MemoryEntry],
+        *,
+        expected_fingerprint: str,
+        lock_already_held: bool = False,
+    ) -> None:
+        """Commit a precomputed review only if MEMORY has not changed."""
+        if lock_already_held:
+            self._commit_review_unlocked(projected_entries, expected_fingerprint)
+            return
+        with self.review_lock():
+            self._commit_review_unlocked(projected_entries, expected_fingerprint)
+
+    def _commit_review_unlocked(
+        self,
+        projected_entries: List[MemoryEntry],
+        expected_fingerprint: str,
+    ) -> None:
+        current = self.store.load()
+        if self.entries_fingerprint(current) != expected_fingerprint:
+            raise IntegrityError("Memory changed concurrently; review must retry")
+        self.store.save(projected_entries)
+
+    @contextmanager
+    def review_lock(self):
+        """Serialize the short MEMORY/USER/watermark review commit boundary."""
+        import fcntl
+
+        lock_path = self.store.memory_path.with_suffix(".md.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "w") as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+
     def apply_review(self, review: dict) -> dict:
         """Apply a review result from memory-review skill.
 
         The review dict may contain:
+        - corrections: replacement facts plus superseded active IDs
+        - split_entries: atomic children replacing one mixed active entry
         - merge_pairs: list of {id_a, id_b, merged_content}
         - deprecate_ids: list of entry IDs to deprecate (score *= 0.3)
         - reinforce_ids: list of entry IDs to reinforce
         - refined_entries: list of {id, content} for in-place content updates
 
-        Returns stats dict. Raises IntegrityError if entries increase.
+        Returns stats dict. Raises IntegrityError on unexpected active growth
+        or a concurrent MEMORY change.
 
         Note: review currently operates on profile entries only — event
         memory is append-only by design and is not subject to review.
         """
-        import fcntl  # Unix-only; project targets Linux/macOS
-
-        lock_path = self.store.memory_path.with_suffix(".md.lock")
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-        stats = {"merged": 0, "deprecated": 0, "reinforced": 0, "refined": 0}
-
-        with open(lock_path, "w") as lock_fd:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            try:
-                entries = self.store.load()
-                entries_before = len(entries)
-                entry_map = {e.id: e for e in entries}
-
-                # 1. Merge pairs
-                consumed_merge_ids = set()
-                for pair in review.get("merge_pairs", []):
-                    id_a = pair.get("id_a", "")
-                    id_b = pair.get("id_b", "")
-                    merged_content = pair.get("merged_content", "")
-                    if id_a == id_b:
-                        logger.warning("Merge pair references the same ID twice: %s", id_a)
-                        continue
-                    if id_a in consumed_merge_ids or id_b in consumed_merge_ids:
-                        logger.warning("Merge pair reuses already merged ID: %s, %s", id_a, id_b)
-                        continue
-                    if id_a not in entry_map or id_b not in entry_map:
-                        logger.warning("Merge pair references missing ID: %s, %s", id_a, id_b)
-                        continue
-                    merged = self.merger.merge_entries(
-                        entry_map[id_a], entry_map[id_b], merged_content
-                    )
-                    del entry_map[id_a]
-                    del entry_map[id_b]
-                    consumed_merge_ids.update((id_a, id_b))
-                    entry_map[merged.id] = merged
-                    stats["merged"] += 1
-
-                # 2. Deprecate
-                for eid in review.get("deprecate_ids", []):
-                    if eid not in entry_map:
-                        logger.warning("Deprecate references missing ID: %s", eid)
-                        continue
-                    entry_map[eid].score *= 0.3
-                    stats["deprecated"] += 1
-
-                # 3. Reinforce
-                for eid in review.get("reinforce_ids", []):
-                    if eid not in entry_map:
-                        logger.warning("Reinforce references missing ID: %s", eid)
-                        continue
-                    self.merger.reinforce(entry_map[eid])
-                    stats["reinforced"] += 1
-
-                # 4. Refine (in-place content update)
-                for item in review.get("refined_entries", []):
-                    eid = item.get("id", "")
-                    content = item.get("content", "")
-                    if eid not in entry_map:
-                        logger.warning("Refine references missing ID: %s", eid)
-                        continue
-                    entry_map[eid].content = content
-                    stats["refined"] += 1
-
-                result_entries = list(entry_map.values())
-
-                # Integrity check: entries should not increase
-                if len(result_entries) > entries_before:
-                    raise IntegrityError(
-                        f"Review should not increase entries: {entries_before} → {len(result_entries)}"
-                    )
-
-                self.store.save(result_entries)
-            finally:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-
+        existing = self.store.load()
+        projected, stats = self.preview_review(review, existing)
+        self.commit_review(
+            projected,
+            expected_fingerprint=self.entries_fingerprint(existing),
+        )
         return stats
+
+
+_PROFILE_CATEGORIES = {"preference", "fact", "workflow", "decision", "experience"}
+_IMPORTANCE_SCORES = {"high": 0.9, "medium": 0.7, "low": 0.5}
+
+
+def _normalize_fact(content: str) -> str:
+    return "".join(content.lower().split())
+
+
+def _new_review_entry(
+    *,
+    content: str,
+    category: str,
+    importance: str,
+    source_session: str,
+    supersedes: List[str],
+) -> MemoryEntry:
+    now = datetime.now(timezone.utc).isoformat()
+    return MemoryEntry(
+        id=new_id(),
+        content=content,
+        category=category,
+        score=_IMPORTANCE_SCORES.get(importance, 0.7),
+        created_at=now,
+        last_activated=now,
+        activation_count=1,
+        source_session=source_session,
+        status="active",
+        supersedes=supersedes,
+    )

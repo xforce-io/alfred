@@ -83,3 +83,20 @@ def test_build_system_prompt_no_memory_when_empty(tmp_path: Path):
     prompt = loader.build_system_prompt()
 
     assert "记忆" not in prompt
+
+
+def test_derived_user_profile_is_only_memory_projection(tmp_path: Path):
+    (tmp_path / "USER.md").write_text(
+        "# 用户画像\n\n<!-- derived_from_memory: true -->\n\n- 项目: 不再负责 A\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "MEMORY.md").write_text(
+        "## Archived Memories\n\n用户负责项目 A\n",
+        encoding="utf-8",
+    )
+
+    prompt = WorkspaceLoader(tmp_path).build_system_prompt()
+
+    assert "不再负责 A" in prompt
+    assert "用户负责项目 A" not in prompt
+    assert "# 记忆" not in prompt
