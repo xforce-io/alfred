@@ -13,6 +13,7 @@ from .llm_utils import parse_json_response, parse_system_dph
 logger = logging.getLogger(__name__)
 _DERIVED_PROFILE_MARKER = "<!-- derived_from_memory: true -->"
 _EMPTY_PROFILE = "（暂无活跃画像）"
+_MAX_ANALYZED_SESSIONS = 3
 
 
 async def run(context: SkillContext) -> Optional[str]:
@@ -36,22 +37,26 @@ async def run(context: SkillContext) -> Optional[str]:
         current_user = user_path.read_text(encoding="utf-8") if user_path.exists() else ""
         if _DERIVED_PROFILE_MARKER in current_user:
             return None
+        existing = context.memory_manager.load_entries()
         profile_content, profile_result = await _render_user_profile(
-            context, context.memory_manager.load_entries(),
+            context, existing,
         )
-        _atomic_write_profile(user_path, profile_content)
+        _commit_profile_if_memory_unchanged(
+            context,
+            user_path,
+            profile_content,
+            existing,
+        )
         return profile_result
 
     # 2. Extract digests, skip failed sessions
-    digests, digest_session_ids = [], []
-    last_successful_session = None
+    digests, successful_sessions = [], []
     for s in sessions:
         try:
             digests.append(
                 f"[source_session:{s.id}]\n{scanner.extract_digest(s.path)}"
             )
-            digest_session_ids.append(s.id)
-            last_successful_session = s
+            successful_sessions.append(s)
         except Exception as e:
             logger.warning("Failed to extract session %s: %s, skipping", s.id, e)
             continue
@@ -59,10 +64,17 @@ async def run(context: SkillContext) -> Optional[str]:
     if not digests:
         return None
 
-    # 3. Consolidation analysis (single LLM call)
+    # 3. Consolidation analysis (single LLM call).  Every downstream boundary
+    # uses this exact batch: prompt, correction source allowlist, and watermark.
+    analyzed_digests = digests[:_MAX_ANALYZED_SESSIONS]
+    analyzed_sessions = successful_sessions[:_MAX_ANALYZED_SESSIONS]
     existing = context.memory_manager.load_entries()
-    review = await _analyze_memory_consolidation(context.llm, digests, existing)
-    review = _validate_review_sources(review, digest_session_ids)
+    review = await _analyze_memory_consolidation(
+        context.llm, analyzed_digests, existing,
+    )
+    review = _validate_review_sources(
+        review, [session.id for session in analyzed_sessions],
+    )
 
     # 4. Project in memory and finish all LLM work before mutating any file.
     projected, review_stats = context.memory_manager.preview_review(review, existing)
@@ -86,8 +98,10 @@ async def run(context: SkillContext) -> Optional[str]:
                 lock_already_held=True,
             )
             _atomic_write_profile(user_path, profile_content)
-            if last_successful_session:
-                state.set_watermark("memory-review", last_successful_session.updated_at)
+            if analyzed_sessions:
+                state.set_watermark(
+                    "memory-review", analyzed_sessions[-1].updated_at,
+                )
                 if not state.save(context.workspace_path):
                     raise OSError("failed to persist memory-review watermark")
         except Exception:
@@ -110,13 +124,19 @@ async def _analyze_memory_consolidation(llm, digests: List[str], existing_entrie
     if not existing_entries:
         return {}
 
+    active_entries = [
+        entry for entry in existing_entries if entry.status == "active"
+    ]
+    if not active_entries:
+        return {}
+
     existing_text = "\n".join(
         f"- [{e.id}] [{e.category}] (score={e.score:.2f}, count={e.activation_count}) {e.content}"
-        for e in existing_entries
+        for e in active_entries
     )
     # Corrections often occur near the end of a long session. Preserve the
     # source header plus the recent tail instead of truncating at 500 chars.
-    context_text = "\n".join(_review_digest_window(d) for d in digests[:3])
+    context_text = "\n".join(_review_digest_window(d) for d in digests)
 
     from pathlib import Path
 
@@ -227,6 +247,28 @@ def _atomic_write_profile(path: Path, content: str) -> None:
     tmp = path.with_suffix(".md.tmp")
     tmp.write_text(content, encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _commit_profile_if_memory_unchanged(
+    context: SkillContext,
+    user_path: Path,
+    profile_content: str,
+    existing_entries,
+) -> None:
+    """Commit a bootstrap USER projection against an unchanged MEMORY view."""
+    from ..memory.manager import IntegrityError
+
+    expected = context.memory_manager.entries_fingerprint(existing_entries)
+    with context.memory_manager.review_lock():
+        current = context.memory_manager.load_entries()
+        if context.memory_manager.entries_fingerprint(current) != expected:
+            raise IntegrityError("Memory changed concurrently; profile must retry")
+        user_snapshot = _snapshot_file(user_path)
+        try:
+            _atomic_write_profile(user_path, profile_content)
+        except Exception:
+            _restore_file(user_path, user_snapshot)
+            raise
 
 
 def _snapshot_file(path: Path) -> Optional[bytes]:

@@ -152,3 +152,42 @@ class TestGateCommit:
 
         state = ReflectionState.load(tmp_path)
         assert state.get_watermark("") == ""
+
+    def test_commit_preserves_watermark_advanced_by_job(self, tmp_path: Path):
+        """A partial-batch job owns its exact analyzed-session boundary."""
+        task = _make_task(job="memory-review")
+        scanner = MagicMock()
+        scanner.check.return_value = ScanResult(
+            has_changes=True, change_summary="5 new sessions",
+        )
+        gate = TaskExecutionGate(tmp_path, "agent", lambda _type: scanner)
+        verdict = gate.check(task)
+
+        job_watermark = "2026-08-02T08:03:00+00:00"
+        state = ReflectionState.load(tmp_path)
+        state.set_watermark("memory-review", job_watermark)
+        assert state.save(tmp_path)
+
+        gate.commit(task, verdict)
+
+        assert (
+            ReflectionState.load(tmp_path).get_watermark("memory-review")
+            == job_watermark
+        )
+
+    def test_commit_advances_when_job_left_watermark_unchanged(self, tmp_path: Path):
+        task = _make_task(job="test-skill")
+        initial = "2026-08-01T00:00:00+00:00"
+        state = ReflectionState.load(tmp_path)
+        state.set_watermark("test-skill", initial)
+        assert state.save(tmp_path)
+        scanner = MagicMock()
+        scanner.check.return_value = ScanResult(
+            has_changes=True, change_summary="new session",
+        )
+        gate = TaskExecutionGate(tmp_path, "agent", lambda _type: scanner)
+        verdict = gate.check(task)
+
+        gate.commit(task, verdict)
+
+        assert ReflectionState.load(tmp_path).get_watermark("test-skill") > initial

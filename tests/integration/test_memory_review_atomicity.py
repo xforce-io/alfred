@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from src.everbot.core.jobs.memory_review import run
-from src.everbot.core.memory.manager import MemoryManager
+from src.everbot.core.memory.manager import IntegrityError, MemoryManager
 from src.everbot.core.memory.models import MemoryEntry
 from src.everbot.core.runtime.skill_context import SkillContext
 from src.everbot.core.scanners.reflection_state import ReflectionState
@@ -153,7 +153,6 @@ async def test_concurrent_memory_insert_is_preserved_and_review_retries(tmp_path
 
     context.llm.complete.side_effect = complete
 
-    from src.everbot.core.memory.manager import IntegrityError
     with pytest.raises(IntegrityError, match="concurrently"):
         await run(context)
 
@@ -162,3 +161,179 @@ async def test_concurrent_memory_insert_is_preserved_and_review_retries(tmp_path
     assert entries["old001"].status == "active"
     assert not ReflectionState.load(tmp_path).get_watermark("memory-review")
     assert "负责 A" in (tmp_path / "USER.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_watermark_never_advances_past_sessions_sent_to_judge(tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    timestamps = [f"2026-08-02T08:0{i}:00+00:00" for i in range(1, 6)]
+    session_ids = [f"web_session_demo_backlog_{i}" for i in range(1, 6)]
+    for index, (session_id, updated_at) in enumerate(
+        zip(session_ids, timestamps), start=1,
+    ):
+        user_text = (
+            "我现在不负责项目 A"
+            if index == 5
+            else f"普通对话 {index}"
+        )
+        (sessions_dir / f"{session_id}.json").write_text(json.dumps({
+            "session_id": session_id,
+            "updated_at": updated_at,
+            "session_type": "primary",
+            "agent_name": "demo",
+            "history_messages": [{"role": "user", "content": user_text}],
+        }, ensure_ascii=False), encoding="utf-8")
+
+    manager = MemoryManager(tmp_path / "MEMORY.md")
+    manager.store.save([MemoryEntry(
+        id="old001",
+        content="用户负责项目 A",
+        category="fact",
+        score=0.8,
+        created_at="2026-06-01T00:00:00+00:00",
+        last_activated="2026-07-01T00:00:00+00:00",
+        activation_count=1,
+        source_session="old",
+    )])
+    (tmp_path / "USER.md").write_text(
+        "# 用户画像\n\n- 项目: 负责 A\n", encoding="utf-8",
+    )
+    context = SkillContext(
+        sessions_dir=sessions_dir,
+        workspace_path=tmp_path,
+        agent_name="demo",
+        memory_manager=manager,
+        mailbox=AsyncMock(),
+        llm=AsyncMock(),
+        scan_result=None,
+    )
+    analysis_prompts = []
+
+    async def complete(prompt, **_kwargs):
+        if "## Recent Conversation Context" in prompt:
+            analysis_prompts.append(prompt)
+            if "我现在不负责项目 A" in prompt:
+                return json.dumps({
+                    "corrections": [{
+                        "content": "用户现在不负责项目 A",
+                        "category": "fact",
+                        "supersedes_ids": ["old001"],
+                        "source_session": session_ids[4],
+                    }],
+                }, ensure_ascii=False)
+            return "{}"
+        return "- 项目状态: 不再负责项目 A"
+
+    context.llm.complete.side_effect = complete
+
+    await run(context)
+
+    first_watermark = ReflectionState.load(tmp_path).get_watermark("memory-review")
+    assert first_watermark == timestamps[2]
+    assert session_ids[3] not in analysis_prompts[0]
+    assert session_ids[4] not in analysis_prompts[0]
+    assert manager.load_entries()[0].status == "active"
+
+    await run(context)
+
+    assert ReflectionState.load(tmp_path).get_watermark("memory-review") == timestamps[4]
+    entries = manager.load_entries()
+    assert next(entry for entry in entries if entry.id == "old001").status == "superseded"
+    active = [entry for entry in entries if entry.status == "active"]
+    assert [entry.content for entry in active] == ["用户现在不负责项目 A"]
+
+
+@pytest.mark.asyncio
+async def test_no_session_bootstrap_rejects_stale_profile_after_memory_change(tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    manager = MemoryManager(tmp_path / "MEMORY.md")
+    manager.store.save([MemoryEntry(
+        id="old001",
+        content="用户负责项目 A",
+        category="fact",
+        score=0.8,
+        created_at="2026-06-01T00:00:00+00:00",
+        last_activated="2026-07-01T00:00:00+00:00",
+        activation_count=1,
+        source_session="old",
+    )])
+    user_path = tmp_path / "USER.md"
+    user_path.write_text("# 用户画像\n\nlegacy profile\n", encoding="utf-8")
+    context = SkillContext(
+        sessions_dir=sessions_dir,
+        workspace_path=tmp_path,
+        agent_name="demo",
+        memory_manager=manager,
+        mailbox=AsyncMock(),
+        llm=AsyncMock(),
+        scan_result=None,
+    )
+
+    async def mutate_memory_then_render(*_args, **_kwargs):
+        entries = manager.load_entries()
+        entries.append(MemoryEntry(
+            id="newcon",
+            content="用户偏好简洁输出",
+            category="preference",
+            score=0.8,
+            created_at="2026-08-02T08:00:00+00:00",
+            last_activated="2026-08-02T08:00:00+00:00",
+            activation_count=1,
+            source_session="concurrent-session",
+        ))
+        manager.store.save(entries)
+        return "- 项目状态: 负责项目 A"
+
+    context.llm.complete.side_effect = mutate_memory_then_render
+
+    with pytest.raises(IntegrityError, match="concurrently"):
+        await run(context)
+
+    assert user_path.read_text(encoding="utf-8") == "# 用户画像\n\nlegacy profile\n"
+    assert {entry.id for entry in manager.load_entries()} == {"old001", "newcon"}
+
+
+@pytest.mark.asyncio
+async def test_no_session_bootstrap_write_failure_restores_user_profile(tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    manager = MemoryManager(tmp_path / "MEMORY.md")
+    manager.store.save([MemoryEntry(
+        id="old001",
+        content="用户负责项目 A",
+        category="fact",
+        score=0.8,
+        created_at="2026-06-01T00:00:00+00:00",
+        last_activated="2026-07-01T00:00:00+00:00",
+        activation_count=1,
+        source_session="old",
+    )])
+    user_path = tmp_path / "USER.md"
+    original_user = "# 用户画像\n\nlegacy profile\n"
+    user_path.write_text(original_user, encoding="utf-8")
+    context = SkillContext(
+        sessions_dir=sessions_dir,
+        workspace_path=tmp_path,
+        agent_name="demo",
+        memory_manager=manager,
+        mailbox=AsyncMock(),
+        llm=AsyncMock(),
+        scan_result=None,
+    )
+    context.llm.complete.return_value = "- 项目状态: 负责项目 A"
+
+    def partial_write_then_fail(_path, _content):
+        user_path.write_text("partial profile", encoding="utf-8")
+        raise OSError("disk full after replace")
+
+    with patch(
+        "src.everbot.core.jobs.memory_review._atomic_write_profile",
+        side_effect=partial_write_then_fail,
+    ):
+        with pytest.raises(OSError, match="disk full"):
+            await run(context)
+
+    assert user_path.read_text(encoding="utf-8") == original_user
+    assert manager.load_entries()[0].status == "active"

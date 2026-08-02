@@ -409,20 +409,53 @@ class MemoryManager:
             source_ids = list(dict.fromkeys(
                 str(value) for value in item.get("supersedes_ids", []) if value
             ))
+            if not content or category not in _PROFILE_CATEGORIES or not source_ids:
+                logger.warning("Skipping invalid memory correction for IDs %s", source_ids)
+                continue
+
+            normalized_content = _normalize_fact(content)
+            replacement = next((
+                entry
+                for entry in entry_map.values()
+                if entry.status == "active"
+                and entry.id not in source_ids
+                and entry.category == category
+                and _normalize_fact(entry.content) == normalized_content
+            ), None)
             sources = [
                 entry_map[source_id]
                 for source_id in source_ids
                 if source_id in entry_map and entry_map[source_id].status == "active"
             ]
-            if not content or category not in _PROFILE_CATEGORIES or not sources:
+            if replacement is not None:
+                new_sources = [
+                    source for source in sources if source.id != replacement.id
+                ]
+                if new_sources:
+                    replacement.supersedes = list(dict.fromkeys(
+                        replacement.supersedes
+                        + [source.id for source in new_sources]
+                    ))
+                    for source in new_sources:
+                        source.status = "superseded"
+                        source.superseded_by = [replacement.id]
+                        source.score = min(source.score, 0.19)
+                    stats["corrected"] += 1
+                    continue
+
+                already_replaced = all(
+                    source_id in replacement.supersedes
+                    or (
+                        source_id in entry_map
+                        and replacement.id in entry_map[source_id].superseded_by
+                    )
+                    for source_id in source_ids
+                )
+                if already_replaced:
+                    continue
+
+            if not sources:
                 logger.warning("Skipping invalid memory correction for IDs %s", source_ids)
-                continue
-            if any(
-                entry.status == "active"
-                and _normalize_fact(entry.content) == _normalize_fact(content)
-                and set(source_ids).issubset(set(entry.supersedes))
-                for entry in entry_map.values()
-            ):
                 continue
             replacement = _new_review_entry(
                 content=content,

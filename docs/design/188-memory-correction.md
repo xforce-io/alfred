@@ -105,11 +105,12 @@ sequenceDiagram
 |------|----------|
 | `core/memory/models.py` | `MemoryEntry` 增加 active/superseded 状态与双向取代关系 |
 | `core/memory/profile_store.py` | 保持旧 header，兼容读取可选关系 metadata comment 并使用原子替换；active 选择排除 superseded |
-| `core/memory/manager.py` | 纯 review projection、correction/split 校验与幂等应用、快照一致性提交 |
-| `core/jobs/memory_review.py` | 从 digest 生成 correction/split，先预览和压缩再提交，返回可观察 profile 结果 |
+| `core/memory/manager.py` | 纯 review projection、correction/split 校验与幂等应用；等价 correction 合并来源关系，不产生重复 active；快照一致性提交 |
+| `core/jobs/memory_review.py` | prompt、source allowlist、watermark 共用同一个 analyzed-session batch；先预览和压缩再提交；无 session bootstrap 也使用锁与 MEMORY fingerprint |
 | `core/jobs/system_dphs/memory_review_consolidation.dph` | 约束明确纠正、原子 split 与临时内容排除 |
 | `infra/workspace.py` | 派生 USER.md 存在时只注入 USER 投影，不再注入原始 MEMORY |
 | `core/scanners/reflection_state.py` | 保存失败可被调用方检测，避免伪推进 watermark |
+| `core/tasks/execution_gate.py` | 若 job 已把 watermark 推到精确处理边界，gate 保留该值；否则维持成功后推进到当前时间的防自触发语义 |
 
 ## 8. API / CLI 设计
 
@@ -132,7 +133,7 @@ sequenceDiagram
 }
 ```
 
-旧的 merge/deprecate/reinforce/refined 字段继续兼容。未知 ID、空 correction、无明确 supersedes、对已 superseded 源的重复操作均跳过并记录 warning。
+旧的 merge/deprecate/reinforce/refined 字段继续兼容。未知 ID、空 correction、无明确 supersedes 均跳过并记录 warning。对已由同一等价 active replacement 取代的源执行重放时静默 no-op；部分重叠来源合并进既有 replacement 的关系，不新建重复 active。
 
 ## 9. 边界考虑
 
@@ -141,6 +142,7 @@ sequenceDiagram
 - split 每个 child 必须非空、类别合法、数量有界；一次性任务/故障默认丢弃而不是迁入 profile。
 - 旧格式没有状态字段时按 active 读取；损坏关系元数据不影响其他条目加载。
 - superseded 内容保留在 MEMORY 但不进入 prompt、profile compression 或 prompt recall。
+- scanner 可以发现多于单次 judge 预算的 session，但 prompt、纠正来源 allowlist 与成功 watermark 必须使用同一 analyzed batch；watermark 不得越过未送入 judge 的 session。
 - USER 内容和模型输出有长度上限；空画像使用固定文本，不调用 compression LLM。
 - 文件不保存密钥；失败日志只含稳定原因与 entry/session ID。
 - 提交锁覆盖 MEMORY/USER/watermark 快照校验和替换；同一 correction 重放必须幂等。
@@ -154,14 +156,15 @@ sequenceDiagram
 ## 11. 测试计划
 
 - **E2E**：用真实 session JSON 与 WorkspaceLoader 构造旧 MEMORY/USER，用户消息明确“我现在不负责项目 A”；确定性 judge 输出 correction。运行完整 Memory Review 后断言旧 entry 为 superseded、新 entry 关联来源、USER 不含仍负责表述；重新构建下一会话 system prompt 并用确定性回答器验证答案不是“仍负责”。同一 fixture 再运行一次断言幂等。第二条 E2E 构造全低分/失效事实，断言 USER 被清为中性投影且 MEMORY 不被注入。
-- **Integration**：在 consolidation、compression、MEMORY replace、USER replace、watermark replace 注入连接错误/超时/写失败，断言三个文件和 watermark 均保持执行前快照；恢复后一次成功执行收敛。提交前并发插入新事实应拒绝本轮而不丢数据。
-- **Unit**：新旧 header round-trip；active/superseded 过滤；correction/split 校验与重复处理；混合巨型记录拆分；原子 USER 写与空投影；WorkspaceLoader 单一投影门禁。
+- **Integration**：在 consolidation、compression、MEMORY replace、USER replace、watermark replace 注入连接错误/超时/写失败，断言三个文件和 watermark 均保持执行前快照；恢复后一次成功执行收敛。提交前并发插入新事实应拒绝本轮而不丢数据。构造 5 个 pending session 且纠正在第 5 个：首轮只分析前三个并把 watermark 停在第 3 个，次轮必须应用纠正。无 session bootstrap 渲染期间 MEMORY 变化时拒绝陈旧 USER 写入，写失败恢复原 USER。
+- **Unit**：新旧 header round-trip；active/superseded 过滤；correction/split 校验与精确/部分重叠重放；Judge 上下文排除 superseded；混合巨型记录拆分；原子 USER 写与空投影；gate 保留 job 自管 watermark 且普通路径仍推进当前时间；WorkspaceLoader 单一投影门禁。
 
 ## 12. 开放问题 / 决策记录
 
 - 2026-08-02：Approved L1 后采用 MEMORY 事实源 + USER 派生投影，不以降低 score 阈值修复。
 - 2026-08-02：Milkie correction 先由 review digest 路径处理；session-end extraction bridge 不阻塞本 issue。
 - 2026-08-02：旧事实保留溯源但不注入；会话行为以新 WorkspaceLoader system prompt 为最终验收事实源。
+- 2026-08-02：analyzed-session batch 是 prompt、source allowlist 和 watermark 的共同事实边界；TaskExecutionGate 不覆盖 job 已提交的精确边界。
 
 ## 13. 关联
 
