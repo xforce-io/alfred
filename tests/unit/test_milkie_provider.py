@@ -99,6 +99,66 @@ async def test_run_turn_yields_llm_progress_deltas():
     ]
 
 
+async def test_run_turn_observes_only_successful_skill_request_hits():
+    sse = _sse(
+        ("tool.requested", {
+            "toolName": "skill_request", "toolCallId": "hit-1", "input": {"name": "web"},
+        }),
+        ("tool.responded", {
+            "toolCallId": "hit-1", "status": "ok",
+            "output": {"status": "ok", "instructions": "..."},
+        }),
+        ("tool.requested", {
+            "toolName": "skill_request", "toolCallId": "miss", "input": {"name": "missing"},
+        }),
+        ("tool.responded", {
+            "toolCallId": "miss", "status": "ok", "output": {"status": "not_found"},
+        }),
+        ("tool.requested", {
+            "toolName": "skill_request", "toolCallId": "hit-2",
+            "input": json.dumps({"name": "web"}),
+        }),
+        ("tool.responded", {
+            "toolCallId": "hit-2", "status": "ok",
+            "output": json.dumps({"status": "ok", "instructions": "..."}),
+        }),
+        ("agent.run.completed", {"status": "completed", "runId": "run-1"}),
+    )
+    p, client = _provider(sse)
+    handle = MilkieAgentHandle("http://sidecar", "c")
+    try:
+        _ = [e async for e in p.run_turn(handle, "load skills")]
+    finally:
+        await client.aclose()
+
+    batch = p.get_skill_observations(handle)
+    assert batch.complete is True
+    assert batch.reason == ""
+    assert batch.skill_names == ("web",)
+
+
+async def test_run_turn_without_terminal_marks_observation_incomplete():
+    sse = _sse(
+        ("tool.requested", {
+            "toolName": "skill_request", "toolCallId": "hit", "input": {"name": "web"},
+        }),
+        ("tool.responded", {
+            "toolCallId": "hit", "status": "ok", "output": {"status": "ok"},
+        }),
+    )
+    p, client = _provider(sse)
+    handle = MilkieAgentHandle("http://sidecar", "c")
+    try:
+        _ = [e async for e in p.run_turn(handle, "load skill")]
+    finally:
+        await client.aclose()
+
+    batch = p.get_skill_observations(handle)
+    assert batch.complete is False
+    assert batch.reason == "terminal_not_seen"
+    assert batch.skill_names == ("web",)
+
+
 async def test_run_turn_raises_on_error_terminal():
     """An ``agent.run.completed`` with status=error must raise (not be swallowed as
     an empty turn) — e.g. an LLM-endpoint connection error. The message carries the

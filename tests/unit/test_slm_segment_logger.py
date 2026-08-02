@@ -27,6 +27,32 @@ def _make_segment(skill_id="test-skill", version="1.0", session_id="s1", **kw):
 
 
 class TestSegmentLogger:
+    def test_observation_state_round_trip(self, tmp_path):
+        logger = SegmentLogger(tmp_path)
+
+        logger.save_observation_state(
+            complete=False,
+            session_id="session-1",
+            reason="stream_ended_without_completion",
+            observed_skills=2,
+        )
+
+        state = logger.load_observation_state()
+        assert state is not None
+        assert state["complete"] is False
+        assert state["session_id"] == "session-1"
+        assert state["reason"] == "stream_ended_without_completion"
+        assert state["observed_skills"] == 2
+
+    def test_invalid_observation_state_is_unavailable(self, tmp_path):
+        (tmp_path / ".observation_state.json").write_text("not-json", encoding="utf-8")
+
+        state = SegmentLogger(tmp_path).load_observation_state()
+
+        assert state is not None
+        assert state["complete"] is False
+        assert state["reason"] == "observation_state_invalid"
+
     def test_append_and_load(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             logger = SegmentLogger(Path(tmpdir))

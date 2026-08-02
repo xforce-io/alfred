@@ -7,8 +7,9 @@ import json
 import logging
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List, Optional
 
 from .models import EvaluationSegment
 
@@ -36,6 +37,10 @@ class SegmentLogger:
 
     def _artifact_dir(self, skill_id: str) -> Path:
         return self._logs_dir / "_artifacts" / skill_id
+
+    @property
+    def _observation_state_path(self) -> Path:
+        return self._logs_dir / ".observation_state.json"
 
     def _prepare_segment_for_storage(self, segment: EvaluationSegment) -> EvaluationSegment:
         """Persist oversized output out-of-line and keep a concise inline summary."""
@@ -99,6 +104,47 @@ class SegmentLogger:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
             f.write(segment.to_json() + "\n")
+
+    def save_observation_state(
+        self,
+        *,
+        complete: bool,
+        session_id: str,
+        reason: str = "",
+        observed_skills: int = 0,
+    ) -> None:
+        """Atomically persist whether the latest provider observation was complete."""
+        path = self._observation_state_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "complete": complete,
+            "session_id": session_id,
+            "reason": reason,
+            "observed_skills": observed_skills,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(path)
+
+    def load_observation_state(self) -> Optional[Dict[str, Any]]:
+        """Load latest observation health; malformed state is treated as unavailable."""
+        path = self._observation_state_path
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or not isinstance(data.get("complete"), bool):
+                raise ValueError("invalid observation state")
+            return data
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            logger.warning("Failed to load skill observation state: %s", exc)
+            return {
+                "complete": False,
+                "session_id": "",
+                "reason": "observation_state_invalid",
+                "observed_skills": 0,
+            }
 
     def backfill_context_after(
         self, skill_id: str, session_id: str, context_after: str,
@@ -205,8 +251,6 @@ class SegmentLogger:
                 data = json.loads(line)
                 triggered = data.get("triggered_at", "")
                 if triggered:
-                    from datetime import datetime, timezone
-
                     ts = datetime.fromisoformat(triggered).timestamp()
                     if ts < cutoff:
                         continue

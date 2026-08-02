@@ -109,6 +109,7 @@ class SkillLogRecorder:
         # Boundary check (accepts Optional[str] defensively)
         if not skill_name:
             return False
+
         # Filter internal tools (all starting with "_")
         if skill_name.startswith("_"):
             return False
@@ -158,6 +159,27 @@ class SkillLogRecorder:
             logger.warning(
                 "SkillLogRecorder: failed to write log for skill '%s': %s", skill_name, e
             )
+            return False
+
+    def record_observation_state(
+        self,
+        *,
+        complete: bool,
+        session_id: str,
+        reason: str = "",
+        observed_skills: int = 0,
+    ) -> bool:
+        """Persist health of the latest provider-native observation batch."""
+        try:
+            self._logger.save_observation_state(
+                complete=complete,
+                session_id=session_id,
+                reason=reason,
+                observed_skills=observed_skills,
+            )
+            return True
+        except Exception as exc:
+            logger.warning("SkillLogRecorder: failed to write observation state: %s", exc)
             return False
 
     @staticmethod

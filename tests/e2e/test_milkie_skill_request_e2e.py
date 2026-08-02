@@ -16,7 +16,9 @@ import re
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -127,6 +129,10 @@ def _make_web_skill(root: Path) -> Dict[str, Any]:
     # Body must not contain banned discovery phrases: hit tool_result embeds
     # instructions, and trajectory assertions scan tool outputs.
     body = (
+        "---\n"
+        "name: web\n"
+        "version: \"1.0.0\"\n"
+        "---\n"
         "# Web\n\n"
         "Closed-world e2e fixture for skill_request.\n\n"
         "Load via skill_request; use returned instructions and dir.\n"
@@ -295,3 +301,93 @@ async def test_skill_request_hit_and_miss_through_real_sidecar(tmp_path, monkeyp
         )
         assert not re.search(r"find\s+\$HOME|find\s+/Users|find\s+/ ", cmd_blob)
     assert handler_cls.tool_calls_seen == ["skill_request", "skill_request"]
+
+    # #187 S1/S2/S3: real sidecar observation → SLM segment → report → no_changes.
+    # No Dolphin trajectory is created anywhere in this path.
+    batch = provider.get_skill_observations(handle)
+    assert batch.complete is True
+    assert batch.skill_names == ("web",)
+    assert not (tmp_path / "trajectory_job_routine_fixture.json").exists()
+
+    from src.everbot.core.slm.skill_log_recorder import SkillLogRecorder
+    from src.everbot.core.slm.segment_logger import SegmentLogger
+
+    logs_dir = tmp_path / "skill_logs"
+    eval_dir = tmp_path / "skill_eval"
+    skills_root = tmp_path / "skills"
+    recorder = SkillLogRecorder(
+        logs_dir,
+        skill_dirs=[skills_root],
+        eval_base_dir=eval_dir,
+    )
+    assert recorder.record_observation_state(
+        complete=batch.complete,
+        session_id="job_routine_e2e",
+        reason=batch.reason,
+        observed_skills=len(batch.skill_names),
+    )
+    for skill_name in batch.skill_names:
+        assert recorder.maybe_record(
+            skill_name,
+            session_id="job_routine_e2e",
+            context_before="load web skill",
+            skill_output="skill-load-done",
+        )
+
+    segments = SegmentLogger(logs_dir).load("web")
+    assert len(segments) == 1
+    assert segments[0].skill_id == "web"
+    assert segments[0].skill_version == "1.0.0"
+    assert segments[0].session_id == "job_routine_e2e"
+
+    from src.everbot.core.jobs.skill_evaluate import run as run_skill_evaluate
+    from src.everbot.core.slm.models import EvalReport, JudgeResult
+
+    context = SimpleNamespace(
+        agent_name="skillreq",
+        llm=MagicMock(),
+        mailbox=SimpleNamespace(deposit=AsyncMock(return_value=None)),
+        skill_logs_dir=logs_dir,
+        skill_eval_dir=eval_dir,
+    )
+    report = EvalReport(
+        skill_id="web",
+        skill_version="1.0.0",
+        evaluated_at="2026-08-02T00:00:00+00:00",
+        segment_count=1,
+        critical_issue_count=0,
+        critical_issue_rate=0.0,
+        mean_satisfaction=0.9,
+        results=[JudgeResult(
+            segment_index=0,
+            has_critical_issue=False,
+            satisfaction=0.9,
+            reason="e2e fixture ok",
+        )],
+    )
+    udm = MagicMock()
+    udm.skill_logs_dir = logs_dir
+    udm.skills_dir = skills_root
+    udm.repo_skills_dir = skills_root
+    udm.sessions_dir = tmp_path / "sessions"
+    udm.get_agent_writable_skills_dir.return_value = skills_root
+    udm.get_agent_read_skill_dirs.return_value = [skills_root]
+
+    with patch("src.everbot.infra.user_data.get_user_data_manager", return_value=udm), patch(
+        "src.everbot.core.jobs.skill_evaluate.evaluate_skill",
+        new=AsyncMock(return_value=report),
+    ) as judge:
+        first = await run_skill_evaluate(context)
+        second = await run_skill_evaluate(context)
+
+    assert first.status == "completed"
+    assert first.reason == "evaluated"
+    assert first.detail["observed_count"] == 1
+    assert first.detail["eligible_count"] == 1
+    assert first.detail["evaluated_count"] == 1
+    assert second.status == "skipped"
+    assert second.reason == "no_changes"
+    assert second.detail["evaluated_count"] == 0
+    judge.assert_awaited_once()
+    reports = list(eval_dir.glob("web/versions/*/eval_report.json"))
+    assert len(reports) == 1

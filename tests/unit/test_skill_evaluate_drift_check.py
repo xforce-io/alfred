@@ -16,8 +16,14 @@ class _StubSegmentLogger:
     def list_skills(self):
         return ["twitter-watch", "invest"]
 
+    def load_observation_state(self):
+        return None
+
     def cleanup(self, _skill_id):
         pass
+
+    def count(self, _skill_id):
+        return 0
 
 
 class _StubVersionManager:
