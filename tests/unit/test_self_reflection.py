@@ -541,10 +541,9 @@ class TestSkillWithoutScanner:
         )
 
         result = await run(ctx)
-        # Silent job — None always; verify processing actually ran by
-        # checking the watermark advanced (only set on successful completion).
+        # Review reports the projection terminal and advances the watermark.
         from src.everbot.core.scanners.reflection_state import ReflectionState
-        assert result is None
+        assert result == "profile_cleared; corrected=0; split=0"
         assert ReflectionState.load(tmp_path).get_watermark("memory-review")
 
     @pytest.mark.asyncio
@@ -567,7 +566,7 @@ class TestSkillWithoutScanner:
         )
 
         result = await run(ctx)
-        assert result is None
+        assert result == "profile_cleared"
         assert not mock_llm.complete.called
 
     @pytest.mark.asyncio
@@ -594,7 +593,7 @@ class TestSkillWithoutScanner:
         )
 
         result = await run(ctx)
-        # Silent job — verify watermark advanced (proves completion).
+        # Silent task-discover job — watermark proves completion.
         from src.everbot.core.scanners.reflection_state import ReflectionState
         assert result is None
         assert ReflectionState.load(tmp_path).get_watermark("task-discover")
@@ -638,9 +637,9 @@ class TestSkillWithoutScanner:
         )
 
         result = await run(ctx)
-        # Silent job — verify watermark advanced (proves completion).
+        # Projection terminal plus watermark prove completion.
         from src.everbot.core.scanners.reflection_state import ReflectionState
-        assert result is None
+        assert result == "profile_cleared; corrected=0; split=0"
         assert ReflectionState.load(tmp_path).get_watermark("memory-review")
 
     @pytest.mark.asyncio

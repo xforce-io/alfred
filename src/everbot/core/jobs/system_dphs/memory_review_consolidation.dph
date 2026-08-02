@@ -8,13 +8,17 @@ $existing_text
 $context_text
 
 ## Tasks
-1. Find pairs of entries that can be merged (similar or overlapping content)
-2. Find entries that are outdated or no longer relevant (deprecate)
-3. Find entries reinforced by recent conversations (reinforce)
-4. Find entries whose content can be refined for clarity (refine, in-place update only)
+1. Detect explicit user corrections that contradict current entries (corrections)
+2. Split any giant entry that mixes independent durable facts with temporary tasks/incidents (split_entries)
+3. Find pairs of atomic entries that can be merged (similar or overlapping content)
+4. Find entries that are outdated or no longer relevant (deprecate)
+5. Find entries reinforced by recent conversations (reinforce)
+6. Find entries whose content can be refined for clarity (refine, in-place update only)
 
 ## Constraints
 - merge: creates 1 new entry, removes 2 → net -1
+- correction: only when a [user] statement explicitly denies/updates a current fact; it must name every superseded current ID and preserve the user's corrected current state
+- split: only for one mixed source entry; emit 1-8 independent long-term user facts and omit temporary tasks, incidents, logs, and assistant claims
 - deprecate: reduces score (accelerates natural decay)
 - reinforce: boosts score of existing entry
 - refine: updates content in-place, no score change
@@ -24,6 +28,8 @@ Output format:
 ```json
 {
   "merge_pairs": [{"id_a": "...", "id_b": "...", "merged_content": "..."}],
+  "corrections": [{"content": "...", "category": "fact", "supersedes_ids": ["..."], "source_session": "session ID from context"}],
+  "split_entries": [{"id": "...", "entries": [{"content": "...", "category": "preference|fact|workflow|decision|experience", "importance": "high|medium|low", "source_session": "..."}]}],
   "deprecate_ids": ["..."],
   "reinforce_ids": ["..."],
   "refined_entries": [{"id": "...", "content": "..."}]

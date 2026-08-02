@@ -43,7 +43,7 @@ class ReflectionState:
             logger.warning("Failed to load reflection state, starting fresh: %s", e)
             return cls()
 
-    def save(self, workspace_path: Path) -> None:
+    def save(self, workspace_path: Path) -> bool:
         """Atomically save state to disk."""
         state_file = Path(workspace_path) / _STATE_FILENAME
         state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -52,6 +52,7 @@ class ReflectionState:
         try:
             tmp.write_text(data, encoding="utf-8")
             os.replace(tmp, state_file)
+            return True
         except Exception as e:
             logger.error("Failed to save reflection state: %s", e)
             # Clean up tmp on failure
@@ -59,3 +60,4 @@ class ReflectionState:
                 tmp.unlink(missing_ok=True)
             except Exception:
                 pass
+            return False

@@ -8,7 +8,9 @@ Event memories live in a separate ``event_store`` module — they are
 time-anchored, append-only, and stored under ``events/YYYY-MM.md``.
 """
 
+import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,10 +20,12 @@ from .models import MemoryEntry
 
 logger = logging.getLogger(__name__)
 
-# Header pattern: ### [id] category | score | last_activated_date | activation_count
+# Keep the legacy header stable. New relation fields live in an optional
+# HTML metadata comment on the following line so old readers still see entries.
 _HEADER_RE = re.compile(
     r"^###\s+\[(\w+)\]\s+(\w+)\s*\|\s*([\d.]+)\s*\|\s*([\d-]+)\s*\|\s*(\d+)\s*$"
 )
+_ENTRY_META_RE = re.compile(r"^<!--\s*memory_meta:\s*(\{.*\})\s*-->$")
 _META_PROCESSED_RE = re.compile(r"<!--\s*last_processed_count:\s*(\d+)\s*-->")
 
 
@@ -78,6 +82,19 @@ class ProfileStore:
                 content_lines = []
             elif current_entry is not None:
                 stripped = line.strip()
+                meta_match = _ENTRY_META_RE.match(stripped)
+                if meta_match:
+                    try:
+                        metadata = json.loads(meta_match.group(1))
+                        current_entry.update({
+                            "status": metadata.get("status", "active"),
+                            "supersedes": metadata.get("supersedes", []),
+                            "superseded_by": metadata.get("superseded_by", []),
+                            "source_session": metadata.get("source_session", ""),
+                        })
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning("Skipping malformed memory relation metadata")
+                    continue
                 # Skip section headers (# or ##) — they're structural, not content
                 if stripped.startswith("## ") or stripped.startswith("# "):
                     continue
@@ -99,19 +116,40 @@ class ProfileStore:
     MAX_ENTRIES = 30
 
     def save(self, entries: List[MemoryEntry], last_processed_count: Optional[int] = None) -> None:
-        """Write entries to MEMORY.md with backup. Discards score < 0.05."""
+        """Atomically write entries to MEMORY.md while preserving superseded trace."""
         if last_processed_count is not None:
             self.last_processed_count = last_processed_count
-        # Filter out near-zero entries
-        entries = [e for e in entries if e.score >= 0.05]
+        # Drop only near-zero active entries. Superseded entries are retained
+        # for provenance even though they are never injected.
+        entries = [e for e in entries if e.status == "superseded" or e.score >= 0.05]
 
         # Enforce hard cap: keep top entries by score
         if len(entries) > self.MAX_ENTRIES:
-            entries = sorted(entries, key=lambda e: e.score, reverse=True)[:self.MAX_ENTRIES]
+            active_ranked = sorted(
+                [e for e in entries if e.status == "active"],
+                key=lambda e: e.score,
+                reverse=True,
+            )
+            trace_ranked = sorted(
+                [e for e in entries if e.status == "superseded"],
+                key=lambda e: e.last_activated,
+                reverse=True,
+            )
+            trace_budget = min(len(trace_ranked), 5)
+            active_budget = self.MAX_ENTRIES - trace_budget
+            entries = active_ranked[:active_budget] + trace_ranked[:trace_budget]
 
         # Partition
-        active = sorted([e for e in entries if e.score >= 0.2], key=lambda e: e.score, reverse=True)
-        archived = sorted([e for e in entries if e.score < 0.2], key=lambda e: e.score, reverse=True)
+        active = sorted(
+            [e for e in entries if e.status == "active" and e.score >= 0.2],
+            key=lambda e: e.score,
+            reverse=True,
+        )
+        archived = sorted(
+            [e for e in entries if e.status == "superseded" or e.score < 0.2],
+            key=lambda e: e.score,
+            reverse=True,
+        )
 
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
         total = len(active) + len(archived)
@@ -150,11 +188,22 @@ class ProfileStore:
             except Exception:
                 logger.debug("Backup failed", exc_info=True)
 
-        self.memory_path.write_text(content, encoding="utf-8")
+        tmp = self.memory_path.with_suffix(".md.tmp")
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, self.memory_path)
 
 
 def _format_entry(entry: MemoryEntry) -> str:
     """Format a single entry as markdown block."""
     date_str = entry.last_activated[:10] if len(entry.last_activated) >= 10 else entry.last_activated
-    header = f"### [{entry.id}] {entry.category} | {entry.score:.2f} | {date_str} | {entry.activation_count}"
-    return f"{header}\n{entry.content}\n"
+    header = (
+        f"### [{entry.id}] {entry.category} | {entry.score:.2f} | "
+        f"{date_str} | {entry.activation_count}"
+    )
+    metadata = json.dumps({
+        "status": entry.status,
+        "supersedes": entry.supersedes,
+        "superseded_by": entry.superseded_by,
+        "source_session": entry.source_session,
+    }, ensure_ascii=False, separators=(",", ":"))
+    return f"{header}\n<!-- memory_meta: {metadata} -->\n{entry.content}\n"
