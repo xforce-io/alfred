@@ -22,6 +22,7 @@ class GateVerdict:
     allowed: bool
     skip_reason: Optional[str] = None  # "no_changes" | "interval_not_met" | "scanner_error"
     scan_result: Any = None
+    watermark_before: Optional[str] = None
 
 
 class TaskExecutionGate:
@@ -52,6 +53,7 @@ class TaskExecutionGate:
         scanner_type = getattr(task, "scanner", None)
         scanner = self._scanner_factory(scanner_type)
         scan_result = None
+        watermark_before = None
 
         # 1. Scanner gate
         if scanner:
@@ -59,26 +61,46 @@ class TaskExecutionGate:
 
             skill_name = getattr(task, "job", None) or ""
             state = ReflectionState.load(self._workspace_path)
+            watermark_before = state.get_watermark(skill_name)
             try:
-                scan_result = scanner.check(state.get_watermark(skill_name), self._agent_name)
+                scan_result = scanner.check(watermark_before, self._agent_name)
             except Exception as exc:
                 logger.warning("Scanner %s error: %s", scanner_type, exc)
-                return GateVerdict(allowed=False, skip_reason="scanner_error", scan_result=None)
+                return GateVerdict(
+                    allowed=False,
+                    skip_reason="scanner_error",
+                    scan_result=None,
+                    watermark_before=watermark_before,
+                )
             if not scan_result.has_changes:
-                return GateVerdict(allowed=False, skip_reason="no_changes", scan_result=scan_result)
+                return GateVerdict(
+                    allowed=False,
+                    skip_reason="no_changes",
+                    scan_result=scan_result,
+                    watermark_before=watermark_before,
+                )
 
         # 2. Min execution interval
         if not self._check_min_execution_interval(task):
-            return GateVerdict(allowed=False, skip_reason="interval_not_met", scan_result=scan_result)
+            return GateVerdict(
+                allowed=False,
+                skip_reason="interval_not_met",
+                scan_result=scan_result,
+                watermark_before=watermark_before,
+            )
 
-        return GateVerdict(allowed=True, scan_result=scan_result)
+        return GateVerdict(
+            allowed=True,
+            scan_result=scan_result,
+            watermark_before=watermark_before,
+        )
 
     def commit(self, task: Any, verdict: GateVerdict) -> None:
         """Advance watermark after successful execution.
 
-        Uses ``datetime.now(UTC)`` – **not** scan-time ``updated_at`` – to
-        prevent self-triggering loops when skill execution itself mutates the
-        monitored data source.
+        Preserve a watermark advanced by the job itself (for example a partial
+        analyzed-session boundary). Otherwise use ``datetime.now(UTC)`` to
+        prevent self-triggering loops when execution mutates the data source.
         """
         from ..scanners.reflection_state import ReflectionState
 
@@ -86,6 +108,17 @@ class TaskExecutionGate:
         if not job_name:
             return
         state = ReflectionState.load(self._workspace_path)
+        current = state.get_watermark(job_name)
+        if (
+            verdict.watermark_before is not None
+            and current != verdict.watermark_before
+        ):
+            logger.debug(
+                "Preserving job-managed watermark for %s: %s",
+                job_name,
+                current,
+            )
+            return
         state.set_watermark(job_name, datetime.now(timezone.utc).isoformat())
         state.save(self._workspace_path)
 

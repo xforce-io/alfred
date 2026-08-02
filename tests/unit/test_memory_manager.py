@@ -10,7 +10,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.everbot.core.memory.manager import MemoryManager
+from src.everbot.core.memory.manager import IntegrityError, MemoryManager
 from src.everbot.core.memory.models import MemoryEntry
 from src.everbot.core.memory.profile_store import ProfileStore
 
@@ -113,6 +113,79 @@ class TestProcessSessionEnd:
             [{"role": "user", "content": "hello"}], "s1"
         )
         assert stats["profile"]["new_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_extractor_prompt_excludes_superseded_entries(self, tmp_path: Path):
+        md = tmp_path / "MEMORY.md"
+        old = MemoryEntry.from_dict({
+            "id": "old001", "content": "用户负责项目 A", "category": "fact",
+            "score": 0.19, "status": "superseded", "superseded_by": ["new001"],
+        })
+        new = MemoryEntry.from_dict({
+            "id": "new001", "content": "用户现在不负责项目 A", "category": "fact",
+            "score": 0.9, "status": "active", "supersedes": ["old001"],
+        })
+        ProfileStore(md).save([old, new])
+        captured = []
+
+        async def capture(_self, prompt):
+            captured.append(prompt)
+            return _mock_llm_response([], [])
+
+        with patch(
+            "src.everbot.core.memory.profile_extractor.ProfileExtractor._call_llm",
+            new=capture,
+        ):
+            await MemoryManager(md, MagicMock()).process_session_end(
+                [{"role": "user", "content": "普通对话"}], "session-new",
+            )
+
+        assert "用户现在不负责项目 A" in captured[0]
+        assert "用户负责项目 A" not in captured[0]
+        assert "old001" not in captured[0]
+
+    @pytest.mark.asyncio
+    async def test_session_end_does_not_overwrite_concurrent_review_commit(self, tmp_path: Path):
+        md = tmp_path / "MEMORY.md"
+        original = MemoryEntry.from_dict({
+            "id": "old001", "content": "用户负责项目 A", "category": "fact",
+            "score": 0.8, "status": "active",
+        })
+        ProfileStore(md).save([original])
+        manager = MemoryManager(md, MagicMock())
+
+        async def commit_correction_during_extract(_self, _prompt):
+            current = manager.load_entries()
+            corrected, _ = manager.preview_review({
+                "corrections": [{
+                    "content": "用户现在不负责项目 A",
+                    "category": "fact",
+                    "supersedes_ids": ["old001"],
+                    "source_session": "review-session",
+                }],
+            }, current)
+            manager.commit_review(
+                corrected,
+                expected_fingerprint=manager.entries_fingerprint(current),
+            )
+            return _mock_llm_response(
+                [{"content": "用户喜欢 Python", "category": "preference", "importance": "high"}],
+                [],
+            )
+
+        with patch(
+            "src.everbot.core.memory.profile_extractor.ProfileExtractor._call_llm",
+            new=commit_correction_during_extract,
+        ):
+            with pytest.raises(IntegrityError, match="concurrently"):
+                await manager.process_session_end(
+                    [{"role": "user", "content": "我喜欢 Python"}], "session-new",
+                )
+
+        entries = manager.load_entries()
+        assert next(entry for entry in entries if entry.id == "old001").status == "superseded"
+        assert any(entry.content == "用户现在不负责项目 A" for entry in entries)
+        assert all(entry.content != "用户喜欢 Python" for entry in entries)
 
 
 class TestIncrementalExtraction:

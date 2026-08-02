@@ -1,10 +1,8 @@
-"""Memory review skill — consolidate and optimize agent memory.
-
-Silent execution, no user notification.
-Strategy: consolidate existing entries, then compress to USER.md profile.
-"""
+"""Memory review — consolidate facts and rebuild the USER.md projection."""
 
 import logging
+import os
+from pathlib import Path
 from typing import List, Optional
 
 from ..runtime.skill_context import SkillContext
@@ -13,15 +11,17 @@ from ..scanners.reflection_state import ReflectionState
 from .llm_utils import parse_json_response, parse_system_dph
 
 logger = logging.getLogger(__name__)
+_DERIVED_PROFILE_MARKER = "<!-- derived_from_memory: true -->"
+_EMPTY_PROFILE = "（暂无活跃画像）"
+_MAX_ANALYZED_SESSIONS = 3
 
 
 async def run(context: SkillContext) -> Optional[str]:
     """Execute memory review: consolidate entries and compress to profile.
 
-    Returns None — this job is silent by contract; review/compression
-    stats are recorded via logger only and never surfaced to the user.
-    Integrity errors still log at ERROR but are not pushed: the next
-    review run self-heals and a persistent failure shows up in metrics.
+    Returns a concise profile terminal when a projection was cleared or
+    rebuilt, and None only for a true no-change run. Failures propagate so
+    cron records degraded/failed and the unchanged watermark permits retry.
     """
     scanner = SessionScanner(context.sessions_dir)
     state = ReflectionState.load(context.workspace_path)
@@ -33,16 +33,30 @@ async def run(context: SkillContext) -> Optional[str]:
     else:
         sessions = scanner.get_reviewable_sessions(skill_wm, agent_name=context.agent_name)
     if not sessions:
-        return None
+        user_path = context.workspace_path / "USER.md"
+        current_user = user_path.read_text(encoding="utf-8") if user_path.exists() else ""
+        if _DERIVED_PROFILE_MARKER in current_user:
+            return None
+        existing = context.memory_manager.load_entries()
+        profile_content, profile_result = await _render_user_profile(
+            context, existing,
+        )
+        _commit_profile_if_memory_unchanged(
+            context,
+            user_path,
+            profile_content,
+            existing,
+        )
+        return profile_result
 
     # 2. Extract digests, skip failed sessions
-    digests, digest_session_ids = [], []
-    last_successful_session = None
+    digests, successful_sessions = [], []
     for s in sessions:
         try:
-            digests.append(scanner.extract_digest(s.path))
-            digest_session_ids.append(s.id)
-            last_successful_session = s
+            digests.append(
+                f"[source_session:{s.id}]\n{scanner.extract_digest(s.path)}"
+            )
+            successful_sessions.append(s)
         except Exception as e:
             logger.warning("Failed to extract session %s: %s, skipping", s.id, e)
             continue
@@ -50,37 +64,72 @@ async def run(context: SkillContext) -> Optional[str]:
     if not digests:
         return None
 
-    # 3. Consolidation analysis (single LLM call)
+    # 3. Consolidation analysis (single LLM call).  Every downstream boundary
+    # uses this exact batch: prompt, correction source allowlist, and watermark.
+    analyzed_digests = digests[:_MAX_ANALYZED_SESSIONS]
+    analyzed_sessions = successful_sessions[:_MAX_ANALYZED_SESSIONS]
     existing = context.memory_manager.load_entries()
-    review = await _analyze_memory_consolidation(context.llm, digests, existing)
+    review = await _analyze_memory_consolidation(
+        context.llm, analyzed_digests, existing,
+    )
+    review = _validate_review_sources(
+        review, [session.id for session in analyzed_sessions],
+    )
 
-    # 4. Apply consolidation + post-validation
-    entries_before = len(existing)
-    from ..memory.manager import IntegrityError
-    try:
-        review_stats = context.memory_manager.apply_review(review)
-    except IntegrityError as e:
-        logger.error("Memory consolidation integrity violation: %s", e)
-        return None
+    # 4. Project in memory and finish all LLM work before mutating any file.
+    projected, review_stats = context.memory_manager.preview_review(review, existing)
+    profile_content, profile_result = await _render_user_profile(context, projected)
 
-    # Defense against concurrent writes: apply_review holds flock but another
-    # process_session_end could have inserted entries between our load and save.
-    entries_after = len(context.memory_manager.load_entries())
-    if entries_after > entries_before:
-        logger.warning(
-            "Entries increased after review (likely concurrent write): %d → %d",
-            entries_before, entries_after,
-        )
+    # 5. Recoverable commit boundary: MEMORY + USER + watermark.
+    memory_path = context.memory_manager.store.memory_path
+    user_path = context.workspace_path / "USER.md"
+    state_path = context.workspace_path / ".reflection_state.json"
+    expected = context.memory_manager.entries_fingerprint(existing)
+    with context.memory_manager.review_lock():
+        snapshots = {
+            memory_path: _snapshot_file(memory_path),
+            user_path: _snapshot_file(user_path),
+            state_path: _snapshot_file(state_path),
+        }
+        memory_committed = False
+        try:
+            context.memory_manager.commit_review(
+                projected,
+                expected_fingerprint=expected,
+                lock_already_held=True,
+            )
+            memory_committed = True
+            _atomic_write_profile(user_path, profile_content)
+            if analyzed_sessions:
+                state.set_watermark(
+                    "memory-review", analyzed_sessions[-1].updated_at,
+                )
+                if not state.save(context.workspace_path):
+                    raise OSError("failed to persist memory-review watermark")
+        except Exception:
+            # A fingerprint mismatch happens before this review writes anything.
+            # Restoring in that case would overwrite the concurrent writer that
+            # caused the mismatch.  Once MEMORY was committed, however, all
+            # three files belong to this transaction and must roll back together.
+            review_changed_memory = memory_committed
+            if not review_changed_memory:
+                current = context.memory_manager.load_entries()
+                current_fingerprint = context.memory_manager.entries_fingerprint(current)
+                projected_fingerprint = context.memory_manager.entries_fingerprint(projected)
+                review_changed_memory = (
+                    projected_fingerprint != expected
+                    and current_fingerprint == projected_fingerprint
+                )
+            if review_changed_memory:
+                for path, snapshot in snapshots.items():
+                    _restore_file(path, snapshot)
+            raise
 
-    # 5. Compress memories → USER.md
-    compress_result = await _compress_to_user_profile(context)
-
-    # Advance watermark — if we got here, both LLM calls succeeded.
-    if last_successful_session:
-        state.set_watermark("memory-review", last_successful_session.updated_at)
-        state.save(context.workspace_path)
-    logger.info("Memory review: %s, profile: %s", review_stats, compress_result)
-    return None
+    logger.info("Memory review: %s, profile: %s", review_stats, profile_result)
+    return (
+        f"{profile_result}; corrected={review_stats['corrected']}; "
+        f"split={review_stats['split']}"
+    )
 
 
 async def _analyze_memory_consolidation(llm, digests: List[str], existing_entries) -> dict:
@@ -91,11 +140,19 @@ async def _analyze_memory_consolidation(llm, digests: List[str], existing_entrie
     if not existing_entries:
         return {}
 
+    active_entries = [
+        entry for entry in existing_entries if entry.status == "active"
+    ]
+    if not active_entries:
+        return {}
+
     existing_text = "\n".join(
         f"- [{e.id}] [{e.category}] (score={e.score:.2f}, count={e.activation_count}) {e.content}"
-        for e in existing_entries
+        for e in active_entries
     )
-    context_text = "\n".join(d[:500] for d in digests[:3])
+    # Corrections often occur near the end of a long session. Preserve the
+    # source header plus the recent tail instead of truncating at 500 chars.
+    context_text = "\n".join(_review_digest_window(d) for d in digests)
 
     from pathlib import Path
 
@@ -114,6 +171,8 @@ async def _analyze_memory_consolidation(llm, digests: List[str], existing_entrie
         **dph_data["config"]
     )
     result = parse_json_response(response)
+    if not isinstance(result, dict):
+        raise ValueError("memory review response must be a JSON object")
 
     # Validate entropy constraint
     merge_count = len(result.get("merge_pairs", []))
@@ -130,26 +189,82 @@ async def _analyze_memory_consolidation(llm, digests: List[str], existing_entrie
     return result
 
 
+def _review_digest_window(digest: str, limit: int = 2000) -> str:
+    if len(digest) <= limit:
+        return digest
+    return f"{digest[:200]}\n...[earlier context truncated]...\n{digest[-(limit - 240):]}"
+
+
+def _validate_review_sources(review: dict, session_ids: List[str]) -> dict:
+    """Validate provenance without silently consuming an analyzed session.
+
+    A missing source is unambiguous only for a one-session batch.  Any other
+    missing or out-of-batch source fails the whole review so its watermark can
+    be retried instead of permanently skipping a correction or split.
+    """
+    allowed = set(session_ids)
+    sole_source = session_ids[0] if len(session_ids) == 1 else None
+
+    def validate_source(item: dict, operation: str) -> None:
+        source = str(item.get("source_session", "")).strip()
+        if not source and sole_source:
+            item["source_session"] = sole_source
+            return
+        if source not in allowed:
+            raise ValueError(
+                f"{operation} has invalid source_session {source!r}; "
+                "memory review must retry"
+            )
+
+    raw_corrections = review.get("corrections", [])
+    if not isinstance(raw_corrections, list):
+        raise ValueError("corrections must be a list")
+    corrections = []
+    for item in raw_corrections:
+        if not isinstance(item, dict):
+            raise ValueError("correction must be an object with source_session")
+        validate_source(item, "correction")
+        corrections.append(item)
+    review["corrections"] = corrections
+
+    raw_splits = review.get("split_entries", [])
+    if not isinstance(raw_splits, list):
+        raise ValueError("split_entries must be a list")
+    for split in raw_splits:
+        if not isinstance(split, dict) or not isinstance(split.get("entries", []), list):
+            raise ValueError("split entry must contain an entries list")
+        for child in split.get("entries", []):
+            if not isinstance(child, dict):
+                raise ValueError("split child must be an object with source_session")
+            validate_source(child, "split child")
+    return review
+
+
 async def _compress_to_user_profile(context: SkillContext) -> str:
     """Compress all memory entries into structured tags and write to USER.md.
 
     This replaces verbose narrative memories with a compact user profile
     that is injected into the system prompt via the USER.md section.
     """
-    entries = context.memory_manager.load_entries()
-    if not entries:
-        return "no entries"
+    content, result = await _render_user_profile(
+        context, context.memory_manager.load_entries(),
+    )
+    _atomic_write_profile(context.workspace_path / "USER.md", content)
+    return result
 
-    # Only compress entries with reasonable score
-    active = [e for e in entries if e.score >= 0.5]
+
+async def _render_user_profile(context: SkillContext, entries) -> tuple[str, str]:
+    """Render a USER.md projection without writing it."""
+    active = [e for e in entries if e.status == "active" and e.score >= 0.5]
     if not active:
-        return "no active entries"
+        return (
+            f"# 用户画像\n\n{_DERIVED_PROFILE_MARKER}\n\n{_EMPTY_PROFILE}\n",
+            "profile_cleared",
+        )
 
     entries_text = "\n".join(
         f"- [{e.category}] {e.content}" for e in active
     )
-
-    from pathlib import Path
 
     dph_path = Path(__file__).parent / "system_dphs" / "memory_review_compression.dph"
     dph_data = parse_system_dph(str(dph_path), {
@@ -166,11 +281,51 @@ async def _compress_to_user_profile(context: SkillContext) -> str:
     )
     profile_content = response.strip()
 
-    # Write to USER.md
-    user_md_path = context.workspace_path / "USER.md"
-    user_md_path.write_text(
-        f"# 用户画像\n\n{profile_content}\n",
-        encoding="utf-8",
+    return (
+        f"# 用户画像\n\n{_DERIVED_PROFILE_MARKER}\n\n{profile_content}\n",
+        f"profile_rebuilt:{len(active)}",
     )
-    logger.info("Compressed %d memory entries to USER.md", len(active))
-    return f"compressed {len(active)} entries"
+
+
+def _atomic_write_profile(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".md.tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _commit_profile_if_memory_unchanged(
+    context: SkillContext,
+    user_path: Path,
+    profile_content: str,
+    existing_entries,
+) -> None:
+    """Commit a bootstrap USER projection against an unchanged MEMORY view."""
+    from ..memory.manager import IntegrityError
+
+    expected = context.memory_manager.entries_fingerprint(existing_entries)
+    with context.memory_manager.review_lock():
+        current = context.memory_manager.load_entries()
+        if context.memory_manager.entries_fingerprint(current) != expected:
+            raise IntegrityError("Memory changed concurrently; profile must retry")
+        user_snapshot = _snapshot_file(user_path)
+        try:
+            _atomic_write_profile(user_path, profile_content)
+        except Exception:
+            _restore_file(user_path, user_snapshot)
+            raise
+
+
+def _snapshot_file(path: Path) -> Optional[bytes]:
+    return path.read_bytes() if path.exists() else None
+
+
+def _restore_file(path: Path, snapshot: Optional[bytes]) -> None:
+    """Restore one file atomically after a failed multi-file commit."""
+    if snapshot is None:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".rollback")
+    tmp.write_bytes(snapshot)
+    os.replace(tmp, path)

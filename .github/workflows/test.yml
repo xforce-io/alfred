@@ -36,3 +36,15 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: |
           pytest tests/unit/ -m "not integration" -x -q --tb=short
+
+      - name: Run memory review integration tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          pytest tests/integration/test_memory_review_atomicity.py -q --tb=short
+
+      - name: Run memory correction E2E tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          pytest tests/e2e/test_memory_correction_e2e.py -q --tb=short
