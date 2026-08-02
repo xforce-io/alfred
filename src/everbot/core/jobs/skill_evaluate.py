@@ -11,9 +11,11 @@ Testing versions that pass evaluation are activated.
 import asyncio
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List
 
+from .result import JobOutcome
 from ..runtime.skill_context import SkillContext
 from ..slm.judge import evaluate_skill
 from ..slm.models import EvaluationSegment, EvalReport, VersionStatus
@@ -24,6 +26,20 @@ from ..slm._atomic_io import skill_lock
 logger = logging.getLogger(__name__)
 _SKILL_EVALUATION_TIMEOUT_SECONDS = 120
 MAX_CONSECUTIVE_EVOLVE = 2
+
+
+@dataclass(frozen=True)
+class SkillEvaluationResult:
+    """One skill's report coverage produced by the current job run."""
+
+    summary: str
+    observed_count: int
+    eligible_count: int
+    evaluated_count: int
+
+    def __contains__(self, value: str) -> bool:
+        """Keep the former summary-string assertion style source compatible."""
+        return value in self.summary
 
 _EVOLVE_SYSTEM = (
     "You are a skill improvement assistant. "
@@ -56,14 +72,12 @@ produce an improved version.
 """
 
 
-async def run(context: SkillContext) -> Optional[str]:
+async def run(context: SkillContext) -> JobOutcome:
     """Evaluate all skills that have accumulated new entries since last report.
 
-    Returns None for the typical silent path — actionable skill state
-    changes (promoted / suspended / improved / rolled back) reach the
-    user via ``context.mailbox.deposit`` inside ``_post_evaluate``. Only
-    persistent LLM unavailability is surfaced here, since it indicates a
-    degraded mode the user should know about.
+    Returns a structured terminal outcome so the scheduler can distinguish
+    evaluated samples, a legitimate no-change skip, and degraded observation
+    or judge availability.
     """
     from ...infra.user_data import get_user_data_manager
 
@@ -73,6 +87,20 @@ async def run(context: SkillContext) -> Optional[str]:
     skill_eval_dir = context.skill_eval_dir
 
     seg_logger = SegmentLogger(skill_logs_dir)
+    observation_state = seg_logger.load_observation_state()
+    if observation_state and not observation_state["complete"]:
+        return JobOutcome(
+            status="degraded",
+            reason="observation_unavailable",
+            summary="Latest skill observation batch was incomplete",
+            detail={
+                "observed_count": 0,
+                "eligible_count": 0,
+                "evaluated_count": 0,
+                "observation_reason": observation_state.get("reason", ""),
+                "observation_session_id": observation_state.get("session_id", ""),
+            },
+        )
     # Layered SLM: writable = agent workspace skills (loader layer 0).
     # Read chain mirrors dolphin's loader priority (workspace → user → repo)
     # so bootstrap can find baseline content even when workspace is empty.
@@ -88,12 +116,20 @@ async def run(context: SkillContext) -> Optional[str]:
 
     skill_ids = seg_logger.list_skills()
     if not skill_ids:
-        return None
+        return JobOutcome(
+            status="skipped",
+            reason="no_changes",
+            detail={"observed_count": 0, "eligible_count": 0, "evaluated_count": 0},
+        )
 
     from .llm_errors import LLMTransientError, LLMConfigError
 
-    evaluated = 0
+    observed_count = sum(seg_logger.count(skill_id) for skill_id in skill_ids)
+    eligible_count = 0
+    evaluated_count = 0
+    evaluated_skills = 0
     unavailable = 0
+    failed = 0
     for skill_id in skill_ids:
         # #132: warn (non-blocking) when a stale per-agent override shadows the
         # repo baseline for this skill. Best-effort — never abort evaluation.
@@ -106,12 +142,21 @@ async def run(context: SkillContext) -> Optional[str]:
                 context, seg_logger, ver_mgr, skill_id, udm.sessions_dir,
             )
             if result:
-                evaluated += 1
-                logger.info("Evaluated %s: %s", skill_id, result)
+                evaluated_skills += 1
+                if isinstance(result, SkillEvaluationResult):
+                    eligible_count += result.eligible_count
+                    evaluated_count += result.evaluated_count
+                    summary = result.summary
+                else:  # compatibility for patched/custom evaluators
+                    eligible_count += 1
+                    evaluated_count += 1
+                    summary = str(result)
+                logger.info("Evaluated %s: %s", skill_id, summary)
         except (LLMTransientError, LLMConfigError):
             unavailable += 1
             logger.warning("LLM unavailable during %s evaluation, skipping skill", skill_id)
         except Exception as e:
+            failed += 1
             logger.warning("Failed to evaluate %s: %s", skill_id, e)
 
     for skill_id in skill_ids:
@@ -120,10 +165,38 @@ async def run(context: SkillContext) -> Optional[str]:
         except Exception as e:
             logger.warning("Cleanup failed for %s: %s", skill_id, e)
 
-    logger.info("Evaluated %d/%d skills", evaluated, len(skill_ids))
-    if unavailable:
-        return f"Evaluated {evaluated}/{len(skill_ids)} skills, skipped {unavailable} due to LLM unavailability"
-    return None
+    detail = {
+        "observed_count": observed_count,
+        "eligible_count": eligible_count,
+        "evaluated_count": evaluated_count,
+        "evaluated_skill_count": evaluated_skills,
+        "skill_count": len(skill_ids),
+        "unavailable_skill_count": unavailable,
+        "failed_skill_count": failed,
+    }
+    logger.info(
+        "Skill evaluation observed=%d eligible=%d evaluated=%d skills=%d/%d",
+        observed_count, eligible_count, evaluated_count, evaluated_skills, len(skill_ids),
+    )
+    if unavailable or failed:
+        reason = "llm_unavailable" if unavailable else "evaluation_error"
+        return JobOutcome(
+            status="degraded",
+            reason=reason,
+            summary=(
+                f"Evaluated {evaluated_skills}/{len(skill_ids)} skills; "
+                f"unavailable={unavailable}, failed={failed}"
+            ),
+            detail=detail,
+        )
+    if evaluated_count:
+        return JobOutcome(
+            status="completed",
+            reason="evaluated",
+            summary=f"Evaluated {evaluated_count} segments across {evaluated_skills} skills",
+            detail=detail,
+        )
+    return JobOutcome(status="skipped", reason="no_changes", detail=detail)
 
 
 async def _evaluate_one(
@@ -132,8 +205,8 @@ async def _evaluate_one(
     ver_mgr: VersionManager,
     skill_id: str,
     sessions_dir,
-) -> str | None:
-    """Evaluate a single skill. Returns summary string or None if skipped."""
+) -> SkillEvaluationResult | str | None:
+    """Evaluate one skill and report newly covered samples, or skip it."""
     # Self-heal: ensure this skill has pointer+metadata+snapshot before we
     # do anything. Handles both first-time skills and partial state from
     # crash / manual edit.
@@ -166,6 +239,7 @@ async def _evaluate_one(
     existing = ver_mgr.get_eval_report(skill_id, target_version)
     if existing and existing.segment_count >= len(target_entries):
         return None
+    previous_segment_count = existing.segment_count if existing else 0
 
     segments = [e for e in target_entries if e.skill_output or e.context_before]
     if not segments:
@@ -203,10 +277,15 @@ async def _evaluate_one(
 
         await _post_evaluate(context, ver_mgr, seg_logger, skill_id, target_version, report)
 
-    return (
-        f"v{target_version}: {report.segment_count} segments, "
-        f"critical={report.critical_issue_rate:.0%}, "
-        f"satisfaction={report.mean_satisfaction:.2f}"
+    return SkillEvaluationResult(
+        summary=(
+            f"v{target_version}: {report.segment_count} segments, "
+            f"critical={report.critical_issue_rate:.0%}, "
+            f"satisfaction={report.mean_satisfaction:.2f}"
+        ),
+        observed_count=len(entries),
+        eligible_count=max(0, len(segments) - previous_segment_count),
+        evaluated_count=max(0, report.segment_count - previous_segment_count),
     )
 
 

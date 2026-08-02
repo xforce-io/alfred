@@ -15,7 +15,7 @@ import json
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
@@ -23,6 +23,7 @@ import httpx
 
 from .adapter import milkie_event_to_progress
 from .sse import SSEParser
+from ..base import SkillObservationBatch
 from .....infra.milkie_trace import capture_trace_report
 from .....infra.user_data import get_user_data_manager
 
@@ -239,6 +240,13 @@ class MilkieAgentHandle:
     # #47: milkie 的单次运行 id(milkie#140 经终止帧回传),provider 私有 —— 供
     # Provider 据此定位落盘 trace(`milkie trace <runId>`)。绝不进中立 _progress。
     last_run_id: Optional[str] = None
+    # #187: provider-neutral SLM observation for the latest completed turn.
+    # Pending requests are provider-private and paired with tool.responded so
+    # a missing/unavailable skill is never recorded as a successful load.
+    skill_observation_names: set[str] = field(default_factory=set)
+    skill_observation_pending: dict[str, str] = field(default_factory=dict)
+    skill_observation_complete: bool = False
+    skill_observation_reason: str = "turn_not_started"
 
 
 class MilkieAgentError(RuntimeError):
@@ -447,6 +455,10 @@ class MilkieProvider:
         text = message if isinstance(message, str) else str(message)
         payload = {"contextId": handle.context_id, "input": text, "goal": text}
         pending_error: Optional[dict[str, Any]] = None
+        handle.skill_observation_names.clear()
+        handle.skill_observation_pending.clear()
+        handle.skill_observation_complete = False
+        handle.skill_observation_reason = "terminal_not_seen"
         try:
             # lease 与流同生命周期(#43):turn 在飞期间该 agent 的 sidecar 重生被推迟。
             async with self._lease_base_url(handle) as base_url, client.stream(
@@ -476,6 +488,10 @@ class MilkieProvider:
                         if event == "error":
                             pending_error = data
                             continue
+                        if event == "tool.requested":
+                            self._observe_skill_request(handle, data)
+                        elif event == "tool.responded":
+                            self._observe_skill_response(handle, data)
                         if event == "agent.run.completed":
                             # #47: 捕获本轮 runId(milkie#140)到 handle —— 必须在
                             # 下面 error 抛出之前,失败 run 才同样可被留证。runId 是
@@ -498,6 +514,8 @@ class MilkieProvider:
                                     or "unknown error"
                                 )
                                 raise MilkieAgentError(msg, envelope=detail, run_id=run_id)
+                            handle.skill_observation_complete = True
+                            handle.skill_observation_reason = ""
                         item = milkie_event_to_progress(event, data)
                         if item is not None:
                             yield {"_progress": [item]}
@@ -509,6 +527,47 @@ class MilkieProvider:
         finally:
             if owns_client:
                 await client.aclose()
+
+    @staticmethod
+    def _observe_skill_request(handle: MilkieAgentHandle, data: dict[str, Any]) -> None:
+        if data.get("toolName") != "skill_request":
+            return
+        raw = data.get("input")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                return
+        if not isinstance(raw, dict):
+            return
+        name = str(raw.get("name") or raw.get("skill_name") or "").strip()
+        call_id = str(data.get("toolCallId") or "").strip()
+        if name and call_id:
+            handle.skill_observation_pending[call_id] = name
+
+    @staticmethod
+    def _observe_skill_response(handle: MilkieAgentHandle, data: dict[str, Any]) -> None:
+        call_id = str(data.get("toolCallId") or "").strip()
+        name = handle.skill_observation_pending.pop(call_id, None)
+        if not name or data.get("status") != "ok":
+            return
+        output = data.get("output")
+        if isinstance(output, str):
+            try:
+                output = json.loads(output)
+            except json.JSONDecodeError:
+                return
+        if isinstance(output, dict) and output.get("status") == "ok":
+            handle.skill_observation_names.add(name)
+
+    def get_skill_observations(self, agent: Any) -> SkillObservationBatch:
+        """Return successful ``skill_request`` loads from the latest turn."""
+        handle: MilkieAgentHandle = agent
+        return SkillObservationBatch(
+            skill_names=tuple(sorted(handle.skill_observation_names)),
+            complete=bool(handle.skill_observation_complete),
+            reason=str(handle.skill_observation_reason or ""),
+        )
 
     # -- 运行态查询:is_paused/is_error 暂未由 serve 透出,默认 False(非本次范围)。
     def is_paused(self, agent: Any) -> bool:

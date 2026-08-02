@@ -780,10 +780,9 @@ class CronExecutor:
                     ),
                 )
 
-            # SLM: record skill invocations from this isolated agent run.
-            # Reads the just-written trajectory to find _load_resource_skill
-            # calls and writes one segment per unique skill into skill_logs/.
-            self._record_skill_log(task, result, job_session_id)
+            # SLM: persist provider-neutral skill observations from this run.
+            # Legacy trajectory parsing remains a compatibility fallback only.
+            self._record_skill_log(task, result, job_session_id, agent=agent)
 
             return result
         except Exception as exc:
@@ -986,6 +985,28 @@ class CronExecutor:
             result = await job_module.run(context)
 
             duration_ms = int(_time.time() * 1000) - start_ms
+            from ..jobs.result import JobOutcome
+
+            if isinstance(result, JobOutcome):
+                detail = dict(result.detail)
+                if result.status == "skipped":
+                    self._write_event(
+                        "job_skipped", skill=job_name,
+                        duration_ms=duration_ms, reason=result.reason, **detail,
+                    )
+                    return None
+                if result.status == "degraded":
+                    self._write_event(
+                        "job_degraded", skill=job_name,
+                        duration_ms=duration_ms, reason=result.reason, **detail,
+                    )
+                    return result.summary or None
+                self._write_event(
+                    "job_completed", skill=job_name,
+                    duration_ms=duration_ms, reason=result.reason,
+                    result=result.summary[:200], **detail,
+                )
+                return None
             self._write_event(
                 "job_completed", skill=job_name,
                 duration_ms=duration_ms, result=str(result)[:200],
@@ -1103,26 +1124,106 @@ class CronExecutor:
     def _task_mode(task: Any) -> str:
         return str(getattr(task, "execution_mode", "inline") or "inline")
 
-    def _record_skill_log(self, task: Task, output: str, session_id: str) -> None:
+    def _record_skill_log(
+        self,
+        task: Task,
+        output: str,
+        session_id: str,
+        *,
+        agent: Any = None,
+    ) -> int:
         """Record skill invocations to the SLM log after task completion.
 
-        Reads the trajectory file to find which skills the LLM actually
-        loaded via _load_resource_skill(). Each unique skill is recorded once.
+        Provider-native observations are authoritative.  The legacy trajectory
+        parser remains only as a compatibility fallback for providers without
+        the observation capability.
         """
         if self._skill_log_recorder is None:
-            return
+            return 0
         desc = str(getattr(task, "description", "") or "")
-        skill_names = self._extract_skills_from_trajectory(session_id)
-        for skill_name in skill_names:
+        skill_names: list[str]
+        if agent is not None:
+            from ..agent.provider import provider_for
+
             try:
-                self._skill_log_recorder.maybe_record(
+                provider = provider_for(agent)
+                getter = getattr(provider, "get_skill_observations", None)
+            except Exception as exc:
+                logger.warning("Cannot resolve skill observation provider for %s: %s", session_id, exc)
+                self._write_event(
+                    "skill_observation_unavailable",
+                    session_id=session_id,
+                    reason="provider_resolution_error",
+                    error=str(exc)[:200],
+                )
+                self._skill_log_recorder.record_observation_state(
+                    complete=False,
+                    session_id=session_id,
+                    reason="provider_resolution_error",
+                )
+                return 0
+            if callable(getter):
+                try:
+                    batch = getter(agent)
+                    if not batch.complete:
+                        reason = batch.reason or "incomplete_provider_observation"
+                        logger.warning("Skill observation incomplete for %s: %s", session_id, reason)
+                        self._write_event(
+                            "skill_observation_unavailable",
+                            session_id=session_id,
+                            reason=reason,
+                        )
+                        self._skill_log_recorder.record_observation_state(
+                            complete=False,
+                            session_id=session_id,
+                            reason=reason,
+                        )
+                        return 0
+                    skill_names = list(batch.skill_names)
+                except Exception as exc:
+                    logger.warning("Skill observation failed for %s: %s", session_id, exc)
+                    self._write_event(
+                        "skill_observation_unavailable",
+                        session_id=session_id,
+                        reason="provider_observation_error",
+                        error=str(exc)[:200],
+                    )
+                    self._skill_log_recorder.record_observation_state(
+                        complete=False,
+                        session_id=session_id,
+                        reason="provider_observation_error",
+                    )
+                    return 0
+                self._skill_log_recorder.record_observation_state(
+                    complete=True,
+                    session_id=session_id,
+                    observed_skills=len(set(skill_names)),
+                )
+            else:
+                skill_names = self._extract_skills_from_trajectory(session_id)
+        else:
+            skill_names = self._extract_skills_from_trajectory(session_id)
+
+        recorded = 0
+        for skill_name in sorted(set(skill_names)):
+            try:
+                if self._skill_log_recorder.maybe_record(
                     skill_name,
                     session_id=session_id,
                     skill_output=output or "",
                     context_before=desc,
-                )
+                ):
+                    recorded += 1
             except Exception as e:
                 logger.debug("Failed to record skill log for %s: %s", skill_name, e)
+        if agent is not None and recorded != len(set(skill_names)):
+            self._skill_log_recorder.record_observation_state(
+                complete=False,
+                session_id=session_id,
+                reason="segment_persist_failed",
+                observed_skills=len(set(skill_names)),
+            )
+        return recorded
 
     def _extract_skills_from_trajectory(self, session_id: str) -> list[str]:
         """Extract skill names from trajectory tool_calls of _load_resource_skill."""

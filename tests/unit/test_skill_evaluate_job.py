@@ -101,9 +101,95 @@ async def test_run_skips_unavailable_skill_and_continues(tmp_path: Path):
         "src.everbot.core.jobs.skill_evaluate._evaluate_one",
         new=AsyncMock(side_effect=fake_evaluate_one),
     ):
-        summary = await run(context)
+        outcome = await run(context)
 
-    assert summary == "Evaluated 1/2 skills, skipped 1 due to LLM unavailability"
+    assert outcome.status == "degraded"
+    assert outcome.reason == "llm_unavailable"
+    assert outcome.detail == {
+        "observed_count": 2,
+        "eligible_count": 1,
+        "evaluated_count": 1,
+        "evaluated_skill_count": 1,
+        "skill_count": 2,
+        "unavailable_skill_count": 1,
+        "failed_skill_count": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_without_skill_logs_is_explicit_no_changes(tmp_path: Path):
+    context = MagicMock()
+    context.skill_logs_dir = tmp_path / "skill_logs"
+    context.skill_eval_dir = tmp_path / "skill_eval"
+
+    fake_udm = MagicMock()
+    fake_udm.skill_logs_dir = context.skill_logs_dir
+    fake_udm.skills_dir = tmp_path / "skills"
+    fake_udm.sessions_dir = tmp_path / "sessions"
+
+    with patch("src.everbot.infra.user_data.get_user_data_manager", return_value=fake_udm):
+        outcome = await run(context)
+
+    assert outcome.status == "skipped"
+    assert outcome.reason == "no_changes"
+    assert outcome.detail == {
+        "observed_count": 0,
+        "eligible_count": 0,
+        "evaluated_count": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_with_incomplete_observation_is_degraded(tmp_path: Path):
+    logs_dir = tmp_path / "skill_logs"
+    SegmentLogger(logs_dir).save_observation_state(
+        complete=False,
+        session_id="routine-42",
+        reason="terminal_not_seen",
+    )
+    context = MagicMock(skill_logs_dir=logs_dir, skill_eval_dir=tmp_path / "skill_eval")
+    fake_udm = MagicMock()
+    fake_udm.skill_logs_dir = logs_dir
+    fake_udm.skills_dir = tmp_path / "skills"
+
+    with patch("src.everbot.infra.user_data.get_user_data_manager", return_value=fake_udm):
+        outcome = await run(context)
+
+    assert outcome.status == "degraded"
+    assert outcome.reason == "observation_unavailable"
+    assert outcome.detail == {
+        "observed_count": 0,
+        "eligible_count": 0,
+        "evaluated_count": 0,
+        "observation_reason": "terminal_not_seen",
+        "observation_session_id": "routine-42",
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_with_already_covered_segments_is_no_changes(tmp_path: Path):
+    logs_dir = tmp_path / "skill_logs"
+    _append_segment(logs_dir, "alpha")
+    context = MagicMock(skill_logs_dir=logs_dir, skill_eval_dir=tmp_path / "skill_eval")
+
+    fake_udm = MagicMock()
+    fake_udm.skill_logs_dir = logs_dir
+    fake_udm.skills_dir = tmp_path / "skills"
+    fake_udm.sessions_dir = tmp_path / "sessions"
+    fake_udm.get_agent_writable_skills_dir.return_value = tmp_path / "skills"
+    fake_udm.get_agent_read_skill_dirs.return_value = [tmp_path / "skills"]
+
+    with patch("src.everbot.infra.user_data.get_user_data_manager", return_value=fake_udm), patch(
+        "src.everbot.core.jobs.skill_evaluate._evaluate_one",
+        new=AsyncMock(return_value=None),
+    ):
+        outcome = await run(context)
+
+    assert outcome.status == "skipped"
+    assert outcome.reason == "no_changes"
+    assert outcome.detail["observed_count"] == 1
+    assert outcome.detail["eligible_count"] == 0
+    assert outcome.detail["evaluated_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -157,6 +243,67 @@ async def test_evaluate_one_uses_bootstrapped_pointer_version(tmp_path: Path):
 
     assert result is not None
     assert "v2.0.0" in result
+
+
+@pytest.mark.asyncio
+async def test_evaluate_one_reports_incremental_coverage(tmp_path: Path):
+    skills_dir = tmp_path / "skills"
+    logs_dir = tmp_path / "skill_logs"
+    eval_dir = tmp_path / "skill_eval"
+    _write_skill_md(skills_dir, "web-search", version="1.0.0")
+    seg_logger = SegmentLogger(logs_dir)
+    for index in range(2):
+        seg_logger.append(EvaluationSegment(
+            skill_id="web-search",
+            skill_version="1.0.0",
+            triggered_at=f"2026-08-02T00:0{index}:00+00:00",
+            context_before="search",
+            skill_output=f"result {index}",
+            context_after="ok",
+            session_id=f"s-{index}",
+        ))
+
+    ver_mgr = VersionManager(skills_dir, eval_base_dir=eval_dir)
+    from src.everbot.core.slm.state_normalizer import ensure_registered
+    ensure_registered(ver_mgr, "web-search", repo_skills_dir=None)
+    existing = EvalReport(
+        skill_id="web-search",
+        skill_version="1.0.0",
+        evaluated_at="2026-08-02T00:00:00+00:00",
+        segment_count=1,
+        critical_issue_count=0,
+        critical_issue_rate=0.0,
+        mean_satisfaction=0.9,
+        results=[JudgeResult(0, False, 0.9, "ok")],
+    )
+    ver_mgr.save_eval_report("web-search", "1.0.0", existing)
+    updated = EvalReport(
+        skill_id="web-search",
+        skill_version="1.0.0",
+        evaluated_at="2026-08-02T00:01:00+00:00",
+        segment_count=2,
+        critical_issue_count=0,
+        critical_issue_rate=0.0,
+        mean_satisfaction=0.9,
+        results=[
+            JudgeResult(0, False, 0.9, "ok"),
+            JudgeResult(1, False, 0.9, "ok"),
+        ],
+    )
+    context = MagicMock(llm=MagicMock(), mailbox=AsyncMock())
+
+    with patch(
+        "src.everbot.core.jobs.skill_evaluate.evaluate_skill",
+        new=AsyncMock(return_value=updated),
+    ):
+        result = await _evaluate_one(
+            context, seg_logger, ver_mgr, "web-search", tmp_path / "sessions",
+        )
+
+    assert result is not None
+    assert result.observed_count == 2
+    assert result.eligible_count == 1
+    assert result.evaluated_count == 1
 
 
 def _mk_context(tmp_path: Path):
