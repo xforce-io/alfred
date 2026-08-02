@@ -6,7 +6,9 @@ Proves host skill-manifest injection + milkie tool handler contract:
     → hit: instructions + dir from manifest.dir/SKILL.md only
     → miss: not_found without HOME/full-disk SKILL.md search
 
-No API key required; milkie dist missing → skip.
+Skill observation / Skill Evaluate acceptance lives in
+``test_skill_observation_e2e.py`` (#187). No API key required; milkie dist
+missing → skip.
 """
 from __future__ import annotations
 
@@ -39,6 +41,28 @@ def _milkie_cli() -> Optional[Path]:
         if candidate.exists():
             return candidate
     return None
+
+
+def _node_bin() -> str:
+    """Prefer Node 22 so milkie's better-sqlite3 native addon loads."""
+    configured = os.environ.get("MILKIE_NODE")
+    if configured:
+        p = Path(configured).expanduser()
+        if p.exists():
+            return str(p)
+    candidates = [
+        Path.home() / ".nvm/versions/node/v22.22.3/bin/node",
+        Path("/opt/homebrew/opt/node@22/bin/node"),
+        Path("/usr/local/opt/node@22/bin/node"),
+    ]
+    nvm_root = Path.home() / ".nvm/versions/node"
+    if nvm_root.is_dir():
+        for child in sorted(nvm_root.glob("v22.*/bin/node"), reverse=True):
+            candidates.append(child)
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return "node"
 
 
 class _SkillRequestOpenAIHandler(BaseHTTPRequestHandler):
@@ -127,6 +151,10 @@ def _make_web_skill(root: Path) -> Dict[str, Any]:
     # Body must not contain banned discovery phrases: hit tool_result embeds
     # instructions, and trajectory assertions scan tool outputs.
     body = (
+        "---\n"
+        "name: web\n"
+        "version: \"1.0.0\"\n"
+        "---\n"
         "# Web\n\n"
         "Closed-world e2e fixture for skill_request.\n\n"
         "Load via skill_request; use returned instructions and dir.\n"
@@ -210,7 +238,7 @@ async def test_skill_request_hit_and_miss_through_real_sidecar(tmp_path, monkeyp
             SKILL_MANIFEST_ENV: str(manifest_path),
         }
         cmd = [
-            "node", str(cli), "serve",
+            _node_bin(), str(cli), "serve",
             "--agent", str(agent_md),
             "--port", "0",
             "--state-store", "sqlite",

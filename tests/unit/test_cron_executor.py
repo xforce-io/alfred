@@ -678,6 +678,64 @@ class TestInvokeJobLLMErrorHandling:
                 await executor._invoke_job(task, None, "test_run")
 
 
+class TestStructuredJobOutcome:
+    @pytest.mark.asyncio
+    async def test_no_changes_emits_skipped_instead_of_completed(self, tmp_path):
+        from src.everbot.core.jobs.result import JobOutcome
+
+        mgr = _seed_task(tmp_path, title="Skill Evaluate", job="skill-evaluate")
+        executor = _make_executor(tmp_path, routine_manager=mgr)
+        task = mgr.load_task_list().tasks[0]
+        executor._write_event = MagicMock()
+        executor._build_job_context = MagicMock(return_value=MagicMock())
+        outcome = JobOutcome(
+            status="skipped",
+            reason="no_changes",
+            detail={"observed_count": 4, "eligible_count": 0, "evaluated_count": 0},
+        )
+
+        with patch("importlib.import_module") as mock_import:
+            mock_module = SimpleNamespace(run=AsyncMock(return_value=outcome))
+            mock_import.return_value = mock_module
+            result = await executor._invoke_job(task, None, "test_run")
+
+        assert result is None
+        event_names = [call.args[0] for call in executor._write_event.call_args_list]
+        assert event_names == ["job_started", "job_skipped"]
+        skipped = executor._write_event.call_args_list[-1]
+        assert skipped.kwargs["reason"] == "no_changes"
+        assert skipped.kwargs["evaluated_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_evaluated_outcome_emits_completed_with_counts(self, tmp_path):
+        from src.everbot.core.jobs.result import JobOutcome
+
+        mgr = _seed_task(tmp_path, title="Skill Evaluate", job="skill-evaluate")
+        executor = _make_executor(tmp_path, routine_manager=mgr)
+        task = mgr.load_task_list().tasks[0]
+        executor._write_event = MagicMock()
+        executor._build_job_context = MagicMock(return_value=MagicMock())
+        outcome = JobOutcome(
+            status="completed",
+            reason="evaluated",
+            summary="Evaluated 2 segments across 1 skills",
+            detail={"observed_count": 2, "eligible_count": 2, "evaluated_count": 2},
+        )
+
+        with patch("importlib.import_module") as mock_import:
+            mock_module = SimpleNamespace(run=AsyncMock(return_value=outcome))
+            mock_import.return_value = mock_module
+            result = await executor._invoke_job(task, None, "test_run")
+
+        assert result is None  # bookkeeping remains silent to the user
+        event_names = [call.args[0] for call in executor._write_event.call_args_list]
+        assert event_names == ["job_started", "job_completed"]
+        completed = executor._write_event.call_args_list[-1]
+        assert completed.kwargs["reason"] == "evaluated"
+        assert completed.kwargs["eligible_count"] == 2
+        assert completed.kwargs["evaluated_count"] == 2
+
+
 class TestIsolatedAgentRetries:
     @pytest.mark.asyncio
     async def test_transient_remote_disconnect_is_not_retried_inside_agent_runner(self, tmp_path):
@@ -861,6 +919,74 @@ class TestSkillLogRecording:
             assert call.kwargs["session_id"] == "sess2"
             assert call.kwargs["skill_output"] == "report content"
             assert call.kwargs["context_before"] == "daily papers task"
+
+    def test_record_skill_log_prefers_complete_provider_observation(self, tmp_path):
+        from src.everbot.core.agent.provider.base import SkillObservationBatch
+
+        executor = _make_executor(tmp_path)
+        recorder = MagicMock()
+        recorder.maybe_record.return_value = True
+        executor._skill_log_recorder = recorder
+        provider = MagicMock()
+        provider.get_skill_observations.return_value = SkillObservationBatch(
+            skill_names=("paper-discovery", "paper-discovery"), complete=True,
+        )
+        agent = object()
+        task = MagicMock(description="daily papers task")
+
+        with patch("src.everbot.core.agent.provider.provider_for", return_value=provider), patch.object(
+            executor, "_extract_skills_from_trajectory"
+        ) as legacy:
+            recorded = executor._record_skill_log(
+                task, "report content", "sess-provider", agent=agent,
+            )
+
+        assert recorded == 1
+        legacy.assert_not_called()
+        recorder.record_observation_state.assert_called_once_with(
+            complete=True,
+            session_id="sess-provider",
+            observed_skills=1,
+        )
+        recorder.maybe_record.assert_called_once_with(
+            "paper-discovery",
+            session_id="sess-provider",
+            skill_output="report content",
+            context_before="daily papers task",
+        )
+
+    def test_record_skill_log_incomplete_observation_is_not_empty_success(self, tmp_path):
+        from src.everbot.core.agent.provider.base import SkillObservationBatch
+
+        executor = _make_executor(tmp_path)
+        recorder = MagicMock()
+        executor._skill_log_recorder = recorder
+        provider = MagicMock()
+        provider.get_skill_observations.return_value = SkillObservationBatch(
+            skill_names=("paper-discovery",),
+            complete=False,
+            reason="terminal_not_seen",
+        )
+
+        with patch("src.everbot.core.agent.provider.provider_for", return_value=provider), patch.object(
+            executor, "_write_event"
+        ) as write_event:
+            recorded = executor._record_skill_log(
+                MagicMock(description="task"), "out", "sess-incomplete", agent=object(),
+            )
+
+        assert recorded == 0
+        recorder.maybe_record.assert_not_called()
+        recorder.record_observation_state.assert_called_once_with(
+            complete=False,
+            session_id="sess-incomplete",
+            reason="terminal_not_seen",
+        )
+        write_event.assert_called_once_with(
+            "skill_observation_unavailable",
+            session_id="sess-incomplete",
+            reason="terminal_not_seen",
+        )
 
     def test_record_skill_log_no_recorder_is_noop(self, tmp_path):
         executor = _make_executor(tmp_path)

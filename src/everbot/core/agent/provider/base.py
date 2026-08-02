@@ -7,16 +7,32 @@ compat constants module instead.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional, Protocol, runtime_checkable
+
+
+@dataclass(frozen=True)
+class SkillObservationBatch:
+    """Provider-neutral skill loads observed during the latest turn.
+
+    ``complete`` distinguishes a genuine zero-skill turn from a provider that
+    could not prove what happened.  Consumers must never treat an incomplete
+    batch as an empty successful observation.
+    """
+
+    skill_names: tuple[str, ...]
+    complete: bool
+    reason: str = ""
 
 
 @runtime_checkable
 class AgentProvider(Protocol):
     """Provider-neutral port for agent-runtime capabilities.
 
-    The active implementation is :class:`MilkieProvider`. Mainline alfred code
-    talks to agents only through this surface.
+The active implementation is :class:`MilkieProvider`. Implementations hide
+    runtime-specific types behind this surface so alfred mainline stays
+    provider-neutral.
     """
 
     async def create_agent(
@@ -71,6 +87,10 @@ class AgentProvider(Protocol):
     def get_variable(self, agent: Any, key: str) -> Any: ...
 
     def init_trajectory(self, agent: Any, path: str, overwrite: bool = False) -> None: ...
+
+    def get_skill_observations(self, agent: Any) -> SkillObservationBatch:
+        """Return successful skill loads from the agent's latest turn."""
+        ...
 
     def set_session_id(self, agent: Any, session_id: str) -> None: ...
 
