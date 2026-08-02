@@ -1,7 +1,7 @@
 # 【SLM】恢复 Milkie 技能评估观测并消除空跑假成功
 
 - Issue: #187
-- 状态: Approved
+- 状态: Implemented
 - 最后更新: 2026-08-02
 
 ## 1. 背景
@@ -168,7 +168,7 @@ heartbeat 事件字段保持向后兼容，并新增：`observed_count`、`eligi
 
 - Issue #187
 - 概要：Issue #187 Approved 设计评论
-- PR：待创建
+- PR：[GitHub #189](https://github.com/xforce-io/alfred/pull/189)
 - `src/everbot/core/agent/provider/base.py`
 - `src/everbot/core/agent/provider/milkie/provider.py`
 - `src/everbot/core/runtime/cron.py`
