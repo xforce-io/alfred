@@ -137,6 +137,7 @@ frontmatter 解析只认可位于首个分隔块内、行首无空白的 `versio
 
 - Issue #191
 - 概要设计：Issue #191 评论
+- 实现：PR #192
 - 发现来源：Issue #187
 - 相关实现：PR #189
 - `src/everbot/core/jobs/skill_evaluate.py`
