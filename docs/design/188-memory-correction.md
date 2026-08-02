@@ -1,7 +1,7 @@
 # 【memory】让用户纠正可靠取代陈旧画像
 
 - Issue: #188
-- 状态: Approved
+- 状态: Implemented
 - 最后更新: 2026-08-02
 
 ## 1. 背景
@@ -167,7 +167,7 @@ sequenceDiagram
 
 - Issue #188
 - 概要：Issue #188 Approved 设计评论
-- PR：待创建
+- PR：[GitHub #190](https://github.com/xforce-io/alfred/pull/190)
 - `src/everbot/core/jobs/memory_review.py`
 - `src/everbot/core/memory/`
 - `src/everbot/infra/workspace.py`
