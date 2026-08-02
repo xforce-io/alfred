@@ -20,7 +20,7 @@ from ..runtime.skill_context import SkillContext
 from ..slm.judge import evaluate_skill
 from ..slm.models import EvaluationSegment, EvalReport, VersionStatus
 from ..slm.segment_logger import SegmentLogger
-from ..slm.version_manager import VersionManager
+from ..slm.version_manager import VersionManager, extract_frontmatter_version
 from ..slm._atomic_io import skill_lock
 
 logger = logging.getLogger(__name__)
@@ -429,10 +429,15 @@ async def _maybe_evolve(
         return None
 
     new_content = _sanitize_llm_skill_md(new_content)
-    if not _validate_skill_md(new_content):
-        preview = (new_content or "")[:200].replace("\n", "\\n")
+    validation_preview = (new_content or "")[:200].replace("\n", "\\n")
+    new_content = _normalize_skill_md_version(new_content, new_version)
+    if new_content is None or not _validate_skill_md(
+        new_content, expected_version=new_version,
+    ):
         logger.warning(
-            "Evolve output for %s failed validation. Preview: %r", skill_id, preview
+            "Evolve output for %s failed validation. Preview: %r",
+            skill_id,
+            validation_preview,
         )
         return None
 
@@ -495,15 +500,58 @@ def _sanitize_llm_skill_md(content: str) -> str:
     return text
 
 
-def _validate_skill_md(content: str) -> bool:
+def _normalize_skill_md_version(content: str, target_version: str) -> str | None:
+    """Replace the unique valid frontmatter version with a system target.
+
+    Only the first frontmatter block is touched.  Invalid or ambiguous input
+    returns ``None`` so evolve can fail without reaching the persistence layer.
+    """
+    if extract_frontmatter_version(content) is None:
+        return None
+    if (
+        not target_version
+        or any(char in target_version for char in ('"', "\r", "\n"))
+    ):
+        return None
+
+    frontmatter = re.match(
+        r"\A---[ \t]*\r?\n(?P<body>.*?)(?P<closing>\r?\n---[ \t]*(?=\r?\n|\Z))",
+        content,
+        re.DOTALL,
+    )
+    if frontmatter is None:
+        return None
+    body = frontmatter.group("body")
+    version_lines = list(re.finditer(r"(?m)^version:[^\r\n]*$", body))
+    if len(version_lines) != 1:
+        return None
+
+    version_line = version_lines[0]
+    body = (
+        body[:version_line.start()]
+        + f'version: "{target_version}"'
+        + body[version_line.end():]
+    )
+    normalized = (
+        content[:frontmatter.start("body")]
+        + body
+        + content[frontmatter.end("body"):]
+    )
+    return (
+        normalized
+        if extract_frontmatter_version(normalized) == target_version
+        else None
+    )
+
+
+def _validate_skill_md(
+    content: str,
+    *,
+    expected_version: str | None = None,
+) -> bool:
     if not content or not content.strip():
         return False
-    if not re.search(r"^---\s*\n", content):
+    version = extract_frontmatter_version(content)
+    if version is None:
         return False
-    match = re.search(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
-    if not match:
-        return False
-    frontmatter = match.group(1)
-    if "version:" not in frontmatter:
-        return False
-    return True
+    return expected_version is None or version == expected_version

@@ -18,6 +18,50 @@ from .models import CurrentPointer, EvalReport, VersionMetadata, VersionStatus
 logger = logging.getLogger(__name__)
 
 
+_FRONTMATTER_RE = re.compile(
+    r"\A---[ \t]*\r?\n(?P<body>.*?)(?P<closing>\r?\n---[ \t]*(?=\r?\n|\Z))",
+    re.DOTALL,
+)
+_VERSION_LINE_RE = re.compile(
+    r"^version:[ \t]*(?:"
+    r'"(?P<double>[^"\r\n]+)"'
+    r"|'(?P<single>[^'\r\n]+)'"
+    r"|(?P<plain>[A-Za-z0-9][A-Za-z0-9._+\-]*))"
+    r"[ \t]*(?:#[^\r\n]*)?$"
+)
+
+
+def extract_frontmatter_version(skill_content: str) -> Optional[str]:
+    """Return the unique top-level frontmatter version, or ``None``.
+
+    The parser is deliberately strict because callers use it as a persistence
+    invariant: missing, duplicate, indented, or ambiguous version fields must
+    not be guessed.  ``version:`` text outside the first frontmatter block is
+    ignored.
+    """
+    if not isinstance(skill_content, str):
+        return None
+    frontmatter = _FRONTMATTER_RE.match(skill_content)
+    if frontmatter is None:
+        return None
+
+    values: list[str] = []
+    for line in frontmatter.group("body").splitlines():
+        if not line.startswith("version:"):
+            continue
+        match = _VERSION_LINE_RE.fullmatch(line)
+        if match is None:
+            return None
+        value = next(
+            group for group in match.group("double", "single", "plain")
+            if group is not None
+        ).strip()
+        if not value:
+            return None
+        values.append(value)
+    return values[0] if len(values) == 1 else None
+
+
 def read_frontmatter_version(skill_md_path: Path) -> str:
     """Extract version from SKILL.md frontmatter. Returns 'baseline' if absent.
 
@@ -30,14 +74,7 @@ def read_frontmatter_version(skill_md_path: Path) -> str:
         text = skill_md_path.read_text(encoding="utf-8")
     except (UnicodeDecodeError, OSError):
         return "baseline"
-    match = re.search(r"^---\s*\n(.*?)\n---", text, re.DOTALL)
-    if not match:
-        return "baseline"
-    for line in match.group(1).splitlines():
-        m = re.match(r'version:\s*["\']?([^"\']+)["\']?', line.strip())
-        if m:
-            return m.group(1).strip()
-    return "baseline"
+    return extract_frontmatter_version(text) or "baseline"
 
 
 class VersionManager:
@@ -237,11 +274,22 @@ class VersionManager:
         2. Snapshot to .eval/versions/v{version}/
         3. Update current.json while preserving the existing stable target
 
+        Before any write, the unique SKILL.md frontmatter version must equal
+        ``version``. Missing, ambiguous, or mismatched content is rejected.
+
         Refuses to operate on symlink-managed skills: writing to the live
         SKILL.md would resolve through the symlink and overwrite the
         upstream repo file. Caller (typically _maybe_evolve) must treat
         this as evolve-failed.
         """
+        content_version = extract_frontmatter_version(skill_content)
+        if content_version != version:
+            actual = content_version if content_version is not None else "missing/ambiguous"
+            raise ValueError(
+                f"SKILL.md frontmatter version={actual!r} does not match "
+                f"publish version={version!r}"
+            )
+
         if self.is_symlink_managed(skill_id):
             raise ValueError(
                 f"{skill_id} is symlink-managed; publish would overwrite upstream. "

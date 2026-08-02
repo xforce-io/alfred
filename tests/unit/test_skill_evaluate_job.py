@@ -758,6 +758,47 @@ class TestSanitizeLLMSkillMd:
         assert not _validate_skill_md(result)
 
 
+class TestNormalizeSkillMdVersion:
+    def test_replaces_only_unique_frontmatter_version(self):
+        from src.everbot.core.jobs.skill_evaluate import (
+            _normalize_skill_md_version,
+            _validate_skill_md,
+        )
+
+        stale = (
+            '---\nname: foo\nversion: "1.0"\ndescription: keep\n---\n'
+            '# Body\n\nExample text: version: "do-not-touch"\n'
+        )
+        target = "1.0-evolve-20260802"
+
+        normalized = _normalize_skill_md_version(stale, target)
+
+        assert normalized is not None
+        assert f'version: "{target}"' in normalized
+        assert 'Example text: version: "do-not-touch"' in normalized
+        assert _validate_skill_md(normalized, expected_version=target)
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "---\nname: foo\n---\nbody\n",
+            '---\nname: foo\nversion: "1.0"\nversion: "2.0"\n---\nbody\n',
+            '---\nname: foo\n  version: "1.0"\n---\nbody\n',
+            '---\nname: foo\nversion: "1.0\n---\nbody\n',
+        ],
+    )
+    def test_rejects_missing_ambiguous_or_invalid_version(self, content):
+        from src.everbot.core.jobs.skill_evaluate import _normalize_skill_md_version
+
+        assert _normalize_skill_md_version(content, "2.0") is None
+
+    def test_validate_rejects_unexpected_version(self):
+        from src.everbot.core.jobs.skill_evaluate import _validate_skill_md
+
+        content = '---\nname: foo\nversion: "1.0"\n---\nbody\n'
+        assert not _validate_skill_md(content, expected_version="2.0")
+
+
 @pytest.mark.asyncio
 async def test_testing_healthy_but_not_promotable_does_not_activate(tmp_path: Path):
     """Healthy with too few segments (< 3) is NOT enough to promote.
