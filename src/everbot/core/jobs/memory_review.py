@@ -84,19 +84,21 @@ async def run(context: SkillContext) -> Optional[str]:
     memory_path = context.memory_manager.store.memory_path
     user_path = context.workspace_path / "USER.md"
     state_path = context.workspace_path / ".reflection_state.json"
-    snapshots = {
-        memory_path: _snapshot_file(memory_path),
-        user_path: _snapshot_file(user_path),
-        state_path: _snapshot_file(state_path),
-    }
     expected = context.memory_manager.entries_fingerprint(existing)
     with context.memory_manager.review_lock():
+        snapshots = {
+            memory_path: _snapshot_file(memory_path),
+            user_path: _snapshot_file(user_path),
+            state_path: _snapshot_file(state_path),
+        }
+        memory_committed = False
         try:
             context.memory_manager.commit_review(
                 projected,
                 expected_fingerprint=expected,
                 lock_already_held=True,
             )
+            memory_committed = True
             _atomic_write_profile(user_path, profile_content)
             if analyzed_sessions:
                 state.set_watermark(
@@ -105,8 +107,22 @@ async def run(context: SkillContext) -> Optional[str]:
                 if not state.save(context.workspace_path):
                     raise OSError("failed to persist memory-review watermark")
         except Exception:
-            for path, snapshot in snapshots.items():
-                _restore_file(path, snapshot)
+            # A fingerprint mismatch happens before this review writes anything.
+            # Restoring in that case would overwrite the concurrent writer that
+            # caused the mismatch.  Once MEMORY was committed, however, all
+            # three files belong to this transaction and must roll back together.
+            review_changed_memory = memory_committed
+            if not review_changed_memory:
+                current = context.memory_manager.load_entries()
+                current_fingerprint = context.memory_manager.entries_fingerprint(current)
+                projected_fingerprint = context.memory_manager.entries_fingerprint(projected)
+                review_changed_memory = (
+                    projected_fingerprint != expected
+                    and current_fingerprint == projected_fingerprint
+                )
+            if review_changed_memory:
+                for path, snapshot in snapshots.items():
+                    _restore_file(path, snapshot)
             raise
 
     logger.info("Memory review: %s, profile: %s", review_stats, profile_result)
@@ -180,18 +196,47 @@ def _review_digest_window(digest: str, limit: int = 2000) -> str:
 
 
 def _validate_review_sources(review: dict, session_ids: List[str]) -> dict:
-    """Reject corrective facts whose claimed source is outside this review batch."""
+    """Validate provenance without silently consuming an analyzed session.
+
+    A missing source is unambiguous only for a one-session batch.  Any other
+    missing or out-of-batch source fails the whole review so its watermark can
+    be retried instead of permanently skipping a correction or split.
+    """
     allowed = set(session_ids)
-    corrections = []
-    for item in review.get("corrections", []):
-        if not isinstance(item, dict):
-            continue
-        source = str(item.get("source_session", ""))
+    sole_source = session_ids[0] if len(session_ids) == 1 else None
+
+    def validate_source(item: dict, operation: str) -> None:
+        source = str(item.get("source_session", "")).strip()
+        if not source and sole_source:
+            item["source_session"] = sole_source
+            return
         if source not in allowed:
-            logger.warning("Skipping correction with untrusted source session: %s", source)
-            continue
+            raise ValueError(
+                f"{operation} has invalid source_session {source!r}; "
+                "memory review must retry"
+            )
+
+    raw_corrections = review.get("corrections", [])
+    if not isinstance(raw_corrections, list):
+        raise ValueError("corrections must be a list")
+    corrections = []
+    for item in raw_corrections:
+        if not isinstance(item, dict):
+            raise ValueError("correction must be an object with source_session")
+        validate_source(item, "correction")
         corrections.append(item)
     review["corrections"] = corrections
+
+    raw_splits = review.get("split_entries", [])
+    if not isinstance(raw_splits, list):
+        raise ValueError("split_entries must be a list")
+    for split in raw_splits:
+        if not isinstance(split, dict) or not isinstance(split.get("entries", []), list):
+            raise ValueError("split entry must contain an entries list")
+        for child in split.get("entries", []):
+            if not isinstance(child, dict):
+                raise ValueError("split child must be an object with source_session")
+            validate_source(child, "split child")
     return review
 
 

@@ -17,6 +17,8 @@ from src.everbot.core.runtime.inspector import (
 )
 from src.everbot.core.runtime.reflection import ReflectionManager
 from src.everbot.core.tasks.routine_manager import RoutineManager
+from src.everbot.core.memory.manager import MemoryManager
+from src.everbot.core.memory.models import MemoryEntry
 
 
 class _StubUserDataManager:
@@ -48,6 +50,27 @@ def _make_inspector(tmp_path: Path, **overrides) -> Inspector:
         return_value=_StubUserDataManager(tmp_path / ".alfred"),
     ):
         return Inspector(**defaults)
+
+
+def test_reflect_prompt_uses_active_memory_projection_only(tmp_path):
+    manager = MemoryManager(tmp_path / "MEMORY.md")
+    manager.store.save([
+        MemoryEntry.from_dict({
+            "id": "active1", "content": "用户现在不负责项目 A",
+            "category": "fact", "score": 0.9, "status": "active",
+        }),
+        MemoryEntry.from_dict({
+            "id": "old001", "content": "用户负责项目 A",
+            "category": "fact", "score": 0.19, "status": "superseded",
+        }),
+    ])
+    inspector = _make_inspector(tmp_path)
+
+    context = inspector._gather_context(heartbeat_content="heartbeat")
+    prompt = inspector._build_reflect_prompt(context)
+
+    assert "用户现在不负责项目 A" in prompt
+    assert "用户负责项目 A" not in prompt
 
 
 def _make_reflection_response_with_proposals(proposals: list[dict]) -> str:

@@ -145,6 +145,29 @@ class TestProfileStoreSave:
         content = md.read_text(encoding="utf-8")
         assert content.index("[high]") < content.index("[mid]") < content.index("[low]")
 
+    def test_superseded_trace_does_not_consume_active_capacity(self, tmp_path: Path):
+        md = tmp_path / "MEMORY.md"
+        store = ProfileStore(md)
+        active = [
+            _make_entry(id=f"active{i:02d}", score=0.9 - i / 1000)
+            for i in range(store.MAX_ENTRIES)
+        ]
+        traces = [
+            _make_entry(
+                id=f"trace{i:02d}", status="superseded", score=0.01,
+                last_activated=f"2026-08-{i + 1:02d}T00:00:00+00:00",
+            )
+            for i in range(7)
+        ]
+
+        store.save(active + traces)
+        loaded = store.load()
+
+        assert {entry.id for entry in loaded if entry.status == "active"} == {
+            entry.id for entry in active
+        }
+        assert len([entry for entry in loaded if entry.status == "superseded"]) == 5
+
 
 class TestProfileStoreRoundTrip:
     """Save then load should preserve data."""

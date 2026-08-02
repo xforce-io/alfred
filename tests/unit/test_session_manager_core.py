@@ -1443,8 +1443,8 @@ class TestFailureMemoryPersistence:
 class TestSaveSessionMilkieSafe:
     """save_session must NOT crash on a milkie handle (no .executor/.snapshot).
 
-    - memory extraction (MemoryManager) is dolphin-only → skipped for milkie.
-    - history compression (SessionCompressor) is dolphin-only → skipped.
+    - session-end MemoryManager extraction is gone; save_session must not build it.
+    - history compression remains provider-neutral shared policy.
     - export_session / session_created_at route through provider.
     """
 
@@ -1493,7 +1493,7 @@ class TestSaveSessionMilkieSafe:
 
         manager.update_atomic = fake_update_atomic
 
-        # primary session_type triggers both memory-extraction + compression guards.
+        # primary session_type still runs shared history compression guards.
         await manager.save_session("web_session_test_agent", handle)
 
         # No crash; export routed through provider; history persisted.
@@ -1501,8 +1501,8 @@ class TestSaveSessionMilkieSafe:
         assert captured["data"].history_messages == [{"role": "user", "content": "hi"}]
 
     @pytest.mark.asyncio
-    async def test_milkie_skips_memory_extraction(self, tmp_path: Path, monkeypatch):
-        """MemoryManager (in-process) must NOT be constructed for milkie."""
+    async def test_save_session_does_not_construct_memory_manager(self, tmp_path: Path, monkeypatch):
+        """save_session must not run in-process profile extraction."""
         import importlib
         from types import SimpleNamespace
         mm_mod = importlib.import_module(
@@ -1541,7 +1541,7 @@ class TestSaveSessionMilkieSafe:
 
         await manager.save_session("web_session_test_agent", handle)
 
-        assert mm_built["n"] == 0, "MemoryManager must be skipped for milkie"
+        assert mm_built["n"] == 0, "MemoryManager must not be constructed in save_session"
 
 
 # ===========================================================================

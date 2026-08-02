@@ -45,7 +45,6 @@ class SessionManager:
 
     MAX_TIMELINE_EVENTS = 500  # 防止内存泄漏，限制每个 session 的 timeline 事件数
     _MAX_CACHED_LOCKS = 200
-    MEMORY_EXTRACTION_TIMEOUT = 120  # seconds; LLM-based memory extraction after session save
 
     # --- Delegated ID helpers (canonical implementations in session_ids.py) ---
 
@@ -592,35 +591,9 @@ class SessionManager:
         timeline = self.get_timeline(session_id)
         context_trace = self._extract_context_trace(agent)
 
-        # Extract structured memories for primary / channel sessions.
-        # Fire-and-forget with timeout so it never blocks session persistence.
-        session_type = SessionManager.infer_session_type(session_id)
-        from ..agent.provider import provider_for  # local: avoid import cycle
-        provider = provider_for(agent)
-        if session_type in ("primary", "channel") and provider.needs_history_restore():
-            # dolphin: 进程内 context 驱动 session-end 记忆抽取。
-            # milkie: in-process memory extraction needs #87 bridge; skip for now
-            try:
-                agent_name = getattr(agent, "name", "")
-                if agent_name:
-                    context = agent.executor.context
-                    from ..memory.manager import MemoryManager
-                    from ...infra.user_data import get_user_data_manager
-                    memory_path = get_user_data_manager().get_agent_dir(agent_name) / "MEMORY.md"
-                    mm = MemoryManager(memory_path, context)
-                    portable = provider.export_session(agent)
-                    history = portable.get("history_messages", [])
-                    await asyncio.wait_for(
-                        mm.process_session_end(history, session_id),
-                        timeout=self.MEMORY_EXTRACTION_TIMEOUT,
-                    )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Memory extraction timed out (%ds); skipping",
-                    self.MEMORY_EXTRACTION_TIMEOUT,
-                )
-            except Exception:
-                logger.warning("Memory extraction failed; skipping", exc_info=True)
+        # Profile memory is maintained by the memory-review job (session digests),
+        # not at save_session time. milkie is the only runtime and does not restore
+        # in-process history for extraction here.
 
         if lock_already_held:
             await self.persistence.save(
@@ -635,12 +608,13 @@ class SessionManager:
             logger.debug("Session persisted.")
             return
 
+        from ..agent.provider import provider_for  # local: avoid import cycle
         provider = provider_for(agent)
         portable = provider.export_session(agent)
         serializable_history = portable.get("history_messages", [])
         exported_variables = portable.get("variables", {})
         exported_variables.pop("_history", None)  # avoid duplicating history_messages
-        # session_created_at: dolphin 读 context;milkie 走 serve(可能为 None,容忍)。
+        # session_created_at may be absent on milkie serve paths; tolerate None.
         created_at_hint = provider.get_variable(agent, "session_created_at")
 
         # Compress history for long-lived sessions before entering the lock.

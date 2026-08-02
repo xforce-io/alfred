@@ -111,9 +111,10 @@ class ProfileStore:
 
         return entries
 
-    # Hard cap on total entries to prevent unbounded growth.
+    # Independent caps prevent provenance trace from evicting active facts.
     # Increase once consolidation logic matures.
     MAX_ENTRIES = 30
+    MAX_TRACE_ENTRIES = 5
 
     def save(self, entries: List[MemoryEntry], last_processed_count: Optional[int] = None) -> None:
         """Atomically write entries to MEMORY.md while preserving superseded trace."""
@@ -123,21 +124,22 @@ class ProfileStore:
         # for provenance even though they are never injected.
         entries = [e for e in entries if e.status == "superseded" or e.score >= 0.05]
 
-        # Enforce hard cap: keep top entries by score
-        if len(entries) > self.MAX_ENTRIES:
-            active_ranked = sorted(
-                [e for e in entries if e.status == "active"],
-                key=lambda e: e.score,
-                reverse=True,
-            )
-            trace_ranked = sorted(
-                [e for e in entries if e.status == "superseded"],
-                key=lambda e: e.last_activated,
-                reverse=True,
-            )
-            trace_budget = min(len(trace_ranked), 5)
-            active_budget = self.MAX_ENTRIES - trace_budget
-            entries = active_ranked[:active_budget] + trace_ranked[:trace_budget]
+        # Active facts and superseded provenance have independent budgets.
+        # Trace retention must never evict a still-valid active fact.
+        active_ranked = sorted(
+            [e for e in entries if e.status == "active"],
+            key=lambda e: e.score,
+            reverse=True,
+        )
+        trace_ranked = sorted(
+            [e for e in entries if e.status == "superseded"],
+            key=lambda e: e.last_activated,
+            reverse=True,
+        )
+        entries = (
+            active_ranked[:self.MAX_ENTRIES]
+            + trace_ranked[:self.MAX_TRACE_ENTRIES]
+        )
 
         # Partition
         active = sorted(

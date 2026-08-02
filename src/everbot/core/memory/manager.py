@@ -166,28 +166,35 @@ class MemoryManager:
     ) -> Dict[str, Any]:
         """Profile pipeline: extract → decay → merge → save."""
         extractor = ProfileExtractor(self._context)
-        extract_result = await extractor.extract(new_messages, existing)
+        active_snapshot = [entry for entry in existing if entry.status == "active"]
+        extract_result = await extractor.extract(new_messages, active_snapshot)
 
-        superseded = [entry for entry in existing if entry.status == "superseded"]
-        active_existing = self.merger.apply_profile_decay(
-            [entry for entry in existing if entry.status == "active"]
-        )
+        expected = self.entries_fingerprint(existing)
+        with self.review_lock():
+            current = self.store.load()
+            if self.entries_fingerprint(current) != expected:
+                raise IntegrityError("Memory changed concurrently; session extraction must retry")
 
-        merge_result = self.merger.merge(
-            existing=active_existing,
-            new_extractions=extract_result.new_memories,
-            reinforcements=extract_result.reinforced_ids,
-            source_session=session_id,
-            content_filter=_is_internal_content,
-        )
+            superseded = [entry for entry in current if entry.status == "superseded"]
+            active_existing = self.merger.apply_profile_decay(
+                [entry for entry in current if entry.status == "active"]
+            )
 
-        # Save advances the watermark even when extraction produced
-        # nothing new — otherwise the same messages would be re-extracted
-        # on the next call.
-        self.store.save(
-            merge_result.entries + superseded,
-            last_processed_count=total_messages,
-        )
+            merge_result = self.merger.merge(
+                existing=active_existing,
+                new_extractions=extract_result.new_memories,
+                reinforcements=extract_result.reinforced_ids,
+                source_session=session_id,
+                content_filter=_is_internal_content,
+            )
+
+            # Save advances the watermark even when extraction produced
+            # nothing new — otherwise the same messages would be re-extracted
+            # on the next call.
+            self.store.save(
+                merge_result.entries + superseded,
+                last_processed_count=total_messages,
+            )
 
         return {
             "new_count": merge_result.new_count,
@@ -247,6 +254,10 @@ class MemoryManager:
         if event_block:
             sections.append(event_block)
         return "\n\n".join(sections)
+
+    def get_prompt_profile(self, top_k: int = 20) -> str:
+        """Return the canonical active-only profile projection for prompts."""
+        return self._format_profile_block(top_k)
 
     def _format_profile_block(self, top_k: int) -> str:
         """High-scoring profile entries, deduplicated by token similarity."""

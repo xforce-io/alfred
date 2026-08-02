@@ -164,6 +164,134 @@ async def test_concurrent_memory_insert_is_preserved_and_review_retries(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_integrity_error_before_review_write_does_not_restore_over_concurrent_insert(
+    tmp_path,
+):
+    """A pre-write CAS failure must not restore snapshots over another writer."""
+    context, review = _seed(tmp_path)
+    context.llm.complete.side_effect = [review, "- 项目状态: 不再负责项目 A"]
+    original_commit = context.memory_manager.commit_review
+
+    def insert_then_reject(*args, **kwargs):
+        entries = context.memory_manager.load_entries()
+        entries.append(MemoryEntry(
+            id="latecon",
+            content="用户偏好简洁输出",
+            category="preference",
+            score=0.8,
+            created_at="2026-08-02T08:00:00+00:00",
+            last_activated="2026-08-02T08:00:00+00:00",
+            activation_count=1,
+            source_session="late-session",
+        ))
+        context.memory_manager.store.save(entries)
+        raise IntegrityError("Memory changed concurrently; review must retry")
+
+    context.memory_manager.commit_review = insert_then_reject
+    try:
+        with pytest.raises(IntegrityError, match="concurrently"):
+            await run(context)
+    finally:
+        context.memory_manager.commit_review = original_commit
+
+    entries = {entry.id: entry for entry in context.memory_manager.load_entries()}
+    assert "latecon" in entries
+    assert entries["old001"].status == "active"
+    assert not ReflectionState.load(tmp_path).get_watermark("memory-review")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "corrections",
+    [
+        [{
+            "content": "用户现在不负责项目 A",
+            "category": "fact",
+            "supersedes_ids": ["old001"],
+            "source_session": "outside-review-batch",
+        }],
+        [
+            {
+                "content": "用户现在不负责项目 A",
+                "category": "fact",
+                "supersedes_ids": ["old001"],
+                "source_session": "web_session_demo_atomic",
+            },
+            {
+                "content": "用户偏好简洁输出",
+                "category": "preference",
+                "supersedes_ids": ["old001"],
+                "source_session": "outside-review-batch",
+            },
+        ],
+    ],
+)
+async def test_untrusted_correction_source_fails_without_advancing_watermark(
+    tmp_path, corrections,
+):
+    context, _review = _seed(tmp_path)
+    before = _snapshots(tmp_path)
+    context.llm.complete.return_value = json.dumps(
+        {"corrections": corrections}, ensure_ascii=False,
+    )
+
+    with pytest.raises(ValueError, match="source_session"):
+        await run(context)
+
+    _assert_snapshots(tmp_path, before)
+
+
+@pytest.mark.asyncio
+async def test_single_session_missing_source_is_backfilled(tmp_path):
+    context, _review = _seed(tmp_path)
+    context.llm.complete.side_effect = [
+        json.dumps({
+            "corrections": [{
+                "content": "用户现在不负责项目 A",
+                "category": "fact",
+                "supersedes_ids": ["old001"],
+            }],
+        }, ensure_ascii=False),
+        "- 项目状态: 不再负责项目 A",
+    ]
+
+    result = await run(context)
+
+    assert result == "profile_rebuilt:1; corrected=1; split=0"
+    replacement = next(
+        entry for entry in context.memory_manager.load_entries()
+        if entry.status == "active"
+    )
+    assert replacement.source_session == "web_session_demo_atomic"
+
+
+@pytest.mark.asyncio
+async def test_multi_session_missing_source_fails_without_advancing_watermark(tmp_path):
+    context, _review = _seed(tmp_path)
+    second_id = "web_session_demo_second"
+    (context.sessions_dir / f"{second_id}.json").write_text(json.dumps({
+        "session_id": second_id,
+        "updated_at": "2026-08-02T08:01:00+00:00",
+        "session_type": "primary",
+        "agent_name": "demo",
+        "history_messages": [{"role": "user", "content": "补充说明"}],
+    }, ensure_ascii=False), encoding="utf-8")
+    before = _snapshots(tmp_path)
+    context.llm.complete.return_value = json.dumps({
+        "corrections": [{
+            "content": "用户现在不负责项目 A",
+            "category": "fact",
+            "supersedes_ids": ["old001"],
+        }],
+    }, ensure_ascii=False)
+
+    with pytest.raises(ValueError, match="source_session"):
+        await run(context)
+
+    _assert_snapshots(tmp_path, before)
+
+
+@pytest.mark.asyncio
 async def test_watermark_never_advances_past_sessions_sent_to_judge(tmp_path):
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()

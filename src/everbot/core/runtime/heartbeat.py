@@ -355,12 +355,12 @@ If not, reply with `HEARTBEAT_OK`.
         return self._file_mgr.read_heartbeat_md()
 
     def _read_memory_md(self) -> Optional[str]:
-        """Read MEMORY.md from workspace, returning content or None."""
+        """Read the canonical active profile projection for reflection."""
         memory_path = self.workspace_path / "MEMORY.md"
         try:
-            return memory_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return None
+            from ..memory.manager import MemoryManager
+
+            return MemoryManager(memory_path).get_prompt_profile() or None
         except OSError as e:
             logger.warning("Failed to read MEMORY.md: %s", e)
             return None

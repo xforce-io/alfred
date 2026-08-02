@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -11,6 +14,10 @@ from src.everbot.core.jobs.memory_review import run
 from src.everbot.core.memory.manager import MemoryManager
 from src.everbot.core.memory.models import MemoryEntry
 from src.everbot.core.runtime.skill_context import SkillContext
+from src.everbot.core.runtime.cron import CronExecutor
+from src.everbot.core.runtime.cron_delivery import CronDelivery
+from src.everbot.core.scanners.reflection_state import ReflectionState
+from src.everbot.core.tasks.routine_manager import RoutineManager
 from src.everbot.infra.workspace import WorkspaceLoader
 
 
@@ -132,3 +139,105 @@ async def test_no_active_memory_clears_stale_profile_and_prompt(tmp_path):
     prompt = WorkspaceLoader(tmp_path).build_system_prompt()
     assert "项目 A 核心研发" not in prompt
     assert "用户是项目 A" not in prompt
+
+
+class _E2EUserData:
+    def __init__(self, root: Path):
+        self.sessions_dir = root / "sessions"
+        self.heartbeat_events_file = root / "heartbeat-events.jsonl"
+
+    def get_agent_skill_logs_dir(self, _agent_name: str) -> Path:
+        return self.heartbeat_events_file.parent / "skill-logs"
+
+    def get_agent_skill_eval_dir(self, _agent_name: str) -> Path:
+        return self.heartbeat_events_file.parent / "skill-eval"
+
+    def get_skill_log_recorder(self, **_kwargs):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_cron_gate_runs_correction_to_next_session_prompt(tmp_path):
+    """Production cron/gate/job wiring, with only the LLM boundary stubbed."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    user_data = _E2EUserData(tmp_path)
+    manager = MemoryManager(workspace / "MEMORY.md")
+    manager.store.save([_old_assignment()])
+    (workspace / "USER.md").write_text(
+        "# 用户画像\n\n- 项目: 项目 A 核心研发\n", encoding="utf-8",
+    )
+    session_id = "web_session_demo_cron_e2e"
+    _write_session(
+        user_data.sessions_dir / f"{session_id}.json",
+        content="我现在不负责项目 A 啦，请更新记忆。",
+    )
+
+    routine_manager = RoutineManager(workspace)
+    routine_manager.add_routine(
+        title="Memory Review",
+        schedule="2h",
+        job="memory-review",
+        scanner="session",
+        execution_mode="inline",
+        next_run_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+    )
+    tasks = routine_manager.load_task_list()
+    session_manager = MagicMock()
+    session_manager.get_primary_session_id.return_value = "web_session_demo_primary"
+    session_manager.get_heartbeat_session_id.return_value = "heartbeat_session_demo"
+    delivery = CronDelivery(
+        session_manager=session_manager,
+        primary_session_id="web_session_demo_primary",
+        heartbeat_session_id="heartbeat_session_demo",
+        agent_name="demo",
+        realtime_push=False,
+    )
+
+    responses = [
+        json.dumps({
+            "corrections": [{
+                "content": "用户现在不负责项目 A",
+                "category": "fact",
+                "supersedes_ids": ["old001"],
+                "source_session": session_id,
+            }],
+        }, ensure_ascii=False),
+        "- 项目状态: 不再负责项目 A",
+    ]
+
+    async def complete(_self, _prompt, **_kwargs):
+        return responses.pop(0)
+
+    with patch(
+        "src.everbot.infra.user_data.get_user_data_manager",
+        return_value=user_data,
+    ), patch(
+        "src.everbot.core.runtime.cron._SkillLLMClient.complete",
+        new=complete,
+    ):
+        executor = CronExecutor(
+            agent_name="demo",
+            workspace_path=workspace,
+            session_manager=session_manager,
+            agent_factory=AsyncMock(),
+            routine_manager=routine_manager,
+            delivery=delivery,
+        )
+        executor._resolve_skill_model = lambda: "test-model"
+        result = await executor.tick(
+            tasks,
+            run_agent=AsyncMock(),
+            inject_context=AsyncMock(),
+            run_id="memory-review-e2e",
+        )
+
+    assert result.executed == 1
+    assert result.failed == 0
+    assert result.results[0].status == "done"
+    assert ReflectionState.load(workspace).get_watermark("memory-review")
+    prompt = WorkspaceLoader(workspace).build_system_prompt()
+    assert "不再负责项目 A" in prompt
+    assert "核心研发者并负责该项目" not in prompt
+    events = user_data.heartbeat_events_file.read_text(encoding="utf-8")
+    assert '"event": "job_completed"' in events

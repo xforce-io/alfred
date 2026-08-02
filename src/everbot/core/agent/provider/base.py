@@ -1,9 +1,9 @@
-"""Neutral AgentProvider port. MUST NOT import dolphin.
+"""Neutral AgentProvider port.
 
 This module defines only provider-neutral *capabilities* (the methods any
-agent runtime must offer).  Dolphin-specific storage details (e.g. the history
-variable key) intentionally do NOT live here — consumers that need them import
-from the allowlisted compat layer instead.
+agent runtime must offer). Storage details (e.g. the history variable key)
+intentionally do NOT live here — consumers that need them import from the
+compat constants module instead.
 """
 from __future__ import annotations
 
@@ -15,9 +15,8 @@ from typing import Any, AsyncIterator, Optional, Protocol, runtime_checkable
 class AgentProvider(Protocol):
     """Provider-neutral port for agent-runtime capabilities.
 
-    The active implementation (currently :class:`DolphinProvider`) hides all
-    dolphin-specific types behind this surface so that alfred's mainline code
-    never imports dolphin directly.
+    The active implementation is :class:`MilkieProvider`. Mainline alfred code
+    talks to agents only through this surface.
     """
 
     async def create_agent(
@@ -99,10 +98,10 @@ class AgentProvider(Protocol):
         ...
 
     def needs_history_restore(self) -> bool:
-        """是否需要 alfred 把存档历史灌回 agent。
+        """Whether alfred must push archived history back into the live agent.
 
-        dolphin(进程内)True;milkie(serve 自持久化,重启从 checkpoint 恢复)False。
-        ``restore_to_agent`` 据此 short-circuit。
+        milkie serve self-persists and restores from its own checkpoint, so the
+        implementation returns False and restore callers short-circuit.
         """
         ...
 
@@ -115,5 +114,5 @@ class AgentProvider(Protocol):
         ...
 
     async def shutdown_sidecars(self) -> None:
-        """Close any spawned sidecar processes. No-op for in-process providers (dolphin)."""
+        """Close any spawned sidecar processes. No-op when none are owned."""
         ...
