@@ -59,7 +59,13 @@ def extract_json_object(raw: str) -> Optional[dict]:
     return None
 
 
-async def call_dolphin_llm(context: Any, prompt: str, temperature: float = 0.3) -> str:
+async def call_dolphin_llm(
+    context: Any,
+    prompt: str,
+    temperature: float = 0.3,
+    *,
+    agent_name: str | None = None,
+) -> str:
     """Call the LLM via the active provider with a single user-message prompt.
 
     Raises ``RuntimeError`` if the provider surfaced an error message.
@@ -67,5 +73,10 @@ async def call_dolphin_llm(context: Any, prompt: str, temperature: float = 0.3) 
     from ..agent.provider import oneshot_llm_provider
 
     return await oneshot_llm_provider().call_llm(
-        context, prompt, temperature=temperature, fast=False
+        context,
+        prompt,
+        temperature=temperature,
+        fast=False,
+        agent_name=agent_name,
     )
+
