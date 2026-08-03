@@ -171,10 +171,25 @@ When pushing paper digests (daily routine or on-demand), you MUST include for ea
 - Title with heat emoji
 - Upvotes / GitHub stars
 - **Abstract excerpt or AI summary** (at least 1-2 sentences — do NOT omit this)
+- **Structured interpretation** (agent-side; the CLI has **no** `--with-analysis` flag):
+  - 🔍 **核心创新点**: 1-2 sentences on the problem and technical breakthrough
+  - 🛠️ **可复用技术点**: what can be referenced or integrated into our stack
+  - ⚡ **落地价值评估**: implementation difficulty and expected value
+- **分类标签**: [前沿跟踪] / [可落地参考] / [竞品分析]
 - **arXiv/PDF links** (do NOT omit these)
 - Keywords if available
 
-**Do NOT reduce papers to just a title + heat score in a table.** The abstract and links are critical — without them, users cannot follow up on papers they're interested in.
+**Do NOT reduce papers to just a title + heat score in a table.** The abstract, structured interpretation, and links are critical.
+
+**CLI truth source:** only flags implemented by `scripts/fetch_papers.py` are valid. Do **not** invent or call `--with-analysis`, `--filter-by-domain`, or `--filter-opensource`. For daily digests prefer:
+
+```bash
+python3 skills/paper-discovery/scripts/fetch_papers.py --source both --limit 10 --format json
+# optional LLM one-liners (resolve_model fast tier):
+python3 skills/paper-discovery/scripts/fetch_papers.py --source both --limit 10 --format json --with-summary
+```
+
+Then write the push-format interpretation yourself from abstracts / `one_line_summary` / `ai_summary`.
 
 ## Error Handling
 
@@ -186,5 +201,7 @@ When pushing paper digests (daily routine or on-demand), you MUST include for ea
 
 1. **Always use `--format json`** for programmatic processing
 2. **Use `--source both`** for comprehensive discovery
-3. **Prefer `ai_summary`** over `abstract` when available (richer context)
+3. **Prefer `ai_summary` / `one_line_summary`** over raw `abstract` when available
 4. **Check `github_repo`** to highlight papers with open-source implementations
+5. **Structured interpretation is agent work** — do not pass unsupported CLI flags
+
