@@ -44,3 +44,26 @@ def test_build_isolated_task_prompt_includes_fail_fast():
     assert "FAIL-FAST" in prompt
     assert "SELECTOR_OR_STRUCTURE_CHANGED" in prompt
     assert "STOP" in prompt
+
+
+def test_build_isolated_task_prompt_requires_full_user_facing_report():
+    """#193: Telegram delivers lastTextOutput — must be the full report, not a status brief.
+
+    Production bug: prompt said "summarize the result briefly", so paper-discovery
+    generated a full digest mid-turn then replaced it with an execution summary
+    as the final assistant message (what users actually received).
+    """
+    prompt = build_isolated_task_prompt(
+        _Task(
+            id="routine_476c4861",
+            title="每日论文报告生成",
+            description="使用 paper-discovery 生成今日 AI 论文报告",
+        )
+    )
+    low = prompt.lower()
+    assert "summarize the result briefly" not in low
+    assert "execution summary" not in low or "not an execution summary" in low
+    # Final user-visible message must be the report body.
+    assert "final reply" in low or "final message" in low or "entire response" in low
+    assert "user-facing" in low or "user facing" in low or "推送" in prompt or "deliver" in low
+

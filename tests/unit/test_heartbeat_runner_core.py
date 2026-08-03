@@ -341,6 +341,35 @@ class TestExtractLlmResult:
         ]
         assert HeartbeatRunner._extract_llm_result(events) == "Hello World"
 
+    def test_prefers_full_report_over_trailing_exec_summary(self):
+        """#193: final short status must not replace an earlier full report body.
+
+        Isolated paper runs often emit the real digest as a mid-turn assistant
+        message, then a short ✅ execution summary after cite tools. Delivery
+        uses lastTextOutput / extracted answer — prefer the report.
+        """
+        report = (
+            "## 📚 今日 AI 论文热榜\n\n"
+            "### 1. 🔥🔥🔥🔥 AISPA\n"
+            "- 🔍 **核心创新点**：user-centric prompt auditing\n"
+            "- 🔗 [arXiv](https://arxiv.org/abs/2607.28617)\n"
+        ) * 3  # long enough to beat short status threshold
+        summary = (
+            "✅ **每日论文报告生成完成**。\n"
+            "- **任务 ID**：routine_476c4861\n"
+            "- **执行状态**：成功\n"
+            "- **原始数据**：~/.alfred/agents/demo_agent/tmp/papers.json\n"
+        )
+        events = [
+            {"_progress": [{"stage": "llm", "id": "a1", "answer": report}]},
+            {"_progress": [{"stage": "llm", "id": "a2", "answer": summary}]},
+        ]
+        out = HeartbeatRunner._extract_llm_result(events)
+        assert "AISPA" in out
+        assert "核心创新点" in out
+        assert "执行状态" not in out or len(out) > len(summary)
+
+
 
 # ============================================================
 # 4. _normalize_reflection_routine

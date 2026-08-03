@@ -62,14 +62,25 @@ def build_isolated_task_prompt(task: Any) -> str:
     """Build the user-message prompt for an isolated task execution.
 
     Single source of truth — used by both heartbeat.py and cron.py.
+
+    The final assistant message is what Telegram/mailbox deliver as the
+    heartbeat_delivery body. It must be the full user-facing report, not a
+    short execution summary after the real report was produced mid-turn.
     """
     task_id = str(getattr(task, "id", "task"))
     task_title = str(getattr(task, "title", "") or "")
     task_desc = str(getattr(task, "description", "") or "")
     return (
-        "Execute this scheduled isolated routine task and summarize the result briefly.\n"
+        "Execute this scheduled isolated routine task and produce the full user-facing report.\n"
         "IMPORTANT: Respond in the SAME language as the task title/description. "
         "Use a consistent, structured format (headings + bullet points).\n\n"
+        "DELIVERY (critical): Your FINAL reply is delivered verbatim to the user "
+        "(Telegram / mailbox). The final message MUST be the complete report body "
+        "the user should read — NOT an execution summary, status checklist, task-id "
+        "recap, or \"done\" brief after you already drafted the report. "
+        "If a skill defines push/report format requirements, the final reply must "
+        "satisfy them in full. Do not end with meta commentary about where files were saved "
+        "unless the task explicitly asks for ops status only.\n\n"
         "CRITICAL: You MUST use real tools (_bash, _python, _load_resource_skill) to fetch "
         "actual data. NEVER fabricate, simulate, or hardcode data. If a tool or data source "
         "fails, report the error honestly — do NOT generate fake results.\n"
@@ -82,7 +93,8 @@ def build_isolated_task_prompt(task: Any) -> str:
         "came from a tool, call the `cite` tool to link that claim to the `objectId` the tool "
         "returned (a non-empty `_bash`/`_python`/data-tool result carries an `objectId`). This "
         "makes 「来源哪里」 answerable via get_lineage and the source impossible to fabricate. "
-        "Cite real objectIds only — never invent one.\n"
+        "Cite real objectIds only — never invent one. Prefer citing in the same turn as the "
+        "final report text (or earlier) without replacing the report body with a status note.\n"
         "When the task description contains `_load_resource_skill(...)`, call the "
         "`_load_resource_skill` tool directly. Never execute `_load_resource_skill(...)` "
         "inside `_python` or `_bash`.\n\n"
@@ -90,3 +102,4 @@ def build_isolated_task_prompt(task: Any) -> str:
         f"Title: {task_title}\n"
         f"Description: {task_desc}\n"
     )
+
