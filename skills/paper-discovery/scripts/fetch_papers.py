@@ -5,73 +5,96 @@ Fetch trending AI/ML papers from HuggingFace JSON API with arXiv fallback.
 """
 
 import argparse
+import asyncio
 import json
 import logging
 import math
+import os
 import re
 import sys
 from datetime import datetime
-from typing import List, Dict, Any
+from pathlib import Path
+from typing import List, Dict, Any, Optional
 
+import httpx
 import requests
 
 logger = logging.getLogger(__name__)
 
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-def generate_one_line_summary(abstract: str) -> str:
-    """Generate a one-line Chinese summary for a paper using LLM."""
+from src.everbot.core.agent.provider.model_config import resolve_model  # noqa: E402
+
+
+def generate_one_line_summary(
+    abstract: str,
+    *,
+    agent_name: Optional[str] = None,
+    model: Optional[str] = None,
+    timeout: float = 90.0,
+) -> str:
+    """Generate a one-line Chinese summary via everbot model routing (#193 P0a).
+
+    Uses ``resolve_model(tier="fast")`` (same pattern as twitter-watch/analyze.py).
+    Failures degrade to empty string so paper fetch still succeeds.
+    """
     if not abstract:
         return ""
 
+    prompt = (
+        "请用一句简洁的中文概括以下论文摘要的核心贡献或发现，不超过50个字：\n\n"
+        f"{abstract}"
+    )
+    agent = agent_name or os.environ.get("EVERBOT_AGENT") or os.environ.get("ALFRED_AGENT")
+
     try:
-        import asyncio
-        import os
-        from dolphin.core.llm.llm_client import LLMClient
-        from dolphin.core.common.enums import Messages as DolphinMessages, MessageRole
-        from dolphin.core.context import Context
-        from dolphin.core.config.global_config import GlobalConfig
-
-        # Load config from dolphin.yaml so LLMClient gets context_engineer_config
-        config_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "..", "config", "dolphin.yaml"
+        resolved = resolve_model(
+            agent_name=agent,
+            override=model,
+            tier="fast",
         )
-        config_path = os.path.normpath(config_path)
-        if os.path.exists(config_path):
-            config = GlobalConfig.from_yaml(config_path)
-        else:
-            logger.warning("dolphin.yaml not found at %s, using default GlobalConfig", config_path)
-            config = GlobalConfig()
-        context = Context(config=config)
-        llm_client = LLMClient(context)
-        msgs = DolphinMessages()
-        prompt = (
-            "请用一句简洁的中文概括以下论文摘要的核心贡献或发现，不超过50个字：\n\n"
-            f"{abstract}"
-        )
-        msgs.append_message(MessageRole.USER, prompt)
-
-        runtime_config = context.get_config()
-        model = getattr(runtime_config, "fast_llm", None) or "qwen-turbo"
-
-        async def _call():
-            result = ""
-            async for chunk in llm_client.mf_chat_stream(
-                messages=msgs,
-                model=model,
-                temperature=0.3,
-                no_cache=True,
-            ):
-                result = chunk.get("content") or ""
-            return result.strip()
-
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(asyncio.wait_for(_call(), timeout=90))
-        finally:
-            loop.close()
+        route = resolved.route
     except Exception as e:
         print(f"Warning: Failed to generate summary: {e}", file=sys.stderr)
         return ""
+
+    payload: Dict[str, Any] = {
+        "model": route.model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+        "stream": False,
+        **(route.extra_body or {}),
+    }
+    headers = {
+        "Authorization": f"Bearer {route.api_key}",
+        "content-type": "application/json",
+        **(route.headers or {}),
+    }
+    base = route.base_url or ""
+    url = base if base.endswith("/chat/completions") else f"{base.rstrip('/')}/chat/completions"
+
+    async def _call() -> str:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout),
+            trust_env=False,
+        ) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"LLM HTTP {resp.status_code}: {resp.text[:200]}")
+        data = resp.json()
+        content = (data["choices"][0]["message"]["content"] or "").strip()
+        if not content:
+            raise RuntimeError("LLM returned empty summary")
+        return content
+
+    try:
+        return asyncio.run(asyncio.wait_for(_call(), timeout=timeout))
+    except Exception as e:
+        print(f"Warning: Failed to generate summary: {e}", file=sys.stderr)
+        return ""
+
 
 
 def fetch_paper_by_id(paper_id: str) -> Dict[str, Any]:
