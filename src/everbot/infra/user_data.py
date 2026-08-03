@@ -272,16 +272,20 @@ class UserDataManager:
         return self.get_agent_tmp_dir(agent_name) / f"trajectory_{safe_session}.json"
 
     def list_agents(self) -> List[str]:
-        """列出所有 Agent"""
+        """List agent workspace directories (milkie; no agent.dph required)."""
         if not self.agents_dir.exists():
             return []
 
         agents = []
         for d in self.agents_dir.iterdir():
-            if d.is_dir() and (d / "agent.dph").exists():
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            # milkie identity: workspace markdown markers (not legacy agent.dph).
+            if any((d / name).exists() for name in ("AGENTS.md", "SOUL.md", "HEARTBEAT.md")):
                 agents.append(d.name)
 
         return sorted(agents)
+
 
     def get_workspace_files(self, agent_name: str) -> Dict[str, Optional[str]]:
         """
@@ -452,14 +456,6 @@ class UserDataManager:
             "USER.md": """# 用户画像
 
 （待补充）
-""",
-            "agent.dph": f"""/explore/(model="$model_name", system_prompt="$workspace_instructions", tools=[_bash, _python, _date, _read_file, _read_folder])
-{agent_name} Agent
-
-当前时间：$current_time
-
-请根据用户的要求提供帮助。
--> answer
 """,
         }
 
