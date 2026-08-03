@@ -44,7 +44,8 @@ class TestUserDataManager:
             assert (agent_dir / "HEARTBEAT.md").exists()
             assert (agent_dir / "MEMORY.md").exists()
             assert (agent_dir / "USER.md").exists()
-            assert (agent_dir / "agent.dph").exists()
+            assert not (agent_dir / "agent.dph").exists()
+
 
     def test_list_agents(self):
         """测试 Agent 列表"""

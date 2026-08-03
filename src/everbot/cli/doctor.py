@@ -206,58 +206,29 @@ def collect_doctor_report(
 
     for agent_dir in agent_dirs:
         agent_name = agent_dir.name
-        agent_dph = agent_dir / "agent.dph"
-        if not agent_dph.exists():
+        if agent_name.startswith("."):
+            continue
+        # milkie workspace markers (agent.dph is legacy dolphin; not required).
+        markers = [name for name in ("AGENTS.md", "SOUL.md", "HEARTBEAT.md") if (agent_dir / name).exists()]
+        if not markers:
             items.append(
                 DoctorItem(
                     level="WARN",
                     title=f"Agent {agent_name}",
-                    details=f"Missing agent.dph: {agent_dph}",
+                    details="Workspace missing AGENTS.md/SOUL.md/HEARTBEAT.md markers.",
                     hint=f"Run: bin/everbot init {agent_name}",
                 )
             )
             continue
 
-        content = ""
-        try:
-            content = agent_dph.read_text(encoding="utf-8")
-        except Exception as e:
-            items.append(
-                DoctorItem(
-                    level="ERROR",
-                    title=f"Agent {agent_name}",
-                    details=f"Failed to read agent.dph: {e}",
-                )
+        items.append(
+            DoctorItem(
+                level="OK",
+                title=f"Agent {agent_name}",
+                details=f"Workspace OK ({', '.join(markers)}).",
             )
-            continue
+        )
 
-        fmt = detect_agent_dph_format(content)
-        if fmt == "legacy_yaml":
-            items.append(
-                DoctorItem(
-                    level="WARN",
-                    title=f"Agent {agent_name} agent.dph",
-                    details="Legacy YAML-style agent.dph detected.",
-                    hint=f"Run: bin/everbot migrate-agent --agent {agent_name}",
-                )
-            )
-        elif fmt == "unknown":
-            items.append(
-                DoctorItem(
-                    level="WARN",
-                    title=f"Agent {agent_name} agent.dph",
-                    details="Unknown agent.dph format; Dolphin may fail to parse it.",
-                    hint=f"Open: {agent_dph} and ensure it contains DPH blocks with '->'.",
-                )
-            )
-        else:
-            items.append(
-                DoctorItem(
-                    level="OK",
-                    title=f"Agent {agent_name} agent.dph",
-                    details="DPH format detected.",
-                )
-            )
 
         # Basic env check for Aliyun model config
         if models_path is not None:
