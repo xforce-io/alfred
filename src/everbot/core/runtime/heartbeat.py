@@ -1746,7 +1746,7 @@ class _SkillLLMClient:
         self._model = model
 
     async def complete(self, prompt: str, system: str = "", model_override: str = "", **kwargs) -> str:
-        """Single-turn LLM completion via Dolphin-configured OpenAI endpoint."""
+        """Single-turn LLM completion via models.yaml OpenAI-compatible route."""
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -1755,10 +1755,26 @@ class _SkillLLMClient:
         model = model_override or self._model
         if not model:
             import os
-            model = os.environ.get("ALFRED_SKILL_MODEL", "deepseek-chat")
 
-        # 解析模型 endpoint/凭证(dolphin-free,读 config/models.yaml)
+            # Explicit ops override still wins; otherwise #155 resolve fast tier
+            # (no hard-coded deepseek-chat — that key is often expired).
+            model = (os.environ.get("ALFRED_SKILL_MODEL") or "").strip()
+            if not model:
+                from ..agent.provider.model_config import resolve_logical_model_name
+
+                agent_name = (
+                    os.environ.get("EVERBOT_AGENT")
+                    or os.environ.get("ALFRED_AGENT")
+                    or None
+                )
+                model, _source = resolve_logical_model_name(
+                    agent_name=agent_name,
+                    tier="fast",
+                )
+
+        # Resolve endpoint/credentials from config/models.yaml
         route = _resolve_skill_model_route(model)
+
 
         base_url = route.base_url
         # AsyncOpenAI appends /chat/completions; strip it if already present

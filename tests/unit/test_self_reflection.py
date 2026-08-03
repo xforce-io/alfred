@@ -857,7 +857,45 @@ class TestSkillLLMClient:
             result = await client.complete("test")
 
         assert result == "ok"
-        mock_route.assert_called_once_with("deepseek-chat")  # 空 model → 回退 env
+        mock_route.assert_called_once_with("deepseek-chat")  # 空 model → env override
+
+    @pytest.mark.asyncio
+    async def test_empty_model_uses_resolve_logical_fast_not_deepseek_hardcode(self):
+        """#193 P0c: empty model must not hardcode deepseek-chat; use resolve fast."""
+        from src.everbot.core.runtime.heartbeat import _SkillLLMClient
+        import unittest.mock as um
+        import os
+        from pathlib import Path
+
+        client = _SkillLLMClient(model="")
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock()]
+        fake_response.choices[0].message.content = "ok"
+
+        env = {k: v for k, v in os.environ.items() if k != "ALFRED_SKILL_MODEL"}
+        with um.patch.dict(os.environ, env, clear=True), \
+             um.patch(
+                 "src.everbot.core.agent.provider.model_config.resolve_logical_model_name",
+                 return_value=("doubao-nothink", "system_fast"),
+             ) as mock_logical, \
+             um.patch(
+                 "src.everbot.core.runtime.heartbeat._resolve_skill_model_route",
+                 return_value=self._route(model="doubao-seed-fake"),
+             ) as mock_route, um.patch(
+                 "src.everbot.core.runtime.heartbeat.AsyncOpenAI",
+             ) as mock_openai_cls:
+            mock_client = AsyncMock()
+            mock_client.chat.completions.create.return_value = fake_response
+            mock_openai_cls.return_value = mock_client
+            result = await client.complete("test")
+
+        assert result == "ok"
+        mock_logical.assert_called_once()
+        assert mock_logical.call_args.kwargs.get("tier") == "fast"
+        mock_route.assert_called_once_with("doubao-nothink")
+        src = Path("src/everbot/core/runtime/heartbeat.py").read_text(encoding="utf-8")
+        assert 'os.environ.get("ALFRED_SKILL_MODEL", "deepseek-chat")' not in src
+
 
     def _client(self):
         from src.everbot.core.runtime.heartbeat import _SkillLLMClient
