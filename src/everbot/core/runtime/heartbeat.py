@@ -1414,9 +1414,49 @@ If not, reply with `HEARTBEAT_OK`.
             logger.debug("[%s] capture_trace 留证失败(忽略):%s", self.agent_name, exc)
 
     @staticmethod
+    def _looks_like_exec_summary(text: str) -> bool:
+        """Heuristic: short ops/status recap that should not replace a real report."""
+        t = (text or "").strip()
+        if not t or len(t) > 1500:
+            return False
+        markers = (
+            "执行状态",
+            "任务 ID",
+            "Task ID",
+            "原始数据",
+            "exitCode",
+            "执行摘要",
+            "任务执行完成",
+            "报告生成完成",
+        )
+        hits = sum(1 for m in markers if m in t)
+        if hits >= 2:
+            return True
+        if t.startswith("✅") and hits >= 1 and "🔥" not in t and "arxiv.org" not in t.lower():
+            return True
+        return False
+
+    @staticmethod
+    def _looks_like_user_report(text: str) -> bool:
+        """Heuristic: full user-facing digest / analysis body."""
+        t = (text or "").strip()
+        if len(t) < 280:
+            return False
+        markers = ("🔥", "arxiv.org", "核心创新", "## ", "### ", "投资信号", "逐条解读")
+        return sum(1 for m in markers if m in t) >= 2
+
+
+    @staticmethod
     def _extract_llm_result(events: list[dict[str, Any]]) -> str:
-        """Extract final LLM text from streamed turn events."""
+        """Extract final LLM text from streamed turn events.
+
+        milkie multi-step turns may emit several full ``answer`` snapshots.
+        Prefer the last non-empty answer, but if a later short execution
+        summary would replace an earlier full user-facing report, keep the
+        report (Telegram delivers this string as the heartbeat body).
+        """
         answer = ""
+        answers: list[str] = []
         deltas: list[str] = []
         seen_llm_progress: set[str] = set()
         for event in events:
@@ -1438,11 +1478,25 @@ If not, reply with `HEARTBEAT_OK`.
                 if isinstance(part, str) and part:
                     deltas.append(part)
                 full = progress.get("answer")
-                if isinstance(full, str) and full:
+                if isinstance(full, str) and full.strip():
                     answer = full
+                    answers.append(full)
+        if answers:
+            last = answers[-1]
+            # Prefer an earlier full report over a trailing ops/status brief.
+            candidates = [a for a in answers if HeartbeatRunner._looks_like_user_report(a)]
+            if candidates and HeartbeatRunner._looks_like_exec_summary(last):
+                best = max(candidates, key=len)
+                if len(best) > len(last) and (
+                    len(best) >= max(len(last) * 2, 400) or len(best) - len(last) >= 200
+                ):
+                    return best
+            return last
         if answer:
             return answer
         return "".join(deltas)
+
+
 
     async def _load_or_create_turn_session(self, session_id: str, session_type: str) -> Any:
         """Load one session for TurnExecutor or build a lightweight stub."""
