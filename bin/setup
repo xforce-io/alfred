@@ -39,19 +39,7 @@ echo "[3/3] Installing dependencies..."
 pip install --upgrade pip -q
 pip install -r "${PROJECT_ROOT}/requirements.txt" -q
 
-# 4. Check dolphin (agent framework, install from source)
-if python -c "import dolphin" 2>/dev/null; then
-  echo "    Dolphin SDK ✓"
-else
-  echo ""
-  echo "WARNING: Dolphin SDK not installed."
-  echo "         EverBot requires dolphin to run. Install it from source:"
-  echo "         pip install -e /path/to/dolphin"
-  echo ""
-  missing_dolphin=1
-fi
-
-# 5. Create ALFRED_HOME dirs
+# 4. Create ALFRED_HOME dirs
 ALFRED_HOME="${ALFRED_HOME:-$HOME/.alfred}"
 mkdir -p "${ALFRED_HOME}/logs" "${ALFRED_HOME}/agents"
 
@@ -61,9 +49,7 @@ echo "    venv:        ${VENV_DIR}"
 echo "    ALFRED_HOME: ${ALFRED_HOME}"
 echo ""
 echo "Next steps:"
-echo "  source .venv/bin/activate   # 激活虚拟环境"
-if [[ "${missing_dolphin:-0}" == "1" ]]; then
-  echo "  pip install -e /path/to/dolphin  # 安装 Dolphin SDK"
-fi
-echo "  bin/everbot init <agent_name>    # 创建 Agent"
-echo "  bin/everbot start                # 启动"
+echo "  source .venv/bin/activate   # activate venv"
+echo "  bin/everbot init <agent_name>    # create Agent"
+echo "  bin/everbot start                # start daemon"
+
