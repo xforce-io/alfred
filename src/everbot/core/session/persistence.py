@@ -331,7 +331,9 @@ class SessionPersistence:
                         compressor = SessionCompressor(
                             getattr(getattr(agent, "executor", None), "context", None),
                             max_summary_tokens=cfg.max_summary_tokens,
+                            agent_name=agent_name or None,
                         )
+
                         policy = HistoryCompactionPolicy()
                         result = await policy.ensure_within_budget(
                             data.history_messages, cfg, summarize=compressor

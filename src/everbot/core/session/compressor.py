@@ -48,15 +48,24 @@ _SUMMARY_PROMPT_TEMPLATE = """\
 class SessionCompressor:
     """Compress old history messages into an LLM-generated summary."""
 
-    def __init__(self, context: Any = None, *, max_summary_tokens: int = 2000):
+    def __init__(
+        self,
+        context: Any = None,
+        *,
+        max_summary_tokens: int = 2000,
+        agent_name: Optional[str] = None,
+    ):
         """
         Args:
             context: Optional opaque context for oneshot LLM (unused by
                      OneshotLLMProvider but kept for call-site compatibility).
             max_summary_tokens: Cap on generated summary body (tokens ≈ chars/3).
+            agent_name: Optional agent for model intent (#193 P0d / #155).
         """
         self._context = context
         self._max_summary_tokens = max_summary_tokens
+        self._agent_name = agent_name
+
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -272,8 +281,14 @@ class SessionCompressor:
         # raise_on_error=True so error strings are not silently stored as
         # summary text; callers catch and degrade to safe window / keep original.
         return await oneshot_llm_provider().call_llm(
-            self._context, prompt, temperature=0.3, fast=True, raise_on_error=True
+            self._context,
+            prompt,
+            temperature=0.3,
+            fast=True,
+            raise_on_error=True,
+            agent_name=self._agent_name,
         )
+
 
 
 def _expand_legacy_window_start(

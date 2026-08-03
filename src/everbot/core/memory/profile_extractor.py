@@ -83,8 +83,10 @@ class ExtractResult:
 class ProfileExtractor:
     """Extract user-portrait memories from conversation using LLM."""
 
-    def __init__(self, context: Any):
+    def __init__(self, context: Any, *, agent_name: str | None = None):
         self._context = context
+        self._agent_name = agent_name
+
 
     async def extract(
         self,
@@ -132,8 +134,11 @@ class ProfileExtractor:
             return ExtractResult()
 
     async def _call_llm(self, prompt: str) -> str:
-        """Call Dolphin LLM. Kept as a method to preserve test patch surface."""
-        return await _helpers.call_dolphin_llm(self._context, prompt)
+        """Call oneshot LLM. Kept as a method to preserve test patch surface."""
+        return await _helpers.call_dolphin_llm(
+            self._context, prompt, agent_name=self._agent_name
+        )
+
 
     def _parse_response(self, raw: str) -> ExtractResult:
         """Parse LLM JSON response with fallback strategies."""

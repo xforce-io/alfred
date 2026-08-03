@@ -90,6 +90,8 @@ class MemoryManager:
         memory_path: Path,
         context: Any = None,
         events_dir: Optional[Path] = None,
+        *,
+        agent_name: Optional[str] = None,
     ):
         memory_path = Path(memory_path)
         self.store = ProfileStore(memory_path)
@@ -98,6 +100,8 @@ class MemoryManager:
         )
         self.merger = MemoryMerger()
         self._context = context
+        self._agent_name = agent_name
+
 
     # =================================================================
     # Session-end pipeline
@@ -165,7 +169,8 @@ class MemoryManager:
         total_messages: int,
     ) -> Dict[str, Any]:
         """Profile pipeline: extract → decay → merge → save."""
-        extractor = ProfileExtractor(self._context)
+        extractor = ProfileExtractor(self._context, agent_name=self._agent_name)
+
         active_snapshot = [entry for entry in existing if entry.status == "active"]
         extract_result = await extractor.extract(new_messages, active_snapshot)
 
@@ -208,7 +213,8 @@ class MemoryManager:
         session_id: str,
     ) -> Dict[str, Any]:
         """Event pipeline: extract → append. Failures degrade gracefully."""
-        extractor = EventExtractor(self._context)
+        extractor = EventExtractor(self._context, agent_name=self._agent_name)
+
         try:
             result = await extractor.extract(new_messages, session_id=session_id)
         except Exception:

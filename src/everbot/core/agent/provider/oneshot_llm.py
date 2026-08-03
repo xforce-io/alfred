@@ -40,10 +40,13 @@ class OneshotLLMProvider:
         temperature: float = 0.3,
         fast: bool = False,
         raise_on_error: bool = True,
+        agent_name: str | None = None,
     ) -> str:
+        # Per-call agent intent wins over constructor default (#193 P0d).
+        effective_agent = agent_name if agent_name is not None else self._agent_name
         try:
             route = resolve_model(
-                agent_name=self._agent_name,
+                agent_name=effective_agent,
                 tier="fast" if fast else "default",
             ).route
         except Exception as exc:  # 配置缺失/模型名不存在
