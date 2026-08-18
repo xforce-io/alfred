@@ -186,11 +186,7 @@ class EverBotDaemon:
             # Share the heartbeat probe health gate with isolated work (#180).
             # Gate before claim so due tasks are not stuck claimed during outages.
             if getattr(runner, "is_llm_unavailable", False):
-                logger.info(
-                    "Skip isolated claim for %s: LLM unavailable",
-                    task_key,
-                )
-                return False
+                raise LLMUnavailableError(f"LLM unavailable for {task_key}")
             claim = getattr(runner, "claim_isolated_task", None)
             if not callable(claim):
                 return False

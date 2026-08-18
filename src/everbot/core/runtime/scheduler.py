@@ -81,6 +81,24 @@ class InlineSchedule:
     max_backoff_minutes: int = 60
 
 
+
+@dataclass
+class IsolatedSchedule:
+    """Per-agent isolated-task scheduling state (#202).
+
+    Isolated due tasks reappear every 1s tick. When claim raises
+    LLMUnavailableError the whole agent's isolated set shares one backoff
+    clock so we do not log or claim on every tick. max_backoff_minutes
+    defaults to 2 so probe recovery starts work within the S2 bound.
+    """
+
+    agent_name: str
+    base_interval_minutes: int = 1
+    next_isolated_at: Optional[datetime] = None
+    consecutive_failures: int = 0
+    max_backoff_minutes: int = 2
+
+
 @dataclass
 class InspectorSchedule:
     """Per-agent inspector scheduling state.
@@ -128,6 +146,7 @@ class Scheduler:
         agent_schedules: Optional[Dict[str, AgentSchedule]] = None,
         inspector_schedules: Optional[Dict[str, InspectorSchedule]] = None,
         inline_schedules: Optional[Dict[str, InlineSchedule]] = None,
+        isolated_schedules: Optional[Dict[str, IsolatedSchedule]] = None,
         tick_interval_seconds: float = 1.0,
         state_file: Optional[Path] = None,
     ):
@@ -140,6 +159,7 @@ class Scheduler:
         self._agent_schedules: Dict[str, AgentSchedule] = dict(agent_schedules or {})
         self._inspector_schedules: Dict[str, InspectorSchedule] = dict(inspector_schedules or {})
         self._inline_schedules: Dict[str, InlineSchedule] = dict(inline_schedules or {})
+        self._isolated_schedules: Dict[str, IsolatedSchedule] = dict(isolated_schedules or {})
         self._tick_interval_seconds = tick_interval_seconds
         self._running = False
         self._state_file = state_file
@@ -180,6 +200,18 @@ class Scheduler:
                 inlines[name] = lentry
             if inlines:
                 state["__inline__"] = inlines
+            isolated: Dict[str, Any] = {}
+            for name, osched in self._isolated_schedules.items():
+                if osched.next_isolated_at is None and osched.consecutive_failures == 0:
+                    continue
+                oentry: Dict[str, Any] = {
+                    "consecutive_failures": osched.consecutive_failures,
+                }
+                if osched.next_isolated_at is not None:
+                    oentry["next_isolated_at"] = osched.next_isolated_at.isoformat()
+                isolated[name] = oentry
+            if isolated:
+                state["__isolated__"] = isolated
             self._state_file.parent.mkdir(parents=True, exist_ok=True)
             self._state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
         except Exception:
@@ -241,6 +273,20 @@ class Scheduler:
                     except (ValueError, TypeError):
                         pass
                 lsched.consecutive_failures = int(lvalue.get("consecutive_failures", 0) or 0)
+            isolated_state = state.get("__isolated__", {})
+            for name, ovalue in isolated_state.items():
+                if not isinstance(ovalue, dict):
+                    continue
+                osched = self._get_isolated_schedule(name)
+                iso_str = ovalue.get("next_isolated_at")
+                if iso_str:
+                    try:
+                        osched.next_isolated_at = datetime.fromisoformat(iso_str)
+                    except (ValueError, TypeError):
+                        pass
+                osched.consecutive_failures = int(
+                    ovalue.get("consecutive_failures", 0) or 0
+                )
             logger.debug("Restored scheduler state from %s", self._state_file)
         except Exception:
             logger.debug("Failed to restore scheduler state", exc_info=True)
@@ -275,6 +321,15 @@ class Scheduler:
             )
             self._inline_schedules[agent_name] = schedule
         return schedule
+
+    def _get_isolated_schedule(self, agent_name: str) -> IsolatedSchedule:
+        """Return the isolated backoff schedule for an agent, creating it lazily."""
+        schedule = self._isolated_schedules.get(agent_name)
+        if schedule is None:
+            schedule = IsolatedSchedule(agent_name=agent_name)
+            self._isolated_schedules[agent_name] = schedule
+        return schedule
+
 
     # -- Core tick ----------------------------------------------------------
 
@@ -384,16 +439,53 @@ class Scheduler:
                     # single flaky task can't stall the whole agent's inline path.
                     logger.exception("Inline task execution failed for %s", agent_name)
 
-        # Isolated: claim then dispatch, per-task error isolation
+        # Isolated: agent-level LLM backoff, then per-task claim/run (#202).
         if self._claim_task is not None and self._run_isolated is not None:
+            isolated_by_agent: Dict[str, List[SchedulerTask]] = {}
             for task in isolated_tasks:
-                try:
-                    claimed = await self._claim_task(task.id)
-                    if not claimed:
-                        continue
-                    await self._run_isolated(task, ts)
-                except Exception:
-                    logger.exception("Isolated task %s failed", task.id)
+                isolated_by_agent.setdefault(task.agent_name, []).append(task)
+            for agent_name, tasks in isolated_by_agent.items():
+                schedule = self._get_isolated_schedule(agent_name)
+                next_at = (
+                    self._normalize_ts(schedule.next_isolated_at)
+                    if schedule.next_isolated_at is not None
+                    else None
+                )
+                if next_at is not None and ts < next_at:
+                    continue
+                blocked = False
+                for task in tasks:
+                    if blocked:
+                        break
+                    try:
+                        claimed = await self._claim_task(task.id)
+                        if not claimed:
+                            continue
+                        await self._run_isolated(task, ts)
+                        schedule.consecutive_failures = 0
+                        schedule.next_isolated_at = None
+                        self._save_state()
+                    except LLMUnavailableError:
+                        schedule.consecutive_failures += 1
+                        base_interval = max(1, schedule.base_interval_minutes)
+                        backoff_minutes = min(
+                            base_interval * (2 ** schedule.consecutive_failures),
+                            schedule.max_backoff_minutes,
+                        )
+                        schedule.next_isolated_at = ts + timedelta(
+                            minutes=backoff_minutes
+                        )
+                        logger.warning(
+                            "Skip isolated claim for %s: LLM unavailable "
+                            "(consecutive_failures=%d, next_retry_in=%d min)",
+                            agent_name,
+                            schedule.consecutive_failures,
+                            backoff_minutes,
+                        )
+                        blocked = True
+                        self._save_state()
+                    except Exception:
+                        logger.exception("Isolated task %s failed", task.id)
 
     async def _tick_inspector(self, ts: datetime) -> None:
         """Trigger due inspector ticks (low-frequency observation)."""
