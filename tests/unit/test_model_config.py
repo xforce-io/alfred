@@ -25,7 +25,7 @@ llms:
 
 
 def _write(tmp_path) -> Path:
-    p = tmp_path / "dolphin.yaml"
+    p = tmp_path / "models.yaml"
     p.write_text(_YAML, encoding="utf-8")
     return p
 
@@ -158,7 +158,7 @@ def test_route_merges_cloud_and_llm_extra_body_llm_wins(tmp_path):
     assert r2.extra_body == {"cloud_flag": True, "thinking": {"type": "enabled"}}
 
 
-# ── #74: models.yaml 正名,dolphin.yaml legacy 兜底(同位置新名优先) ────
+# ── models.yaml only; dolphin.yaml is not a config source ────
 
 
 from src.everbot.core.agent.provider.model_config import find_model_config_path
@@ -171,7 +171,7 @@ def _mk_cfg(base: Path, name: str) -> Path:
     return p
 
 
-def test_find_prefers_models_over_dolphin_in_same_location(tmp_path):
+def test_find_uses_models_yaml_even_if_dolphin_yaml_exists(tmp_path):
     home = tmp_path / "home"
     models = _mk_cfg(home, "models.yaml")
     _mk_cfg(home, "dolphin.yaml")
@@ -180,14 +180,21 @@ def test_find_prefers_models_over_dolphin_in_same_location(tmp_path):
     assert got == models
 
 
-def test_find_legacy_home_dolphin_beats_lower_priority_models(tmp_path):
-    """用户 home 级旧名覆盖必须仍优先于 cwd/repo 的新名 —— 改名不得悄换生效配置。"""
+def test_find_ignores_home_dolphin_yaml_when_cwd_has_models(tmp_path):
     home = tmp_path / "home"
     cwdc = tmp_path / "cwdc"
-    legacy = _mk_cfg(home, "dolphin.yaml")
-    _mk_cfg(cwdc, "models.yaml")
+    _mk_cfg(home, "dolphin.yaml")
+    cwd_models = _mk_cfg(cwdc, "models.yaml")
     got = find_model_config_path(home=home, cwd_config=cwdc, repo_config=tmp_path / "n")
-    assert got == legacy
+    assert got == cwd_models
+
+
+def test_find_returns_none_when_only_dolphin_yaml_exists(tmp_path):
+    home = tmp_path / "home"
+    _mk_cfg(home, "dolphin.yaml")
+    got = find_model_config_path(
+        home=home, cwd_config=tmp_path / "n1", repo_config=tmp_path / "n2")
+    assert got is None
 
 
 def test_find_falls_back_cwd_then_repo(tmp_path):

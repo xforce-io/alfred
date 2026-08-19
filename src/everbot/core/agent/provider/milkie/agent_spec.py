@@ -1,8 +1,8 @@
-"""dolphin.yaml 风格 model 配置 → milkie agent.md ModelConfig 映射(sidecar 产品化奠基)。
+"""models.yaml routing (llms/clouds) → milkie agent.md ModelConfig.
 
 milkie serve 用 `--agent <md>` 加载单 agent,其 frontmatter 的 `model:`(默认档)与
-`models.<tier>:`(具名档,milkie#126)需要 ``{provider, model, adapter, baseUrl}``。
-alfred 的 dolphin.yaml 用 ``llms.<name> = {cloud, model_name, type_api}`` +
+`models.<tier>:`(具名档)需要 ``{provider, model, adapter, baseUrl}``。
+alfred ``models.yaml`` 用 ``llms.<name> = {cloud, model_name, type_api}`` +
 ``clouds.<cloud> = {api, api_key}`` 描述模型,本模块做这层翻译。
 
 注意(已知 gap):milkie OpenAICompatibleAdapter 的 apiKey 仅从 env 读,serve 的

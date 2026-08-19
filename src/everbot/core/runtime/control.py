@@ -49,7 +49,6 @@ async def run_heartbeat_once(
     agent_name: str,
     *,
     config_path: Optional[str] = None,
-    dolphin_config_path: Optional[str] = None,
     model: Optional[str] = None,
     force: bool = False,
 ) -> str:

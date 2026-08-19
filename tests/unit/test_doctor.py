@@ -73,7 +73,7 @@ def test_doctor_reports_missing_config_and_agents_dir():
 # 原两条钉住该函数的用例一并撤销。
 
 
-# ── #74: doctor 同步改名(models.yaml 优先、dolphin.yaml 兜底、撤 skillkit 残留检查) ──
+# ── doctor only recognizes models.yaml ──
 
 
 def test_doctor_resolves_models_yaml_first(tmp_path):
@@ -88,8 +88,9 @@ def test_doctor_resolves_models_yaml_first(tmp_path):
     assert path == home / "models.yaml"
 
 
-def test_doctor_legacy_dolphin_still_resolves(tmp_path):
+def test_doctor_ignores_dolphin_yaml_only(tmp_path, monkeypatch):
     from src.everbot.cli.doctor import resolve_model_config_source
+    monkeypatch.chdir(tmp_path)
     home = tmp_path / ".alfred"
     home.mkdir(parents=True)
     proj_cfg = tmp_path / "config"
@@ -97,8 +98,18 @@ def test_doctor_legacy_dolphin_still_resolves(tmp_path):
     (proj_cfg / "dolphin.yaml").write_text("default: y\n", encoding="utf-8")
     ud = UserDataManager(alfred_home=home)
     label, path = resolve_model_config_source(ud, tmp_path)
-    assert label == "project"
-    assert path == proj_cfg / "dolphin.yaml"
+    assert label == "default"
+    assert path is None
+
+
+def test_doctor_missing_models_yaml_message_omits_dolphin(tmp_path):
+    home = tmp_path / ".alfred"
+    items = collect_doctor_report(project_root=tmp_path, alfred_home=home)
+    routing = [i for i in items if i.title == "Model routing config"]
+    assert routing
+    blob = " ".join(f"{i.details} {i.hint or ''}" for i in routing).lower()
+    assert "dolphin" not in blob
+    assert "models.yaml" in blob
 
 
 def test_doctor_report_drops_dead_skillkit_check(tmp_path):

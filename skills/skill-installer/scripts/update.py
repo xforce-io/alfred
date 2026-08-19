@@ -43,24 +43,6 @@ def find_skills_directories() -> List[Path]:
         Path.cwd() / "skills",
         home / ".alfred" / "skills",
     ]
-
-    # Also check from config if available
-    config_path = Path.cwd() / "config" / "dolphin.yaml"
-    if config_path.exists():
-        try:
-            import yaml
-            with open(config_path) as f:
-                config = yaml.safe_load(f)
-                resource_dirs = config.get("resource_skills", {}).get("directories", [])
-                for d in resource_dirs:
-                    path = Path(d).expanduser()
-                    if path.exists():
-                        candidates.append(path)
-        except ImportError:
-            pass
-        except Exception:
-            pass
-
     return [p for p in candidates if p.exists() and p.is_dir()]
 
 

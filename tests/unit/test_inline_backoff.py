@@ -401,8 +401,8 @@ class TestDaemonIsolatedHealthGate:
         sched = self._build(runner, tmp_path)
         due = list(sched._get_due_tasks(datetime.now()) or [])
         assert any(t.id == "a:t1" for t in due)
-        assert asyncio.run(sched._claim_task("a:t1")) is False
-        runner.claim_isolated_task.assert_not_awaited()
+        with pytest.raises(LLMUnavailableError):
+            asyncio.run(sched._claim_task("a:t1"))
 
     def test_claim_and_run_when_llm_available(self, tmp_path):
         from types import SimpleNamespace

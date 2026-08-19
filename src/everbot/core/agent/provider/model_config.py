@@ -1,8 +1,7 @@
-"""模型路由配置(dolphin-free)。
+"""模型路由配置。
 
-从 ``models.yaml``(#74 正名;legacy ``dolphin.yaml`` 兜底)读取 llms/clouds + 默认/快速档。
-此前 milkie pool 经 dolphin factory 的 ``global_config_path`` 取这份配置,导致 milkie
-仍耦合 dolphin;本模块用同样的查找顺序独立定位,去掉该耦合(#38 去 dolphin)。
+从 ``models.yaml`` 读取 llms/clouds + 默认/快速档。
+查找顺序:~/.alfred/models.yaml → ./config/models.yaml → repo config/models.yaml。
 
 文件 schema(``config/models.yaml``):
     default: <llm-name>        # 系统级 fallback(无 agent 上下文时;亦兼容旧键 default_model)
@@ -27,9 +26,7 @@ from typing import Any, Dict, Literal, Optional
 import yaml
 
 
-# #74:正名 models.yaml(dolphin 已于 #38 移除,旧名误导);同位置内新名优先、
-# 旧名兜底 —— 用户 home 级 dolphin.yaml 覆盖仍优先于 cwd/repo 的新名,改名不悄换生效配置。
-_CONFIG_NAMES = ("models.yaml", "dolphin.yaml")
+_CONFIG_NAME = "models.yaml"
 
 
 def find_model_config_path(
@@ -48,11 +45,11 @@ def find_model_config_path(
         repo_config or Path(__file__).resolve().parents[5] / "config",  # repo config/
     )
     for base in bases:
-        for name in _CONFIG_NAMES:
-            p = base / name
-            if p.exists():
-                return p
+        p = base / _CONFIG_NAME
+        if p.exists():
+            return p
     return None
+
 
 
 _ENV_PLACEHOLDER = __import__("re").compile(r"\$\{[^}]+\}")

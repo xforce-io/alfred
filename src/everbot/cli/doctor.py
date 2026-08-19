@@ -27,22 +27,11 @@ class DoctorItem:
 
 
 def resolve_model_config_source(user_data: UserDataManager, project_root: Path) -> Tuple[str, Optional[Path]]:
-    """
-    Resolve which model-routing config file is effectively used.
-
-    #74:正名 models.yaml,同位置内旧名 dolphin.yaml 兜底(与
-    model_config.find_model_config_path 同语义)。
-
-    Returns:
-        (source_label, path or None)
-    """
+    """Resolve which models.yaml is used. dolphin.yaml is not a source."""
     candidates = [
         ("alfred", user_data.models_config_path),
-        ("alfred", user_data.dolphin_config_path),
         ("project", (project_root / "config" / "models.yaml").resolve()),
-        ("project", (project_root / "config" / "dolphin.yaml").resolve()),
         ("cwd", Path("./config/models.yaml").resolve()),
-        ("cwd", Path("./config/dolphin.yaml").resolve()),
     ]
 
     for label, path in candidates:
@@ -138,15 +127,14 @@ def collect_doctor_report(
             )
         )
 
-    # Model routing config(#74:正名 models.yaml;skillkit 检查随死配置移除 ——
-    # tool.enabled_tools 自 #38 去 dolphin 后无 runtime 消费方,体检它只产噪音)
+    # Model routing: models.yaml only.
     source, models_path = resolve_model_config_source(user_data, project_root)
     if models_path is None:
         items.append(
             DoctorItem(
                 level="WARN",
                 title="Model routing config",
-                details="No model routing YAML found (models.yaml / legacy dolphin.yaml).",
+                details="No model routing YAML found (models.yaml).",
                 hint=f"Create {user_data.models_config_path} (copy from config/models.yaml).",
             )
         )

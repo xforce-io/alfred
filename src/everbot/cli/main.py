@@ -162,7 +162,6 @@ async def cmd_start_async(args):
     """启动守护进程（异步）"""
     daemon = EverBotDaemon(
         config_path=args.config,
-        global_config_path=getattr(args, 'dolphin_config', None),
         default_model=getattr(args, 'model', None),
     )
     await daemon.start()
@@ -269,7 +268,6 @@ def cmd_heartbeat(args):
         run_heartbeat_once(
             args.agent,
             config_path=args.config,
-            dolphin_config_path=getattr(args, "dolphin_config", None),
             model=getattr(args, "model", None),
             force=bool(getattr(args, "force", False)),
         )
@@ -357,8 +355,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # start 命令（推荐使用 bin/everbot start）
     parser_start = subparsers.add_parser("start", help="启动守护进程（推荐使用 bin/everbot）")
-    parser_start.add_argument("--dolphin-config", type=str, help="Dolphin 配置文件路径")
-    parser_start.add_argument("--model", type=str, default=None, help="默认模型（为空则使用 Dolphin 配置默认）")
+    parser_start.add_argument("--model", type=str, default=None, help="默认模型")
     parser_start.set_defaults(func=cmd_start)
 
     # stop 命令
@@ -380,14 +377,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser_heartbeat = subparsers.add_parser("heartbeat", help="手动触发心跳")
     parser_heartbeat.add_argument("--agent", required=True, help="Agent 名称")
     parser_heartbeat.add_argument("--force", action="store_true", help="忽略活跃时段限制")
-    parser_heartbeat.add_argument("--dolphin-config", type=str, help="Dolphin 配置文件路径")
-    parser_heartbeat.add_argument("--model", type=str, default=None, help="默认模型（为空则使用 Dolphin 配置默认）")
+    parser_heartbeat.add_argument("--model", type=str, default=None, help="默认模型")
     parser_heartbeat.set_defaults(func=cmd_heartbeat)
 
     # migrate-agent 命令
-    parser_migrate = subparsers.add_parser("migrate-agent", help="迁移/修复 agent.dph（兼容旧格式）")
+    parser_migrate = subparsers.add_parser("migrate-agent", help="已废弃")
     parser_migrate.add_argument("--agent", required=True, help="Agent 名称")
-    parser_migrate.add_argument("--dolphin-config", type=str, help="Dolphin 配置文件路径")
     parser_migrate.set_defaults(func=cmd_migrate_agent)
 
     # doctor 命令
