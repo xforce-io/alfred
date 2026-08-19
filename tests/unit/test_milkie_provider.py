@@ -1085,8 +1085,8 @@ def test_injected_system_prompt_loader_is_used(monkeypatch):
     monkeypatch.setattr(
         "src.everbot.infra.config.get_config", lambda *a, **k: {}
     )
-    # #38:_build_pool 现经 model_config.load_model_config 读模型路由(非 dolphin factory),
-    # 走真实 config/dolphin.yaml 即可;_CapturingLauncher 忽略 llms/clouds,无害。
+    # _build_pool reads model routing via model_config.load_model_config.
+    # _CapturingLauncher ignores llms/clouds.
 
     # 模块级默认 loader 一旦被调用就炸 → 证明注入版真正接通(而非静默走默认)
     def _default_must_not_be_called(agent_name):

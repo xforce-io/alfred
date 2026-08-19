@@ -43,11 +43,6 @@ class UserDataManager:
         return self.alfred_home / "models.yaml"
 
     @property
-    def dolphin_config_path(self) -> Path:
-        """legacy 模型配置路径(#38 去 dolphin 后旧名残留,仅兜底查找用)"""
-        return self.alfred_home / "dolphin.yaml"
-
-    @property
     def agents_dir(self) -> Path:
         """Agent 工作区目录"""
         return self.alfred_home / "agents"

@@ -20,6 +20,7 @@ htmlcov/
 HEARTBEAT.md
 
 # Sensitive config (use example files as templates)
+# leftover local dolphin.yaml is ignored, not read
 config/dolphin.yaml
 config/dolphin.yaml.bak-74
 config/models.yaml

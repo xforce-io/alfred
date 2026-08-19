@@ -826,8 +826,7 @@ async def main():
 
     parser = argparse.ArgumentParser(description="EverBot Daemon")
     parser.add_argument("--config", type=str, help="EverBot 配置文件路径")
-    parser.add_argument("--dolphin-config", type=str, help="Dolphin 全局配置文件路径")
-    parser.add_argument("--model", type=str, default=None, help="默认模型名称（为空则使用 Dolphin 配置默认）")
+    parser.add_argument("--model", type=str, default=None, help="默认模型名称")
     parser.add_argument("--log-level", type=str, default="INFO",
                        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                        help="日志级别")
@@ -835,7 +834,6 @@ async def main():
 
     daemon = EverBotDaemon(
         config_path=args.config,
-        global_config_path=args.dolphin_config,
         default_model=args.model,
     )
     configure_daemon_logging(

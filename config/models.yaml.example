@@ -1,7 +1,6 @@
-# 模型路由配置(#74 正名,前身 dolphin.yaml —— dolphin 已于 #38 移除,本文件是纯数据)
-# 消费方:src/everbot/core/agent/provider/model_config.py(_SkillLLMClient / OneshotLLMProvider)
+# 模型路由配置
+# 消费方:src/everbot/core/agent/provider/model_config.py
 # 查找顺序:~/.alfred/models.yaml → ./config/models.yaml → repo config/models.yaml
-#         (同位置内旧名 dolphin.yaml 兜底)
 
 # #155: top-level default/fast are SYSTEM FALLBACK only (no agent context).
 # Agent intent lives in everbot.agents.<name>.model — skill scripts inherit via
