@@ -15,6 +15,7 @@ from src.everbot.core.agent.provider.milkie.provider import (
     MilkieAgentHandle,
     MilkieProvider,
     MilkieSessionImportConflict,
+    _history_messages_to_pairs,
 )
 
 
@@ -1450,6 +1451,65 @@ def test_import_session_with_manifest_posts_import_as_is():
     assert cap["body"]["session"]["manifest"]["latestRunId"] == "run-old"
 
 
+def test_history_messages_to_pairs_folds_tools_as_prose():
+    """#205: tool_calls fold to Used/Result prose, never a fake [tool_call] DSL."""
+    pairs = _history_messages_to_pairs(
+        [
+            {"role": "user", "content": "search the repo"},
+            {
+                "role": "assistant",
+                "content": "searching",
+                "tool_calls": [
+                    {
+                        "id": "tc_live",
+                        "type": "function",
+                        "function": {"name": "search", "arguments": '{"q":"open"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tc_live", "content": "found A B C"},
+            {"role": "assistant", "content": "working on open task"},
+            {"role": "user", "content": "thanks"},
+            {"role": "assistant", "content": "you're welcome"},
+        ]
+    )
+    assert pairs == [
+        (
+            "search the repo",
+            "searching\nUsed search.\nResult: found A B C\nworking on open task",
+        ),
+        ("thanks", "you're welcome"),
+    ]
+    blob = "\n".join(asst for _, asst in pairs)
+    assert "[tool_call" not in blob
+    assert "[tool_result" not in blob
+    assert '{"q":"open"}' not in blob
+
+    long_body = "x" * 2500
+    truncated = _history_messages_to_pairs(
+        [
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"function": {"name": "search", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "content": long_body},
+        ]
+    )
+    assert truncated == [("q", "Used search.\nResult: " + ("x" * 2000) + "…")]
+
+    nameless = _history_messages_to_pairs(
+        [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "hi", "tool_calls": [{"function": {}}]},
+        ]
+    )
+    assert nameless == [("q", "hi")]
+
+
 def test_import_session_from_compacted_history_rewrites_and_imports():
     """#166 S4: alfred {history_messages} → export live portable → rewrite
     history:turn-* regions → POST /session/import under same contextId.
@@ -1529,8 +1589,11 @@ def test_import_session_from_compacted_history_rewrites_and_imports():
     assert "old bulk message" not in hist_blob
     assert "CRITICAL_CONSTRAINT" in hist_blob or "Python 3.11" in hist_blob
     assert "open task" in hist_blob.lower() or "search" in hist_blob.lower()
-    # Tool chain folded into assistant text (milkie pair regions).
-    assert "tc_live" in hist_blob or "tool_call" in hist_blob or "tool_result" in hist_blob
+    # Tool chain folded as natural prose, not a fake `[tool_call …]` DSL (#205).
+    assert "Used search." in hist_blob
+    assert "Result: found A B C" in hist_blob
+    assert "[tool_call" not in hist_blob
+    assert "[tool_result" not in hist_blob
 
     # previousRunId chain broken so getSessionHistory does not walk old runs.
     started = [e for e in session["events"] if e.get("type") == "agent.run.started"]

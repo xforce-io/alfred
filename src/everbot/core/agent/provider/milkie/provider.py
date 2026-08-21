@@ -1036,7 +1036,11 @@ def _rewrite_history_regions(regions_snap: Any, history_messages: list) -> Any:
 
 
 def _history_messages_to_pairs(history_messages: list) -> list:
-    """Fold alfred history into (user, assistant_text) pairs for milkie regions."""
+    """Fold alfred history into (user, assistant_text) pairs for milkie regions.
+
+    Tool chains become ``Used {name}.`` / ``Result: {body}`` prose so compacted
+    history cannot few-shot a fake ``[tool_call …]`` DSL (#205).
+    """
     pairs: list = []
     i = 0
     msgs = [m for m in history_messages if isinstance(m, dict)]
@@ -1056,15 +1060,16 @@ def _history_messages_to_pairs(history_messages: list) -> list:
                     for tc in cur.get("tool_calls") or []:
                         fn = (tc or {}).get("function") or {}
                         name = fn.get("name") or ""
-                        args = fn.get("arguments") or ""
-                        asst_parts.append(f"[tool_call {name}({args})]")
+                        # Natural prose, not a fake DSL — models few-shot `[tool_call …]`
+                        # from compacted history and emit it as plain text (#205).
+                        if name:
+                            asst_parts.append(f"Used {name}.")
                 elif cur.get("role") == "tool":
                     body = cur.get("content") if isinstance(cur.get("content"), str) else ""
-                    tcid = cur.get("tool_call_id") or ""
                     # Bound tool body so a single region cannot re-inflate the base
                     if len(body) > 2000:
                         body = body[:2000] + "…"
-                    asst_parts.append(f"[tool_result {tcid}] {body}")
+                    asst_parts.append(f"Result: {body}")
                 i += 1
             pairs.append((user_text or "", "\n".join(asst_parts)))
         else:
