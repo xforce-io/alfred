@@ -875,11 +875,7 @@ class TestSessionManagerCompact:
                     user = content.get("userInput") or ""
                     asst = content.get("assistantText") or ""
                     msgs.append(_user(user))
-                    # Unfold tool prose folded by milkie rewrite when present.
-                    if "[tool_call" in asst or "[tool_result" in asst:
-                        msgs.append(_assistant(asst))
-                    else:
-                        msgs.append(_assistant(asst))
+                    msgs.append(_assistant(asst))
             return msgs
 
         class FakeMilkieServe:
