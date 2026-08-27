@@ -275,8 +275,15 @@ class CronExecutor:
     def _resolve_skill_model(self) -> str:
         """Resolve the model for skill LLM calls via #155 single entry.
 
+        grok-cli agents must not fall through to models.yaml ``fast`` (volcengine).
         ``tier=fast``: models.yaml fast (scoring), then agent, then system default.
         """
+        from ..agent.provider import agent_uses_grok_cli
+        from ..agent.agent_config import resolve_agent_model
+
+        if agent_uses_grok_cli(self.agent_name):
+            return resolve_agent_model(self.agent_name) or "grok-4.6"
+
         from ..agent.provider.model_config import resolve_logical_model_name
 
         try:
@@ -286,8 +293,6 @@ class CronExecutor:
             )
             return name
         except Exception:
-            from ..agent.agent_config import resolve_agent_model
-
             return resolve_agent_model(self.agent_name)
 
     # ── Scheduler-facing task listing ─────────────────────────
@@ -930,11 +935,11 @@ class CronExecutor:
     @staticmethod
     def _build_job_system_prompt(agent: Any, task: Task) -> str:
         """Build isolated job system prompt from base workspace + task description."""
-        from ..agent.provider import provider_for
+        from ..agent.provider import provider_for, uses_dolphin_executor
 
         provider = provider_for(agent)
         base = ""
-        if provider.needs_history_restore():
+        if provider.needs_history_restore() and uses_dolphin_executor(agent):
             # dolphin: 进程内 context,行为保持不变(优先属性,回退 get_variable)
             context = agent.executor.context
             if hasattr(context, "workspace_instructions"):
@@ -942,7 +947,7 @@ class CronExecutor:
             elif hasattr(context, "get_variable"):
                 base = str(context.get_variable("workspace_instructions") or "")
         else:
-            # milkie: 无 .executor;workspace_instructions 走 serve /context/get(可能为 None)
+            # milkie/grok-cli: 无 .executor
             base = str(provider.get_variable(agent, "workspace_instructions") or "")
         task_description = str(task.description or "").strip()
         if not task_description:

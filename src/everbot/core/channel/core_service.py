@@ -909,9 +909,12 @@ class ChannelCoreService:
         the missing variable and rebuilds fresh instructions from the workspace
         files on disk (AGENTS.md, HEARTBEAT.md, MEMORY.md, etc.).
         """
-        if not provider_for(agent).needs_history_restore():
-            # milkie: workspace_instructions 已 bake 进 agent.md;serve 自持久化,无 in-process
-            # context 可回灌 → reload-if-missing 是 dolphin-only 概念,直接返回。
+        from ..agent.provider import uses_dolphin_executor
+
+        if (not provider_for(agent).needs_history_restore()) or (
+            not uses_dolphin_executor(agent)
+        ):
+            # milkie/grok-cli: workspace_instructions 已 bake 进 persona;无 .executor。
             return
         ctx = agent.executor.context
         get_var = getattr(ctx, "get_var_value", None)
@@ -947,8 +950,10 @@ class ChannelCoreService:
     def _cache_runtime_workspace_instructions(self, agent: Any, agent_name: str) -> None:
         """Cache workspace instructions from agent context for strategy lookup."""
         self._ensure_runtime_context_strategy()
+        from ..agent.provider import uses_dolphin_executor
+
         provider = provider_for(agent)
-        if provider.needs_history_restore():
+        if provider.needs_history_restore() and uses_dolphin_executor(agent):
             # dolphin: 进程内 context,行为保持不变
             context = agent.executor.context
             get_var = getattr(context, "get_var_value", None)

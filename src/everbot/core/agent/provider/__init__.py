@@ -47,8 +47,25 @@ def _telegram_serving_agents(everbot_cfg: dict) -> set:
     return agents
 
 
+def _agent_runtime(agent_name: str, everbot_cfg: dict | None = None) -> str:
+    """everbot.agents.<name>.runtime, default milkie."""
+    cfg = everbot_cfg if everbot_cfg is not None else _load_everbot_cfg()
+    agent_cfg = ((cfg.get("agents") or {}).get(agent_name) or {})
+    runtime = agent_cfg.get("runtime") or "milkie"
+    return str(runtime)
+
+
+def agent_uses_grok_cli(agent_name: str | None, everbot_cfg: dict | None = None) -> bool:
+    """True when this agent is configured to host-spawn grok CLI."""
+    if not agent_name:
+        return False
+    return _agent_runtime(agent_name, everbot_cfg) == "grok-cli"
+
+
 def _make_provider(name: str = "milkie") -> "AgentProvider":
-    # dolphin 已移除;milkie 是唯一 provider。per-agent base_url 由 spawn 的 sidecar 提供。
+    if name == "grok-cli":
+        from .grok_cli.provider import GrokCliProvider
+        return GrokCliProvider()
     from .milkie.provider import MilkieProvider
     return MilkieProvider()
 
@@ -56,14 +73,15 @@ def _make_provider(name: str = "milkie") -> "AgentProvider":
 def get_provider_for_agent(agent_name: str) -> "AgentProvider":
     """Per-agent provider 路由。
 
-    #38 起 dolphin 已移除,milkie 是唯一 runtime;所有 agent → 单例 MilkieProvider
-    (其内部 per-agent sidecar 池按 agent 名 spawn/复用)。保留显式 ``provider`` 配置读取
-    仅为前向兼容,值不影响结果。
+    ``everbot.agents.<name>.runtime: grok-cli`` → 宿主 spawn grok CLI;
+    其余（缺省）→ 单例 MilkieProvider（内部 per-agent sidecar 池）。
     """
-    cached = _provider_by_name.get("milkie")
+    runtime = _agent_runtime(agent_name)
+    key = "grok-cli" if runtime == "grok-cli" else "milkie"
+    cached = _provider_by_name.get(key)
     if cached is None:
-        cached = _make_provider()
-        _provider_by_name["milkie"] = cached
+        cached = _make_provider(key)
+        _provider_by_name[key] = cached
     return cached
 
 
@@ -82,15 +100,30 @@ def oneshot_llm_provider() -> "AgentProvider":
     return cached
 
 
-def provider_for(agent) -> "AgentProvider":
-    """Return the provider that owns this agent OBJECT。
+def uses_dolphin_executor(agent) -> bool:
+    """True only for legacy in-process dolphin agents that expose ``.executor``.
 
-    #38 起只有 milkie:所有 agent(``MilkieAgentHandle``)→ 单例 MilkieProvider。
+    Grok-cli / milkie handles have no executor; callers must skip
+    ``agent.executor.context`` even if provider routing is wrong.
     """
-    cached = _provider_by_name.get("milkie")
+    return getattr(agent, "executor", None) is not None
+
+
+def provider_for(agent) -> "AgentProvider":
+    """Return the provider that owns this agent OBJECT."""
+    from .grok_cli.provider import GrokCliAgentHandle
+
+    name = getattr(agent, "name", "") or ""
+    is_grok = (
+        isinstance(agent, GrokCliAgentHandle)
+        or getattr(agent, "runtime", None) == "grok-cli"
+        or (bool(name) and _agent_runtime(name) == "grok-cli")
+    )
+    key = "grok-cli" if is_grok else "milkie"
+    cached = _provider_by_name.get(key)
     if cached is None:
-        cached = _make_provider()
-        _provider_by_name["milkie"] = cached
+        cached = _make_provider(key)
+        _provider_by_name[key] = cached
     return cached
 
 
@@ -126,8 +159,10 @@ __all__ = [
     "AgentProvider",
     "get_provider",
     "get_provider_for_agent",
+    "agent_uses_grok_cli",
     "oneshot_llm_provider",
     "provider_for",
+    "uses_dolphin_executor",
     "shutdown_all_providers",
     "reset_provider",
 ]

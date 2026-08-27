@@ -48,7 +48,8 @@ everbot:
     # 示例 Agent: daily_insight
     daily_insight:
       workspace: ~/.alfred/agents/daily_insight
-      # model: volcengine/glm-5.2  # 每 agent 覆盖默认模型（everbot.agents.<name>.model > everbot.default_model）。
+      # model: grok-4.6  # 每 agent 覆盖默认模型（everbot.agents.<name>.model > everbot.default_model）。
+      # runtime: grok-cli  # 缺省 milkie sidecar; grok-cli = 宿主 spawn 本机 grok CLI（OAuth,非 xAI HTTP）。
       # skills:                    # 每 agent 技能白/黑名单（milkie 经 discover_skills 扫工作区 SKILL.md）。
       #   include: [daily-attractor]
       #   exclude: []

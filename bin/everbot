@@ -428,6 +428,15 @@ case "${cmd}" in
             # 不再 exec(否则无法回报);pid 未变 = 重启没生效,非零退出报错。
             _svc_pid() { launchctl print "${_svc_target}" 2>/dev/null | awk -F'= *' '/^[[:space:]]*pid =/{gsub(/[^0-9]/,"",$2); print $2; exit}'; }
             _old_pid="$(_svc_pid)"
+            # A leftover non-launchd daemon (pidfile) can hold everbot.lock;
+            # kickstart then looks successful while status still shows the old pid.
+            _file_pid="$(read_pid)"
+            if is_running "${_file_pid}" && [[ "${_file_pid}" != "${_old_pid}" ]]; then
+              echo "Stopping leftover daemon (pid=${_file_pid}) that holds the lock..."
+              kill "${_file_pid}" 2>/dev/null || true
+              wait_for_exit "${_file_pid}" 10 || kill -9 "${_file_pid}" 2>/dev/null || true
+              rm -f "${PID_FILE}" || true
+            fi
             launchctl kickstart -k "${_svc_target}"
             _new_pid=""
             for _i in $(seq 1 30); do

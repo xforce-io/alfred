@@ -1090,6 +1090,14 @@ If not, reply with `HEARTBEAT_OK`.
             return False
         self._last_probe_at = now
         try:
+            from ..agent.provider import _agent_runtime
+
+            if _agent_runtime(self.agent_name) == "grok-cli":
+                from ..agent.provider.grok_cli.invoke import grok_cli_available
+
+                if grok_cli_available():
+                    return True
+                raise RuntimeError("grok CLI not found")
             client = self._create_skill_llm_client()
             await asyncio.wait_for(
                 client.complete("ping", max_tokens=1),
@@ -1526,15 +1534,15 @@ If not, reply with `HEARTBEAT_OK`.
     async def _run_heartbeat_turn(self, agent: Any, message: str) -> str:
         """Run heartbeat turn via TurnExecutor and runtime context strategies."""
         try:
-            from ..agent.provider import provider_for
+            from ..agent.provider import provider_for, uses_dolphin_executor
 
             provider = provider_for(agent)
-            if provider.needs_history_restore():
+            if provider.needs_history_restore() and uses_dolphin_executor(agent):
                 # dolphin: 进程内 context,行为保持不变
                 ctx = agent.executor.context
                 self._runtime_workspace_instructions = self._get_workspace_instructions(ctx)
             else:
-                # milkie: 无 .executor;workspace_instructions 走 serve(可能为 None)
+                # milkie/grok-cli: 无 .executor
                 value = provider.get_variable(agent, "workspace_instructions")
                 self._runtime_workspace_instructions = value if isinstance(value, str) else ""
 
@@ -1806,25 +1814,47 @@ class _SkillLLMClient:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
-        model = model_override or self._model
-        if not model:
-            import os
+        import os
 
+        model = model_override or self._model
+        agent_name = (
+            os.environ.get("EVERBOT_AGENT")
+            or os.environ.get("ALFRED_AGENT")
+            or None
+        )
+        from ..agent.provider import agent_uses_grok_cli
+
+        if agent_uses_grok_cli(agent_name) or str(model).startswith("grok"):
+            if not str(model).startswith("grok"):
+                from ..agent.agent_config import resolve_agent_model
+
+                model = resolve_agent_model(agent_name) if agent_name else "grok-4.6"
+            # Fall through to grok CLI branch below (do not resolve yaml fast→volcengine).
+        elif not model:
             # Explicit ops override still wins; otherwise #155 resolve fast tier
             # (no hard-coded deepseek-chat — that key is often expired).
             model = (os.environ.get("ALFRED_SKILL_MODEL") or "").strip()
             if not model:
                 from ..agent.provider.model_config import resolve_logical_model_name
 
-                agent_name = (
-                    os.environ.get("EVERBOT_AGENT")
-                    or os.environ.get("ALFRED_AGENT")
-                    or None
-                )
                 model, _source = resolve_logical_model_name(
                     agent_name=agent_name,
                     tier="fast",
                 )
+
+        if agent_uses_grok_cli(agent_name) or str(model).startswith("grok"):
+            from pathlib import Path
+
+            from ..agent.provider.grok_cli.invoke import grok_oneshot_text
+
+            agent = agent_name or "demo_agent"
+            cwd = Path.home() / ".alfred" / "agents" / agent
+            if not cwd.exists():
+                cwd = Path.home() / ".alfred"
+            prompt_full = f"{system}\n\n{prompt}" if system else prompt
+            return await asyncio.to_thread(
+                grok_oneshot_text, prompt_full, cwd=cwd, model=str(model)
+            )
 
         # Resolve endpoint/credentials from config/models.yaml
         route = _resolve_skill_model_route(model)
