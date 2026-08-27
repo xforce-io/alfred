@@ -252,10 +252,7 @@ class EverBotDaemon:
             active_hours = tuple(getattr(runner, "active_hours", (8, 22)))
             _night = getattr(runner, "night_interval_minutes", None)
             if _night is not None and int(_night) <= 0:
-                logger.warning(
-                    "[%s] night_interval_minutes=%s is invalid (must be > 0); treating as None (skip at night)",
-                    agent_name, _night,
-                )
+                # 0 = skip heartbeats outside active_hours (intentional, not invalid).
                 _night = None
             agent_schedules[agent_name] = AgentSchedule(
                 agent_name=agent_name,
@@ -265,10 +262,6 @@ class EverBotDaemon:
             )
             _inspect_night = getattr(runner, "inspect_night_interval_minutes", None)
             if _inspect_night is not None and int(_inspect_night) <= 0:
-                logger.warning(
-                    "[%s] inspect_night_interval_minutes=%s is invalid (must be > 0); treating as None (skip at night)",
-                    agent_name, _inspect_night,
-                )
                 _inspect_night = None
             inspector_schedules[agent_name] = InspectorSchedule(
                 agent_name=agent_name,

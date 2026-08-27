@@ -120,8 +120,16 @@ def _print_agent_model_states() -> None:
             key = resolve_agent_model(agent_name)
             return (mc.llms.get(key) or {}).get("model_name") if key else None
 
+        agents_cfg = ((config.get("everbot") or {}).get("agents") or {})
+
+        def _runtime(agent_name: str):
+            return (agents_cfg.get(agent_name) or {}).get("runtime")
+
         states = collect_agent_model_states(
-            agents, milkie_root=milkie_root, configured_resolver=_configured
+            agents,
+            milkie_root=milkie_root,
+            configured_resolver=_configured,
+            runtime_resolver=_runtime,
         )
     except Exception as e:  # status 是只读自检,绝不因此崩
         logging.getLogger(__name__).debug("agent model state collect failed: %s", e)

@@ -5,7 +5,8 @@
 - 提供 `_DelegatingTestProvider`:镜像「旧 DolphinProvider 委托给 agent 自身方法」的行为,
   供大量用脚本化/fake agent(暴露 continue_chat/arun/executor.context/snapshot 等)测试
   编排器、会话、上下文逻辑的单测复用。autouse fixture 把 `provider_for` 按 agent 类型分派:
-  非 MilkieAgentHandle(脚本 fake agent)→ 委托 fake;MilkieAgentHandle → 真 MilkieProvider。
+  非 MilkieAgentHandle/GrokCliAgentHandle(脚本 fake agent)→ 委托 fake;
+  真 handle → 真 MilkieProvider / GrokCliProvider。
   消费模块都是函数内 `from ..agent.provider import provider_for`(调用时实时取),故 patch
   一处包级 `provider_for` 即影响全部消费者。
 """
@@ -119,15 +120,16 @@ class _DelegatingTestProvider:
 
 @pytest.fixture(autouse=True)
 def _delegate_fake_agents_to_test_provider(monkeypatch):
-    """`provider_for` 按 agent 类型分派:脚本 fake agent → 委托 fake;真 handle → 真 milkie。"""
+    """`provider_for` 按 agent 类型分派:脚本 fake agent → 委托 fake;真 handle → 真 provider。"""
     import src.everbot.core.agent.provider as prov
+    from src.everbot.core.agent.provider.grok_cli.provider import GrokCliAgentHandle
     from src.everbot.core.agent.provider.milkie.provider import MilkieAgentHandle
 
     real_provider_for = prov.provider_for
     fake = _DelegatingTestProvider()
 
     def _smart(agent):
-        if isinstance(agent, MilkieAgentHandle):
+        if isinstance(agent, (MilkieAgentHandle, GrokCliAgentHandle)):
             return real_provider_for(agent)
         return fake
 

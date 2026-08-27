@@ -38,15 +38,33 @@ def collect_agent_model_states(
     *,
     milkie_root,
     configured_resolver: Callable[[str], Optional[str]],
+    runtime_resolver: Optional[Callable[[str], Optional[str]]] = None,
 ) -> List[dict]:
     """对每个 agent 汇总 {agent, effective, configured, stale}。
 
     effective 来自运行 agent.md;configured 来自配置解析。无 agent.md(sidecar 未拉起)
     → effective=None、stale=False(尚无"生效"可言)。
+    ``runtime_resolver`` 返回 ``grok-cli`` 时不读 milkie agent.md,生效/配置均为 grok-cli。
     """
     root = Path(milkie_root)
     out: List[dict] = []
     for name in agent_names:
+        runtime = None
+        if runtime_resolver is not None:
+            try:
+                runtime = runtime_resolver(name)
+            except Exception:
+                runtime = None
+        if runtime == "grok-cli":
+            out.append(
+                {
+                    "agent": name,
+                    "effective": "grok-cli",
+                    "configured": "grok-cli",
+                    "stale": False,
+                }
+            )
+            continue
         effective = parse_agent_md_model(root / name / "agent.md")
         try:
             configured = configured_resolver(name)

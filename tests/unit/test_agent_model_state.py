@@ -66,6 +66,21 @@ def test_collect_states_not_stale_when_match(tmp_path):
     assert states[0]["stale"] is False
 
 
+def test_collect_states_grok_cli_runtime_not_glm(tmp_path):
+    milkie_root = tmp_path / "milkie"
+    milkie_root.mkdir()
+    states = collect_agent_model_states(
+        ["demo_agent"],
+        milkie_root=milkie_root,
+        configured_resolver=lambda a: "glm-5.2",
+        runtime_resolver=lambda a: "grok-cli",
+    )
+    s = states[0]
+    assert s["effective"] == "grok-cli"
+    assert s["configured"] == "grok-cli"
+    assert s["stale"] is False
+
+
 def test_collect_states_no_sidecar_when_agent_md_absent(tmp_path):
     milkie_root = tmp_path / "milkie"
     milkie_root.mkdir()

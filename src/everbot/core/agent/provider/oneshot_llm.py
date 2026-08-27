@@ -10,7 +10,9 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -44,6 +46,26 @@ class OneshotLLMProvider:
     ) -> str:
         # Per-call agent intent wins over constructor default (#193 P0d).
         effective_agent = agent_name if agent_name is not None else self._agent_name
+        from . import agent_uses_grok_cli
+        from ..agent_config import resolve_agent_model
+
+        if agent_uses_grok_cli(effective_agent):
+            from .grok_cli.invoke import grok_oneshot_text
+
+            model = resolve_agent_model(effective_agent) if effective_agent else ""
+            cwd = Path.home() / ".alfred" / "agents" / (effective_agent or "demo_agent")
+            if not cwd.exists():
+                cwd = Path.home() / ".alfred"
+            try:
+                return await asyncio.to_thread(
+                    grok_oneshot_text, prompt, cwd=cwd, model=model
+                )
+            except Exception as exc:
+                msg = f"oneshot LLM grok-cli 失败: {exc}"
+                if raise_on_error:
+                    raise RuntimeError(msg) from exc
+                return msg
+
         try:
             route = resolve_model(
                 agent_name=effective_agent,

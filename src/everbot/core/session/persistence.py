@@ -625,11 +625,37 @@ class SessionPersistence:
         but is no longer used.  Heartbeat results are now delivered exclusively
         via mailbox deposit and consumed as user-message prefix on the next turn.
         """
-        from ..agent.provider import provider_for  # local: avoid import cycle
-        if not provider_for(agent).needs_history_restore():
-            # milkie 等自持久化 provider:serve 用 sqlite/jsonl 跨重启从 checkpoint
-            # 恢复(milkie#130),无需 alfred 把存档历史灌回进程内 agent。
-            logger.debug("provider 自持久化会话,跳过 restore history 灌回")
+        from ..agent.provider import provider_for, uses_dolphin_executor  # local: avoid import cycle
+        from ...infra.dolphin_compat import KEY_HISTORY
+
+        provider = provider_for(agent)
+        if getattr(agent, "runtime", None) == "grok-cli":
+            history = self._filter_empty_assistant_messages(
+                session_data.history_messages or []
+            )
+            history = prepare_for_restore(history)
+            history = self._heal_orphan_tool_messages(history)
+            restore_variables = {
+                k: v for k, v in (session_data.variables or {}).items()
+                if k not in {"workspace_instructions", "_history", "model_name", "intervention_explore_block_vars"}
+                and v is not None
+            }
+            provider.import_session(
+                agent,
+                {"history_messages": history, "variables": restore_variables},
+            )
+            provider.set_variable(agent, KEY_HISTORY, history)
+            logger.debug(
+                "grok-cli session restore: %s history=%s",
+                session_data.session_id,
+                len(history),
+            )
+            return
+        if (not provider.needs_history_restore()) or (
+            not uses_dolphin_executor(agent)
+        ):
+            # milkie: no dolphin executor; skip in-process history灌回.
+            logger.debug("provider 自持久化会话或无 dolphin executor,跳过 restore history 灌回")
             return
         try:
             # 0a. Strip bare empty assistant messages (content="" with no tool_calls).
