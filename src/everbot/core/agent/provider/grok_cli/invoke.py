@@ -9,7 +9,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
+import tempfile
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -81,6 +84,41 @@ def _child_env(base: Optional[dict[str, str]] = None) -> dict[str, str]:
     return env
 
 
+def _has_terminal_json(path: Path) -> bool:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return isinstance(data, dict) and (
+        isinstance(data.get("text"), str) or data.get("type") == "error"
+    )
+
+
+def _stop_process_group(proc: subprocess.Popen) -> None:
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        pgid = None
+    try:
+        if pgid is not None:
+            os.killpg(pgid, signal.SIGTERM)
+        else:
+            proc.terminate()
+        proc.wait(timeout=1)
+    except (ProcessLookupError, OSError, subprocess.TimeoutExpired):
+        pass
+    finally:
+        try:
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGKILL)
+            elif proc.poll() is None:
+                proc.kill()
+        except (ProcessLookupError, OSError):
+            pass
+        if proc.poll() is None:
+            proc.wait(timeout=5)
+
+
 def default_grok_runner(
     cmd: str,
     args: list[str],
@@ -90,31 +128,42 @@ def default_grok_runner(
     stdout_file: Path,
     timeout: Optional[float] = None,
 ) -> None:
-    """Run grok; stdout goes to ``stdout_file``. Resolves ``grok`` on PATH."""
+    """Run grok and stop once its terminal JSON is complete."""
     exe = resolve_grok_executable(cmd)
     stdout_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(stdout_file, "w", encoding="utf-8") as out:
+    limit = timeout or DEFAULT_TIMEOUT_S
+    deadline = time.monotonic() + limit
+    terminal = False
+    with (
+        open(stdout_file, "w", encoding="utf-8") as out,
+        tempfile.TemporaryFile(mode="w+", encoding="utf-8") as err_file,
+    ):
         proc = subprocess.Popen(
             [exe, *args],
             cwd=str(cwd),
             env=env,
             stdout=out,
-            stderr=subprocess.PIPE,
+            stderr=err_file,
             text=True,
             start_new_session=True,
         )
         try:
-            _, err = proc.communicate(timeout=timeout or DEFAULT_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), 15)
-            except (ProcessLookupError, OSError):
-                proc.kill()
-            proc.wait(timeout=5)
-            raise RuntimeError(f"grok CLI timeout after {timeout or DEFAULT_TIMEOUT_S}s") from None
-    if proc.returncode not in (0, None):
+            while proc.poll() is None:
+                if _has_terminal_json(stdout_file):
+                    terminal = True
+                    _stop_process_group(proc)
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"grok CLI timeout after {limit}s")
+                time.sleep(0.05)
+        finally:
+            if proc.poll() is None:
+                _stop_process_group(proc)
+        terminal = terminal or _has_terminal_json(stdout_file)
+        err_file.seek(0)
+        err = err_file.read()
+    if proc.returncode not in (0, None) and not terminal:
         msg = (err or "").strip()[:500] or f"exit {proc.returncode}"
-        # JSON error envelope may still be in stdout_file; caller parses it.
         if not stdout_file.exists() or not stdout_file.read_text(encoding="utf-8").strip():
             raise RuntimeError(f"grok exited {proc.returncode}: {msg}")
 
@@ -129,38 +178,41 @@ def invoke_grok(
     environ: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     """Write prompt file, spawn grok headless, return parsed JSON object."""
-    work = Path(cwd)
-    prompt_path = work / PROMPT_REL
-    stdout_path = work / STDOUT_REL
-    prompt_path.parent.mkdir(parents=True, exist_ok=True)
-    prompt_path.write_text(prompt, encoding="utf-8")
-    args = [
-        "--prompt-file",
-        str(PROMPT_REL),
-        "--output-format",
-        "json",
-        "--always-approve",
-        "--no-plan",
-    ]
-    if model.strip().startswith("grok-"):
-        args += ["-m", model.strip()]
-    (runner or default_grok_runner)(
-        GROK_BIN,
-        args,
-        cwd=work,
-        env=_child_env(environ),
-        stdout_file=stdout_path,
-        timeout=timeout,
-    )
-    if not stdout_path.exists():
-        raise RuntimeError(f"grok 无 stdout 输出:{stdout_path}")
-    raw = stdout_path.read_text(encoding="utf-8").strip()
-    if not raw:
-        raise RuntimeError(f"grok stdout 为空:{stdout_path}")
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"grok stdout 非 JSON:{raw[:300]!r}") from exc
-    if not isinstance(data, dict):
-        raise RuntimeError(f"grok stdout 非 object:{type(data).__name__}")
-    return data
+    work = Path(cwd).resolve()
+    scratch_root = work / PROMPT_REL.parent
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="run-", dir=scratch_root) as scratch_name:
+        scratch = Path(scratch_name)
+        prompt_path = scratch / PROMPT_REL.name
+        stdout_path = scratch / STDOUT_REL.name
+        prompt_path.write_text(prompt, encoding="utf-8")
+        args = [
+            "--prompt-file",
+            str(prompt_path.relative_to(work)),
+            "--output-format",
+            "json",
+            "--always-approve",
+            "--no-plan",
+        ]
+        if model.strip().startswith("grok-"):
+            args += ["-m", model.strip()]
+        (runner or default_grok_runner)(
+            GROK_BIN,
+            args,
+            cwd=work,
+            env=_child_env(environ),
+            stdout_file=stdout_path,
+            timeout=timeout,
+        )
+        if not stdout_path.exists():
+            raise RuntimeError(f"grok 无 stdout 输出:{stdout_path}")
+        raw = stdout_path.read_text(encoding="utf-8").strip()
+        if not raw:
+            raise RuntimeError(f"grok stdout 为空:{stdout_path}")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"grok stdout 非 JSON:{raw[:300]!r}") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError(f"grok stdout 非 object:{type(data).__name__}")
+        return data

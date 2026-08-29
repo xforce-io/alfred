@@ -2,12 +2,18 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
 from src.everbot.core.agent.provider import get_provider_for_agent, provider_for, reset_provider
 from src.everbot.core.agent.provider.grok_cli.invoke import (
+    _has_terminal_json,
+    default_grok_runner,
     grok_json_to_progress,
     invoke_grok,
 )
@@ -24,6 +30,8 @@ def _fake_runner_factory(recorded: dict, payload: dict | None = None):
         recorded["env"] = dict(env)
         recorded["stdout_file"] = str(stdout_file)
         recorded["timeout"] = timeout
+        prompt_arg = args[args.index("--prompt-file") + 1]
+        recorded["prompt"] = (Path(cwd) / prompt_arg).read_text(encoding="utf-8")
         Path(stdout_file).write_text(body, encoding="utf-8")
 
     return fake_runner
@@ -73,6 +81,92 @@ async def test_run_turn_maps_json_text_to_progress(tmp_path, monkeypatch):
             texts.append(item.get("answer") or "")
     joined = "".join(texts)
     assert "pong" in joined
+
+
+def test_concurrent_invocations_use_isolated_prompt_and_stdout_files(tmp_path):
+    calls = []
+    ready = Barrier(2)
+
+    def runner(cmd, args, *, cwd, env, stdout_file, timeout=None):
+        prompt_arg = args[args.index("--prompt-file") + 1]
+        calls.append((Path(cwd) / prompt_arg, Path(stdout_file)))
+        ready.wait(timeout=1)
+        prompt = (Path(cwd) / prompt_arg).read_text(encoding="utf-8")
+        Path(stdout_file).write_text(json.dumps({"text": prompt}), encoding="utf-8")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(invoke_grok, text, cwd=tmp_path, runner=runner)
+            for text in ("first", "second")
+        ]
+        results = [future.result(timeout=2)["text"] for future in futures]
+
+    assert results == ["first", "second"]
+    assert calls[0][0] != calls[1][0]
+    assert calls[0][1] != calls[1][1]
+
+
+@pytest.mark.parametrize("payload", [{"text": "pong"}, {"type": "error", "message": "upstream"}])
+def test_runner_stops_process_group_after_terminal_json(tmp_path, monkeypatch, payload):
+    script = tmp_path / "fake-grok"
+    pid_file = tmp_path / "pids"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, pathlib, subprocess, time\n"
+        "child = subprocess.Popen(['/bin/sh', '-c', \"trap '' TERM; sleep 30\"])\n"
+        f"pathlib.Path({str(pid_file)!r}).write_text(f'{{os.getpid()}} {{child.pid}}')\n"
+        f"print({json.dumps(payload)!r}, flush=True)\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    monkeypatch.setattr(
+        "src.everbot.core.agent.provider.grok_cli.invoke.resolve_grok_executable",
+        lambda _cmd: str(script),
+    )
+    stdout_file = tmp_path / "out.json"
+
+    default_grok_runner(
+        "grok", [], cwd=tmp_path, env={}, stdout_file=stdout_file, timeout=5
+    )
+
+    assert json.loads(stdout_file.read_text(encoding="utf-8")) == payload
+    for pid in map(int, pid_file.read_text().split()):
+        state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False
+        ).stdout.strip()
+        assert not state or state.startswith("Z")
+
+
+def test_terminal_json_tolerates_partial_utf8(tmp_path):
+    stdout_file = tmp_path / "out.json"
+    stdout_file.write_bytes(b'{"text":"\xe4')
+    assert _has_terminal_json(stdout_file) is False
+    stdout_file.write_text('{"text":"你"}', encoding="utf-8")
+    assert _has_terminal_json(stdout_file) is True
+
+
+def test_runner_timeout_cleans_process(tmp_path, monkeypatch):
+    script = tmp_path / "silent-grok"
+    pid_file = tmp_path / "pid"
+    script.write_text(
+        "#!/bin/sh\n"
+        f"echo $$ > {pid_file}\n"
+        "sleep 30\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    monkeypatch.setattr(
+        "src.everbot.core.agent.provider.grok_cli.invoke.resolve_grok_executable",
+        lambda _cmd: str(script),
+    )
+
+    with pytest.raises(RuntimeError, match="timeout"):
+        default_grok_runner(
+            "grok", [], cwd=tmp_path, env={}, stdout_file=tmp_path / "out.json", timeout=0.1
+        )
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
 
 
 def test_grok_cli_skips_dolphin_history_restore():
@@ -196,7 +290,7 @@ async def test_run_turn_includes_prior_history(tmp_path):
     ]
     async for _ in provider.run_turn(handle, "what is my name?"):
         pass
-    prompt = (tmp_path / "tmp" / "grok-cli" / "_prompt.md").read_text(encoding="utf-8")
+    prompt = recorded["prompt"]
     assert "my name is Ada" in prompt
     assert "what is my name?" in prompt
     hist = handle.variables["history_messages"]
