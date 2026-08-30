@@ -18,6 +18,30 @@ import json
 from typing import Any, Dict, Optional
 
 
+def _tool_output_as_text(out: Any) -> str:
+    """Project milkie tool output onto the text the model/orchestrator should see.
+
+    ``run_command`` returns ``{objectId, stdout, ...}``. The envelope is for
+    projection; dumping it as the chat answer or next-round observation
+    hides the real stdout and leaks internal ids.
+    """
+    if out is None:
+        return ""
+    if isinstance(out, str):
+        text = out.strip()
+        if text.startswith("{") and "objectId" in text:
+            try:
+                parsed = json.loads(out)
+            except (TypeError, ValueError):
+                return out
+            if isinstance(parsed, dict) and isinstance(parsed.get("stdout"), str):
+                return parsed["stdout"]
+        return out
+    if isinstance(out, dict) and isinstance(out.get("stdout"), str):
+        return out["stdout"]
+    return json.dumps(out, ensure_ascii=False)
+
+
 def milkie_event_to_progress(event: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if event == "message_delta":
         return {"stage": "llm", "delta": data.get("text") or "", "answer": "", "id": "llm"}
@@ -36,8 +60,7 @@ def milkie_event_to_progress(event: str, data: Dict[str, Any]) -> Optional[Dict[
     if event == "tool.responded":
         ok = data.get("status") == "ok"
         out = data.get("output") if ok else (data.get("error") or "")
-        if not isinstance(out, str):
-            out = json.dumps(out, ensure_ascii=False)
+        out = _tool_output_as_text(out)
         return {
             "stage": "skill",
             "status": "completed" if ok else "failed",

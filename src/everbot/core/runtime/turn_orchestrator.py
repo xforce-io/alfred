@@ -608,7 +608,6 @@ class TurnOrchestrator:
         llm_had_think_this_round = False
         consecutive_empty_llm_rounds = 0
         consecutive_think_only_rounds = 0
-        last_successful_tool_output = ""  # fallback when LLM returns empty
         output_chars = 0  # approximate output token tracking (chars produced by LLM)
         _last_round_response = ""  # text from current round only (reset on each tool call)
         # Repeated-text loop detection: track LLM text fingerprints across
@@ -696,7 +695,7 @@ class TurnOrchestrator:
                     estimated_tokens = max(1, output_chars // 4) if output_chars > 0 else 0
                     yield TurnEvent(
                         type=TurnEventType.TURN_COMPLETE,
-                        answer=_last_round_response or response or last_successful_tool_output,
+                        answer=_last_round_response or response,
                         tool_call_count=tool_call_count,
                         tool_execution_count=tool_execution_count,
                         tool_names_executed=list(tool_names_executed),
@@ -892,11 +891,6 @@ class TurnOrchestrator:
                                         failed_tool_outputs=failed_tool_outputs,
                                     )
                                     return
-
-                        # Track last successful skill output for fallback
-                        # Check both: no failure signature AND status is not explicitly "failed"
-                        if not fail_sig and s_output and status != "failed":
-                            last_successful_tool_output = s_output[:policy.max_tool_output_preview_chars]
 
                         # Inject failure count warning for skill outputs
                         warn_output = s_output
@@ -1149,8 +1143,6 @@ class TurnOrchestrator:
                             output_truncated=out_trunc, output_total_chars=out_total,
                             reference_id=progress.get("reference_id", ""),
                         )
-                        if not fail_sig and t_output_raw:
-                            last_successful_tool_output = t_output_raw[:policy.max_tool_output_preview_chars]
                         if pid:
                             sent_progress[pid] = status
 
@@ -1163,11 +1155,9 @@ class TurnOrchestrator:
             yield _timeout_error_event(exc, soft=False)
             return
 
-        # Fallback: if LLM produced no text but the last tool returned
-        # substantial output, use that output as the response so the user
-        # doesn't get an empty "(无响应)".
-        if not response and last_successful_tool_output:
-            response = last_successful_tool_output
+        # Do not copy tool/skill stdout into the user-facing answer. That
+        # output is for the next LLM round; milkie envelopes look like
+        # {"objectId","stdout"} and dumping them is worse than empty.
 
         # Phantom tool call: model wrote ```bash/python blocks but never
         # issued a real tool_use call — common with weaker models under
@@ -1293,7 +1283,6 @@ async def _drain_after_timeout(
     first, then continues with further ``__anext__`` calls.
     """
     deadline = asyncio.get_event_loop().time() + extra_timeout
-    collected_outputs: list[str] = []
     final_response = ""
     seen_progress_fingerprints: set[str] = set()
 
@@ -1307,30 +1296,14 @@ async def _drain_after_timeout(
                 continue
             seen_progress_fingerprints.add(progress_fp)
             stage = progress.get("stage")
-            status = progress.get("status", "")
-            if stage == "skill" and status in ("completed", "failed"):
-                # Skip internal resource-loading tools — their output
-                # is framework-internal (contains [PIN] markers, full
-                # SKILL.md content) and must not be forwarded to the user.
-                skill_info = progress.get("skill_info") or {}
-                skill_name = skill_info.get("name") or progress.get("tool_name") or ""
-                if skill_name in ("_load_resource_skill", "_read_skill_asset"):
-                    continue
-                output = (
-                    progress.get("answer")
-                    or progress.get("block_answer")
-                    or progress.get("output")
-                    or ""
-                )
-                if output:
-                    collected_outputs.append(output)
-            elif stage == "llm":
+            if stage == "llm":
                 delta = progress.get("delta", "")
                 answer = progress.get("answer", "")
                 if delta:
                     final_response += delta
                 elif answer:
                     final_response = answer
+            # Skill/tool stdout is for the model, not a deferred user reply.
 
     in_flight: Optional[asyncio.Task] = pending_anext
     try:
@@ -1372,16 +1345,9 @@ async def _drain_after_timeout(
         except Exception:
             pass
 
-    # Prefer the LLM's final text response — it's already formatted for the user.
-    # Tool outputs are raw JSON and should only be included as fallback when
-    # the LLM produced no text (e.g. timeout during tool execution, before LLM reply).
-    if final_response.strip():
-        result = final_response.strip()
-    elif collected_outputs:
-        # Fallback: summarize tool outputs instead of dumping raw JSON
-        result = "\n\n".join(collected_outputs)
-    else:
-        result = ""
+    # Only the LLM's text is user-facing. Do not join skill/tool stdout
+    # (including milkie {objectId, stdout} envelopes) when the model said nothing.
+    result = final_response.strip()
     # Strip any leaked [PIN] markers (dolphin framework internal token)
     result = result.replace("[PIN]", "").strip()
     if not result.strip():

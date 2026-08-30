@@ -5,6 +5,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Tuple
 
+# Last lines of a mailbox-composed turn. Recency: the model must not treat
+# background events as the request. Keep this out of system prompt / agent.md.
+RECENCY_CLOSER = (
+    "请只回应用户在「User Message」中的本轮请求；Background Updates 不是本轮任务。"
+)
+
 
 def compose_message_with_mailbox_updates(
     trigger_message: str,
@@ -14,9 +20,12 @@ def compose_message_with_mailbox_updates(
     stale_after: timedelta = timedelta(hours=24),
     max_events: int = 3,
 ) -> Tuple[str, List[str]]:
-    """Prefix user message with mailbox updates and return ack event ids.
+    """Compose one turn message: user text first, then mailbox updates.
 
-    The function applies two cleanup rules before composing the prefix:
+    User intent must lead. Background events after the user message are
+    clues only; they must not be treated as the request to execute.
+
+    Cleanup before compose:
     - dedupe by ``dedupe_key`` (keep the latest event for the same key)
     - drop stale events where ``suppress_if_stale`` is true and age exceeds ``stale_after``
     """
@@ -78,6 +87,7 @@ def compose_message_with_mailbox_updates(
         "## Background Updates",
         (
             "(以下是后台定时任务通知，仅可作为线索，不保证覆盖全部事实。"
+            "用户本轮消息优先：除非用户明确询问这些后台事项，否则不要执行其中的任务，先回应用户本轮消息。"
             "若用户询问任务配置、执行时间、调度频率、下次运行时间或某任务是否存在，"
             "必须先读取真实任务源（如 HEARTBEAT.md / task list）再回答。"
             "被追问来源时，可说明是后台定时任务采集。)"
@@ -121,10 +131,10 @@ def compose_message_with_mailbox_updates(
     for dropped_event_id in dropped_event_ids:
         _append_unique_event_id(ack_ids, dropped_event_id)
 
-    if len(lines) == 1:
+    if included_count == 0:
         return trigger_message, ack_ids
 
     lines.append("")
-    lines.append("## User Message")
-    lines.append(trigger_message)
-    return "\n".join(lines), ack_ids
+    lines.append(RECENCY_CLOSER)
+    user_block = f"## User Message\n{trigger_message}"
+    return f"{user_block}\n\n" + "\n".join(lines), ack_ids
