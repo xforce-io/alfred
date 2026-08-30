@@ -1167,17 +1167,21 @@ async def test_empty_output_loop_not_triggered_when_think_present():
 
 
 # ---------------------------------------------------------------------------
-# last_successful_tool_output fallback tests
+# Empty LLM after tools: do not dump tool stdout as the user answer
 # ---------------------------------------------------------------------------
 
+def _assert_empty_user_answer(events: list[TurnEvent]) -> None:
+    complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
+    assert not (complete.answer or "").strip()
+
+
 @pytest.mark.asyncio
-async def test_tool_output_fallback_when_llm_empty():
-    """When LLM produces no text, last successful tool_output should be used as response."""
+async def test_tool_output_not_used_as_answer_when_llm_empty():
+    """Tool stdout is for the next LLM round, not the Telegram/Web bubble."""
     script = [
         _progress_event(_llm_delta("", think="reasoning about tools")),
         _progress_event(_tool_call("_bash", "echo analysis", pid="tc1")),
         _progress_event(_tool_output("_bash", "Analysis result: all good", pid="to1")),
-        # LLM produces only thinking, no visible text
         _progress_event(_llm_delta("", think="done, returning result")),
     ]
     agent = _ScriptedAgent(script)
@@ -1186,16 +1190,37 @@ async def test_tool_output_fallback_when_llm_empty():
     async for te in orch.run_turn(agent, "go"):
         events.append(te)
 
+    _assert_empty_user_answer(events)
     complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
-    assert complete.answer, "Expected fallback to last_successful_tool_output, got empty"
-    assert "Analysis result" in complete.answer
+    assert "Analysis result" not in (complete.answer or "")
 
 
 @pytest.mark.asyncio
-async def test_skill_output_fallback_when_llm_empty():
-    """When LLM produces no text after skill calls, last successful skill output
-    should be used as response. This is the production bug: skill outputs don't
-    update last_successful_tool_output, causing empty '(无响应)' replies."""
+async def test_milkie_run_command_envelope_not_used_as_answer():
+    """Incident: empty glm round + last run_command JSON dumped to Telegram."""
+    envelope = (
+        '{"objectId": "obj:sha256:59173f96abb48c52972dd0c705a4718fb02f46832875a19e4f",'
+        ' "stdout": "aleabitoreddit (@aleaditorebdit) / Posts / X"}'
+    )
+    script = [
+        _progress_event(_skill_call("run_command", "search.py aleabitoreddit", pid="sk1")),
+        _progress_event(_skill_output("run_command", envelope, pid="so1")),
+    ]
+    agent = _ScriptedAgent(script)
+    orch = TurnOrchestrator(TurnPolicy(max_attempts=1, max_tool_calls=10))
+    events: list[TurnEvent] = []
+    async for te in orch.run_turn(agent, "hi"):
+        events.append(te)
+
+    complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
+    answer = complete.answer or ""
+    assert "objectId" not in answer
+    assert "aleabitoreddit" not in answer
+    assert not answer.strip()
+
+
+@pytest.mark.asyncio
+async def test_skill_output_not_used_as_answer_when_llm_empty():
     script = [
         _progress_event(_llm_delta("", think="loading skill")),
         _progress_event(_skill_call("_load_resource_skill", "example-skill", pid="sk1")),
@@ -1203,7 +1228,6 @@ async def test_skill_output_fallback_when_llm_empty():
         _progress_event(_llm_delta("", think="running analysis")),
         _progress_event(_skill_call("_bash", "dispatch.py analyze", pid="sk2")),
         _progress_event(_skill_output("_bash", "Deep Review: 5 bugs found ...", pid="so2")),
-        # LLM produces only thinking, no visible text
         _progress_event(_llm_delta("", think="analysis complete")),
     ]
     agent = _ScriptedAgent(script)
@@ -1213,22 +1237,18 @@ async def test_skill_output_fallback_when_llm_empty():
         events.append(te)
 
     complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
-    assert complete.answer, "Expected fallback to last successful skill output, got empty"
-    assert "Deep Review" in complete.answer
+    assert "Deep Review" not in (complete.answer or "")
+    assert not (complete.answer or "").strip()
 
 
 @pytest.mark.asyncio
-async def test_skill_output_fallback_ignores_failed_skill_output():
-    """Only successful skill outputs should be used as fallback.
-    A failed skill output (with error signature) should NOT overwrite
-    a previous successful output."""
+async def test_failed_skill_output_not_used_as_answer():
     script = [
         _progress_event(_llm_delta("", think="step 1")),
         _progress_event(_skill_call("_bash", "echo good", pid="sk1")),
         _progress_event(_skill_output("_bash", "Good result from first skill", pid="so1")),
         _progress_event(_llm_delta("", think="step 2")),
         _progress_event(_skill_call("_bash", "bad command", pid="sk2")),
-        # Failed output: has error signature
         _progress_event(_skill_output("_bash", "Command exited with code 1", pid="so2")),
         _progress_event(_llm_delta("", think="done")),
     ]
@@ -1239,29 +1259,18 @@ async def test_skill_output_fallback_ignores_failed_skill_output():
         events.append(te)
 
     complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
-    assert complete.answer, "Expected fallback to successful skill output"
-    assert "Good result" in complete.answer
-    assert "exited with code 1" not in complete.answer
+    assert "Good result" not in (complete.answer or "")
+    assert "exited with code 1" not in (complete.answer or "")
 
 
 @pytest.mark.asyncio
-async def test_skill_output_fallback_ignores_status_failed_without_signature():
-    """BUG: When a skill reports status='failed' but its output text does NOT
-    match any known failure pattern (no 'exit code', no 'Error:', etc.),
-    _extract_failure_signature() returns None.  The fallback tracking code
-    only checks `not fail_sig`, ignoring the explicit status='failed' field.
-    Result: failed skill output is stored as last_successful_tool_output and
-    surfaced to the user as the response — leaking internal error details.
-
-    The fix should also check `status != 'failed'` before tracking fallback.
-    """
+async def test_status_failed_skill_output_not_used_as_answer():
     script = [
         _progress_event(_llm_delta("", think="step 1")),
         _progress_event(_skill_call("_bash", "echo good", pid="sk1")),
         _progress_event(_skill_output("_bash", "Good result", pid="so1")),
         _progress_event(_llm_delta("", think="step 2")),
         _progress_event(_skill_call("_bash", "do something", pid="sk2")),
-        # status="failed" but output has NO recognized failure pattern
         _progress_event(_skill_output(
             "_bash",
             "The operation could not be completed due to insufficient permissions",
@@ -1277,69 +1286,12 @@ async def test_skill_output_fallback_ignores_status_failed_without_signature():
         events.append(te)
 
     complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
-    # The failed skill output should NOT become the fallback response
-    assert "insufficient permissions" not in (complete.answer or ""), (
-        "BUG: status='failed' skill output was used as fallback because "
-        "_extract_failure_signature() returned None (no pattern match). "
-        "The code should also check the explicit status field."
-    )
-    # The earlier successful output should be preserved
-    assert complete.answer == "Good result", (
-        f"Expected earlier successful output 'Good result', got: {complete.answer!r}"
-    )
+    assert "insufficient permissions" not in (complete.answer or "")
+    assert "Good result" not in (complete.answer or "")
 
 
 @pytest.mark.asyncio
-async def test_skill_output_fallback_truncated_to_max_chars():
-    """Skill output used as fallback should be truncated to max_tool_output_preview_chars."""
-    long_output = "X" * 500
-    script = [
-        _progress_event(_llm_delta("", think="analyzing")),
-        _progress_event(_skill_call("_bash", "long command", pid="sk1")),
-        _progress_event(_skill_output("_bash", long_output, pid="so1")),
-        _progress_event(_llm_delta("", think="done")),
-    ]
-    agent = _ScriptedAgent(script)
-    orch = TurnOrchestrator(TurnPolicy(max_attempts=1, max_tool_calls=10, max_tool_output_preview_chars=100))
-    events: list[TurnEvent] = []
-    async for te in orch.run_turn(agent, "go"):
-        events.append(te)
-
-    complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
-    assert complete.answer, "Expected truncated fallback"
-    assert len(complete.answer) == 100
-
-
-@pytest.mark.asyncio
-async def test_skill_output_overwrites_earlier_tool_output_fallback():
-    """A later successful skill output should overwrite an earlier tool_output fallback."""
-    script = [
-        _progress_event(_llm_delta("", think="step 1")),
-        # Regular tool_call/tool_output stage
-        _progress_event(_tool_call("_bash", "echo old", pid="tc1")),
-        _progress_event(_tool_output("_bash", "Old tool_output result", pid="to1")),
-        _progress_event(_llm_delta("", think="step 2")),
-        # Skill stage (should overwrite the tool_output fallback)
-        _progress_event(_skill_call("_bash", "echo new", pid="sk1")),
-        _progress_event(_skill_output("_bash", "New skill result", pid="so1")),
-        _progress_event(_llm_delta("", think="done")),
-    ]
-    agent = _ScriptedAgent(script)
-    orch = TurnOrchestrator(TurnPolicy(max_attempts=1, max_tool_calls=10))
-    events: list[TurnEvent] = []
-    async for te in orch.run_turn(agent, "go"):
-        events.append(te)
-
-    complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
-    assert complete.answer, "Expected skill output to be the fallback"
-    assert "New skill result" in complete.answer
-
-
-@pytest.mark.asyncio
-async def test_skill_only_flow_no_tool_output_stage():
-    """Pure skill-only flow (no tool_call/tool_output stages at all).
-    This is the most common production scenario where the bug manifests:
-    Dolphin emits only skill events, never tool_call/tool_output events."""
+async def test_skill_only_flow_empty_llm_stays_empty():
     script = [
         _progress_event(_llm_delta("", think="I'll use skills to solve this")),
         _progress_event(_skill_call("_load_resource_skill", "paper-discovery", pid="sk1")),
@@ -1347,10 +1299,8 @@ async def test_skill_only_flow_no_tool_output_stage():
         _progress_event(_llm_delta("", think="now search")),
         _progress_event(_skill_call("_bash", "search papers", pid="sk2")),
         _progress_event(_skill_output("_bash", "Found 3 papers: A, B, C", pid="so2")),
-        _progress_event(_llm_delta("", think="now analyze")),
         _progress_event(_skill_call("_bash", "analyze results", pid="sk3")),
         _progress_event(_skill_output("_bash", "Final analysis: Paper A is best", pid="so3")),
-        # LLM never produces visible text
     ]
     agent = _ScriptedAgent(script)
     orch = TurnOrchestrator(TurnPolicy(max_attempts=1, max_tool_calls=10))
@@ -1359,8 +1309,8 @@ async def test_skill_only_flow_no_tool_output_stage():
         events.append(te)
 
     complete = next(e for e in events if e.type == TurnEventType.TURN_COMPLETE)
-    assert complete.answer, "Pure skill flow should have fallback answer, not empty '(无响应)'"
-    assert "Final analysis" in complete.answer
+    assert "Final analysis" not in (complete.answer or "")
+    assert not (complete.answer or "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -1413,6 +1363,31 @@ async def test_drain_prefers_llm_over_tool_outputs():
 
 
 @pytest.mark.asyncio
+async def test_drain_llm_plus_envelope_prefers_llm():
+    envelope = (
+        '{"objectId": "obj:sha256:ab", "stdout": "aleabitoreddit dump"}'
+    )
+    items = [
+        {"_progress": [{"stage": "llm", "delta": "Hello there."}]},
+        {"_progress": [{
+            "stage": "skill",
+            "status": "completed",
+            "skill_info": {"name": "run_command"},
+            "answer": envelope,
+        }]},
+    ]
+    results = []
+    await _drain_after_timeout(
+        _FakeAsyncIter(items),
+        on_result=lambda r: results.append(r),
+        extra_timeout=5.0,
+    )
+    assert results == ["Hello there."]
+    assert "objectId" not in results[0]
+    assert "aleabitoreddit" not in results[0]
+
+
+@pytest.mark.asyncio
 async def test_drain_llm_only():
     """Drain with only LLM text works correctly."""
     items = [
@@ -1430,7 +1405,7 @@ async def test_drain_llm_only():
 
 @pytest.mark.asyncio
 async def test_drain_tool_only():
-    """Drain with only tool output works correctly."""
+    """Tool-only drain must not deliver stdout as a deferred user reply."""
     items = [
         {"_progress": [{"stage": "skill", "status": "completed", "output": "Tool only."}]},
     ]
@@ -1440,8 +1415,34 @@ async def test_drain_tool_only():
         on_result=lambda r: results.append(r),
         extra_timeout=5.0,
     )
-    assert len(results) == 1
-    assert results[0] == "Tool only."
+    assert results == []
+
+
+@pytest.mark.asyncio
+async def test_drain_milkie_envelope_not_delivered():
+    """Soft-timeout drain must not dump milkie run_command envelopes."""
+    envelope = (
+        '{"objectId": "obj:sha256:59173f96abb48c52972dd0c705a4718fb02f46832875a19e4f",'
+        ' "stdout": "aleabitoreddit (@aleaditorebdit) / Posts / X"}'
+    )
+    items = [
+        {"_progress": [{
+            "stage": "skill",
+            "status": "completed",
+            "skill_info": {"name": "run_command"},
+            "answer": envelope,
+        }]},
+    ]
+    results = []
+    await _drain_after_timeout(
+        _FakeAsyncIter(items),
+        on_result=lambda r: results.append(r),
+        extra_timeout=5.0,
+    )
+    assert results == []
+    joined = "\n".join(results)
+    assert "objectId" not in joined
+    assert "aleabitoreddit" not in joined
 
 
 @pytest.mark.asyncio
@@ -1772,10 +1773,11 @@ async def test_drain_filters_load_resource_skill():
         on_result=lambda r: results.append(r),
         extra_timeout=5.0,
     )
-    assert len(results) == 1
-    assert "Real command result" in results[0]
-    assert "Coding Master" not in results[0]
-    assert "[PIN]" not in results[0]
+    assert results == []
+    joined = "\n".join(results)
+    assert "Real command result" not in joined
+    assert "Coding Master" not in joined
+    assert "[PIN]" not in joined
 
 
 @pytest.mark.asyncio
@@ -1850,9 +1852,10 @@ async def test_drain_strips_pin_marker_from_tool_output():
         on_result=lambda r: results.append(r),
         extra_timeout=5.0,
     )
-    assert len(results) == 1
-    assert "[PIN]" not in results[0]
-    assert "should be cleaned" in results[0]
+    assert results == []
+    joined = "\n".join(results)
+    assert "[PIN]" not in joined
+    assert "should be cleaned" not in joined
 
 
 @pytest.mark.asyncio
@@ -1870,9 +1873,8 @@ async def test_drain_collects_skill_answer_field():
         on_result=lambda r: results.append(r),
         extra_timeout=5.0,
     )
-    assert len(results) == 1
-    # answer takes precedence over output
-    assert "Answer field value" in results[0]
+    assert results == []
+    assert "Answer field value" not in "\n".join(results)
 
 
 @pytest.mark.asyncio
@@ -1891,8 +1893,8 @@ async def test_drain_collects_skill_block_answer_field():
         on_result=lambda r: results.append(r),
         extra_timeout=5.0,
     )
-    assert len(results) == 1
-    assert "Block answer value" in results[0]
+    assert results == []
+    assert "Block answer value" not in "\n".join(results)
 
 
 @pytest.mark.asyncio

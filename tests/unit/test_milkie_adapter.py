@@ -68,6 +68,32 @@ def test_tool_responded_non_string_output_is_json_encoded():
     assert json.loads(p["answer"]) == {"k": 1}
 
 
+def test_tool_responded_unwraps_objectid_stdout_envelope():
+    envelope = {
+        "objectId": "obj:sha256:59173f96",
+        "stdout": "aleabitoreddit posts",
+        "outputBytes": 32,
+    }
+    p = milkie_event_to_progress(
+        "tool.responded",
+        {"toolName": "run_command", "toolCallId": "tc", "status": "ok", "output": envelope},
+    )
+    assert p["answer"] == "aleabitoreddit posts"
+    assert "objectId" not in p["answer"]
+
+
+def test_tool_responded_unwraps_objectid_stdout_json_string():
+    raw = json.dumps(
+        {"objectId": "obj:sha256:ab", "stdout": "hello from shell"},
+        ensure_ascii=False,
+    )
+    p = milkie_event_to_progress(
+        "tool.responded",
+        {"toolName": "run_command", "toolCallId": "tc", "status": "ok", "output": raw},
+    )
+    assert p["answer"] == "hello from shell"
+
+
 def test_pid_pairs_running_and_completed_via_toolcallid():
     """同一 toolCallId 让 running/completed 配对(turn_orchestrator 靠 pid 去重/配对)。"""
     a = milkie_event_to_progress("tool.requested", {"toolName": "t", "input": {}, "toolCallId": "X"})

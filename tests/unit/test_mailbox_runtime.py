@@ -2,7 +2,10 @@
 
 from datetime import datetime, timezone
 
-from src.everbot.core.runtime.mailbox import compose_message_with_mailbox_updates
+from src.everbot.core.runtime.mailbox import (
+    RECENCY_CLOSER,
+    compose_message_with_mailbox_updates,
+)
 
 
 def test_compose_message_with_mailbox_updates_prefixes_user_message():
@@ -23,13 +26,35 @@ def test_compose_message_with_mailbox_updates_prefixes_user_message():
 
     message, ack_ids = compose_message_with_mailbox_updates(user_message, mailbox)
 
-    assert message.startswith("## Background Updates")
+    assert message.startswith("## User Message")
     assert "仅可作为线索" in message
+    assert "不要执行其中的任务" in message
     assert "必须先读取真实任务源" in message
     assert "[heartbeat_result] 你有新的日报" in message
     assert "Detail: 详见日报附件" in message
-    assert message.endswith(user_message)
+    user_pos = message.find(user_message)
+    bg_pos = message.find("## Background Updates")
+    assert 0 <= user_pos < bg_pos
+    assert message.rstrip().endswith(RECENCY_CLOSER)
     assert ack_ids == ["evt_1", "evt_2"]
+
+
+def test_compose_short_hi_leads_and_ends_with_closer():
+    """Gating: short user trigger + mailbox → user first, closer last."""
+    mailbox = [
+        {
+            "event_id": "evt_job",
+            "event_type": "job_completed",
+            "summary": "Serenity账号定时分析 completed",
+            "detail": "抓取脚本已失败，按 fail-fast 立即停止。",
+        },
+    ]
+    message, ack_ids = compose_message_with_mailbox_updates("hi", mailbox)
+    assert message.startswith("## User Message\nhi")
+    assert message.find("hi") < message.find("## Background Updates")
+    assert message.find("## Background Updates") < message.rfind(RECENCY_CLOSER)
+    assert message.rstrip().endswith(RECENCY_CLOSER)
+    assert ack_ids == ["evt_job"]
 
 
 def test_compose_message_with_mailbox_updates_no_events_returns_original():
@@ -110,7 +135,7 @@ def test_compose_message_truncates_long_detail():
 # Root cause: multimodal messages (images) skip mailbox consumption in
 # process_message (core_service.py L236-239), so heartbeat events deposited
 # before the multimodal turn are NOT acked.  They survive into the next text
-# turn and get prepended to the user message by compose_message_with_mailbox_updates.
+# turn and get included by compose_message_with_mailbox_updates.
 #
 # Real incident: user sent a paper screenshot (multimodal, mailbox skipped) →
 # bot discussed Meta-Harness paper → user replied "好的，我也好奇具体怎么做的"
@@ -118,21 +143,14 @@ def test_compose_message_truncates_long_detail():
 # prepended.  The LLM bound the user's ambiguous reply to the heartbeat
 # topic instead of the paper being discussed.
 #
-# The tests below document the message format that enables this hijack.
-# The actual bug is tested in test_channel_core_service.py::
-# test_multimodal_message_skips_mailbox_ack_bug.
+# Compose now puts the user message first so short replies are not bound
+# to mailbox topics. The multimodal skip-ack bug is still tested in
+# test_channel_core_service.py::test_multimodal_message_skips_mailbox_ack_bug.
 # ---------------------------------------------------------------------------
 
 
-def test_compose_message_heartbeat_placed_before_user_message():
-    """Heartbeat updates are always placed ABOVE the user's message.
-
-    When the heartbeat summary introduces a specific topic and the user
-    message is short/ambiguous, the LLM may bind the user's intent to
-    the heartbeat topic rather than the conversation history.
-
-    This test documents the current (problematic) message structure.
-    """
+def test_compose_message_user_message_leads_background_updates():
+    """User text comes first so a short reply is not bound to mailbox topics."""
     user_message = "好的，我也好奇具体怎么做的"
     mailbox = [
         {
@@ -145,38 +163,17 @@ def test_compose_message_heartbeat_placed_before_user_message():
 
     message, ack_ids = compose_message_with_mailbox_updates(user_message, mailbox)
 
-    # Current structure: heartbeat comes first, user message last
-    lines = message.split("\n")
-
-    # The heartbeat topic "反共识信号" appears BEFORE the user's message
     heartbeat_pos = message.find("反共识信号")
     user_msg_pos = message.find("好的，我也好奇具体怎么做的")
-    assert heartbeat_pos < user_msg_pos, (
-        "Heartbeat content should appear before user message in current format"
-    )
-
-    # The composed message has the structure:
-    #   ## Background Updates
-    #   (说明文字)
-    #   - [heartbeat_result] 反共识信号...
-    #     Detail: ...
-    #
-    #   ## User Message
-    #   好的，我也好奇具体怎么做的
+    assert 0 <= user_msg_pos < heartbeat_pos
+    assert message.startswith("## User Message")
     assert "## Background Updates" in message
-    assert "## User Message" in message
-
-    # PROBLEM: The "反共识信号" heartbeat is the closest context to the
-    # user's ambiguous "具体怎么做的", making the LLM likely to treat the
-    # heartbeat topic as what the user is asking about.
+    assert "不要执行其中的任务" in message
+    assert message.rstrip().endswith(RECENCY_CLOSER)
+    assert ack_ids == ["evt_hb"]
 
 
-def test_compose_message_heartbeat_topic_proximity_to_user_message():
-    """Measure how close the heartbeat content is to the user message.
-
-    The shorter the distance, the more likely the LLM treats the heartbeat
-    topic as the referent for the user's pronoun/reference.
-    """
+def test_compose_message_background_section_follows_user_message():
     user_message = "具体怎么做的"
     mailbox = [
         {
@@ -194,28 +191,15 @@ def test_compose_message_heartbeat_topic_proximity_to_user_message():
 
     message, _ = compose_message_with_mailbox_updates(user_message, mailbox)
 
-    # The last heartbeat event is closest to "## User Message"
-    bg_section_end = message.find("## User Message")
-    last_heartbeat_end = message.rfind("反共识信号", 0, bg_section_end)
-    assert last_heartbeat_end != -1, "Heartbeat topic should be present before user message"
-
-    # The gap between last heartbeat content and user message header is small
-    gap = bg_section_end - last_heartbeat_end
-    # With current format this gap is typically < 100 chars (just a blank line + header)
-    assert gap < 150, (
-        f"Gap between heartbeat topic and user message is {gap} chars — "
-        f"close enough for LLM to mis-attribute user intent"
-    )
+    user_header = message.find("## User Message")
+    bg_header = message.find("## Background Updates")
+    assert 0 <= user_header < bg_header
+    assert message.find(user_message) < message.find("反共识信号")
+    assert message.rstrip().endswith(RECENCY_CLOSER)
+    assert message.rfind("## Background Updates") < message.rfind(RECENCY_CLOSER)
 
 
-def test_compose_message_multiple_events_last_one_closest_to_user():
-    """When multiple heartbeat events are included, the LAST one is closest
-    to the user message and most likely to hijack intent.
-
-    In the real incident, a benign "Evaluated 2/8 skills" was followed by
-    a topical "反共识信号已顺利生成" — the latter was closest to the user's
-    message and became the mis-attributed referent.
-    """
+def test_compose_message_multiple_events_stay_after_user_message():
     user_message = "好的，我也好奇具体怎么做的"
     mailbox = [
         {
@@ -233,13 +217,10 @@ def test_compose_message_multiple_events_last_one_closest_to_user():
 
     message, _ = compose_message_with_mailbox_updates(user_message, mailbox)
 
-    user_section_start = message.find("## User Message")
-    # The topical event (反共识) appears after the benign one and closer to user
+    user_pos = message.find(user_message)
     benign_pos = message.find("Evaluated 2/8 skills")
     topical_pos = message.find("反共识信号已顺利生成")
-    assert benign_pos < topical_pos < user_section_start, (
-        "Events are ordered chronologically; last event is closest to user message"
-    )
+    assert 0 <= user_pos < benign_pos < topical_pos
 
 
 def test_compose_message_warns_task_queries_to_verify_real_task_source():
@@ -264,3 +245,6 @@ def test_compose_message_warns_task_queries_to_verify_real_task_source():
     assert "任务配置、执行时间、调度频率、下次运行时间" in message
     assert "必须先读取真实任务源" in message
     assert "HEARTBEAT.md / task list" in message
+    assert "不要执行其中的任务" in message
+    assert message.find(user_message) < message.find("## Background Updates")
+    assert message.rstrip().endswith(RECENCY_CLOSER)
