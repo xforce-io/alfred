@@ -86,7 +86,8 @@ EverBot 通过可插拔的技能模块扩展 Agent 的能力。每个技能是�
 | **invest** | 统一投资分析 | 多源信号采集（宏观流动性、价值评分、中国市场、箱体突破）、因果链条、资产概率分布 |
 | **gray-rhino** | 风险趋势预警 | 新闻聚类、灰犀牛识别、资产影响映射 |
 | **daily-attractor** | 每日市场监控 | 融资定价偏移、吸引子追踪、Telegram 推送 |
-| **paper-discovery** | AI/ML 论文发现 | HuggingFace + arXiv 集成、热度评分、GitHub Star 排名 |
+| **papers** | AI/ML 论文发现与深读 | 调用 `researcher papers`：热榜 / 查篇 / Library 证据卡 |
+| **paper-discovery** | （已由 papers 替换）旧 HF+arXiv 脚本 | 保留脚本与单测；demo_agent 不再加载 |
 | **dev-browser** | 浏览器自动化 | 持久页面状态、ARIA 快照、截图能力 |
 | **web** | 网络搜索与浏览器 | 多后端搜索（DuckDuckGo/Tavily）、页面提取、Playwright 自动化 |
 | **skill-installer** | 动态技能管理 | 注册表安装、多源支持（Git/URL/本地） |
@@ -291,7 +292,8 @@ alfred/
 │   ├── invest/               # 统一投资分析（含宏观流动性、价值评分、中国市场信号）
 │   ├── gray-rhino/           # 风险趋势预警
 │   ├── daily-attractor/      # 每日市场监控
-│   ├── paper-discovery/      # AI/ML 论文发现
+│   ├── papers/               # researcher papers CLI（热榜/查篇/深读）
+│   ├── paper-discovery/      # 旧论文脚本（demo_agent 已 exclude）
 │   ├── dev-browser/          # 浏览器自动化
 │   ├── web/                  # 网络搜索与浏览器自动化
 │   ├── skill-installer/      # 动态技能安装

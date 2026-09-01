@@ -86,7 +86,8 @@ EverBot extends Agent capabilities through pluggable skill modules. Each skill i
 | **invest** | Unified investment analysis | Multi-source signals (macro liquidity, value scoring, China market, box breakout), causal chains, probability distributions |
 | **gray-rhino** | Risk trend alerts | News clustering, gray rhino identification, asset impact mapping |
 | **daily-attractor** | Daily market monitoring | Financing pricing deviation, attractor tracking, Telegram push |
-| **paper-discovery** | AI/ML paper discovery | HuggingFace + arXiv integration, heat scoring, GitHub star ranking |
+| **papers** | AI/ML paper digest and deep-read | `researcher papers` CLI: trending / lookup / Library evidence card |
+| **paper-discovery** | (replaced by papers) legacy HF+arXiv scripts | kept for tests; demo_agent no longer loads it |
 | **dev-browser** | Browser automation | Persistent page state, ARIA snapshots, screenshot capability |
 | **web** | Web search & browser | Multi-backend search (DuckDuckGo/Tavily), page extraction, Playwright automation |
 | **skill-installer** | Dynamic skill management | Registry installation, multi-source support (Git/URL/local) |
@@ -291,7 +292,8 @@ alfred/
 │   ├── invest/               # Unified investment analysis (macro liquidity, value scoring, China market signals)
 │   ├── gray-rhino/           # Risk trend alerts
 │   ├── daily-attractor/      # Daily market monitoring
-│   ├── paper-discovery/      # AI/ML paper discovery
+│   ├── papers/               # researcher papers CLI (trending / lookup / deep-read)
+│   ├── paper-discovery/      # legacy paper scripts (excluded for demo_agent)
 │   ├── dev-browser/          # Browser automation
 │   ├── web/                  # Web search & browser automation
 │   ├── skill-installer/      # Dynamic skill installation
