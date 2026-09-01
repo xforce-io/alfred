@@ -155,6 +155,12 @@ class SidecarLauncher:
         # #155: skill scripts (analyze.py) inherit agent model intent via env.
         env["EVERBOT_AGENT"] = agent_name
         env["ALFRED_AGENT"] = agent_name
+        # Workspace ``bin/`` (e.g. a kairo write-guard wrapper) must win PATH
+        # inside the sidecar, including run_command children.
+        if agent_workspace is not None:
+            ws_bin = Path(agent_workspace).expanduser().resolve() / "bin"
+            if ws_bin.is_dir():
+                env["PATH"] = f"{ws_bin}:{env.get('PATH', '')}"
         default_cloud = self._llms[default]["cloud"]  # per-agent 模型的 cloud(决定 key/VOLCENGINE 处理)
         api_key = self._clouds[default_cloud].get("api_key")
         if api_key:
