@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol
 
 from .mailbox import compose_message_with_mailbox_updates
+from .skill_catalog import append_catalog_if_listing_query, load_installed_skills
 
 
 @dataclass
@@ -22,6 +23,7 @@ class RuntimeDeps:
 
     load_workspace_instructions: Callable[[str], str]
     list_due_tasks: Optional[Callable[[str], Iterable[Dict[str, Any]]]] = None
+    list_installed_skills: Optional[Callable[[str], Iterable[Dict[str, Any]]]] = None
     heartbeat_instructions: str = ""
 
 
@@ -51,6 +53,13 @@ class PrimaryContextStrategy:
     def build_message(self, session: Any, trigger: str, deps: RuntimeDeps) -> BuildMessageResult:
         mailbox = getattr(session, "mailbox", []) or []
         message, ack_ids = compose_message_with_mailbox_updates(trigger, mailbox)
+        lister = deps.list_installed_skills or load_installed_skills
+        try:
+            skills = list(lister(_agent_name_from_session(session)) or [])
+        except Exception:
+            skills = None
+        if skills is not None:
+            message = append_catalog_if_listing_query(trigger, message, skills)
         return BuildMessageResult(message=message, mailbox_ack_ids=ack_ids)
 
 
