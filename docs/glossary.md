@@ -3,6 +3,7 @@
 | 规范名 | 一句话定义 | 禁止别称 |
 |---|---|---|
 | grok-cli | 宿主 spawn 本机 `grok` CLI 作为 agent runtime 的路径，走 OAuth 登录而非 HTTP 模型端点。 | grok HTTP、xAI API、SpaceXAI HTTP |
+| papers | 调用 PATH 上 `researcher papers` 的 agent skill：热榜、按名/ID 查篇、Library 深读。 | paper-discovery、热榜脚本 |
 
 # Alfred 术语表
 
