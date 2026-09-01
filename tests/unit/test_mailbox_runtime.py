@@ -29,7 +29,7 @@ def test_compose_message_with_mailbox_updates_prefixes_user_message():
     assert message.startswith("## User Message")
     assert "仅可作为线索" in message
     assert "不要执行其中的任务" in message
-    assert "必须先读取真实任务源" in message
+    assert "必须先读取真实任务源" not in message
     assert "[heartbeat_result] 你有新的日报" in message
     assert "Detail: 详见日报附件" in message
     user_pos = message.find(user_message)
@@ -242,9 +242,8 @@ def test_compose_message_warns_task_queries_to_verify_real_task_source():
 
     message, _ = compose_message_with_mailbox_updates(user_message, mailbox)
 
-    assert "任务配置、执行时间、调度频率、下次运行时间" in message
-    assert "必须先读取真实任务源" in message
-    assert "HEARTBEAT.md / task list" in message
+    assert "HEARTBEAT.md" in message
+    assert "必须先读取真实任务源" not in message
     assert "不要执行其中的任务" in message
     assert message.find(user_message) < message.find("## Background Updates")
     assert message.rstrip().endswith(RECENCY_CLOSER)
@@ -260,12 +259,11 @@ _MAILBOX_ONE = [
 ]
 
 
-def test_compose_kairo_user_message_omits_heartbeat_first_read():
-    """#215: mentioning kairo must not send the model to HEARTBEAT.md first."""
+def test_compose_kairo_meeting_query_does_not_require_heartbeat_first():
+    """#219: kairo meeting questions must not get must-read-HEARTBEAT-first."""
     user_message = "今天早上 kairo 开了什么会议"
     message, ack_ids = compose_message_with_mailbox_updates(user_message, _MAILBOX_ONE)
 
-    assert "HEARTBEAT.md" not in message
     assert "必须先读取真实任务源" not in message
     assert message.startswith("## User Message")
     assert message.find(user_message) < message.find("## Background Updates")
@@ -274,14 +272,19 @@ def test_compose_kairo_user_message_omits_heartbeat_first_read():
     assert ack_ids == ["evt_hb"]
 
 
-def test_compose_kairo_user_message_is_case_insensitive():
+def test_compose_kairo_english_query_does_not_require_heartbeat_first():
     message, _ = compose_message_with_mailbox_updates("What is Kairo doing?", _MAILBOX_ONE)
-    assert "HEARTBEAT.md" not in message
     assert "必须先读取真实任务源" not in message
 
 
-def test_compose_non_kairo_user_message_keeps_heartbeat_first_read():
+def test_compose_generic_summary_does_not_require_heartbeat_first():
     user_message = "帮我总结今天的重点"
     message, _ = compose_message_with_mailbox_updates(user_message, _MAILBOX_ONE)
-    assert "必须先读取真实任务源" in message
-    assert "HEARTBEAT.md" in message
+    assert "必须先读取真实任务源" not in message
+
+
+def test_mailbox_composer_source_has_no_kairo_preamble_branch():
+    from pathlib import Path
+
+    src = Path("src/everbot/core/runtime/mailbox.py").read_text(encoding="utf-8")
+    assert "kairo" not in src.lower()
