@@ -70,6 +70,26 @@ def test_build_injects_everbot_agent_env_for_skill_model_intent(tmp_path):
     assert spec.env.get("ALFRED_AGENT") == "demo_agent"
 
 
+def test_build_prepends_workspace_bin_to_path_when_present(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    ws = tmp_path / "agent-ws"
+    bindir = ws / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "kairo").write_text("#!/bin/sh\n", encoding="utf-8")
+    spec = _launcher(tmp_path).build(
+        "demo_agent", system_prompt="x", agent_workspace=ws
+    )
+    path = spec.env.get("PATH") or ""
+    assert path.split(":")[0] == str(bindir.resolve())
+    assert "/usr/bin" in path
+
+
+def test_build_does_not_prepend_missing_workspace_bin(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    spec = _launcher(tmp_path).build("demo_agent", system_prompt="x")
+    assert spec.env.get("PATH") == "/usr/bin:/bin"
+
+
 def test_build_unknown_model_fails_fast(tmp_path):
     launcher = SidecarLauncher(
         dist_path=tmp_path / "x.js", data_dir_root=tmp_path / "d", node_bin="node",
