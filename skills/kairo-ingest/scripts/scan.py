@@ -111,6 +111,59 @@ def recommend_topic(xxx: str, topics: list[dict]) -> dict:
     return {"status": "unspecified", "topic": None, "candidates": winners}
 
 
+_MIN_HINT_FRAG = 2
+_HINT_STOP = frozenset(
+    {"讨论", "沟通", "例会", "准备", "部分", "计划", "逻辑", "产品", "系统"}
+)
+
+
+def fuzzy_topic_hint(xxx: str, topics: list[dict]) -> tuple[str | None, list[str]]:
+    """Best existing-topic guess when slug is not a substring of XXX.
+
+    Score = longest fragment of a topic name that appears in XXX; ties go
+    to the earlier occurrence in XXX. Never invents a new topic.
+    """
+    xxx = (xxx or "").strip()
+    scored: list[tuple[int, int, str]] = []
+    for topic in topics:
+        slug = topic["slug"]
+        names = {slug, topic.get("topic") or slug}
+        best: tuple[int, int, str] | None = None
+        for name in names:
+            if not name:
+                continue
+            for length in range(len(name), _MIN_HINT_FRAG - 1, -1):
+                hit = False
+                for start in range(len(name) - length + 1):
+                    frag = name[start : start + length]
+                    if frag in _HINT_STOP:
+                        continue
+                    pos = xxx.find(frag)
+                    if pos >= 0:
+                        cand = (length, -pos, slug)
+                        if best is None or cand[:2] > best[:2]:
+                            best = cand
+                        hit = True
+                        break
+                if hit:
+                    break
+        if best is not None:
+            scored.append(best)
+    if not scored:
+        return None, []
+    scored.sort(reverse=True)
+    best_len = scored[0][0]
+    winners: list[str] = []
+    seen: set[str] = set()
+    for length, _negpos, slug in scored:
+        if length != best_len:
+            continue
+        if slug not in seen:
+            winners.append(slug)
+            seen.add(slug)
+    return winners[0], winners
+
+
 def collect_downloads(folder: Path) -> list[dict]:
     rows: list[dict] = []
     if not folder.is_dir():
@@ -258,6 +311,14 @@ def merge_items(
     items: list[dict] = []
     for title, forms in grouped.items():
         rec = recommend_topic(forms[0]["xxx"], topics)
+        hint, hint_candidates = fuzzy_topic_hint(forms[0]["xxx"], topics)
+        if rec["status"] == "matched":
+            topic_hint = rec["topic"]
+            hint_candidates = rec["candidates"]
+        else:
+            topic_hint = hint
+            if rec["candidates"] and not hint_candidates:
+                hint_candidates = rec["candidates"]
         names = {Path(form["path"]).name for form in forms}
         form_paths = {form["path"] for form in forms}
         already = (
@@ -280,6 +341,8 @@ def merge_items(
                 "topic_status": rec["status"],
                 "topic": rec["topic"],
                 "candidates": rec["candidates"],
+                "topic_hint": topic_hint,
+                "hint_candidates": hint_candidates,
                 "action": "skip" if already else "add",
                 "skip_reason": "already-ingested" if already else None,
                 "forms": [
@@ -328,12 +391,44 @@ def scan(
     }
 
 
+def format_scan_report(payload: dict) -> str:
+    items = payload.get("items") or []
+    matched = [i for i in items if i.get("action") == "add" and i.get("topic")]
+    pending = [i for i in items if i.get("action") == "add" and not i.get("topic")]
+    skipped = [i for i in items if i.get("action") == "skip"]
+    lines = [
+        "kairo-ingest 扫描",
+        f"- 已匹配可入库: {len(matched)} 条",
+        f"- 已跳过已入库: {len(skipped)} 条",
+        f"- 待指定: {len(pending)} 条（不自动 add，下面每条都有推荐 Topic）",
+    ]
+    if matched:
+        lines.append("已匹配:")
+        for item in matched:
+            lines.append(f"- {item['title']} → {item['topic']}")
+    if pending:
+        lines.append("待指定（推荐来自已有 Topic，请确认或改选/跳过）:")
+        for index, item in enumerate(pending, 1):
+            hint = item.get("topic_hint") or "无"
+            alts = [
+                c
+                for c in (item.get("hint_candidates") or [])
+                if c and c != item.get("topic_hint")
+            ]
+            extra = f" 备选={','.join(alts)}" if alts else ""
+            lines.append(f"{index}. {item['title']}  推荐={hint}{extra}")
+    if not matched and not pending:
+        lines.append("无待处理条目")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Scan XXX-YYMMDD materials for Kairo ingest")
     parser.add_argument("--root", default=str(Path.home() / "kairo"))
     parser.add_argument("--downloads", default=str(Path.home() / "Downloads"))
     parser.add_argument("--voice-memos", default=str(DEFAULT_VOICE_DIR))
     parser.add_argument("--kairo-bin", default=kairo_bin())
+    parser.add_argument("--format", choices=("json", "text"), default="json")
     args = parser.parse_args(argv)
     try:
         payload = scan(
@@ -345,8 +440,11 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
-    sys.stdout.write("\n")
+    if args.format == "text":
+        sys.stdout.write(format_scan_report(payload) + "\n")
+    else:
+        json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
     return 0
 
 

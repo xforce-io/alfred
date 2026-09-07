@@ -185,7 +185,7 @@ def run_actions(
 def format_receipt(plan: dict, result: dict) -> str:
     lines = ["kairo-ingest 完成" if not result.get("dry_run") else "kairo-ingest 预览（未执行）"]
     pending = [
-        item["title"]
+        item
         for item in plan.get("items") or []
         if item.get("action") != "skip" and not item.get("topic")
     ]
@@ -202,7 +202,9 @@ def format_receipt(plan: dict, result: dict) -> str:
         suffix = f" ({extra})" if extra else ""
         lines.append(f"- step {Path(rec['cwd']).name}{suffix}")
     if pending:
-        lines.append("- 待指定未执行: " + ", ".join(pending))
+        for item in pending:
+            hint = item.get("topic_hint") or "无"
+            lines.append(f"- 待指定 {item['title']} 推荐={hint}")
     if skipped:
         lines.append(f"- 已跳过已入库 {len(skipped)} 条")
     for rec in result.get("failed") or []:

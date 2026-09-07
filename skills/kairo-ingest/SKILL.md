@@ -19,7 +19,7 @@ tags: [kairo, ingest, voice-memo, downloads]
 - **不** `kairo new` / `tag create` / `kairo run`
 - **不**把文件拷进 `demo_agent` 工作区
 - **不**自己做 ASR；转写由 `kairo step` 完成
-- 未命中已有 Topic 的条目标 **待指定**，等用户从现有列表里选或跳过
+- 未唯一命中已有 Topic 的条目标 **待指定**：**必须给出推荐 Topic**（`topic_hint`，只来自已有 slug），等用户确认/改选/跳过；禁止只丢标题让用户填 slug；禁止 `kairo new`
 
 ## 命令
 
@@ -29,8 +29,9 @@ tags: [kairo, ingest, voice-memo, downloads]
 INGEST="$SKILL_DIR/scripts"
 ROOT="${KAIRO_SERVE_ROOT:-$HOME/kairo}"
 
-# 1) 只读扫描
+# 1) 只读扫描（给用户看用 --format text，含每条推荐 Topic）
 python "$INGEST/scan.py" --root "$ROOT"
+python "$INGEST/scan.py" --root "$ROOT" --format text
 
 # 2) 把用户确认后的 JSON 存成计划（可改 topic / action=skip）
 # 3) 确认执行后才 apply；未确认只允许 --dry-run
@@ -42,8 +43,8 @@ python "$INGEST/apply.py" --plan /tmp/kairo-ingest-plan.json
 
 ## Agent 流程（强制）
 
-1. 跑 `scan.py`，按 JSON 列清单。对每条写清：来源、推荐 Topic、推荐 Ref 标题、`--occurred`、是否 `--copy`、将执行的命令。
-2. `topic_status=unspecified` 或 `topic=null`：**待指定**，不预填 Topic，列出 `kairo list` 已有 slug 供选择，或跳过。
+1. 跑 `scan.py`。给用户的清单**必须**含每条推荐 Topic。优先把 `scan.py --format text` 原文发出去。
+2. `topic` 为空：**待指定**，用 JSON 的 `topic_hint` / `hint_candidates` 作为推荐（已有 Topic，不是新建）。禁止只列标题让用户自己填 slug。用户确认推荐、改成别的已有 slug、或跳过之后才 add。
 3. `action=skip`（已入库）标明跳过原因，不重复 add。
 4. **停下来等确认**。用户本轮没有「确认执行 / 直接执行 / 不用问了」时，禁止 `apply.py`（除非 `--dry-run`），禁止手写 `kairo add` / `step`。
 5. 用户可改 Topic（必须是已有 slug）、改成 skip、或给待指定补上已有 Topic。把确认后的 JSON 写到 `tmp/kairo-ingest-plan.json`（agent tmp 目录）。
@@ -55,7 +56,8 @@ python "$INGEST/apply.py" --plan /tmp/kairo-ingest-plan.json
 
 - 文件名 / 语音备忘录 **标题** 严格 `XXX-YYMMDD`；跳过 `新录音*`
 - 语音备忘录读 `CloudRecordings.db` 标题，磁盘文件是时间戳
-- Topic：对已有 slug / topic 名最长匹配；零命中或并列 → 待指定
+- Topic 唯一匹配：`topic` 有值，例行可自动 add
+- 零命中或并列：`topic` 为空，但 `topic_hint` 仍给已有 Topic 的模糊推荐（更长片段优先，同长取更靠前）；没有重叠则推荐=无
 - 同一 `XXX-YYMMDD` 的录音 + 文档合成一条 Ref（音频作主 form，其余 `--to`）
 - 语音备忘录默认 `--copy`；Downloads 默认识路径
 - 已入库判定（命中任一即 skip，回执只报条数、不逐条推荐）：Kairo 标题等于 `XXX-YYMMDD` 或其 `XXX-YYYYMMDD` / 下划线变体；源文件 basename 或完整路径已出现在某条 Ref 的 location；或 `.kairo/kairo-ingest-seen.json` 已记录（apply 成功后写入）
@@ -64,7 +66,7 @@ python "$INGEST/apply.py" --plan /tmp/kairo-ingest-plan.json
 
 demo_agent 每 30 分钟 isolated routine 会跑本技能。例行路径的**站立授权**仅覆盖「scan 已唯一匹配到已有 Topic」的条目：写 plan 后直接 `apply.py`（add + step），把回执发给用户。无新匹配时回执写明「无已匹配可入库」，避免空转误报成功。
 
-- `topic` 为空 / 待指定：只出现在回执里，**禁止 add**
+- `topic` 为空 / 待指定：**禁止 add**；回执每条必须带 `推荐=topic_hint`（可附备选）。给用户看时用 `scan.py --format text`，不要只丢标题列表
 - 已入库 skip：不重复 add，回执只写「已跳过已入库 N 条」，不要把旧标题再推给用户
 - 禁止 `kairo new` / `tag create` / `kairo run`
 - 写操作走 `KAIRO_REAL_BIN`，禁止 `demo_agent/bin/kairo`

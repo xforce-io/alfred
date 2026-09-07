@@ -40,6 +40,8 @@ TOPICS = [
     {"slug": "ai-native", "topic": "ai-native"},
     {"slug": "流程质量", "topic": "流程质量"},
     {"slug": "未分类", "topic": "未分类"},
+    {"slug": "医院机器人调度", "topic": "医院机器人调度"},
+    {"slug": "机器人业务", "topic": "机器人业务"},
 ]
 
 
@@ -109,6 +111,82 @@ def test_recommend_topic_does_not_invent_new_topic(scan):
     rec = scan.recommend_topic("人员盘点任务", TOPICS)
     assert rec["topic"] is None
     assert rec["status"] == "unspecified"
+
+
+def test_fuzzy_hint_energy_org_prefers_energy_topic(scan):
+    hint, cands = scan.fuzzy_topic_hint("能源组织讨论", TOPICS)
+    assert hint == "能源梳理"
+    assert "能源梳理" in cands
+
+
+def test_fuzzy_hint_platform_org_prefers_org_topic(scan):
+    hint, cands = scan.fuzzy_topic_hint("中台组织讨论", TOPICS)
+    assert hint == "组织架构讨论"
+
+
+def test_fuzzy_hint_robot_prefers_hospital_dispatch(scan):
+    hint, _cands = scan.fuzzy_topic_hint("机器人调度仿真与参数自学习讨论纪要", TOPICS)
+    assert hint == "医院机器人调度"
+
+
+def test_fuzzy_hint_none_when_no_overlap(scan):
+    hint, cands = scan.fuzzy_topic_hint("传奇沟通", TOPICS)
+    assert hint is None
+    assert cands == []
+
+
+def test_fuzzy_hint_ignores_generic_discussion_suffix(scan):
+    hint, cands = scan.fuzzy_topic_hint("戴云讨论", TOPICS)
+    assert hint is None
+    assert cands == []
+    hint, cands = scan.fuzzy_topic_hint("能源例会", TOPICS)
+    assert hint == "能源梳理"
+    assert "算法例会" not in cands
+
+
+def test_merge_unspecified_carries_topic_hint(scan):
+    items = scan.merge_items(
+        [
+            {
+                "title": "能源组织讨论-260907",
+                "xxx": "能源组织讨论",
+                "occurred": "2026-09-07",
+                "path": "/rec/20260907 112244.m4a",
+                "source": "voice-memo",
+                "copy": True,
+            }
+        ],
+        TOPICS,
+        existing_titles=set(),
+        existing_basenames=set(),
+    )
+    assert items[0]["topic"] is None
+    assert items[0]["action"] == "add"
+    assert items[0]["topic_hint"] == "能源梳理"
+
+
+def test_format_scan_report_includes_hint(scan):
+    text = scan.format_scan_report(
+        {
+            "items": [
+                {
+                    "title": "能源组织讨论-260907",
+                    "action": "add",
+                    "topic": None,
+                    "topic_hint": "能源梳理",
+                    "hint_candidates": ["能源梳理", "组织架构讨论"],
+                },
+                {
+                    "title": "算法例会-260904",
+                    "action": "skip",
+                    "topic": "算法例会",
+                },
+            ]
+        }
+    )
+    assert "能源组织讨论-260907  推荐=能源梳理" in text
+    assert "备选=组织架构讨论" in text
+    assert "待指定: 1 条" in text
 
 
 def test_merge_groups_same_title_and_prefers_audio(scan):
@@ -344,7 +422,12 @@ def test_format_receipt_lists_pending_and_failures(apply):
     text = apply.format_receipt(
         {
             "items": [
-                {"title": "传奇沟通-260903", "topic": None, "action": "add"},
+                {
+                    "title": "传奇沟通-260903",
+                    "topic": None,
+                    "topic_hint": "团队管理",
+                    "action": "add",
+                },
                 {"title": "算法例会-260904", "topic": "算法例会", "action": "skip"},
             ]
         },
@@ -364,7 +447,7 @@ def test_format_receipt_lists_pending_and_failures(apply):
     assert text.startswith("kairo-ingest 完成")
     assert "流程质量-260902" in text
     assert "step 流程质量" in text
-    assert "待指定未执行: 传奇沟通-260903" in text
+    assert "待指定 传奇沟通-260903 推荐=团队管理" in text
     assert "已跳过已入库 1 条" in text
     assert "已跳过: 算法例会-260904" not in text
 
