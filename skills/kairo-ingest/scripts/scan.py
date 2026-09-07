@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+"""Scan Voice Memos and Downloads for XXX-YYMMDD items; recommend existing Kairo topics."""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+STEM_RE = re.compile(r"^(.+)-(\d{6})$")
+STEM8_RE = re.compile(r"^(.+)-(\d{8})$")
+DEFAULT_VOICE_RE = re.compile(r"^新录音")
+AUDIO_EXT = {".m4a", ".wav", ".mp3", ".aac", ".caf"}
+SEEN_FILE = Path(".kairo") / "kairo-ingest-seen.json"
+DEFAULT_VOICE_DIR = (
+    Path.home()
+    / "Library"
+    / "Group Containers"
+    / "group.com.apple.VoiceMemos.shared"
+    / "Recordings"
+)
+
+
+def kairo_bin() -> str:
+    return os.environ.get("KAIRO_REAL_BIN") or str(Path.home() / ".local/bin/kairo")
+
+
+def parse_stem(stem: str) -> dict | None:
+    stem = (stem or "").strip()
+    if not stem or DEFAULT_VOICE_RE.match(stem):
+        return None
+    matched = STEM_RE.match(stem)
+    if not matched:
+        return None
+    xxx, yymmdd = matched.group(1).strip(), matched.group(2)
+    if not xxx or DEFAULT_VOICE_RE.match(xxx):
+        return None
+    occurred = _occurred(yymmdd)
+    if not occurred:
+        return None
+    return {
+        "xxx": xxx,
+        "title": f"{xxx}-{yymmdd}",
+        "yymmdd": yymmdd,
+        "occurred": occurred,
+    }
+
+
+def canonical_title(stem: str) -> str | None:
+    """Map XXX-YYMMDD / XXX_YYMMDD / XXX-YYYYMMDD onto XXX-YYMMDD."""
+    text = (stem or "").strip().replace("_", "-")
+    if not text:
+        return None
+    matched8 = STEM8_RE.match(text)
+    if matched8:
+        ymd = matched8.group(2)
+        parsed = parse_stem(f"{matched8.group(1)}-{ymd[2:]}")
+        return parsed["title"] if parsed else None
+    parsed = parse_stem(text)
+    return parsed["title"] if parsed else None
+
+
+def _occurred(yymmdd: str) -> str | None:
+    year = 2000 + int(yymmdd[:2])
+    month = int(yymmdd[2:4])
+    day = int(yymmdd[4:6])
+    try:
+        dt.date(year, month, day)
+    except ValueError:
+        return None
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def recommend_topic(xxx: str, topics: list[dict]) -> dict:
+    xxx = (xxx or "").strip()
+    exact: list[str] = []
+    for topic in topics:
+        slug = topic["slug"]
+        label = topic.get("topic") or slug
+        if xxx == slug or xxx == label:
+            exact.append(slug)
+    if len(exact) == 1:
+        return {"status": "matched", "topic": exact[0], "candidates": exact}
+    if len(exact) > 1:
+        return {"status": "unspecified", "topic": None, "candidates": exact}
+
+    scored: list[tuple[int, str]] = []
+    for topic in topics:
+        slug = topic["slug"]
+        label = topic.get("topic") or slug
+        lengths: list[int] = []
+        if slug and slug in xxx:
+            lengths.append(len(slug))
+        if label and label != slug and label in xxx:
+            lengths.append(len(label))
+        if lengths:
+            scored.append((max(lengths), slug))
+    if not scored:
+        return {"status": "unspecified", "topic": None, "candidates": []}
+    best = max(length for length, _ in scored)
+    winners = sorted({slug for length, slug in scored if length == best})
+    if len(winners) == 1:
+        return {"status": "matched", "topic": winners[0], "candidates": winners}
+    return {"status": "unspecified", "topic": None, "candidates": winners}
+
+
+def collect_downloads(folder: Path) -> list[dict]:
+    rows: list[dict] = []
+    if not folder.is_dir():
+        return rows
+    for path in sorted(folder.iterdir()):
+        if not path.is_file() or path.name.startswith("."):
+            continue
+        parsed = parse_stem(path.stem)
+        if not parsed:
+            continue
+        rows.append(
+            {
+                **parsed,
+                "path": str(path.resolve()),
+                "source": "downloads",
+                "copy": False,
+            }
+        )
+    return rows
+
+
+def collect_voice_memos(recordings_dir: Path) -> list[dict]:
+    rows: list[dict] = []
+    if not recordings_dir.is_dir():
+        return rows
+    for label, rel in _voice_memo_rows(recordings_dir):
+        parsed = parse_stem(label)
+        if not parsed:
+            continue
+        path = recordings_dir / rel
+        if not path.is_file():
+            continue
+        rows.append(
+            {
+                **parsed,
+                "path": str(path.resolve()),
+                "source": "voice-memo",
+                "copy": True,
+            }
+        )
+    return rows
+
+
+def _voice_memo_rows(recordings_dir: Path) -> list[tuple[str, str]]:
+    db = recordings_dir / "CloudRecordings.db"
+    if not db.is_file():
+        return []
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        for name in ("CloudRecordings.db", "CloudRecordings.db-wal", "CloudRecordings.db-shm"):
+            src = recordings_dir / name
+            if src.exists():
+                shutil.copy2(src, tmp_path / name)
+        conn = sqlite3.connect(str(tmp_path / "CloudRecordings.db"))
+        try:
+            cur = conn.execute(
+                "SELECT COALESCE(ZCUSTOMLABELFORSORTING, ZENCRYPTEDTITLE, ''), "
+                "COALESCE(ZPATH, '') FROM ZCLOUDRECORDING"
+            )
+            out: list[tuple[str, str]] = []
+            for label, rel in cur.fetchall():
+                label = (label or "").strip()
+                rel = (rel or "").strip()
+                if label and rel:
+                    out.append((label, rel))
+            return out
+        finally:
+            conn.close()
+
+
+def _add_title(titles: set[str], raw: str) -> None:
+    raw = (raw or "").strip()
+    if not raw:
+        return
+    titles.add(raw)
+    canon = canonical_title(raw)
+    if canon:
+        titles.add(canon)
+
+
+def load_seen_ledger(root: Path) -> tuple[set[str], set[str], set[str]]:
+    titles: set[str] = set()
+    basenames: set[str] = set()
+    paths: set[str] = set()
+    seen_path = root / SEEN_FILE
+    if not seen_path.is_file():
+        return titles, basenames, paths
+    try:
+        data = json.loads(seen_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return titles, basenames, paths
+    for title in data.get("titles") or []:
+        _add_title(titles, str(title))
+    for name in data.get("basenames") or []:
+        if name:
+            basenames.add(str(name))
+    for path in data.get("paths") or []:
+        if path:
+            paths.add(str(path))
+    return titles, basenames, paths
+
+
+def load_existing(root: Path) -> tuple[set[str], set[str], set[str]]:
+    titles: set[str] = set()
+    basenames: set[str] = set()
+    paths: set[str] = set()
+    if not root.is_dir():
+        return titles, basenames, paths
+    for manifest in root.glob("*/references/*/manifest.yaml"):
+        text = manifest.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if line.startswith("title:"):
+                _add_title(titles, line.split(":", 1)[1].strip().strip("'\""))
+            stripped = line.strip()
+            if "location:" in stripped:
+                loc = stripped.split("location:", 1)[1].strip()
+                if loc:
+                    basenames.add(Path(loc).name)
+                    paths.add(loc)
+    led_titles, led_bases, led_paths = load_seen_ledger(root)
+    titles |= led_titles
+    basenames |= led_bases
+    paths |= led_paths
+    return titles, basenames, paths
+
+
+def merge_items(
+    rows: list[dict],
+    topics: list[dict],
+    existing_titles: set[str],
+    existing_basenames: set[str],
+    existing_paths: set[str] | None = None,
+) -> list[dict]:
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(row["title"], []).append(row)
+
+    known_titles = set(existing_titles)
+    for raw in existing_titles:
+        canon = canonical_title(raw)
+        if canon:
+            known_titles.add(canon)
+    known_paths = set(existing_paths or ())
+
+    items: list[dict] = []
+    for title, forms in grouped.items():
+        rec = recommend_topic(forms[0]["xxx"], topics)
+        names = {Path(form["path"]).name for form in forms}
+        form_paths = {form["path"] for form in forms}
+        already = (
+            title in known_titles
+            or bool(names & existing_basenames)
+            or bool(form_paths & known_paths)
+        )
+        forms_sorted = sorted(
+            forms,
+            key=lambda form: (
+                0 if Path(form["path"]).suffix.lower() in AUDIO_EXT else 1,
+                0 if form["source"] == "voice-memo" else 1,
+            ),
+        )
+        items.append(
+            {
+                "title": title,
+                "xxx": forms[0]["xxx"],
+                "occurred": forms[0]["occurred"],
+                "topic_status": rec["status"],
+                "topic": rec["topic"],
+                "candidates": rec["candidates"],
+                "action": "skip" if already else "add",
+                "skip_reason": "already-ingested" if already else None,
+                "forms": [
+                    {
+                        "path": form["path"],
+                        "source": form["source"],
+                        "copy": bool(form["copy"]),
+                    }
+                    for form in forms_sorted
+                ],
+            }
+        )
+    items.sort(key=lambda item: (item["occurred"], item["title"]))
+    return items
+
+
+def list_topics(root: Path, binary: str) -> list[dict]:
+    result = subprocess.run(
+        [binary, "list", "--json", str(root)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "kairo list failed")
+    data = json.loads(result.stdout)
+    if isinstance(data, list):
+        return data
+    return data.get("topics") or data.get("workspaces") or []
+
+
+def scan(
+    root: Path,
+    downloads: Path,
+    recordings: Path,
+    binary: str | None = None,
+) -> dict:
+    binary = binary or kairo_bin()
+    topics = list_topics(root, binary)
+    titles, basenames, paths = load_existing(root)
+    rows = collect_downloads(downloads) + collect_voice_memos(recordings)
+    return {
+        "root": str(root),
+        "topics": [{"slug": t["slug"], "topic": t.get("topic") or t["slug"]} for t in topics],
+        "items": merge_items(rows, topics, titles, basenames, paths),
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Scan XXX-YYMMDD materials for Kairo ingest")
+    parser.add_argument("--root", default=str(Path.home() / "kairo"))
+    parser.add_argument("--downloads", default=str(Path.home() / "Downloads"))
+    parser.add_argument("--voice-memos", default=str(DEFAULT_VOICE_DIR))
+    parser.add_argument("--kairo-bin", default=kairo_bin())
+    args = parser.parse_args(argv)
+    try:
+        payload = scan(
+            Path(args.root).expanduser(),
+            Path(args.downloads).expanduser(),
+            Path(args.voice_memos).expanduser(),
+            args.kairo_bin,
+        )
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

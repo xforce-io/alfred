@@ -3,6 +3,7 @@
 | 规范名 | 一句话定义 | 禁止别称 |
 |---|---|---|
 | grok-cli | 宿主 spawn 本机 `grok` CLI 作为 agent runtime 的路径，走 OAuth 登录而非 HTTP 模型端点。 | grok HTTP、xAI API、SpaceXAI HTTP |
+| kairo-ingest | 扫描语音备忘录与 Downloads 中名为 XXX-YYMMDD 的材料，确认后登记到已有 Kairo Topic 并 step 进目标的技能。 | 入库、inbox |
 
 # Alfred 术语表
 
