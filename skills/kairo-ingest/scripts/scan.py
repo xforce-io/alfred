@@ -407,7 +407,12 @@ def format_scan_report(payload: dict) -> str:
         for item in matched:
             lines.append(f"- {item['title']} → {item['topic']}")
     if pending:
-        lines.append("待指定（推荐来自已有 Topic，请确认或改选/跳过）:")
+        pending = sorted(
+            pending,
+            key=lambda item: (item.get("occurred") or "", item.get("title") or ""),
+            reverse=True,
+        )
+        lines.append("待指定（新→旧；推荐来自已有 Topic，请确认或改选/跳过）:")
         for index, item in enumerate(pending, 1):
             hint = item.get("topic_hint") or "无"
             alts = [

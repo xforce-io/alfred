@@ -189,6 +189,41 @@ def test_format_scan_report_includes_hint(scan):
     assert "待指定: 1 条" in text
 
 
+def test_format_scan_report_lists_newest_pending_first(scan):
+    text = scan.format_scan_report(
+        {
+            "items": [
+                {
+                    "title": "产品工厂务虚会-250926",
+                    "occurred": "2025-09-26",
+                    "action": "add",
+                    "topic": None,
+                    "topic_hint": None,
+                },
+                {
+                    "title": "中台组织讨论-260907",
+                    "occurred": "2026-09-07",
+                    "action": "add",
+                    "topic": None,
+                    "topic_hint": "组织架构讨论",
+                },
+                {
+                    "title": "能源组织讨论-260907",
+                    "occurred": "2026-09-07",
+                    "action": "add",
+                    "topic": None,
+                    "topic_hint": "能源梳理",
+                },
+            ]
+        }
+    )
+    pos_mid = text.find("中台组织讨论-260907")
+    pos_energy = text.find("能源组织讨论-260907")
+    pos_old = text.find("产品工厂务虚会-250926")
+    assert 0 <= pos_energy < pos_old
+    assert 0 <= pos_mid < pos_old
+
+
 def test_merge_groups_same_title_and_prefers_audio(scan):
     items = scan.merge_items(
         [
