@@ -29,9 +29,11 @@ tags: [kairo, ingest, voice-memo, downloads]
 INGEST="$SKILL_DIR/scripts"
 ROOT="${KAIRO_SERVE_ROOT:-$HOME/kairo}"
 
-# 1) 只读扫描（给用户看用 --format text，含每条推荐 Topic）
-python "$INGEST/scan.py" --root "$ROOT"
-python "$INGEST/scan.py" --root "$ROOT" --format text
+# 1) 只读扫描
+python "$INGEST/scan.py" --root "$ROOT"                 # JSON
+python "$INGEST/scan.py" --root "$ROOT" --format text     # 全量（含 skip 统计，仅调试）
+python "$INGEST/scan.py" --root "$ROOT" --only-new --mark-notified --format text
+# 例行给用户：仅新导入项；没有则 stdout=NO_USER_MESSAGE，不发 Telegram
 
 # 2) 把用户确认后的 JSON 存成计划（可改 topic / action=skip）
 # 3) 确认执行后才 apply；未确认只允许 --dry-run
@@ -64,10 +66,9 @@ python "$INGEST/apply.py" --plan /tmp/kairo-ingest-plan.json
 
 ## 例行任务
 
-demo_agent 每 30 分钟 isolated routine 会跑本技能。例行路径的**站立授权**仅覆盖「scan 已唯一匹配到已有 Topic」的条目：写 plan 后直接 `apply.py`（add + step），把回执发给用户。无新匹配时回执写明「无已匹配可入库」，避免空转误报成功。
+demo_agent 每 30 分钟 isolated routine。用户消息**只含本轮需要新导入的条目**；没有新导入则**整段回复必须恰好是** `NO_USER_MESSAGE`（框架不推 Telegram）。
 
-- `topic` 为空 / 待指定：**禁止 add**；回执每条必须带 `推荐=topic_hint`（可附备选）。给用户看时用 `scan.py --format text`，不要只丢标题列表
-- 已入库 skip：不重复 add，回执只写「已跳过已入库 N 条」，不要把旧标题再推给用户
-- 禁止 `kairo new` / `tag create` / `kairo run`
-- 写操作走 `KAIRO_REAL_BIN`，禁止 `demo_agent/bin/kairo`
-- 无已匹配条目时仍要回复「无已匹配可入库」+ 待指定清单，不能沉默结束
+1. `python "$SKILL_DIR/scripts/scan.py" --root "$HOME/kairo" --only-new --mark-notified --format text`
+2. 若 stdout 为 `NO_USER_MESSAGE`：你的回复全文只能是 `NO_USER_MESSAGE`，不要解释、不要 apply。
+3. 否则：对其中 `topic` 非空的条目 `apply.py`；发给用户的正文 = 该 stdout（可加 apply 回执）。禁止附带已跳过条数、禁止把旧待指定再推一遍。
+4. 待指定仍禁止 add；禁止 `kairo new` / `run`；写操作走 `KAIRO_REAL_BIN`。

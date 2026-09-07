@@ -189,6 +189,50 @@ def test_format_scan_report_includes_hint(scan):
     assert "待指定: 1 条" in text
 
 
+def test_new_import_items_drops_skip_and_already_notified(scan):
+    items = [
+        {"title": "旧待指定-260801", "action": "add", "topic": None},
+        {"title": "新待指定-260907", "action": "add", "topic": None},
+        {"title": "将入库-260907", "action": "add", "topic": "能源梳理"},
+        {"title": "已入库-260806", "action": "skip", "topic": "算法例会"},
+    ]
+    out = scan.new_import_items(items, notified={"旧待指定-260801"})
+    titles = [i["title"] for i in out]
+    assert titles == ["新待指定-260907", "将入库-260907"]
+
+
+def test_format_import_report_omits_skip_counts(scan):
+    text = scan.format_import_report(
+        [
+            {
+                "title": "能源组织讨论-260907",
+                "occurred": "2026-09-07",
+                "topic": None,
+                "topic_hint": "能源梳理",
+            }
+        ]
+    )
+    assert "待导入" in text
+    assert "能源组织讨论-260907  推荐=能源梳理" in text
+    assert "已跳过" not in text
+
+
+def test_only_new_marks_notified_and_then_silent(scan, tmp_path):
+    item = {
+        "title": "能源组织讨论-260907",
+        "xxx": "能源组织讨论",
+        "occurred": "2026-09-07",
+        "action": "add",
+        "topic": None,
+        "topic_hint": "能源梳理",
+    }
+    first = scan.new_import_items([item], scan.load_notified(tmp_path))
+    assert first
+    scan.save_notified(tmp_path, {item["title"]})
+    second = scan.new_import_items([item], scan.load_notified(tmp_path))
+    assert second == []
+
+
 def test_format_scan_report_lists_newest_pending_first(scan):
     text = scan.format_scan_report(
         {

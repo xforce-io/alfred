@@ -1020,6 +1020,34 @@ class TestSkillLogRecording:
         assert call_args.args[0] is task
         assert call_args.args[1] == "report content"
 
+    @pytest.mark.asyncio
+    async def test_silent_isolated_output_skips_user_delivery(self, tmp_path):
+        from src.everbot.core.runtime.cron import is_silent_isolated_output
+
+        assert is_silent_isolated_output("NO_USER_MESSAGE")
+        assert is_silent_isolated_output("NO_USER_MESSAGE\n")
+        assert not is_silent_isolated_output("kairo-ingest 待导入\n1. foo")
+
+        mgr = _seed_task(tmp_path, title="kairo-ingest", execution_mode="isolated")
+        executor = _make_executor(tmp_path, routine_manager=mgr)
+        task = mgr.load_task_list().tasks[0]
+        agent = MagicMock()
+        executor._create_job_agent = AsyncMock(return_value=agent)
+        executor._build_job_system_prompt = MagicMock(return_value="sys")
+        executor._record_skill_log = MagicMock()
+        executor._observe_provenance = MagicMock()
+        executor._append_run_provenance = MagicMock(side_effect=lambda result, _agent: result)
+        executor.delivery.deposit_job_event = AsyncMock()
+        executor.delivery.inject_to_history = AsyncMock()
+        executor.delivery._emit_realtime = AsyncMock()
+        run_agent = AsyncMock(return_value="NO_USER_MESSAGE")
+
+        result = await executor._run_isolated_agent(task, "run_silent", run_agent=run_agent)
+        assert result is None
+        executor.delivery.deposit_job_event.assert_not_awaited()
+        executor.delivery.inject_to_history.assert_not_awaited()
+        executor.delivery._emit_realtime.assert_not_awaited()
+
 
 class TestCreateJobAgentProviderRouting:
     """CronExecutor._create_job_agent must route creation through the per-agent

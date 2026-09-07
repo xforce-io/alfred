@@ -55,6 +55,23 @@ ALLOWED_JOBS: frozenset[str] = frozenset({
 # Intentionally excludes "skill_evaluate" — that is a cron job, not an
 # isolated skill; running it through _run_isolated_skill() would bypass
 # the normal cron scheduling and concurrency controls.
+SILENT_ISOLATED_TOKEN = "NO_USER_MESSAGE"
+
+
+def is_silent_isolated_output(result: Optional[str]) -> bool:
+    """True when an isolated agent turn asked for no user-facing delivery."""
+    if result is None:
+        return True
+    text = str(result).strip()
+    if not text:
+        return True
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped == SILENT_ISOLATED_TOKEN
+    return True
+
+
 ALLOWED_SKILLS: frozenset[str] = frozenset({
     "health_check",
     "memory_review",
@@ -707,7 +724,7 @@ class CronExecutor:
             await self.delivery._emit_realtime(fail_msg, run_id)
             raise
 
-    async def _run_isolated_agent(self, task: Task, run_id: str, *, run_agent: Callable) -> str:
+    async def _run_isolated_agent(self, task: Task, run_id: str, *, run_agent: Callable) -> Optional[str]:
         """Execute an isolated agent task with a dedicated LLM session."""
         job_session_id = build_job_session_id(task)
         task_title = str(task.title or "")
@@ -739,6 +756,9 @@ class CronExecutor:
             # #130 T1: mechanically append each signal's top-1 source link to the
             # delivered result (independent of the LLM prose).
             result = self._append_run_provenance(result, agent)
+            if is_silent_isolated_output(result):
+                self._record_skill_log(task, result, job_session_id, agent=agent)
+                return None
 
             # #130 T2: the projection anchor must be the milkie run id (deref-able by the
             # consuming agent via get_execution/get_lineage under milkie#200's

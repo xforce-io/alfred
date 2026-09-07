@@ -19,6 +19,8 @@ STEM8_RE = re.compile(r"^(.+)-(\d{8})$")
 DEFAULT_VOICE_RE = re.compile(r"^新录音")
 AUDIO_EXT = {".m4a", ".wav", ".mp3", ".aac", ".caf"}
 SEEN_FILE = Path(".kairo") / "kairo-ingest-seen.json"
+NOTIFIED_FILE = Path(".kairo") / "kairo-ingest-notified.json"
+SILENT_TOKEN = "NO_USER_MESSAGE"
 DEFAULT_VOICE_DIR = (
     Path.home()
     / "Library"
@@ -391,6 +393,67 @@ def scan(
     }
 
 
+def load_notified(root: Path) -> set[str]:
+    path = root / NOTIFIED_FILE
+    if not path.is_file():
+        return set()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    titles = data.get("titles") if isinstance(data, dict) else data
+    return {str(t) for t in (titles or []) if t}
+
+
+def save_notified(root: Path, titles: set[str]) -> None:
+    path = root / NOTIFIED_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"titles": sorted(titles)}
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def new_import_items(items: list[dict], notified: set[str]) -> list[dict]:
+    """Items that still need import and have not been notified as pending."""
+    out: list[dict] = []
+    for item in items:
+        if item.get("action") != "add":
+            continue
+        if item.get("topic"):
+            out.append(item)
+            continue
+        if item.get("title") not in notified:
+            out.append(item)
+    return out
+
+
+def format_import_report(items: list[dict]) -> str:
+    """User-facing message: only items that need import, newest first."""
+    items = sorted(
+        items,
+        key=lambda item: (item.get("occurred") or "", item.get("title") or ""),
+        reverse=True,
+    )
+    matched = [i for i in items if i.get("topic")]
+    pending = [i for i in items if not i.get("topic")]
+    lines = ["kairo-ingest 待导入"]
+    if matched:
+        lines.append("将自动入库:")
+        for item in matched:
+            lines.append(f"- {item['title']} → {item['topic']}")
+    if pending:
+        lines.append("待指定（请确认推荐 Topic 或改选/跳过）:")
+        for index, item in enumerate(pending, 1):
+            hint = item.get("topic_hint") or "无"
+            alts = [
+                c
+                for c in (item.get("hint_candidates") or [])
+                if c and c != item.get("topic_hint")
+            ]
+            extra = f" 备选={','.join(alts)}" if alts else ""
+            lines.append(f"{index}. {item['title']}  推荐={hint}{extra}")
+    return "\n".join(lines)
+
+
 def format_scan_report(payload: dict) -> str:
     items = payload.get("items") or []
     matched = [i for i in items if i.get("action") == "add" and i.get("topic")]
@@ -434,10 +497,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--voice-memos", default=str(DEFAULT_VOICE_DIR))
     parser.add_argument("--kairo-bin", default=kairo_bin())
     parser.add_argument("--format", choices=("json", "text"), default="json")
+    parser.add_argument(
+        "--only-new",
+        action="store_true",
+        help="Only items that need import and were not previously notified",
+    )
+    parser.add_argument(
+        "--mark-notified",
+        action="store_true",
+        help="Record listed pending titles so later --only-new stays silent",
+    )
     args = parser.parse_args(argv)
+    root = Path(args.root).expanduser()
     try:
         payload = scan(
-            Path(args.root).expanduser(),
+            root,
             Path(args.downloads).expanduser(),
             Path(args.voice_memos).expanduser(),
             args.kairo_bin,
@@ -445,6 +519,19 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    items = payload.get("items") or []
+    if args.only_new:
+        notified = load_notified(root)
+        items = new_import_items(items, notified)
+        payload = {**payload, "items": items}
+        if args.mark_notified:
+            pending_titles = {i["title"] for i in items if not i.get("topic")}
+            save_notified(root, notified | pending_titles)
+        if not items:
+            sys.stdout.write(SILENT_TOKEN + "\n")
+            return 0
+        sys.stdout.write(format_import_report(items) + "\n")
+        return 0
     if args.format == "text":
         sys.stdout.write(format_scan_report(payload) + "\n")
     else:
