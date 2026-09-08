@@ -412,10 +412,37 @@ def save_notified(root: Path, titles: set[str]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def new_import_items(items: list[dict], notified: set[str] | None = None) -> list[dict]:
-    """Items that still need import (not yet in Kairo). ``notified`` is ignored."""
+def is_recent(occurred: str, *, days: int, today: dt.date | None = None) -> bool:
+    """True if occurred is within ``days`` back from today (days=1 → today and yesterday)."""
+    if days < 0:
+        return True
+    today = today or dt.date.today()
+    try:
+        occurred_date = dt.date.fromisoformat(occurred)
+    except ValueError:
+        return False
+    return occurred_date >= today - dt.timedelta(days=days)
+
+
+def new_import_items(
+    items: list[dict],
+    notified: set[str] | None = None,
+    *,
+    since_days: int = -1,
+    today: dt.date | None = None,
+) -> list[dict]:
+    """Not-yet-ingested items, optionally limited to a recent occurred window."""
     del notified
-    return [item for item in items if item.get("action") == "add"]
+    out: list[dict] = []
+    for item in items:
+        if item.get("action") != "add":
+            continue
+        if since_days >= 0 and not is_recent(
+            str(item.get("occurred") or ""), days=since_days, today=today
+        ):
+            continue
+        out.append(item)
+    return out
 
 
 FALLBACK_TOPIC = "未分类"
@@ -524,7 +551,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--auto-topic",
         action="store_true",
-        help="Fill topic from unique match, then hint, then 未分类 (unattended ingest)",
+        help="Fill topic from unique match, then hint, then 未分类 (do not use in routine)",
+    )
+    parser.add_argument(
+        "--since-days",
+        type=int,
+        default=-1,
+        help="With --only-new, keep items whose occurred date is within N days (1=today+yesterday)",
     )
     args = parser.parse_args(argv)
     root = Path(args.root).expanduser()
@@ -541,9 +574,10 @@ def main(argv: list[str] | None = None) -> int:
     items = payload.get("items") or []
     if args.only_new:
         notified = load_notified(root)
-        items = new_import_items(items, notified)
-        if args.auto_topic:
-            items = assign_topics(items)
+        since = args.since_days
+        if since < 0:
+            since = 1
+        items = new_import_items(items, notified, since_days=since)
         payload = {**payload, "items": items}
         if args.mark_notified:
             pending_titles = {i["title"] for i in items if not i.get("topic")}

@@ -254,6 +254,18 @@ def test_format_import_report_omits_skip_counts(scan):
     assert "已跳过" not in text
 
 
+def test_new_import_items_since_days_keeps_yesterday_drops_old(scan):
+    today = __import__("datetime").date(2026, 9, 8)
+    items = [
+        {"title": "中台组织讨论-260907", "occurred": "2026-09-07", "action": "add"},
+        {"title": "能源例会-260901", "occurred": "2026-09-01", "action": "add"},
+        {"title": "产品工厂务虚会-250926", "occurred": "2025-09-26", "action": "add"},
+        {"title": "已入库-260907", "occurred": "2026-09-07", "action": "skip"},
+    ]
+    out = scan.new_import_items(items, since_days=1, today=today)
+    assert [i["title"] for i in out] == ["中台组织讨论-260907"]
+
+
 def test_only_new_silent_only_when_nothing_to_import(scan):
     skipped = {
         "title": "算法例会-260904",
