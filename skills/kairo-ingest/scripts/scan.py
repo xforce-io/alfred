@@ -418,6 +418,28 @@ def new_import_items(items: list[dict], notified: set[str] | None = None) -> lis
     return [item for item in items if item.get("action") == "add"]
 
 
+FALLBACK_TOPIC = "未分类"
+
+
+def auto_assign_topic(item: dict, fallback: str = FALLBACK_TOPIC) -> str:
+    """Pick an existing topic for unattended ingest: match > hint > fallback."""
+    if item.get("topic"):
+        return str(item["topic"])
+    if item.get("topic_hint"):
+        return str(item["topic_hint"])
+    return fallback
+
+
+def assign_topics(items: list[dict], fallback: str = FALLBACK_TOPIC) -> list[dict]:
+    assigned: list[dict] = []
+    for item in items:
+        copy = dict(item)
+        if copy.get("action") == "add":
+            copy["topic"] = auto_assign_topic(copy, fallback)
+        assigned.append(copy)
+    return assigned
+
+
 def format_import_report(items: list[dict]) -> str:
     """User-facing message: only items that need import, newest first."""
     items = sorted(
@@ -499,6 +521,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Record listed pending titles so later --only-new stays silent",
     )
+    parser.add_argument(
+        "--auto-topic",
+        action="store_true",
+        help="Fill topic from unique match, then hint, then 未分类 (unattended ingest)",
+    )
     args = parser.parse_args(argv)
     root = Path(args.root).expanduser()
     try:
@@ -515,6 +542,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.only_new:
         notified = load_notified(root)
         items = new_import_items(items, notified)
+        if args.auto_topic:
+            items = assign_topics(items)
         payload = {**payload, "items": items}
         if args.mark_notified:
             pending_titles = {i["title"] for i in items if not i.get("topic")}

@@ -17,7 +17,7 @@ def kairo_bin() -> str:
     return os.environ.get("KAIRO_REAL_BIN") or str(Path.home() / ".local/bin/kairo")
 
 
-def build_actions(plan: dict) -> list[dict]:
+def build_actions(plan: dict, *, step: bool = True) -> list[dict]:
     root = Path(plan["root"])
     actions: list[dict] = []
     stepped: list[str] = []
@@ -63,15 +63,16 @@ def build_actions(plan: dict) -> list[dict]:
             )
         if topic not in stepped:
             stepped.append(topic)
-    for topic in stepped:
-        actions.append(
-            {
-                "kind": "step",
-                "cwd": str(root / topic),
-                "args": ["step"],
-                "title": topic,
-            }
-        )
+    if step:
+        for topic in stepped:
+            actions.append(
+                {
+                    "kind": "step",
+                    "cwd": str(root / topic),
+                    "args": ["step"],
+                    "title": topic,
+                }
+            )
     return actions
 
 
@@ -224,9 +225,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plan", required=True, help="JSON plan from scan.py, after user edits")
     parser.add_argument("--kairo-bin", default=kairo_bin())
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--no-step",
+        action="store_true",
+        help="Register refs only; skip kairo step (ASR/compose can exceed job turn timeout)",
+    )
     args = parser.parse_args(argv)
     plan = load_plan(Path(args.plan).expanduser())
-    actions = build_actions(plan)
+    actions = build_actions(plan, step=not args.no_step)
     result = run_actions(
         actions,
         binary=args.kairo_bin,

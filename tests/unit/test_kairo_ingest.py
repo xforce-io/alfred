@@ -144,6 +144,44 @@ def test_fuzzy_hint_ignores_generic_discussion_suffix(scan):
     assert "算法例会" not in cands
 
 
+def test_auto_assign_topic_prefers_match_then_hint_then_fallback(scan):
+    assert scan.auto_assign_topic({"topic": "算法例会", "topic_hint": "能源梳理"}) == "算法例会"
+    assert scan.auto_assign_topic({"topic": None, "topic_hint": "能源梳理"}) == "能源梳理"
+    assert scan.auto_assign_topic({"topic": None, "topic_hint": None}) == "未分类"
+
+
+def test_assign_topics_fills_add_items_only(scan):
+    items = scan.assign_topics(
+        [
+            {"title": "a", "action": "add", "topic": None, "topic_hint": "能源梳理"},
+            {"title": "b", "action": "skip", "topic": None, "topic_hint": "能源梳理"},
+            {"title": "c", "action": "add", "topic": None, "topic_hint": None},
+        ]
+    )
+    assert items[0]["topic"] == "能源梳理"
+    assert items[1]["topic"] is None
+    assert items[2]["topic"] == "未分类"
+
+
+def test_apply_no_step_omits_step_actions(apply):
+    actions = apply.build_actions(
+        {
+            "root": "/kairo",
+            "items": [
+                {
+                    "title": "算法例会-260904",
+                    "occurred": "2026-09-04",
+                    "topic": "算法例会",
+                    "action": "add",
+                    "forms": [{"path": "/tmp/b.m4a", "copy": True}],
+                }
+            ],
+        },
+        step=False,
+    )
+    assert [a["kind"] for a in actions] == ["add", "title"]
+
+
 def test_merge_unspecified_carries_topic_hint(scan):
     items = scan.merge_items(
         [
