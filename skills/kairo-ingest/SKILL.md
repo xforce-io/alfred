@@ -32,8 +32,8 @@ ROOT="${KAIRO_SERVE_ROOT:-$HOME/kairo}"
 # 1) 只读扫描
 python "$INGEST/scan.py" --root "$ROOT"                 # JSON
 python "$INGEST/scan.py" --root "$ROOT" --format text     # 全量（含 skip 统计，仅调试）
-python "$INGEST/scan.py" --root "$ROOT" --only-new --mark-notified --format text
-# 例行给用户：仅新导入项；没有则 stdout=NO_USER_MESSAGE，不发 Telegram
+python "$INGEST/scan.py" --root "$ROOT" --only-new --format text
+# 例行给用户：仅未入库项；没有未入库则 stdout=NO_USER_MESSAGE，不发 Telegram
 
 # 2) 把用户确认后的 JSON 存成计划（可改 topic / action=skip）
 # 3) 确认执行后才 apply；未确认只允许 --dry-run
@@ -66,9 +66,9 @@ python "$INGEST/apply.py" --plan /tmp/kairo-ingest-plan.json
 
 ## 例行任务
 
-demo_agent 每 30 分钟 isolated routine。用户消息**只含本轮需要新导入的条目**；没有新导入则**整段回复必须恰好是** `NO_USER_MESSAGE`（框架不推 Telegram）。
+demo_agent 每 30 分钟 isolated routine。用户消息**只含尚未入库的条目**（含待指定）；全部已入库则**整段回复必须恰好是** `NO_USER_MESSAGE`（不推 Telegram）。未入库就会继续推，直到 add 成功或用户明确跳过。
 
-1. `python "$SKILL_DIR/scripts/scan.py" --root "$HOME/kairo" --only-new --mark-notified --format text`
-2. 若 stdout 为 `NO_USER_MESSAGE`：你的回复全文只能是 `NO_USER_MESSAGE`，不要解释、不要 apply。
-3. 否则：对其中 `topic` 非空的条目 `apply.py`；发给用户的正文 = 该 stdout（可加 apply 回执）。禁止附带已跳过条数、禁止把旧待指定再推一遍。
-4. 待指定仍禁止 add；禁止 `kairo new` / `run`；写操作走 `KAIRO_REAL_BIN`。
+1. `python "$SKILL_DIR/scripts/scan.py" --root "$HOME/kairo" --only-new --format text`
+2. 若 stdout 为 `NO_USER_MESSAGE`：回复全文只能是 `NO_USER_MESSAGE`，不要解释、不要 apply。
+3. 否则：对其中 `topic` 非空的条目 `apply.py`；发给用户的正文 = 该 stdout（可加 apply 回执）。禁止附带已跳过条数。
+4. 待指定仍禁止自动 add；禁止 `kairo new` / `run`；写操作走 `KAIRO_REAL_BIN`。

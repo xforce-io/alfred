@@ -412,18 +412,10 @@ def save_notified(root: Path, titles: set[str]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def new_import_items(items: list[dict], notified: set[str]) -> list[dict]:
-    """Items that still need import and have not been notified as pending."""
-    out: list[dict] = []
-    for item in items:
-        if item.get("action") != "add":
-            continue
-        if item.get("topic"):
-            out.append(item)
-            continue
-        if item.get("title") not in notified:
-            out.append(item)
-    return out
+def new_import_items(items: list[dict], notified: set[str] | None = None) -> list[dict]:
+    """Items that still need import (not yet in Kairo). ``notified`` is ignored."""
+    del notified
+    return [item for item in items if item.get("action") == "add"]
 
 
 def format_import_report(items: list[dict]) -> str:
