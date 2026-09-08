@@ -32,33 +32,51 @@ def build_actions(plan: dict, *, step: bool = True) -> list[dict]:
         forms = item.get("forms") or []
         if not forms:
             continue
-        cwd = str(root / topic)
+        cwd = str(root)
         primary, *rest = forms
         add_args = ["add", primary["path"]]
         if primary.get("copy"):
             add_args.append("--copy")
-        add_args.extend(["--occurred", item["occurred"]])
+        add_args.extend(
+            [
+                "--occurred",
+                item["occurred"],
+                "--topic",
+                topic,
+                "--root",
+                str(root),
+            ]
+        )
         actions.append(
-            {"kind": "add", "cwd": cwd, "args": add_args, "title": item["title"]}
+            {
+                "kind": "add",
+                "cwd": cwd,
+                "args": add_args,
+                "title": item["title"],
+                "topic": topic,
+            }
         )
         actions.append(
             {
                 "kind": "title",
                 "cwd": cwd,
-                "args": ["title", REF_PLACEHOLDER, item["title"]],
+                "args": ["title", REF_PLACEHOLDER, item["title"], "--topic", topic],
                 "title": item["title"],
+                "topic": topic,
             }
         )
         for form in rest:
             attach_args = ["add", form["path"], "--to", REF_PLACEHOLDER]
             if form.get("copy"):
                 attach_args.append("--copy")
+            attach_args.extend(["--root", str(root)])
             actions.append(
                 {
                     "kind": "attach",
                     "cwd": cwd,
                     "args": attach_args,
                     "title": item["title"],
+                    "topic": topic,
                 }
             )
         if topic not in stepped:
@@ -68,9 +86,10 @@ def build_actions(plan: dict, *, step: bool = True) -> list[dict]:
             actions.append(
                 {
                     "kind": "step",
-                    "cwd": str(root / topic),
-                    "args": ["step"],
+                    "cwd": str(root),
+                    "args": ["step", "--topic", topic],
                     "title": topic,
+                    "topic": topic,
                 }
             )
     return actions
@@ -148,6 +167,7 @@ def run_actions(
             "cwd": action["cwd"],
             "args": args,
             "title": action["title"],
+            "topic": action.get("topic") or "",
         }
         if dry_run:
             if action["kind"] == "add":
@@ -197,11 +217,13 @@ def format_receipt(plan: dict, result: dict) -> str:
     ]
     for rec in result.get("added") or []:
         rid = rec.get("ref_id") or REF_PLACEHOLDER
-        lines.append(f"- add {rec['title']} → {Path(rec['cwd']).name} ref {rid}")
+        dest = rec.get("topic") or Path(rec["cwd"]).name
+        lines.append(f"- add {rec['title']} → {dest} ref {rid}")
     for rec in result.get("stepped") or []:
         extra = rec.get("stdout") or ""
         suffix = f" ({extra})" if extra else ""
-        lines.append(f"- step {Path(rec['cwd']).name}{suffix}")
+        dest = rec.get("topic") or Path(rec["cwd"]).name
+        lines.append(f"- step {dest}{suffix}")
     if pending:
         for item in pending:
             hint = item.get("topic_hint") or "无"
@@ -220,18 +242,43 @@ def load_plan(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def filter_plan(plan: dict, titles: list[str] | None) -> dict:
+    """Keep confirmed titles; unmarked add items become skip. Empty titles = all with topic."""
+    wanted = {t.strip() for t in (titles or []) if t and t.strip()}
+    if not wanted:
+        return plan
+    items = []
+    for item in plan.get("items") or []:
+        copy = dict(item)
+        if copy.get("title") not in wanted:
+            copy["action"] = "skip"
+        items.append(copy)
+    return {**plan, "items": items}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Apply a confirmed kairo-ingest plan")
-    parser.add_argument("--plan", required=True, help="JSON plan from scan.py, after user edits")
+    parser.add_argument("--plan", required=True, help="JSON plan from scan.py --format json")
+    parser.add_argument(
+        "--title",
+        action="append",
+        default=[],
+        help="Only ingest this title (repeatable). Others in the plan are skipped.",
+    )
     parser.add_argument("--kairo-bin", default=kairo_bin())
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Also dump machine JSON after the receipt (default: receipt only)",
+    )
     parser.add_argument(
         "--no-step",
         action="store_true",
         help="Register refs only; skip kairo step (ASR/compose can exceed job turn timeout)",
     )
     args = parser.parse_args(argv)
-    plan = load_plan(Path(args.plan).expanduser())
+    plan = filter_plan(load_plan(Path(args.plan).expanduser()), args.title)
     actions = build_actions(plan, step=not args.no_step)
     result = run_actions(
         actions,
@@ -241,9 +288,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     receipt = format_receipt(plan, result)
     print(receipt)
-    print("---")
-    json.dump({"ok": not result["failed"], **result}, sys.stdout, ensure_ascii=False, indent=2)
-    sys.stdout.write("\n")
+    if args.json:
+        print("---")
+        json.dump({"ok": not result["failed"], **result}, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
     return 1 if result["failed"] else 0
 
 

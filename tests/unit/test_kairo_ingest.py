@@ -561,16 +561,22 @@ def test_apply_builds_add_title_attach_and_one_step_per_topic(apply):
         "step",
         "step",
     ]
-    assert actions[0]["cwd"] == "/kairo/流程质量"
+    assert actions[0]["cwd"] == "/kairo"
     assert actions[0]["args"][:2] == ["add", "/tmp/a.m4a"]
     assert "--copy" in actions[0]["args"]
-    assert actions[0]["args"][-2:] == ["--occurred", "2026-09-02"]
-    assert actions[1]["args"][0] == "title"
+    assert actions[0]["args"][-4:] == ["--topic", "流程质量", "--root", "/kairo"]
+    assert "--occurred" in actions[0]["args"]
+    assert actions[1]["args"][:1] == ["title"]
+    assert actions[1]["args"][-2:] == ["--topic", "流程质量"]
     assert actions[2]["args"][:3] == ["add", "/tmp/a.pdf", "--to"]
     assert "--copy" not in actions[2]["args"]
+    assert actions[2]["args"][-2:] == ["--root", "/kairo"]
     step_cwds = [a["cwd"] for a in actions if a["kind"] == "step"]
-    assert step_cwds == ["/kairo/流程质量", "/kairo/算法例会"]
-    assert all(a["args"] == ["step"] for a in actions if a["kind"] == "step")
+    assert step_cwds == ["/kairo", "/kairo"]
+    assert [a["args"] for a in actions if a["kind"] == "step"] == [
+        ["step", "--topic", "流程质量"],
+        ["step", "--topic", "算法例会"],
+    ]
 
 
 def test_format_receipt_lists_pending_and_failures(apply):
@@ -625,7 +631,8 @@ def test_apply_dry_run_does_not_require_ref_id(apply):
     result = apply.run_actions(actions, binary="/bin/false", dry_run=True)
     assert result["failed"] == []
     assert result["added"][0]["args"][0] == "add"
-    assert result["stepped"][0]["args"] == ["step"]
+    assert "--topic" in result["added"][0]["args"]
+    assert result["stepped"][0]["args"] == ["step", "--topic", "算法例会"]
 
 
 def test_apply_never_emits_new_or_run(apply):
@@ -647,3 +654,74 @@ def test_apply_never_emits_new_or_run(apply):
     assert all("new" not in s.split()[:1] for s in flat)
     assert all(s.split()[0] != "run" for s in flat)
     assert all("tag" not in s.split()[:1] for s in flat)
+
+
+def test_render_only_new_json_is_apply_plan(scan, tmp_path):
+    items = [
+        {
+            "title": "算法例会-260908",
+            "action": "add",
+            "topic": "算法例会",
+            "occurred": "2026-09-08",
+            "forms": [{"path": "/rec/a.m4a", "copy": True}],
+        }
+    ]
+    payload = json.loads(scan.render_only_new(tmp_path, items, "json"))
+    assert payload["root"] == str(tmp_path)
+    assert payload["items"][0]["title"] == "算法例会-260908"
+    human = scan.render_only_new(tmp_path, items, "text")
+    assert human.startswith("kairo-ingest 待导入")
+    assert "算法例会-260908" in human
+    assert not human.strip().startswith("{")
+
+
+def test_filter_plan_keeps_only_requested_titles(apply):
+    plan = {
+        "root": "/kairo",
+        "items": [
+            {
+                "title": "算法例会-260908",
+                "topic": "算法例会",
+                "action": "add",
+                "occurred": "2026-09-08",
+                "forms": [{"path": "/tmp/a.m4a", "copy": True}],
+            },
+            {
+                "title": "能源例会-260907",
+                "topic": "能源梳理",
+                "action": "add",
+                "occurred": "2026-09-07",
+                "forms": [{"path": "/tmp/b.m4a", "copy": True}],
+            },
+        ],
+    }
+    filtered = apply.filter_plan(plan, ["算法例会-260908"])
+    actions = apply.build_actions(filtered, step=False)
+    assert [a["title"] for a in actions if a["kind"] == "add"] == ["算法例会-260908"]
+    assert "--topic" in actions[0]["args"]
+    assert "算法例会" in actions[0]["args"]
+
+
+def test_apply_main_receipt_only_by_default(apply, tmp_path, capsys):
+    plan = {
+        "root": str(tmp_path),
+        "items": [
+            {
+                "title": "算法例会-260908",
+                "topic": "算法例会",
+                "action": "add",
+                "occurred": "2026-09-08",
+                "forms": [{"path": "/tmp/a.m4a", "copy": True}],
+            }
+        ],
+    }
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    rc = apply.main(
+        ["--plan", str(plan_path), "--dry-run", "--no-step", "--title", "算法例会-260908"]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.startswith("kairo-ingest 预览")
+    assert "---" not in out
+    assert '"ok"' not in out

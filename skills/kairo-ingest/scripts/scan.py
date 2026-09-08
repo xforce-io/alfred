@@ -550,6 +550,13 @@ def format_import_report(items: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def render_only_new(root: Path, items: list[dict], fmt: str) -> str:
+    """Routine/confirm payload: text for humans, JSON plan for apply.py."""
+    if fmt == "json":
+        return json.dumps({"root": str(root), "items": items}, ensure_ascii=False, indent=2) + "\n"
+    return format_import_report(items) + "\n"
+
+
 def format_scan_report(payload: dict) -> str:
     items = payload.get("items") or []
     matched = [i for i in items if i.get("action") == "add" and i.get("topic")]
@@ -649,7 +656,7 @@ def main(argv: list[str] | None = None) -> int:
         if not items:
             sys.stdout.write(SILENT_TOKEN + "\n")
             return 0
-        sys.stdout.write(format_import_report(items) + "\n")
+        sys.stdout.write(render_only_new(root, items, args.format))
         return 0
     if args.format == "text":
         sys.stdout.write(format_scan_report(payload) + "\n")
