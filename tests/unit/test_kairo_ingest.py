@@ -266,6 +266,33 @@ def test_new_import_items_since_days_keeps_yesterday_drops_old(scan):
     assert [i["title"] for i in out] == ["中台组织讨论-260907"]
 
 
+def test_new_import_items_since_hours_is_rolling_24h(scan):
+    now = __import__("datetime").datetime(2026, 9, 8, 10, 0, 0)
+    items = [
+        {
+            "title": "中台组织讨论-260907",
+            "action": "add",
+            "recorded_at": "2026-09-07T13:59:58",
+        },
+        {
+            "title": "总体组织架构讨论-260907",
+            "action": "add",
+            "recorded_at": "2026-09-07T09:26:46",
+        },
+        {
+            "title": "能源例会-260901",
+            "action": "add",
+            "recorded_at": "2026-09-01T09:01:52",
+        },
+    ]
+    out = scan.new_import_items(items, since_hours=24, now=now)
+    assert [i["title"] for i in out] == ["中台组织讨论-260907"]
+
+
+def test_recorded_at_from_voice_name(scan):
+    assert scan.recorded_at_from_voice_name("20260907 135958.m4a") == "2026-09-07T13:59:58"
+
+
 def test_only_new_silent_only_when_nothing_to_import(scan):
     skipped = {
         "title": "算法例会-260904",

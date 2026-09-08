@@ -16,6 +16,7 @@ from pathlib import Path
 
 STEM_RE = re.compile(r"^(.+)-(\d{6})$")
 STEM8_RE = re.compile(r"^(.+)-(\d{8})$")
+VOICE_STAMP_RE = re.compile(r"^(\d{8}) (\d{6})")
 DEFAULT_VOICE_RE = re.compile(r"^新录音")
 AUDIO_EXT = {".m4a", ".wav", ".mp3", ".aac", ".caf"}
 SEEN_FILE = Path(".kairo") / "kairo-ingest-seen.json"
@@ -182,6 +183,7 @@ def collect_downloads(folder: Path) -> list[dict]:
                 "path": str(path.resolve()),
                 "source": "downloads",
                 "copy": False,
+                "recorded_at": recorded_at_from_mtime(path),
             }
         )
     return rows
@@ -204,9 +206,28 @@ def collect_voice_memos(recordings_dir: Path) -> list[dict]:
                 "path": str(path.resolve()),
                 "source": "voice-memo",
                 "copy": True,
+                "recorded_at": recorded_at_from_voice_name(rel) or recorded_at_from_mtime(path),
             }
         )
     return rows
+
+
+def recorded_at_from_voice_name(rel: str) -> str | None:
+    matched = VOICE_STAMP_RE.match(Path(rel).stem)
+    if not matched:
+        return None
+    try:
+        stamp = dt.datetime.strptime(matched.group(1) + matched.group(2), "%Y%m%d%H%M%S")
+    except ValueError:
+        return None
+    return stamp.isoformat()
+
+
+def recorded_at_from_mtime(path: Path) -> str | None:
+    try:
+        return dt.datetime.fromtimestamp(path.stat().st_mtime).isoformat()
+    except OSError:
+        return None
 
 
 def _voice_memo_rows(recordings_dir: Path) -> list[tuple[str, str]]:
@@ -340,6 +361,11 @@ def merge_items(
                 "title": title,
                 "xxx": forms[0]["xxx"],
                 "occurred": forms[0]["occurred"],
+                "recorded_at": max(
+                    (form.get("recorded_at") or "" for form in forms_sorted),
+                    default="",
+                )
+                or None,
                 "topic_status": rec["status"],
                 "topic": rec["topic"],
                 "candidates": rec["candidates"],
@@ -424,20 +450,49 @@ def is_recent(occurred: str, *, days: int, today: dt.date | None = None) -> bool
     return occurred_date >= today - dt.timedelta(days=days)
 
 
+def is_within_hours(
+    recorded_at: str,
+    *,
+    hours: int,
+    now: dt.datetime | None = None,
+) -> bool:
+    """True if recorded_at is within the last ``hours`` (rolling window)."""
+    if hours < 0:
+        return True
+    now = now or dt.datetime.now()
+    try:
+        stamp = dt.datetime.fromisoformat(recorded_at)
+    except ValueError:
+        return False
+    if stamp.tzinfo is not None:
+        stamp = stamp.replace(tzinfo=None)
+    if now.tzinfo is not None:
+        now = now.replace(tzinfo=None)
+    delta = now - stamp
+    return dt.timedelta(0) <= delta <= dt.timedelta(hours=hours)
+
+
 def new_import_items(
     items: list[dict],
     notified: set[str] | None = None,
     *,
     since_days: int = -1,
+    since_hours: int = -1,
     today: dt.date | None = None,
+    now: dt.datetime | None = None,
 ) -> list[dict]:
-    """Not-yet-ingested items, optionally limited to a recent occurred window."""
+    """Not-yet-ingested items, optionally limited to a recent window."""
     del notified
     out: list[dict] = []
     for item in items:
         if item.get("action") != "add":
             continue
-        if since_days >= 0 and not is_recent(
+        if since_hours >= 0:
+            if not is_within_hours(
+                str(item.get("recorded_at") or ""), hours=since_hours, now=now
+            ):
+                continue
+        elif since_days >= 0 and not is_recent(
             str(item.get("occurred") or ""), days=since_days, today=today
         ):
             continue
@@ -557,7 +612,13 @@ def main(argv: list[str] | None = None) -> int:
         "--since-days",
         type=int,
         default=-1,
-        help="With --only-new, keep items whose occurred date is within N days (1=today+yesterday)",
+        help="With --only-new, keep items whose occurred date is within N days",
+    )
+    parser.add_argument(
+        "--since-hours",
+        type=int,
+        default=-1,
+        help="With --only-new, keep items recorded within N hours (default 24)",
     )
     args = parser.parse_args(argv)
     root = Path(args.root).expanduser()
@@ -574,10 +635,13 @@ def main(argv: list[str] | None = None) -> int:
     items = payload.get("items") or []
     if args.only_new:
         notified = load_notified(root)
-        since = args.since_days
-        if since < 0:
-            since = 1
-        items = new_import_items(items, notified, since_days=since)
+        hours = args.since_hours
+        days = args.since_days
+        if hours < 0 and days < 0:
+            hours = 24
+        items = new_import_items(
+            items, notified, since_days=days, since_hours=hours
+        )
         payload = {**payload, "items": items}
         if args.mark_notified:
             pending_titles = {i["title"] for i in items if not i.get("topic")}

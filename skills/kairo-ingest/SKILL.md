@@ -12,13 +12,13 @@ tags: [kairo, ingest, voice-memo, downloads]
 ## When to Use
 
 - 用户要扫语音备忘录 / Downloads、把 `XXX-YYMMDD` 入库 Kairo
-- 例行 isolated routine：发现近 2 天未入库项时推推荐清单，等确认
+- 例行 isolated routine：发现 **24 小时内** 未入库项时推推荐清单，等确认
 
 ## 非目标
 
 - **不** `kairo new` / `tag create` / `kairo run`
 - **不**自动 `add`（含例行；禁止 `ingest.py` 无人值守）
-- **不**把历史库存一次性灌进 Kairo；例行只看 **occurred 近 1 天**（今天+昨天）
+- **不**把历史库存一次性灌进 Kairo；例行只看录音/文件时间 **24 小时以内**
 
 ## 命令
 
@@ -28,14 +28,14 @@ tags: [kairo, ingest, voice-memo, downloads]
 INGEST="$SKILL_DIR/scripts"
 ROOT="${KAIRO_SERVE_ROOT:-$HOME/kairo}"
 
-python "$INGEST/scan.py" --root "$ROOT" --only-new --since-days 1 --format text
+python "$INGEST/scan.py" --root "$ROOT" --only-new --since-hours 24 --format text
 ```
 
 ## Agent 流程
 
 ### 例行（强制）
 
-1. `python "$SKILL_DIR/scripts/scan.py" --root "$HOME/kairo" --only-new --since-days 1 --format text`
+1. `python "$SKILL_DIR/scripts/scan.py" --root "$HOME/kairo" --only-new --since-hours 24 --format text`
 2. stdout 为 `NO_USER_MESSAGE` → 回复全文只能是 `NO_USER_MESSAGE`（近两天没有未入库新材料，不推 Telegram）。
 3. 否则把该 text **原样**发给用户（未入库新项 + 推荐 Topic）。**禁止 apply / ingest.py / add。**
 4. 用户本轮确认推荐（或改选已有 slug / 跳过）后，下一轮对话才 `apply.py`。
