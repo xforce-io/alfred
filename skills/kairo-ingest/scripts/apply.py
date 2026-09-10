@@ -17,10 +17,24 @@ def kairo_bin() -> str:
     return os.environ.get("KAIRO_REAL_BIN") or str(Path.home() / ".local/bin/kairo")
 
 
+def _scan_mod():
+    import importlib.util
+
+    path = Path(__file__).resolve().parent / "scan.py"
+    spec = importlib.util.spec_from_file_location("_kairo_ingest_scan", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 def build_actions(plan: dict, *, step: bool = True) -> list[dict]:
     root = Path(plan["root"])
     actions: list[dict] = []
     stepped: list[str] = []
+    scan = _scan_mod()
+    existing_records = scan.lookup_existing_refs(root)
+    find_existing = scan.find_existing_ref
     for item in plan.get("items") or []:
         if item.get("action") == "skip":
             continue
@@ -34,6 +48,58 @@ def build_actions(plan: dict, *, step: bool = True) -> list[dict]:
             continue
         cwd = str(root)
         primary, *rest = forms
+        names = {Path(form["path"]).name for form in forms}
+        form_paths = {form["path"] for form in forms}
+        existing = find_existing(
+            root,
+            title=item["title"],
+            basenames=names,
+            paths=form_paths,
+            records=existing_records,
+        )
+        if existing:
+            rid = existing["id"]
+            home = existing.get("home") or ""
+            tag_args = ["tag", "add", rid, topic, "--root", str(root)]
+            if home:
+                tag_args.extend(["--home", home])
+            actions.append(
+                {
+                    "kind": "tag",
+                    "cwd": cwd,
+                    "args": tag_args,
+                    "title": item["title"],
+                    "topic": topic,
+                    "ref_id": rid,
+                }
+            )
+            actions.append(
+                {
+                    "kind": "title",
+                    "cwd": cwd,
+                    "args": ["title", rid, item["title"], "--topic", topic],
+                    "title": item["title"],
+                    "topic": topic,
+                    "ref_id": rid,
+                }
+            )
+            for form in rest:
+                attach_args = ["add", form["path"], "--to", rid]
+                if form.get("copy"):
+                    attach_args.append("--copy")
+                attach_args.extend(["--root", str(root)])
+                actions.append(
+                    {
+                        "kind": "attach",
+                        "cwd": cwd,
+                        "args": attach_args,
+                        "title": item["title"],
+                        "topic": topic,
+                    }
+                )
+            if topic not in stepped:
+                stepped.append(topic)
+            continue
         add_args = ["add", primary["path"]]
         if primary.get("copy"):
             add_args.append("--copy")
@@ -41,6 +107,8 @@ def build_actions(plan: dict, *, step: bool = True) -> list[dict]:
             [
                 "--occurred",
                 item["occurred"],
+                "--title",
+                item["title"],
                 "--topic",
                 topic,
                 "--root",
@@ -170,7 +238,9 @@ def run_actions(
             "topic": action.get("topic") or "",
         }
         if dry_run:
-            if action["kind"] == "add":
+            if action["kind"] in ("add", "tag"):
+                if action["kind"] == "tag":
+                    record["ref_id"] = action.get("ref_id")
                 added.append(record)
             elif action["kind"] == "step":
                 stepped.append(record)
@@ -195,6 +265,14 @@ def run_actions(
             added.append(record)
             if root is not None:
                 record_seen(root, action["title"], [args[1]])
+        elif action["kind"] == "tag":
+            ref_id = action.get("ref_id") or ""
+            if ref_id:
+                ref_by_title[action["title"]] = ref_id
+            record["ref_id"] = ref_id
+            added.append(record)
+            if root is not None:
+                record_seen(root, action["title"], [])
         elif action["kind"] == "attach":
             if root is not None:
                 record_seen(root, action["title"], [args[1]])
@@ -218,7 +296,8 @@ def format_receipt(plan: dict, result: dict) -> str:
     for rec in result.get("added") or []:
         rid = rec.get("ref_id") or REF_PLACEHOLDER
         dest = rec.get("topic") or Path(rec["cwd"]).name
-        lines.append(f"- add {rec['title']} → {dest} ref {rid}")
+        verb = "tag" if rec.get("kind") == "tag" else "add"
+        lines.append(f"- {verb} {rec['title']} → {dest} ref {rid}")
     for rec in result.get("stepped") or []:
         extra = rec.get("stdout") or ""
         suffix = f" ({extra})" if extra else ""
@@ -252,6 +331,8 @@ def filter_plan(plan: dict, titles: list[str] | None) -> dict:
         copy = dict(item)
         if copy.get("title") not in wanted:
             copy["action"] = "skip"
+        else:
+            copy["action"] = "add"
         items.append(copy)
     return {**plan, "items": items}
 

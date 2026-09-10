@@ -289,23 +289,107 @@ def load_seen_ledger(root: Path) -> tuple[set[str], set[str], set[str]]:
     return titles, basenames, paths
 
 
+def iter_ref_manifests(root: Path) -> list[tuple[str, str, Path]]:
+    """List (home, ref_id, manifest). home is '' for global-home refs."""
+    root = Path(root)
+    found: list[tuple[str, str, Path]] = []
+    if not root.is_dir():
+        return found
+    for manifest in sorted(root.glob("*/references/*/manifest.yaml")):
+        if ".kairo" in manifest.parts:
+            continue
+        found.append((manifest.parents[2].name, manifest.parent.name, manifest))
+    global_refs = root / ".kairo" / "global-home" / "references"
+    if global_refs.is_dir():
+        for manifest in sorted(global_refs.glob("*/manifest.yaml")):
+            found.append(("", manifest.parent.name, manifest))
+    return found
+
+
+def parse_manifest_index(text: str) -> tuple[str, set[str], set[str]]:
+    """Return (title, basenames, paths) from a manifest.yaml body."""
+    title = ""
+    basenames: set[str] = set()
+    paths: set[str] = set()
+    for line in text.splitlines():
+        if line.startswith("id:"):
+            continue
+        if line.startswith("title:"):
+            title = line.split(":", 1)[1].strip().strip("'\"")
+            continue
+        stripped = line.strip()
+        if "location:" in stripped:
+            loc = stripped.split("location:", 1)[1].strip()
+            if loc:
+                basenames.add(Path(loc).name)
+                paths.add(loc)
+    return title, basenames, paths
+
+
+def lookup_existing_refs(root: Path) -> list[dict]:
+    """Disk refs under Topic homes and `.kairo/global-home`."""
+    records: list[dict] = []
+    for home, ref_id, manifest in iter_ref_manifests(root):
+        try:
+            text = manifest.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        title, basenames, paths = parse_manifest_index(text)
+        records.append(
+            {
+                "home": home,
+                "id": ref_id,
+                "title": title,
+                "basenames": basenames,
+                "paths": paths,
+            }
+        )
+    return records
+
+
+def find_existing_ref(
+    root: Path,
+    *,
+    title: str,
+    basenames: set[str] | None = None,
+    paths: set[str] | None = None,
+    records: list[dict] | None = None,
+) -> dict | None:
+    """Match a plan item to an existing ref. Prefer global-home when both exist."""
+    wanted_title = {title}
+    canon = canonical_title(title)
+    if canon:
+        wanted_title.add(canon)
+    wanted_bases = set(basenames or ())
+    wanted_paths = set(paths or ())
+    hits: list[dict] = []
+    for rec in records if records is not None else lookup_existing_refs(root):
+        rec_titles = {rec.get("title") or ""}
+        extra = canonical_title(rec.get("title") or "")
+        if extra:
+            rec_titles.add(extra)
+        if (
+            wanted_title & rec_titles
+            or wanted_bases & set(rec.get("basenames") or ())
+            or wanted_paths & set(rec.get("paths") or ())
+        ):
+            hits.append(rec)
+    if not hits:
+        return None
+    globals_ = [h for h in hits if not h.get("home")]
+    return (globals_ or hits)[0]
+
+
 def load_existing(root: Path) -> tuple[set[str], set[str], set[str]]:
     titles: set[str] = set()
     basenames: set[str] = set()
     paths: set[str] = set()
     if not root.is_dir():
         return titles, basenames, paths
-    for manifest in root.glob("*/references/*/manifest.yaml"):
-        text = manifest.read_text(encoding="utf-8")
-        for line in text.splitlines():
-            if line.startswith("title:"):
-                _add_title(titles, line.split(":", 1)[1].strip().strip("'\""))
-            stripped = line.strip()
-            if "location:" in stripped:
-                loc = stripped.split("location:", 1)[1].strip()
-                if loc:
-                    basenames.add(Path(loc).name)
-                    paths.add(loc)
+    for rec in lookup_existing_refs(root):
+        _add_title(titles, rec.get("title") or "")
+        basenames |= set(rec.get("basenames") or ())
+        paths |= set(rec.get("paths") or ())
     led_titles, led_bases, led_paths = load_seen_ledger(root)
     titles |= led_titles
     basenames |= led_bases
