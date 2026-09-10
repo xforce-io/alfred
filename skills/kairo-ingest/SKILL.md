@@ -49,6 +49,7 @@ python "$INGEST/apply.py" --plan /tmp/kairo-ingest-plan.json --title "标题-YYM
 
 - `--title` 可重复；只入库这些标题。plan 里其余条目会 skip。
 - 条目已有唯一匹配 `topic` 时不必改 JSON。用户改选 Topic 时，改 plan 里该条的 `"topic"` 再 apply。
+- 源已在 `.kairo/global-home`（或 Topic `references/`）时，apply 只 `tag add` + `title`，**禁止** `cd Topic && kairo add` 造第二份 home。
 - 默认 `--no-step`（避免 ASR/compose 撑爆会话）。用户明确要求 step/run 时再对那个 Topic 单独走 kairo 技能。
 - 禁止再 scan 考古、禁止复述步骤。
 

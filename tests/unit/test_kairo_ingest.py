@@ -651,9 +651,11 @@ def test_apply_never_emits_new_or_run(apply):
         }
     )
     flat = [" ".join(a["args"]) for a in actions]
-    assert all("new" not in s.split()[:1] for s in flat)
+    assert all(s.split()[0] != "new" for s in flat)
     assert all(s.split()[0] != "run" for s in flat)
-    assert all("tag" not in s.split()[:1] for s in flat)
+    assert all(not s.startswith("tag create") for s in flat)
+    assert all(a["cwd"] == "/kairo" for a in actions)
+    assert all("add" != a["args"][0] or "--topic" in a["args"] for a in actions)
 
 
 def test_render_only_new_json_is_apply_plan(scan, tmp_path):
@@ -725,3 +727,179 @@ def test_apply_main_receipt_only_by_default(apply, tmp_path, capsys):
     assert out.startswith("kairo-ingest 预览")
     assert "---" not in out
     assert '"ok"' not in out
+
+
+def _write_global_home_ref(root: Path, *, ref_id: str, title: str, location: str) -> None:
+    ref = root / ".kairo" / "global-home" / "references" / ref_id
+    ref.mkdir(parents=True)
+    (ref / "manifest.yaml").write_text(
+        f"id: {ref_id}\ntitle: {title}\nforms:\n- location: {location}\n",
+        encoding="utf-8",
+    )
+
+
+def test_load_existing_includes_global_home(scan, tmp_path):
+    _write_global_home_ref(
+        tmp_path,
+        ref_id="2026-09-10-20260910-093216",
+        title="数仓技术评审-260910",
+        location=".kairo/uploads/20260910 093216.m4a",
+    )
+    titles, bases, paths = scan.load_existing(tmp_path)
+    assert "数仓技术评审-260910" in titles
+    assert "20260910 093216.m4a" in bases
+    assert ".kairo/uploads/20260910 093216.m4a" in paths
+
+
+def test_merge_skips_global_home_title(scan, tmp_path):
+    _write_global_home_ref(
+        tmp_path,
+        ref_id="2026-09-10-20260910-093216",
+        title="数仓技术评审-260910",
+        location=".kairo/uploads/20260910 093216.m4a",
+    )
+    titles, bases, paths = scan.load_existing(tmp_path)
+    items = scan.merge_items(
+        [
+            {
+                "title": "数仓技术评审-260910",
+                "xxx": "数仓技术评审",
+                "occurred": "2026-09-10",
+                "path": "/rec/20260910 093216.m4a",
+                "source": "voice-memo",
+                "copy": True,
+            }
+        ],
+        TOPICS,
+        existing_titles=titles,
+        existing_basenames=bases,
+        existing_paths=paths,
+    )
+    assert items[0]["action"] == "skip"
+    assert items[0]["skip_reason"] == "already-ingested"
+
+
+def test_find_existing_prefers_global_home(scan, tmp_path):
+    topic_ref = tmp_path / "生态平台" / "references" / "2026-09-10-20260910-093216"
+    topic_ref.mkdir(parents=True)
+    (topic_ref / "manifest.yaml").write_text(
+        "id: 2026-09-10-20260910-093216\ntitle: 20260910 093216\n"
+        "forms:\n- location: .kairo/uploads/20260910 093216.m4a\n",
+        encoding="utf-8",
+    )
+    _write_global_home_ref(
+        tmp_path,
+        ref_id="2026-09-10-20260910-093216",
+        title="数仓技术评审-260910",
+        location=".kairo/uploads/20260910 093216.m4a",
+    )
+    found = scan.find_existing_ref(
+        tmp_path,
+        title="数仓技术评审-260910",
+        basenames={"20260910 093216.m4a"},
+        paths={"/rec/20260910 093216.m4a"},
+    )
+    assert found is not None
+    assert found["home"] == ""
+    assert found["id"] == "2026-09-10-20260910-093216"
+
+
+def test_apply_tags_existing_global_home_instead_of_add(apply, tmp_path):
+    _write_global_home_ref(
+        tmp_path,
+        ref_id="2026-09-10-20260910-093216",
+        title="数仓技术评审-260910",
+        location=".kairo/uploads/20260910 093216.m4a",
+    )
+    actions = apply.build_actions(
+        {
+            "root": str(tmp_path),
+            "items": [
+                {
+                    "title": "数仓技术评审-260910",
+                    "occurred": "2026-09-10",
+                    "topic": "生态平台",
+                    "action": "add",
+                    "forms": [
+                        {
+                            "path": "/rec/20260910 093216.m4a",
+                            "copy": True,
+                        }
+                    ],
+                }
+            ],
+        },
+        step=False,
+    )
+    kinds = [a["kind"] for a in actions]
+    assert kinds == ["tag", "title"]
+    assert actions[0]["args"][:4] == [
+        "tag",
+        "add",
+        "2026-09-10-20260910-093216",
+        "生态平台",
+    ]
+    assert "--home" not in actions[0]["args"]
+    assert actions[1]["args"] == [
+        "title",
+        "2026-09-10-20260910-093216",
+        "数仓技术评审-260910",
+        "--topic",
+        "生态平台",
+    ]
+    assert all(a["cwd"] == str(tmp_path) for a in actions)
+    assert all(a["args"][0] != "add" for a in actions)
+
+
+def test_filter_plan_reopens_already_ingested_wanted_title(apply):
+    plan = {
+        "root": "/kairo",
+        "items": [
+            {
+                "title": "数仓技术评审-260910",
+                "topic": "生态平台",
+                "action": "skip",
+                "occurred": "2026-09-10",
+                "forms": [{"path": "/rec/a.m4a", "copy": True}],
+            }
+        ],
+    }
+    filtered = apply.filter_plan(plan, ["数仓技术评审-260910"])
+    assert filtered["items"][0]["action"] == "add"
+
+
+def test_apply_dry_run_existing_global_home_receipt(apply, tmp_path, capsys):
+    _write_global_home_ref(
+        tmp_path,
+        ref_id="2026-09-10-20260910-103828",
+        title="C 端菜品制作流程讨论-260910",
+        location=".kairo/uploads/20260910 103828.m4a",
+    )
+    plan = {
+        "root": str(tmp_path),
+        "items": [
+            {
+                "title": "C 端菜品制作流程讨论-260910",
+                "topic": "康医通产品逻辑",
+                "action": "skip",
+                "occurred": "2026-09-10",
+                "forms": [{"path": "/rec/20260910 103828.m4a", "copy": True}],
+            }
+        ],
+    }
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    rc = apply.main(
+        [
+            "--plan",
+            str(plan_path),
+            "--dry-run",
+            "--no-step",
+            "--title",
+            "C 端菜品制作流程讨论-260910",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "tag C 端菜品制作流程讨论-260910 → 康医通产品逻辑 ref 2026-09-10-20260910-103828" in out
+    assert "add C 端菜品制作流程讨论-260910" not in out
