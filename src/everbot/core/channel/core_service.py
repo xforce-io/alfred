@@ -139,6 +139,7 @@ class ChannelCoreService:
         self._primary_context_strategy = PrimaryContextStrategy()
         self._runtime_deps = RuntimeDeps(
             load_workspace_instructions=self._runtime_load_workspace_instructions,
+            list_installed_skills=self._runtime_list_installed_skills,
         )
         self._runtime_workspace_instructions_by_agent: Dict[str, str] = {}
         self._default_orchestrator = TurnOrchestrator(CHAT_POLICY)
@@ -890,11 +891,17 @@ class ChannelCoreService:
         if not hasattr(self, "_runtime_deps"):
             self._runtime_deps = RuntimeDeps(
                 load_workspace_instructions=self._runtime_load_workspace_instructions,
+                list_installed_skills=self._runtime_list_installed_skills,
             )
         if not hasattr(self, "_runtime_workspace_instructions_by_agent"):
             self._runtime_workspace_instructions_by_agent = {}
         if not hasattr(self, "_default_orchestrator"):
             self._default_orchestrator = TurnOrchestrator(CHAT_POLICY)
+
+    def _runtime_list_installed_skills(self, agent_name: str):
+        from ...core.runtime.skill_catalog import load_installed_skills
+
+        return load_installed_skills(agent_name)
 
     def _runtime_load_workspace_instructions(self, agent_name: str) -> str:
         """Load cached workspace instructions for runtime context strategy."""
