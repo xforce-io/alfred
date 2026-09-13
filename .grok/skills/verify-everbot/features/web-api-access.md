@@ -25,7 +25,7 @@ everbot:
 3. 有 key：`GET /api/agents` → `200`。
 4. 跨站 POST：`curl -X POST -H "X-API-Key: $K" -H "Origin: https://evil.example" /api/agents/demo_agent/sessions/reset` → `403 {"detail":"Origin not allowed"}`。
 5. 同源 POST：`-H "Origin: http://127.0.0.1:8765"` → 非 403。
-6. 跨站 WS：`Origin: https://evil.example` 握手 → 关闭码 `4003`。
+6. 跨站 WS：`Origin: https://evil.example` 握手 → 被拒（真实 uvicorn 为 HTTP 403 握手拒绝；ASGI 侧 close code 4003 只在 TestClient 可见），`everbot-web.out` 有 `Rejected websocket request from disallowed origin`。
 7. 同源/无 Origin WS，带 key → 收到欢迎消息。
 8. 浏览器 UI 入口能用。
 
@@ -33,8 +33,8 @@ everbot:
 
 1. `GET /api/agents/ghost_agent/sessions`（带 key）→ `404 Unknown agent: ghost_agent`。
 2. `POST /api/agents/..%2F..%2Fetc/sessions/reset`（带 key）→ `404`；`~/.alfred/agents/` 之外没有新目录。
-3. WS `/ws/chat/ghost_agent?api_key=…` → 关闭码 `4004`。
-4. WS 无 key → `4001`。
+3. WS `/ws/chat/ghost_agent?api_key=…` → 握手被拒 HTTP 403（ASGI close 4004）。
+4. WS 无 key → 握手被拒 HTTP 403（ASGI close 4001）。
 
 ## 不做
 

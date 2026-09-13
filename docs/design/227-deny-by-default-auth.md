@@ -37,7 +37,7 @@
 
 ### 4.1 UI/UX
 
-N/A —— 无新增页面。现有 Web 前端只需在 WS 连接时继续携带 `?api_key=`（已有）；跨域场景下浏览器会看到连接被关闭（code 4003），无新增 UI。
+N/A —— 无新增页面。现有 Web 前端只需在 WS 连接时继续携带 `?api_key=`（已有）；跨域场景下浏览器会看到 WS 握手被拒（uvicorn 将 accept 前的 `close(4003)` 映射为 HTTP 403；4003 仅在 Starlette TestClient 中可见），无新增 UI。
 
 ## 5 思路与折衷
 
@@ -100,7 +100,7 @@ flowchart LR
 | `/start` 非法名 | 回复 `Unknown agent: <name>` | 无 binding 写入 |
 | Web 空 key 启动 | lifespan raise `RuntimeError("everbot.web.api_key is required")` | `everbot-web.out` 末行含该文案；`bin/everbot start` 打印启动失败 |
 | 读配置异常 | `_get_configured_api_key` raise | 同上 |
-| 外域 Origin | HTTP 403 `{"detail":"Origin not allowed"}`；WS `close(4003)` | access log |
+| 外域 Origin | HTTP 403 `{"detail":"Origin not allowed"}`；WS `close(4003)`（真实 uvicorn 表现为握手 HTTP 403） | access log |
 | `get_agent_dir` 非法名 | `ValueError("Invalid agent name")` | Telegram 回 `Unknown agent`；Web 404 |
 | passthrough 变量缺失 | WARNING 一次，继续 spawn | 技能脚本自身报"未配置 key"（与现状一致） |
 | agent 执行异常 | 频道 `执行失败（ref=<run_id>）` | 完整异常与 traceback 在 `everbot.out` |
