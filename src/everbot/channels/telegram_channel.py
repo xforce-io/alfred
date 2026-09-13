@@ -622,8 +622,10 @@ class TelegramChannel:
     def _log_rejected_chat(self, chat_id: str) -> None:
         """WARN about a rejected chat at most once per hour per chat_id."""
         now = time.monotonic()
-        last = self._rejected_chat_log_at.get(chat_id, 0.0)
-        if now - last >= 3600:
+        last = self._rejected_chat_log_at.get(chat_id)
+        # monotonic() may be close to 0 right after boot, so a 0.0 default
+        # would swallow the first warning; treat "never logged" explicitly.
+        if last is None or now - last >= 3600:
             self._rejected_chat_log_at[chat_id] = now
             logger.warning(
                 "[%s] Rejected Telegram update from unauthorized chat_id=%s",
