@@ -83,3 +83,6 @@ tmp_*.py
 .coding-master/
 .coding-master.lock
 .invest/
+
+# keel-verify run evidence (local only, see .grok/skills/verify-*/SKILL.md)
+.grok/verify-runs/
