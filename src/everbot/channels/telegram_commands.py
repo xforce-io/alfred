@@ -43,6 +43,11 @@ async def _cmd_start(ch: TelegramChannel, chat_id: str, arg: str) -> None:
             chat_id, "Usage: /start <agent_name>\nExample: /start daily_insight"
         )
         return
+    # #227: only bind to agents that actually exist; the name is also a path
+    # segment downstream, so never persist an arbitrary string.
+    if agent_name not in ch._user_data.list_agents():
+        await ch._send_message(chat_id, f"Unknown agent: {agent_name}")
+        return
     ch._bindings[chat_id] = agent_name
     ch._save_bindings()
     await ch._send_message(chat_id, f"Bound to agent: {agent_name}")

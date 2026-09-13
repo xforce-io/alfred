@@ -13,6 +13,7 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -101,6 +102,7 @@ class TelegramChannel:
         default_agent: str = "",
         allowed_chat_ids: Optional[List[str]] = None,
         name: str = "",
+        allow_all: bool = False,
     ) -> None:
         self._bot_token = bot_token
         self._name = name
@@ -108,9 +110,20 @@ class TelegramChannel:
         self._file_base_url = f"https://api.telegram.org/file/bot{bot_token}"
         self._session_manager = session_manager
         self._default_agent = default_agent
-        self._allowed_chat_ids: Optional[Set[str]] = (
-            set(allowed_chat_ids) if allowed_chat_ids else None
-        )
+        # Deny by default (#227): with neither an allow-list nor an explicit
+        # ``allow_all`` every chat is rejected, and we say so once at startup.
+        self._allow_all = bool(allow_all)
+        self._allowed_chat_ids: Set[str] = {str(c) for c in (allowed_chat_ids or [])}
+        if self._allow_all:
+            logger.warning(
+                "[%s] Telegram bot accepts messages from ANY chat (allow_all=true)", name,
+            )
+        elif not self._allowed_chat_ids:
+            logger.warning(
+                "[%s] Telegram bot has no allowed_chat_ids and allow_all is not set: "
+                "every incoming chat will be rejected", name,
+            )
+        self._rejected_chat_log_at: Dict[str, float] = {}
 
         self._user_data = get_user_data_manager()
         self._agent_service = AgentService()
@@ -602,11 +615,34 @@ class TelegramChannel:
     # Update routing
     # ------------------------------------------------------------------
 
+    def _is_chat_allowed(self, chat_id: str) -> bool:
+        """Access control (#227): explicit allow-list or explicit allow_all only."""
+        return self._allow_all or chat_id in self._allowed_chat_ids
+
+    def _log_rejected_chat(self, chat_id: str) -> None:
+        """WARN about a rejected chat at most once per hour per chat_id."""
+        now = time.monotonic()
+        last = self._rejected_chat_log_at.get(chat_id)
+        # monotonic() may be close to 0 right after boot, so a 0.0 default
+        # would swallow the first warning; treat "never logged" explicitly.
+        if last is None or now - last >= 3600:
+            self._rejected_chat_log_at[chat_id] = now
+            logger.warning(
+                "[%s] Rejected Telegram update from unauthorized chat_id=%s",
+                self._name, chat_id,
+            )
+
     async def _handle_update(self, update: dict) -> None:
         msg = update.get("message") or {}
         text = (msg.get("text") or "").strip()
         chat_id = str((msg.get("chat") or {}).get("id", ""))
         if not chat_id:
+            return
+
+        # Access control runs before any parsing or media download so an
+        # unauthorized chat can neither reach the agent nor write files locally.
+        if not self._is_chat_allowed(chat_id):
+            self._log_rejected_chat(chat_id)
             return
 
         # message can be str or list (multimodal)
@@ -674,11 +710,6 @@ class TelegramChannel:
                     message += " (文件下载失败，请重新上传文件，或者确认文件有效性后再为你处理)"
 
         if not message:
-            return
-
-        # Access control
-        if self._allowed_chat_ids is not None and chat_id not in self._allowed_chat_ids:
-            logger.debug("Ignoring message from unauthorized chat_id=%s", chat_id)
             return
 
         # Commands only from plain text messages

@@ -61,6 +61,16 @@ Agent 工作区已初始化: my_first_agent
 
 ## 第 4 步：启动
 
+Web 服务要求配置 API key（为空则拒绝启动）。在 `~/.alfred/config.yaml` 中设置：
+
+```yaml
+everbot:
+  web:
+    api_key: "${EVERBOT_WEB_API_KEY}"   # 或直接写字面值
+```
+
+浏览器访问时在 URL 上带 `?api_key=...`（WebSocket 同样），API 调用带 `X-API-Key` 头。
+
 ```bash
 # 一键启动（后台启动 daemon + web）
 ./bin/everbot start
@@ -123,7 +133,7 @@ everbot:
       enabled: true
       bot_token: "${TELEGRAM_BOT_TOKEN}"
       default_agent: "my_first_agent"
-      # allowed_chat_ids: ["123456789"]  # 可选，限制允许的用户
+      allowed_chat_ids: ["123456789"]  # 必填：不在列表中的 chat 一律拒绝（或显式 allow_all: true）
 ```
 
 **多 Bot（每个 Agent 独立 Bot）**：

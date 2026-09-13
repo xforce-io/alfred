@@ -50,6 +50,9 @@ def _make_session_manager_mock():
     return sm
 
 
+_KNOWN_AGENTS = ["test_agent", "my_agent", "daily_insight", "other_agent"]
+
+
 def _make_channel(tmp_path: Path, **kwargs) -> TelegramChannel:
     sm = _make_session_manager_mock()
     ch = TelegramChannel(
@@ -57,8 +60,13 @@ def _make_channel(tmp_path: Path, **kwargs) -> TelegramChannel:
         session_manager=sm,
         default_agent=kwargs.get("default_agent", "test_agent"),
         allowed_chat_ids=kwargs.get("allowed_chat_ids"),
+        # #227: access is deny-by-default; behaviour tests opt into allow_all
+        # unless they exercise the access-control path itself.
+        allow_all=kwargs.get("allow_all", kwargs.get("allowed_chat_ids") is None),
     )
     ch._bindings_path = tmp_path / "bindings.json"
+    ch._user_data = MagicMock(wraps=ch._user_data)
+    ch._user_data.list_agents = MagicMock(return_value=list(_KNOWN_AGENTS))
     return ch
 
 
@@ -885,6 +893,65 @@ class TestAccessControl:
             },
         })
         ch._send_message.assert_awaited()
+
+    # -- #227 deny by default -------------------------------------------------
+
+    def _update(self, chat_id: int, **body) -> dict:
+        body.setdefault("chat", {"id": chat_id})
+        return {"update_id": 1, "message": body}
+
+    @pytest.mark.asyncio
+    async def test_no_allowlist_and_no_allow_all_rejects_everything(self, tmp_path, caplog):
+        """S1: neither allowed_chat_ids nor allow_all → every chat is dropped with one WARNING."""
+        ch = _make_channel(tmp_path, allow_all=False)
+        ch._send_message = AsyncMock()
+        ch._core.process_message = AsyncMock()
+        with caplog.at_level("WARNING"):
+            await ch._handle_update(self._update(999, text="/start test_agent"))
+            await ch._handle_update(self._update(999, text="hello"))
+        ch._send_message.assert_not_awaited()
+        ch._core.process_message.assert_not_awaited()
+        assert "999" not in ch._bindings
+        rejected = [r for r in caplog.records if "unauthorized chat_id=999" in r.getMessage()]
+        assert len(rejected) == 1  # rate-limited to once per chat per hour
+
+    @pytest.mark.asyncio
+    async def test_unauthorized_chat_never_triggers_media_download(self, tmp_path):
+        """S1: access control runs before media download so strangers cannot write files."""
+        ch = _make_channel(tmp_path, allowed_chat_ids=["111"])
+        ch._download_document = AsyncMock()
+        ch._download_photo = AsyncMock()
+        await ch._handle_update(self._update(
+            999, document={"file_id": "f", "file_name": "x.pdf", "file_size": 10}, caption="c",
+        ))
+        await ch._handle_update(self._update(999, photo=[{"file_id": "p"}], caption="c"))
+        ch._download_document.assert_not_awaited()
+        ch._download_photo.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_allow_all_admits_unknown_chat(self, tmp_path):
+        ch = _make_channel(tmp_path, allow_all=True)
+        ch._send_message = AsyncMock()
+        await ch._handle_update(self._update(999, text="/help"))
+        ch._send_message.assert_awaited()
+
+    def test_startup_warns_when_open_or_closed(self, tmp_path, caplog):
+        with caplog.at_level("WARNING"):
+            _make_channel(tmp_path, allow_all=False)
+            _make_channel(tmp_path, allow_all=True)
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("every incoming chat will be rejected" in m for m in msgs)
+        assert any("allow_all=true" in m for m in msgs)
+
+    @pytest.mark.asyncio
+    async def test_start_rejects_unknown_or_traversal_agent(self, tmp_path):
+        """S5: /start only binds agents that exist; '../..' never becomes a binding."""
+        ch = _make_channel(tmp_path)
+        ch._send_message = AsyncMock()
+        for bad in ("../..", "ghost_agent"):
+            await ch._handle_command("111", f"/start {bad}", {})
+            assert "111" not in ch._bindings
+            assert "Unknown agent" in ch._send_message.call_args[0][1]
 
 
 # ===========================================================================

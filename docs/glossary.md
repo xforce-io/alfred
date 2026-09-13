@@ -4,6 +4,8 @@
 |---|---|---|
 | grok-cli | 宿主 spawn 本机 `grok` CLI 作为 agent runtime 的路径，走 OAuth 登录而非 HTTP 模型端点。 | grok HTTP、xAI API、SpaceXAI HTTP |
 | kairo-ingest | 扫描语音备忘录与 Downloads 中名为 XXX-YYMMDD 的材料，确认后登记到已有 Kairo Topic 并 step 进目标的技能。 | 入库、inbox |
+| sidecar | daemon 为每个 agent 启动的 `milkie serve` Node 子进程，agent 的工具调用（含 `run_command`）都在其中执行。 | milkie 进程、agent 进程 |
+| env_passthrough | per-agent 配置 `everbot.agents.<name>.env_passthrough`，列出允许从 daemon 环境透传到该 agent sidecar 的变量名；未列出的变量不进 sidecar。 | env 白名单、passthrough env |
 
 # Alfred 术语表
 

@@ -13,6 +13,7 @@ import re
 
 import yaml
 
+from ..infra.config import expand_env_refs
 from ..infra.user_data import UserDataManager
 
 
@@ -48,6 +49,62 @@ def parse_yaml_file(path: Path) -> Dict[str, Any]:
         return {}
     return data if isinstance(data, dict) else {}
 
+
+
+def check_access_config(
+    everbot_cfg: Dict[str, Any], *, environ: Optional[Dict[str, str]] = None
+) -> List[DoctorItem]:
+    """Deny-by-default access checks (#227).
+
+    Flags the three settings that, when missing, now stop the service
+    instead of running open: Telegram allow-list, web api_key, and
+    per-agent env_passthrough names absent from the current environment.
+    """
+    env = os.environ if environ is None else environ
+    items: List[DoctorItem] = []
+
+    telegram = (everbot_cfg.get("channels", {}) or {}).get("telegram")
+    bots = telegram if isinstance(telegram, list) else ([telegram] if telegram else [])
+    for bot in bots:
+        if not isinstance(bot, dict):
+            continue
+        name = str(bot.get("name") or "default")
+        if bot.get("allow_all") is True:
+            items.append(DoctorItem(
+                level="WARN", title=f"Telegram access ({name})",
+                details="allow_all is true: every chat can talk to this bot.",
+            ))
+        elif not bot.get("allowed_chat_ids"):
+            items.append(DoctorItem(
+                level="ERROR", title=f"Telegram access ({name})",
+                details="No allowed_chat_ids and allow_all is not set: all chats are rejected.",
+                hint="Set channels.telegram[].allowed_chat_ids (chat ids from telegram_bindings*.json) or allow_all: true.",
+            ))
+
+    raw_key = str((everbot_cfg.get("web", {}) or {}).get("api_key") or "")
+    try:
+        api_key = expand_env_refs(raw_key, environ=env).strip()
+    except ValueError as exc:
+        api_key = ""
+        key_detail = f"everbot.web.api_key cannot be resolved: {exc}."
+    else:
+        key_detail = "everbot.web.api_key is empty: the web server refuses to start."
+    if not api_key:
+        items.append(DoctorItem(
+            level="ERROR", title="Web api_key", details=key_detail,
+            hint="Set everbot.web.api_key (supports ${ENV}) and export the referenced variable.",
+        ))
+
+    for agent_name, agent_cfg in (everbot_cfg.get("agents", {}) or {}).items():
+        names = (agent_cfg or {}).get("env_passthrough") or []
+        missing = sorted(n for n in names if n not in env)
+        if missing:
+            items.append(DoctorItem(
+                level="WARN", title=f"env_passthrough ({agent_name})",
+                details=f"Declared but absent from the daemon environment: {', '.join(missing)}",
+                hint="Export them in ~/.env.secrets or remove them from env_passthrough.",
+            ))
+    return items
 
 
 def detect_agent_dph_format(agent_dph_content: str) -> str:
@@ -117,6 +174,7 @@ def collect_doctor_report(
                     hint=f"Edit {user_data.config_path} and set everbot.enabled: true",
                 )
             )
+        items.extend(check_access_config(everbot_cfg.get("everbot", {}) or {}))
     else:
         items.append(
             DoctorItem(

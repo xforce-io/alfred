@@ -1070,7 +1070,7 @@ def test_injected_system_prompt_loader_is_used(monkeypatch):
     captured_skills: list = []
 
     class _CapturingLauncher:
-        def build(self, agent_name, *, system_prompt, skills=None, default_model=None, agent_workspace=None, sandbox_enabled=None):
+        def build(self, agent_name, *, system_prompt, skills=None, default_model=None, agent_workspace=None, sandbox_enabled=None, env_passthrough=()):
             captured_prompts.append(system_prompt)
             captured_skills.append(skills)
             return LaunchSpec(
@@ -1115,7 +1115,7 @@ def test_default_loader_feeds_discovered_skills_to_launcher(monkeypatch):
     captured = {}
 
     class _CapturingLauncher:
-        def build(self, agent_name, *, system_prompt, skills=None, default_model=None, agent_workspace=None, sandbox_enabled=None):
+        def build(self, agent_name, *, system_prompt, skills=None, default_model=None, agent_workspace=None, sandbox_enabled=None, env_passthrough=()):
             captured["system_prompt"] = system_prompt
             captured["skills"] = skills
             return LaunchSpec(
@@ -1212,7 +1212,7 @@ def test_build_pool_wires_skills_fingerprint(monkeypatch):
     from src.everbot.core.agent.provider.milkie.launcher import LaunchSpec
 
     class _StubLauncher:
-        def build(self, agent_name, *, system_prompt, skills=None, default_model=None, agent_workspace=None, sandbox_enabled=None):
+        def build(self, agent_name, *, system_prompt, skills=None, default_model=None, agent_workspace=None, sandbox_enabled=None, env_passthrough=()):
             return LaunchSpec(
                 cmd=["node"], env={}, data_dir=Path("/tmp"), agent_md=Path("/tmp/a.md")
             )
