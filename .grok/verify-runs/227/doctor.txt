@@ -1,0 +1,13 @@
+$ ./bin/everbot status | head -2
+EverBot: 运行中 (pid=58525)
+Agents: demo_agent
+$ ./bin/everbot doctor | head -1
+Doctor: OK=6 WARN=1 ERROR=0
+$ curl -s -o /dev/null -w %{http_code} -H "X-API-Key: $EVERBOT_WEB_API_KEY" http://127.0.0.1:8765/api/agents
+000
+$ pgrep -f milkie/demo_agent | wc -l
+       0
+$ cat ~/.alfred/telegram_bindings_default.json
+{
+  "8576399597": "demo_agent"
+}

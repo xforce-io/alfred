@@ -1,0 +1,9 @@
+Doctor: OK=6 WARN=1 ERROR=0
+! [WARN] Agent budget_agent: Workspace missing AGENTS.md/SOUL.md/HEARTBEAT.md markers.
+    Hint: Run: bin/everbot init budget_agent
+✓ [OK] Agent coding-master: Workspace OK (AGENTS.md, SOUL.md, HEARTBEAT.md).
+✓ [OK] EverBot config: Found config: /Users/xupeng/.alfred/config.yaml
+✓ [OK] Model routing config: Using project config: /Users/xupeng/dev/github/alfred/config/models.yaml
+✓ [OK] Web deps: fastapi/uvicorn installed.
+✓ [OK] milkie native deps: better-sqlite3 加载正常(node v22.22.3 127)
+✓ [OK] milkie node_bin: 已钉死绝对路径:/Users/xupeng/.nvm/versions/node/v22.22.3/bin/node(版本 v22.22.3)
