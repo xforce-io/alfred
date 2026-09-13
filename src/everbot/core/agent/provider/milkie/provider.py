@@ -200,6 +200,20 @@ def _agent_sandbox_enabled(agent_name: str) -> bool:
         return False
 
 
+def _agent_env_passthrough(agent_name: str) -> list[str]:
+    """Return ``everbot.agents.<name>.env_passthrough`` (#227).
+
+    Unlike the sandbox toggle this is fail-closed: a config that cannot be
+    read yields an empty allow-list, never the inherited daemon environment.
+    """
+    from .....infra.config import get_config
+
+    everbot_cfg = (get_config() or {}).get("everbot", {}) or {}
+    agent_cfg = (everbot_cfg.get("agents", {}) or {}).get(agent_name, {}) or {}
+    names = agent_cfg.get("env_passthrough") or []
+    return [str(n) for n in names]
+
+
 def _agent_skill_filter(agent_name: str):
     """读 everbot.agents.<name>.skills.{include,exclude} → (include, exclude)。缺省 (None, None)。"""
     try:
@@ -357,6 +371,7 @@ class MilkieProvider:
                 default_model=per_agent_model,
                 agent_workspace=_resolve_agent_workspace(agent_name),
                 sandbox_enabled=_agent_sandbox_enabled(agent_name),
+                env_passthrough=_agent_env_passthrough(agent_name),
             )
             return spec.cmd, spec.env
 

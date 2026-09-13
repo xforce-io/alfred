@@ -613,6 +613,7 @@ class EverBotDaemon:
                 default_agent=default_agent,
                 allowed_chat_ids=allowed_ids,
                 name=bot_name,
+                allow_all=bool(cfg.get("allow_all", False)),
             )
             result.append(channel)
             logger.info(

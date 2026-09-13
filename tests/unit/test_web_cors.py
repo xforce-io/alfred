@@ -54,7 +54,7 @@ class TestGetCorsOrigins:
         with mock.patch.dict(os.environ, {"EVERBOT_CORS_ORIGINS": ""}):
             origins = _get_cors_origins()
         # Only defaults
-        assert len(origins) == 6
+        assert len(origins) == 8
 
     def test_env_var_skips_empty_entries(self):
         """Trailing commas or empty segments should be ignored."""

@@ -23,10 +23,13 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .auth import verify_api_key, verify_ws_api_key
+from contextlib import asynccontextmanager
+
+from .auth import require_api_key, verify_api_key, verify_ws_api_key
+from .origin_guard import OriginGuardMiddleware
 from .services import AgentService, ChatService
 from ..core.session.session import SessionData
-from ..infra.user_data import get_user_data_manager
+from ..infra.user_data import get_user_data_manager, is_valid_agent_name
 from ..infra.config import get_config, load_config, save_config
 def _get_cors_origins() -> List[str]:
     """Build the list of allowed CORS origins.
@@ -38,9 +41,11 @@ def _get_cors_origins() -> List[str]:
         "http://localhost",
         "http://localhost:8080",
         "http://localhost:3000",
+        "http://localhost:8765",
         "http://127.0.0.1",
         "http://127.0.0.1:8080",
         "http://127.0.0.1:3000",
+        "http://127.0.0.1:8765",
     ]
     extra = os.environ.get("EVERBOT_CORS_ORIGINS", "").strip()
     if extra:
@@ -51,8 +56,16 @@ def _get_cors_origins() -> List[str]:
     return origins
 
 
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # Deny by default (#227): refuse to serve without an API key so a
+    # misconfigured instance fails at start instead of running open.
+    require_api_key()
+    yield
+
+
 # FastAPI app
-app = FastAPI(title="EverBot")
+app = FastAPI(title="EverBot", lifespan=_lifespan)
 
 # CORS middleware — restricted to local origins by default.
 # Set EVERBOT_CORS_ORIGINS (comma-separated) to allow additional origins.
@@ -63,6 +76,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Origin guard (#227): CORS does not stop cross-site WebSocket handshakes or
+# simple POSTs; reject those unless the Origin is same-origin or allow-listed.
+app.add_middleware(OriginGuardMiddleware, allowed_origins=_get_cors_origins)
 
 # Directory configuration
 BASE_DIR = Path(__file__).parent
@@ -75,6 +91,12 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 agent_service = AgentService()
 chat_service = ChatService()
 logger = logging.getLogger(__name__)
+
+def _require_valid_agent(agent_name: str) -> None:
+    """Path dependency (#227): unknown or unsafe agent names are 404, never a path."""
+    if not is_valid_agent_name(agent_name) or not get_user_data_manager().get_agent_dir(agent_name).is_dir():
+        raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
+
 
 # Task tracking (for async heartbeat operations)
 _tasks: Dict[str, str] = {}
@@ -139,7 +161,7 @@ async def api_status() -> Dict[str, Any]:
     return agent_service.get_status()
 
 
-@app.post("/api/agents/{agent_name}/heartbeat", dependencies=[Depends(verify_api_key)])
+@app.post("/api/agents/{agent_name}/heartbeat", dependencies=[Depends(verify_api_key), Depends(_require_valid_agent)])
 async def api_trigger_heartbeat(agent_name: str, force: bool = False) -> JSONResponse:
     """Trigger heartbeat for an agent"""
     _cleanup_completed_tasks()
@@ -161,7 +183,7 @@ async def api_trigger_heartbeat(agent_name: str, force: bool = False) -> JSONRes
     return JSONResponse({"scheduled": True, "task_id": task_id})
 
 
-@app.post("/api/agents/{agent_name}/sessions/reset", dependencies=[Depends(verify_api_key)])
+@app.post("/api/agents/{agent_name}/sessions/reset", dependencies=[Depends(verify_api_key), Depends(_require_valid_agent)])
 async def reset_agent_session(agent_name: str, request: Request):
     """Hard reset agent environment: clear all sessions, cache, and temp files."""
     forwarded_for = request.headers.get("x-forwarded-for", "").strip()
@@ -182,8 +204,7 @@ async def reset_agent_session(agent_name: str, request: Request):
 
     # A-4: Clean up agent temp directory to prevent leftover artifacts
     # from contaminating the next conversation.
-    user_data = get_user_data_manager()
-    agent_tmp = user_data.alfred_home / "agents" / agent_name / "tmp"
+    agent_tmp = get_user_data_manager().get_agent_tmp_dir(agent_name)
     if agent_tmp.is_dir():
         import shutil
         shutil.rmtree(agent_tmp, ignore_errors=True)
@@ -193,7 +214,7 @@ async def reset_agent_session(agent_name: str, request: Request):
     return {"status": "ok", "removed_sessions": removed_sessions}
 
 
-@app.post("/api/agents/{agent_name}/sessions/{session_id}/clear-history", dependencies=[Depends(verify_api_key)])
+@app.post("/api/agents/{agent_name}/sessions/{session_id}/clear-history", dependencies=[Depends(verify_api_key), Depends(_require_valid_agent)])
 async def clear_session_history(agent_name: str, session_id: str):
     """Clear conversation history for a single session while preserving session metadata."""
     found = await chat_service.session_manager.clear_session_history(session_id)
@@ -203,7 +224,7 @@ async def clear_session_history(agent_name: str, session_id: str):
     return {"status": "ok", "session_id": session_id}
 
 
-@app.get("/api/agents/{agent_name}/sessions", dependencies=[Depends(verify_api_key)])
+@app.get("/api/agents/{agent_name}/sessions", dependencies=[Depends(verify_api_key), Depends(_require_valid_agent)])
 async def list_agent_sessions(agent_name: str, limit: int = 20) -> Dict[str, Any]:
     """List persisted sessions for one agent."""
     sessions = await chat_service.session_manager.list_agent_sessions(agent_name, limit=limit)
@@ -224,7 +245,7 @@ async def list_agent_sessions(agent_name: str, limit: int = 20) -> Dict[str, Any
     return {"agent_name": agent_name, "sessions": sessions}
 
 
-@app.post("/api/agents/{agent_name}/sessions", dependencies=[Depends(verify_api_key)])
+@app.post("/api/agents/{agent_name}/sessions", dependencies=[Depends(verify_api_key), Depends(_require_valid_agent)])
 async def create_agent_session(agent_name: str, request: Request) -> Dict[str, Any]:
     """Create a new chat session id for one agent."""
     forwarded_for = request.headers.get("x-forwarded-for", "").strip()
@@ -265,7 +286,7 @@ async def create_agent_session(agent_name: str, request: Request) -> Dict[str, A
     return {"agent_name": agent_name, "session_id": session_id}
 
 
-@app.get("/api/agents/{agent_name}/session/trace", dependencies=[Depends(verify_api_key)])
+@app.get("/api/agents/{agent_name}/session/trace", dependencies=[Depends(verify_api_key), Depends(_require_valid_agent)])
 async def get_agent_session_trace(agent_name: str, session_id: Optional[str] = None) -> Dict[str, Any]:
     """Get persisted trace data for one agent session."""
     await chat_service.session_manager.migrate_legacy_sessions_for_agent(agent_name)
@@ -538,6 +559,9 @@ async def websocket_chat(websocket: WebSocket, agent_name: str, session_id: Opti
     # Authenticate before accepting the WebSocket connection
     if not await verify_ws_api_key(websocket):
         await websocket.close(code=4001, reason="Unauthorized")
+        return
+    if not is_valid_agent_name(agent_name) or not get_user_data_manager().get_agent_dir(agent_name).is_dir():
+        await websocket.close(code=4004, reason="Unknown agent")
         return
 
     logger.info("WebSocket connection request for agent: %s", agent_name)

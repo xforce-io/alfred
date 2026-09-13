@@ -2,8 +2,10 @@
 配置管理
 """
 
+import os
+import re
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Mapping, Optional
 import yaml
 import logging
 
@@ -11,6 +13,26 @@ logger = logging.getLogger(__name__)
 
 
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
+_ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def expand_env_refs(value: str, *, environ: Optional[Mapping[str, str]] = None) -> str:
+    """Expand ``${NAME}`` references in *value* from the environment.
+
+    Unlike :func:`os.path.expandvars`, an unset variable is an error rather
+    than being left as the literal ``${NAME}`` text — otherwise a secret that
+    was never exported would silently become the secret itself.
+    """
+    env = os.environ if environ is None else environ
+
+    def _sub(match: "re.Match[str]") -> str:
+        name = match.group(1)
+        if name not in env:
+            raise ValueError(f"Environment variable {name} referenced in config is not set")
+        return env[name]
+
+    return _ENV_REF_RE.sub(_sub, value)
 
 
 def _validate_config(config: Dict[str, Any]) -> None:
@@ -28,6 +50,26 @@ def _validate_config(config: Dict[str, Any]) -> None:
             for name, agent_cfg in everbot["agents"].items():
                 if not isinstance(agent_cfg, dict):
                     raise ValueError(f"'everbot.agents.{name}' must be a dictionary")
+                passthrough = agent_cfg.get("env_passthrough")
+                if passthrough is not None and (
+                    not isinstance(passthrough, list)
+                    or not all(isinstance(v, str) and v for v in passthrough)
+                ):
+                    raise ValueError(
+                        f"'everbot.agents.{name}.env_passthrough' must be a list of "
+                        "non-empty variable names"
+                    )
+        telegram = (everbot.get("channels") or {}).get("telegram")
+        bots = telegram if isinstance(telegram, list) else ([telegram] if telegram else [])
+        for bot in bots:
+            if not isinstance(bot, dict):
+                continue
+            allow_all = bot.get("allow_all")
+            if allow_all is not None and not isinstance(allow_all, bool):
+                raise ValueError("'channels.telegram[].allow_all' must be a boolean")
+            allowed = bot.get("allowed_chat_ids")
+            if allowed is not None and not isinstance(allowed, list):
+                raise ValueError("'channels.telegram[].allowed_chat_ids' must be a list")
 
     if "logging" in config:
         logging_cfg = config["logging"]

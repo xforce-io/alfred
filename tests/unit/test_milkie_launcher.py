@@ -366,3 +366,45 @@ def test_build_sandbox_follows_constructor_when_no_override(tmp_path, monkeypatc
     # 不传 sandbox_enabled(None)→ 沿用构造默认(True)。
     spec = _sandbox_launcher(tmp_path, tmp_path / ".alfred", enabled=True).build("alice", system_prompt="x")
     assert spec.cmd[0] == "sandbox-exec"
+
+
+# ---------------------------------------------------------------------------
+# #227 deny-by-default sidecar environment
+# ---------------------------------------------------------------------------
+
+from src.everbot.core.agent.provider.milkie.launcher import (  # noqa: E402
+    SIDECAR_BASE_ENV,
+    build_sidecar_env,
+)
+
+
+def test_build_sidecar_env_is_allowlist_only(caplog):
+    source = {
+        "PATH": "/usr/bin", "HOME": "/h", "LANG": "C",
+        "TELEGRAM_ALFRED_BOT_TOKEN": "tg-secret",
+        "AWS_SECRET_ACCESS_KEY": "aws-secret",
+        "TAVILY_API_KEY": "tav",
+    }
+    with caplog.at_level("WARNING"):
+        env = build_sidecar_env(
+            agent_name="demo", env_passthrough=["TAVILY_API_KEY", "TUSHARE_TOKEN"], source=source,
+        )
+    assert env == {"PATH": "/usr/bin", "HOME": "/h", "LANG": "C", "TAVILY_API_KEY": "tav"}
+    assert "TELEGRAM_ALFRED_BOT_TOKEN" not in env and "AWS_SECRET_ACCESS_KEY" not in env
+    # Declared but absent → one WARNING naming the variable, no failure.
+    assert any("TUSHARE_TOKEN" in r.getMessage() for r in caplog.records)
+
+
+def test_build_does_not_inherit_daemon_secrets(tmp_path, monkeypatch):
+    """S4: the spec env is base ∪ framework ∪ passthrough — nothing else from os.environ."""
+    monkeypatch.setenv("TELEGRAM_ALFRED_BOT_TOKEN", "tg-secret")
+    monkeypatch.setenv("SOME_RANDOM_SECRET", "x")
+    monkeypatch.setenv("TUSHARE_TOKEN", "ts")
+    spec = _launcher(tmp_path).build(
+        "alice", system_prompt="p", env_passthrough=["TUSHARE_TOKEN"],
+    )
+    framework = {"EVERBOT_AGENT", "ALFRED_AGENT", "OPENAI_API_KEY", SKILL_MANIFEST_ENV}
+    assert set(spec.env) <= SIDECAR_BASE_ENV | framework | {"TUSHARE_TOKEN"}
+    assert spec.env["TUSHARE_TOKEN"] == "ts"
+    assert "TELEGRAM_ALFRED_BOT_TOKEN" not in spec.env
+    assert "SOME_RANDOM_SECRET" not in spec.env

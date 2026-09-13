@@ -11,6 +11,15 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Agent names are used as path segments under agents_dir and as milkie
+# data-dir names; restrict them to a single safe filename segment (#227).
+_AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def is_valid_agent_name(agent_name: str) -> bool:
+    """Return True when *agent_name* is a single safe path segment."""
+    return bool(agent_name) and _AGENT_NAME_RE.match(agent_name) is not None
+
 
 class UserDataManager:
     """
@@ -248,7 +257,14 @@ class UserDataManager:
     # --- Agent 管理 ---
 
     def get_agent_dir(self, agent_name: str) -> Path:
-        """获取 Agent 工作区目录"""
+        """Return the agent workspace directory.
+
+        Single chokepoint for agent-name → path mapping (#227): rejects
+        anything that is not one safe path segment so ``../..`` from a
+        channel or the web API can never escape ``agents_dir``.
+        """
+        if not is_valid_agent_name(agent_name):
+            raise ValueError(f"Invalid agent name: {agent_name!r}")
         return self.agents_dir / agent_name
 
     def get_agent_tmp_dir(self, agent_name: str) -> Path:

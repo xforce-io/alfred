@@ -8,8 +8,10 @@ import pytest
 from fastapi import HTTPException
 
 from src.everbot.web.auth import (
+    API_KEY_REQUIRED_MESSAGE,
     _get_configured_api_key,
     _extract_api_key,
+    require_api_key,
     verify_api_key,
     verify_ws_api_key,
 )
@@ -58,9 +60,36 @@ class TestGetConfiguredApiKey:
         assert _get_configured_api_key() == ""
 
     @patch("src.everbot.web.auth.get_config")
-    def test_returns_empty_on_exception(self, mock_load):
+    def test_config_error_propagates(self, mock_load):
+        """#227: a broken config must not degrade into 'no key configured'."""
         mock_load.side_effect = FileNotFoundError("no config")
-        assert _get_configured_api_key() == ""
+        with pytest.raises(FileNotFoundError):
+            _get_configured_api_key()
+
+    @patch("src.everbot.web.auth.get_config")
+    def test_expands_env_reference(self, mock_load, monkeypatch):
+        monkeypatch.setenv("EVERBOT_TEST_WEB_KEY", "from-env")
+        mock_load.return_value = {"everbot": {"web": {"api_key": "${EVERBOT_TEST_WEB_KEY}"}}}
+        assert _get_configured_api_key() == "from-env"
+
+    @patch("src.everbot.web.auth.get_config")
+    def test_unresolved_env_reference_raises(self, mock_load, monkeypatch):
+        """An unset ${VAR} must not silently become the literal key text."""
+        monkeypatch.delenv("EVERBOT_TEST_WEB_KEY", raising=False)
+        mock_load.return_value = {"everbot": {"web": {"api_key": "${EVERBOT_TEST_WEB_KEY}"}}}
+        with pytest.raises(ValueError, match="EVERBOT_TEST_WEB_KEY"):
+            _get_configured_api_key()
+
+
+class TestRequireApiKey:
+    @patch("src.everbot.web.auth._get_configured_api_key", return_value="")
+    def test_empty_key_raises(self, _mock):
+        with pytest.raises(RuntimeError, match=API_KEY_REQUIRED_MESSAGE):
+            require_api_key()
+
+    @patch("src.everbot.web.auth._get_configured_api_key", return_value="k")
+    def test_configured_key_returned(self, _mock):
+        assert require_api_key() == "k"
 
 
 # ===========================================================================
@@ -95,12 +124,12 @@ class TestExtractApiKey:
 class TestVerifyApiKey:
     @pytest.mark.asyncio
     @patch("src.everbot.web.auth._get_configured_api_key", return_value="")
-    async def test_no_key_configured_allows_all(self, _mock):
-        """When api_key is empty, all requests should pass."""
-        import src.everbot.web.auth as auth_mod
-        auth_mod._warned_no_key = False  # reset warning state
-        req = _make_request()
-        await verify_api_key(req)  # should not raise
+    async def test_no_key_configured_rejects_with_503(self, _mock):
+        """#227 deny by default: an unconfigured key is a server error, not open access."""
+        req = _make_request(headers={"x-api-key": "anything"})
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_api_key(req)
+        assert exc_info.value.status_code == 503
 
     @pytest.mark.asyncio
     @patch("src.everbot.web.auth._get_configured_api_key", return_value="secret123")
@@ -138,11 +167,10 @@ class TestVerifyApiKey:
 class TestVerifyWsApiKey:
     @pytest.mark.asyncio
     @patch("src.everbot.web.auth._get_configured_api_key", return_value="")
-    async def test_no_key_configured_returns_true(self, _mock):
-        import src.everbot.web.auth as auth_mod
-        auth_mod._warned_no_key = False
-        ws = _make_websocket()
-        assert await verify_ws_api_key(ws) is True
+    async def test_no_key_configured_returns_false(self, _mock):
+        """#227 deny by default."""
+        ws = _make_websocket(query_params={"api_key": "anything"})
+        assert await verify_ws_api_key(ws) is False
 
     @pytest.mark.asyncio
     @patch("src.everbot.web.auth._get_configured_api_key", return_value="ws_secret")

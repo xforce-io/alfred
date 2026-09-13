@@ -686,8 +686,12 @@ class ChannelCoreService:
                         "本轮执行遇到错误，未能完成处理。"
                         "我已停止本轮并保留上下文，你可以直接重试或给我一个更具体的指令。"
                     ), msg_type="text"))
-                    tb_text = traceback.format_exc()
-                    await on_event(OutboundMessage(session_id, f"执行失败: {str(e)}\n\n```\n{tb_text[-1000:]}\n```", msg_type="error"))
+                    # #227: the traceback (and any command line / stderr inside
+                    # the exception text) stays in the log above; the channel
+                    # only gets a correlation handle.
+                    await on_event(OutboundMessage(
+                        session_id, f"执行失败（ref={run_id}）", msg_type="error",
+                    ))
             except Exception as send_error:
                 should_send_end = False
                 logger.warning("Failed to send error payload: %s", send_error)

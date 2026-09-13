@@ -18,7 +18,9 @@ everbot:
 
   # Web UI 配置
   web:
-    api_key: ""  # 留空则不启用认证；设置后所有 API 需携带此 key
+    # 必填（#227）：为空时 Web 服务拒绝启动。所有 HTTP/WebSocket 请求需携带此 key
+    # （X-API-Key 头或 ?api_key=）。支持 ${ENV} 引用。
+    api_key: "${EVERBOT_WEB_API_KEY}"
 
   runtime:
     job_retention_days: 7           # archived job session 保留天数
@@ -41,7 +43,10 @@ everbot:
       enabled: false
       bot_token: "${TELEGRAM_BOT_TOKEN}"
       default_agent: "daily_insight"
-      # allowed_chat_ids: ["123456789"]
+      # 访问控制（#227，缺省拒绝）：不在 allowed_chat_ids 中的 chat 一律忽略；
+      # 两项都不设 → 所有 chat 被拒绝并在启动时 WARNING。allow_all: true 为显式放开。
+      allowed_chat_ids: ["123456789"]
+      # allow_all: false
 
   # Agent 配置
   agents:
@@ -53,6 +58,9 @@ everbot:
       # skills:                    # 每 agent 技能白/黑名单（milkie 经 discover_skills 扫工作区 SKILL.md）。
       #   include: [daily-attractor]
       #   exclude: []
+      # env_passthrough:           # #227：允许透传到该 agent sidecar 的环境变量名（只写名字）。
+      #   - TAVILY_API_KEY         # sidecar 不再继承 daemon 全部环境；技能脚本 / 外部 CLI 依赖的
+      #   - TUSHARE_TOKEN          # key 必须在此声明。缺失项启动时 WARNING（不阻断）。
       heartbeat:
         enabled: true
         interval: 30          # 心跳间隔（分钟）

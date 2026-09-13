@@ -11,7 +11,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .agent_spec import build_milkie_agent_md, build_milkie_model_tiers
 
@@ -81,6 +81,49 @@ def _render_skill_manifest(skills: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+# Deny-by-default sidecar environment (#227). Everything the sidecar (and every
+# ``run_command`` child) sees must come from one of three sets:
+#   1. this fixed base set — process/locale/proxy plumbing, no secrets;
+#   2. framework-injected keys set explicitly in ``build`` (model key, manifest);
+#   3. the agent's ``env_passthrough`` list — variable *names* declared in config.
+# ``~/.env.secrets`` is sourced into the daemon wholesale, so inheriting
+# ``os.environ`` would hand every credential to prompt-injected tool calls.
+SIDECAR_BASE_ENV: frozenset[str] = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TMPDIR",
+    "LANG", "LC_ALL", "LC_CTYPE",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    "ALFRED_HOME", "ALFRED_PROJECT_ROOT", "PYTHONPATH",
+})
+
+
+def build_sidecar_env(
+    *,
+    agent_name: str,
+    env_passthrough: Sequence[str],
+    source: Optional[Mapping[str, str]] = None,
+) -> Dict[str, str]:
+    """Return the allow-listed environment for one agent's sidecar.
+
+    Declared-but-absent passthrough names are logged once and skipped: a
+    missing key is a deployment fact, not a launch error.
+    """
+    src = os.environ if source is None else source
+    env: Dict[str, str] = {k: src[k] for k in SIDECAR_BASE_ENV if k in src}
+    missing = []
+    for name in env_passthrough:
+        if name in src:
+            env[name] = src[name]
+        else:
+            missing.append(name)
+    if missing:
+        logger.warning(
+            "env_passthrough for agent %s lists variables absent from the daemon "
+            "environment: %s", agent_name, ", ".join(sorted(missing)),
+        )
+    return env
+
+
 @dataclass
 class LaunchSpec:
     cmd: List[str]
@@ -123,6 +166,7 @@ class SidecarLauncher:
         default_model: str | None = None,
         agent_workspace: Optional[Path] = None,
         sandbox_enabled: Optional[bool] = None,
+        env_passthrough: Sequence[str] = (),
     ) -> LaunchSpec:
         # default_model:per-agent 模型覆盖(everbot.agents.<name>.model)。缺省回退全局默认。
         # 不传则**所有 agent 用同一全局模型**——会无视 per-agent 配置(实测踩到:demo_agent
@@ -151,7 +195,7 @@ class SidecarLauncher:
             "--agent", str(agent_md), "--port", "0",
             "--state-store", "sqlite", "--data-dir", str(data_dir),
         ]
-        env = dict(os.environ)
+        env = build_sidecar_env(agent_name=agent_name, env_passthrough=env_passthrough)
         # #155: skill scripts (analyze.py) inherit agent model intent via env.
         env["EVERBOT_AGENT"] = agent_name
         env["ALFRED_AGENT"] = agent_name
@@ -167,11 +211,12 @@ class SidecarLauncher:
             # 展开 ${ENV}:原样写字面 ${...} 会让 milkie 拿到坏 key(非 volcengine cloud → 401)。
             env["OPENAI_API_KEY"] = os.path.expandvars(api_key)
         # milkie GatewayFactory 取 key 顺序 = VOLCENGINE_TOKEN ?? OPENAI_API_KEY。
-        # 若部署环境带 VOLCENGINE_TOKEN 而本 agent 不是 volcengine,它会抢占我们设的
-        # OPENAI_API_KEY → 拿错 key 打目标端点(401)。故非 volcengine 时清掉这俩。
-        if default_cloud != "volcengine":
-            env.pop("VOLCENGINE_TOKEN", None)
-            env.pop("VOLCENGINE_API_BASE", None)
+        # 环境已是白名单(#227),这俩只在本 agent 确实走 volcengine 时才放进去;
+        # 非 volcengine agent 拿到 VOLCENGINE_TOKEN 会抢占 OPENAI_API_KEY → 401。
+        if default_cloud == "volcengine":
+            for name in ("VOLCENGINE_TOKEN", "VOLCENGINE_API_BASE"):
+                if name in os.environ:
+                    env[name] = os.environ[name]
         # skill_list manifest(milkie #139):skills 非 None 即产出(含空列表 → configured
         # but empty)。skills is None(注入式 loader / reflector)→ 不写、不设 env,milkie
         # 侧据缺失 degrade(registryConfigured:false)。与 prompt 技能段同源(provider 侧
