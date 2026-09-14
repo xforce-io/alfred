@@ -58,16 +58,14 @@ class SidecarPool:
         """同步取已存活的 sidecar(无则 None)—— 供 provider 的 sync 方法按
         agent 名解析当前 base_url(#43:handle 不再冻结端口)。不触发 spawn/检查。
         
-        S2: Poll before checking returncode (kill -9 doesn't auto-update).
+        S2: Check if exited before returning (kill -9 detection via kill(pid, 0)).
+        Pop from cache on exit so sync _agent_base_url stops seeing dead URL.
         """
         sidecar = self._sidecars.get(agent_name)
-        if sidecar is not None:
-            # S2: Poll the process to update returncode after kill -9
-            if hasattr(sidecar, '_proc') and sidecar._proc is not None:
-                sidecar._proc.poll()
-            # Check if dead
-            if hasattr(sidecar, 'returncode') and sidecar.returncode is not None:
-                return None
+        if sidecar is not None and sidecar.exited():
+            self._sidecars.pop(agent_name, None)
+            self._fingerprints.pop(agent_name, None)
+            return None
         return sidecar
 
     def evict(self, agent_name: str) -> None:
@@ -109,12 +107,8 @@ class SidecarPool:
         if existing is None:
             return await self._spawn_locked(agent_name)
         
-        # S2: Poll before checking returncode (kill -9 doesn't auto-update)
-        if hasattr(existing, '_proc') and existing._proc is not None:
-            existing._proc.poll()
-        
-        # S2: Check if cached sidecar has exited (returncode is not None)
-        if hasattr(existing, 'returncode') and existing.returncode is not None:
+        # S2: Check if cached sidecar has exited (kill -9 detection via kill(pid, 0))
+        if existing.exited():
             logger.info(
                 "sidecar pool: '%s' cached sidecar has exited (returncode=%s), evicting and respawning",
                 agent_name, existing.returncode

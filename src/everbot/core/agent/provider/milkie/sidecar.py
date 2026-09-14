@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from collections import deque
 from typing import Deque, List, Optional
@@ -101,6 +102,24 @@ class MilkieSidecar:
     @property
     def returncode(self) -> Optional[int]:
         return self._proc.returncode if self._proc is not None else None
+
+    def exited(self) -> bool:
+        """True if subprocess has exited. Safe after external kill -9.
+
+        asyncio.Process.returncode stays None until the event loop reaps the
+        child; do not call waitpid (steals from asyncio). Use kill(pid, 0).
+        """
+        if self._proc is None:
+            return True
+        if self._proc.returncode is not None:
+            return True
+        try:
+            os.kill(self._proc.pid, 0)
+            return False  # still alive
+        except ProcessLookupError:
+            return True   # dead, not yet reaped by asyncio
+        except PermissionError:
+            return False  # exists
 
     async def start(self) -> None:
         self._proc = await asyncio.create_subprocess_exec(
