@@ -710,7 +710,11 @@ class CronExecutor:
             if not deposit_ok:
                 raise RuntimeError("Failed to deposit job completion event to mailbox")
             
-            await self.delivery.inject_to_history(result, run_id)
+            # S3: history inject failure → raise error, task will be marked FAILED
+            history_ok = await self.delivery.inject_to_history(result, run_id)
+            if not history_ok:
+                raise RuntimeError("Failed to inject job result to history")
+            
             await self.delivery._emit_realtime(
                 result, run_id, transcript_worthy=True,
                 source_session_id=job_session_id,  # #122:可解析溯源锚点,非合成 run_id
@@ -797,7 +801,11 @@ class CronExecutor:
                 if not deposit_ok:
                     raise RuntimeError("Failed to deposit job completion event to mailbox")
                 
-                await self.delivery.inject_to_history(result, run_id)
+                # S3: history inject failure → task FAILED, never DONE
+                history_ok = await self.delivery.inject_to_history(result, run_id)
+                if not history_ok:
+                    raise RuntimeError("Failed to inject job result to history")
+                
                 await self.delivery._emit_realtime(
                     result, run_id, transcript_worthy=True,
                     source_session_id=projection_anchor,  # #130 T2: milkie runId, deref-able

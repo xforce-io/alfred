@@ -39,10 +39,15 @@ from ...infra.user_data import UserDataManager
 from ...infra.workspace import WorkspaceLoader
 
 # SLM: imported at module level to avoid per-event attribute lookup overhead.
-# handle_skill_event is called in the SKILL-completed hot path.
+# async_handle_skill_event is called in the SKILL-completed hot path (chat).
+# Legacy handle_skill_event kept for backward compat with heartbeat path.
 try:
-    from ...core.slm.skill_log_recorder import handle_skill_event as _slm_handle_skill_event
+    from ...core.slm.skill_log_recorder import (
+        async_handle_skill_event as _slm_async_handle_skill_event,
+        handle_skill_event as _slm_handle_skill_event,
+    )
 except Exception:  # pragma: no cover
+    _slm_async_handle_skill_event = None  # type: ignore[assignment]
     _slm_handle_skill_event = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
@@ -489,14 +494,23 @@ class ChannelCoreService:
                             status="failed" if norm_status in {"failed", "error"} else "success",
                             source="skill_fallback", **event_meta,
                         )
-                        # SLM: record successful skill invocations for evaluation
+                        # SLM: record successful skill invocations for evaluation (S1: async path)
                         _recorder = self._get_recorder(agent_name)
-                        if norm_status == "completed" and _recorder is not None and _slm_handle_skill_event is not None:
-                            _slm_handle_skill_event(
-                                te, _recorder,
-                                session_id=session_id,
-                                context_before=message_text or "",
-                            )
+                        if norm_status == "completed" and _recorder is not None and _slm_async_handle_skill_event is not None:
+                            try:
+                                await _slm_async_handle_skill_event(
+                                    te, _recorder,
+                                    session_id=session_id,
+                                    context_before=message_text or "",
+                                )
+                            except RuntimeError as e:
+                                # S1: Surface skill BUSY state to user (LockTimeout → 技能正在更新)
+                                logger.warning("SLM recording failed for %s: %s", te.skill_name, e)
+                                await on_event(OutboundMessage(
+                                    session_id,
+                                    f"⚠️ {e}",
+                                    msg_type="error",
+                                ))
                     await on_event(OutboundMessage(session_id, "", msg_type="skill", metadata={
                         "id": te.pid or "noid-skill",
                         "status": te.status, "skill_name": te.skill_name,

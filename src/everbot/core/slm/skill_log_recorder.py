@@ -91,7 +91,7 @@ class SkillLogRecorder:
         output_kind: str = "final",
         error: Optional[str] = "",
     ) -> bool:
-        """Record a skill invocation to the SLM log.
+        """Record a skill invocation to the SLM log (sync version).
 
         The ``skill_name`` parameter accepts ``None`` for defensive callers;
         None or empty string is treated as "no skill" and returns False.
@@ -105,6 +105,9 @@ class SkillLogRecorder:
 
         Failures are logged at WARNING level and never propagate — this is a
         side-channel recorder and must never block the main session flow.
+        
+        NOTE: Sync version uses sync ensure_registered with time.sleep polling.
+        Chat/async callers should use async_maybe_record to avoid blocking loop.
         """
         # Boundary check (accepts Optional[str] defensively)
         if not skill_name:
@@ -132,6 +135,64 @@ class SkillLogRecorder:
             except Exception as e:
                 logger.warning("ensure_registered failed for %s: %s", skill_name, e)
 
+        return self._write_segment(skill_name, session_id, skill_output, context_before, status, output_kind, error)
+
+    async def async_maybe_record(
+        self,
+        skill_name: Optional[str],
+        *,
+        session_id: str,
+        skill_output: Optional[str] = "",
+        context_before: Optional[str] = "",
+        status: str = "completed",
+        output_kind: str = "final",
+        error: Optional[str] = "",
+    ) -> bool:
+        """Async version of maybe_record for chat/async callers.
+        
+        S1: Uses async_ensure_registered to avoid blocking the event loop.
+        Raises LockTimeoutError (技能正在更新) to surface BUSY state to chat turn.
+        """
+        from ._atomic_io import LockTimeoutError
+        
+        # Boundary check
+        if not skill_name:
+            return False
+
+        # Filter internal tools
+        if skill_name.startswith("_"):
+            return False
+
+        # Bootstrap with async lock (S1: 2s timeout, raises on BUSY)
+        if self._eval_base_dir is not None and self._skill_dirs:
+            from .state_normalizer import async_ensure_registered
+            from .version_manager import VersionManager
+            vm = VersionManager(
+                self._skill_dirs[0],
+                eval_base_dir=self._eval_base_dir,
+                read_skill_dirs=list(self._skill_dirs),
+            )
+            try:
+                await async_ensure_registered(vm, skill_name, repo_skills_dir=None)
+            except LockTimeoutError:
+                # S1: Surface BUSY state to turn, don't swallow as WARNING
+                raise RuntimeError(f"技能 {skill_name} 正在更新，请稍后重试") from None
+            except Exception as e:
+                logger.warning("async_ensure_registered failed for %s: %s", skill_name, e)
+
+        return self._write_segment(skill_name, session_id, skill_output, context_before, status, output_kind, error)
+
+    def _write_segment(
+        self,
+        skill_name: str,
+        session_id: str,
+        skill_output: Optional[str],
+        context_before: Optional[str],
+        status: str,
+        output_kind: str,
+        error: Optional[str],
+    ) -> bool:
+        """Shared segment write logic for sync and async paths."""
         normalized_output = self._normalize_skill_output(skill_output or "")
         normalized_error = error or ""
 
@@ -239,13 +300,16 @@ def handle_skill_event(
     session_id: str,
     context_before: str = "",
 ) -> bool:
-    """Handle a TurnEvent object from CoreService path for SLM logging.
+    """Handle a TurnEvent object from CoreService path for SLM logging (sync).
 
     Only processes SKILL events with status="completed". All other event
     types and statuses return False without side effects.
 
     When a raw dict is passed (TurnExecutor/heartbeat path), this function
     returns False — use record_skills_from_raw_events() for that path instead.
+    
+    NOTE: Sync version for legacy/heartbeat paths. Chat/async callers should
+    use async_handle_skill_event to avoid blocking the event loop.
 
     Args:
         event: A TurnEvent instance (or any object with .type / .status /
@@ -265,6 +329,34 @@ def handle_skill_event(
     if (getattr(event, "status", "") or "").lower() != "completed":
         return False
     return recorder.maybe_record(
+        getattr(event, "skill_name", None),
+        session_id=session_id,
+        skill_output=getattr(event, "skill_output", None),
+        context_before=context_before,
+        status="completed",
+        output_kind="final",
+    )
+
+
+async def async_handle_skill_event(
+    event: Any,
+    recorder: SkillLogRecorder,
+    *,
+    session_id: str,
+    context_before: str = "",
+) -> bool:
+    """Async version of handle_skill_event for chat/async callers.
+    
+    S1: Uses async_maybe_record to avoid blocking the event loop.
+    Raises RuntimeError (技能正在更新) when skill lock is busy.
+    """
+    from ..runtime.turn_policy import TurnEventType
+
+    if getattr(event, "type", None) != TurnEventType.SKILL:
+        return False
+    if (getattr(event, "status", "") or "").lower() != "completed":
+        return False
+    return await recorder.async_maybe_record(
         getattr(event, "skill_name", None),
         session_id=session_id,
         skill_output=getattr(event, "skill_output", None),
