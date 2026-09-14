@@ -709,15 +709,21 @@ class MilkieProvider:
                     agent_name, exc
                 )
                 self._pool.evict(agent_name)
-
                 
-
-                # Actually respawn to get fresh base_url
-
-                new_sidecar = self._respawn_sidecar_sync(agent_name)
-
-                agent.base_url = new_sidecar.base_url
-
+                # S2: Check if in async context (WS handler)
+                if self._check_running_loop():
+                    logger.info("In async context, evicted; run_turn will respawn")
+                    if owns:
+                        client.close()
+                    return False
+                
+                # Sync context (rare CLI): try sync spawn
+                try:
+                    new_sidecar = self._respawn_sidecar_sync(agent_name)
+                    agent.base_url = new_sidecar.base_url
+                except Exception as spawn_exc:
+                    logger.error("Failed to respawn: %s", spawn_exc)
+                    raise exc from spawn_exc
                 
                 retry_attempted = True
                 continue
