@@ -858,11 +858,27 @@ class MilkieProvider:
                     raise
                 
                 logger.warning(
-                    "milkie provider: ConnectError in export_session for '%s', "
-                    "evicting and respawning sidecar: %s",
-                    agent_name, exc
+                    "milkie provider: ConnectError in export_session for '%s', evicting",
+                    agent_name
                 )
                 self._pool.evict(agent_name)
+                
+                # S2: Check if in async context (WS handler)
+                if self._check_running_loop():
+                    logger.info("In async context, evicted; run_turn will respawn")
+                    if owns:
+                        client.close()
+                    # Return empty session (safe default, same as 404)
+                    return {"history_messages": [], "variables": {}}
+                
+                # Sync context (rare CLI): try sync spawn
+                try:
+                    new_sidecar = self._respawn_sidecar_sync(agent_name)
+                    agent.base_url = new_sidecar.base_url
+                except Exception as spawn_exc:
+                    logger.error("Failed to respawn: %s", spawn_exc)
+                    raise exc from spawn_exc
+                
                 retry_attempted = True
                 continue
             except BaseException:
@@ -932,11 +948,27 @@ class MilkieProvider:
                     raise
                 
                 logger.warning(
-                    "milkie provider: ConnectError in import_session for '%s', "
-                    "evicting and respawning sidecar: %s",
-                    agent_name, exc
+                    "milkie provider: ConnectError in import_session for '%s', evicting",
+                    agent_name
                 )
                 self._pool.evict(agent_name)
+                
+                # S2: Check if in async context (WS handler)
+                if self._check_running_loop():
+                    logger.info("In async context, evicted; run_turn will respawn")
+                    if owns:
+                        client.close()
+                    # Import is not critical; no-op return to let run_turn proceed
+                    return
+                
+                # Sync context (rare CLI): try sync spawn
+                try:
+                    new_sidecar = self._respawn_sidecar_sync(agent_name)
+                    agent.base_url = new_sidecar.base_url
+                except Exception as spawn_exc:
+                    logger.error("Failed to respawn: %s", spawn_exc)
+                    raise exc from spawn_exc
+                
                 retry_attempted = True
                 continue
             except BaseException:
