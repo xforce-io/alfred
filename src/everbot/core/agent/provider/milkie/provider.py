@@ -557,7 +557,7 @@ class MilkieProvider:
                 agent_name = getattr(handle, "name", "") or ""
                 if agent_name and self._pool is not None:
                     logger.warning(
-                        "milkie provider: ConnectError for '%s', evicting sidecar and retrying: %s",
+                        "milkie provider: ConnectError for '%s', evicting and respawning sidecar: %s",
                         agent_name, exc
                     )
                     self._pool.evict(agent_name)
@@ -646,6 +646,21 @@ class MilkieProvider:
             milkie_cmd=_milkie_cli_cmd(),
         )
 
+    def _respawn_sidecar_sync(self, agent_name: str) -> Any:
+        """Synchronous bridge to async get_or_spawn for sync methods.
+        
+        S2: After pool.evict(), must actually respawn to get fresh base_url.
+        Sync methods cannot directly await, so use asyncio.run().
+        """
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                raise RuntimeError("Cannot respawn sidecar from running event loop in sync method")
+        except RuntimeError:
+            pass
+        return asyncio.run(self._pool.get_or_spawn(agent_name))
+
     def is_user_interrupt_paused(self, agent: Any) -> bool:
         # milkie#137:经 serve /context/state 查运行态。paused ⇔ context 被 /interrupt
         # 停在 FSM 保留态 paused、可 /resume 续跑;此前恒 False 使 resume gate 成死分支。
@@ -677,12 +692,21 @@ class MilkieProvider:
                 # S2: First ConnectError → evict sidecar and retry once
                 logger.warning(
                     "milkie provider: ConnectError in is_user_interrupt_paused for '%s', "
-                    "evicting sidecar and retrying: %s",
+                    "evicting and respawning sidecar: %s",
                     agent_name, exc
                 )
                 self._pool.evict(agent_name)
+
+                
+
+                # Actually respawn to get fresh base_url
+
+                new_sidecar = self._respawn_sidecar_sync(agent_name)
+
+                agent.base_url = new_sidecar.base_url
+
+                
                 retry_attempted = True
-                # Loop will retry with fresh get_or_spawn on next _agent_base_url call
                 continue
             except BaseException:
                 if owns:
@@ -816,7 +840,7 @@ class MilkieProvider:
                 
                 logger.warning(
                     "milkie provider: ConnectError in export_session for '%s', "
-                    "evicting sidecar and retrying: %s",
+                    "evicting and respawning sidecar: %s",
                     agent_name, exc
                 )
                 self._pool.evict(agent_name)
@@ -890,7 +914,7 @@ class MilkieProvider:
                 
                 logger.warning(
                     "milkie provider: ConnectError in import_session for '%s', "
-                    "evicting sidecar and retrying: %s",
+                    "evicting and respawning sidecar: %s",
                     agent_name, exc
                 )
                 self._pool.evict(agent_name)

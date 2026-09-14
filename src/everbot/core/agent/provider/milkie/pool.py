@@ -56,8 +56,15 @@ class SidecarPool:
 
     def peek(self, agent_name: str) -> Any:
         """同步取已存活的 sidecar(无则 None)—— 供 provider 的 sync 方法按
-        agent 名解析当前 base_url(#43:handle 不再冻结端口)。不触发 spawn/检查。"""
-        return self._sidecars.get(agent_name)
+        agent 名解析当前 base_url(#43:handle 不再冻结端口)。不触发 spawn/检查。
+        
+        S2: Check returncode to refuse dead sidecars.
+        """
+        sidecar = self._sidecars.get(agent_name)
+        if sidecar is not None and hasattr(sidecar, 'returncode') and sidecar.returncode is not None:
+            # Dead sidecar, do not return it
+            return None
+        return sidecar
 
     def evict(self, agent_name: str) -> None:
         """Evict a cached sidecar (S2: ConnectError recovery).
