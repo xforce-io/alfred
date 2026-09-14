@@ -89,8 +89,14 @@ async def test_deposit_job_event_false_fails_task(tmp_path):
             # Error message should match S3 requirement
             assert "Failed to deposit job completion event to mailbox" in result.results[0].error
             
-            # Verify deposit was called
-            mock_deposit.assert_called_once()
+            # Verify deposit was called for job_completed (except handler also deposits job_failed)
+            completed_calls = [
+                c for c in mock_deposit.await_args_list
+                if c.kwargs.get('event_type') == 'job_completed'
+            ]
+            assert len(completed_calls) == 1
+            # Optional: verify job_failed was also deposited in except handler
+            assert any(c.kwargs.get('event_type') == 'job_failed' for c in mock_deposit.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -135,8 +141,14 @@ async def test_inject_to_history_false_fails_task(tmp_path):
                 # Error message should match S3 requirement
                 assert "Failed to inject job result to history" in result.results[0].error
                 
-                # Verify both were called
-                mock_deposit.assert_called_once()
+                # Verify deposit was called for job_completed (except handler also deposits job_failed)
+                completed_calls = [
+                    c for c in mock_deposit.await_args_list
+                    if c.kwargs.get('event_type') == 'job_completed'
+                ]
+                assert len(completed_calls) == 1
+                assert any(c.kwargs.get('event_type') == 'job_failed' for c in mock_deposit.await_args_list)
+                # Verify inject was called once (no retry after failure)
                 mock_inject.assert_called_once()
 
 
