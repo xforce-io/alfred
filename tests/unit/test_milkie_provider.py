@@ -967,6 +967,12 @@ class _FakeSidecarStub:
     @property
     def base_url(self):
         return "http://127.0.0.1:19999"
+    @property
+    def returncode(self):
+        return getattr(self, "_returncode", None)
+    def exited(self) -> bool:
+        """S2: compatibility method for pool exited checks."""
+        return self.returncode is not None
     async def close(self):
         self.closed += 1
 
@@ -1159,6 +1165,14 @@ async def test_skill_change_respawn_chain_other_sessions_not_orphaned():
         @property
         def base_url(self):
             return self.url
+
+        @property
+        def returncode(self):
+            return getattr(self, "_returncode", None)
+
+        def exited(self) -> bool:
+            """S2: compatibility method for pool exited checks."""
+            return self.returncode is not None
 
         async def start(self):
             pass

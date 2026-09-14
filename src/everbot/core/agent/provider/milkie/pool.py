@@ -29,6 +29,19 @@ def _default_factory(cmd, env):
     return MilkieSidecar(cmd, env=env)
 
 
+def _sidecar_exited(sidecar) -> bool:
+    """Check if sidecar has exited (S2: duck-type safe for fakes/tests).
+    
+    Prefers sidecar.exited() if callable, falls back to returncode check.
+    """
+    exited = getattr(sidecar, "exited", None)
+    if callable(exited):
+        return bool(exited())
+    # Fallback: check returncode if present
+    rc = getattr(sidecar, "returncode", None)
+    return rc is not None
+
+
 class SidecarPool:
     def __init__(
         self,
@@ -62,7 +75,7 @@ class SidecarPool:
         Pop from cache on exit so sync _agent_base_url stops seeing dead URL.
         """
         sidecar = self._sidecars.get(agent_name)
-        if sidecar is not None and sidecar.exited():
+        if sidecar is not None and _sidecar_exited(sidecar):
             self._sidecars.pop(agent_name, None)
             self._fingerprints.pop(agent_name, None)
             return None
@@ -108,10 +121,10 @@ class SidecarPool:
             return await self._spawn_locked(agent_name)
         
         # S2: Check if cached sidecar has exited (kill -9 detection via kill(pid, 0))
-        if existing.exited():
+        if _sidecar_exited(existing):
             logger.info(
                 "sidecar pool: '%s' cached sidecar has exited (returncode=%s), evicting and respawning",
-                agent_name, existing.returncode
+                agent_name, getattr(existing, 'returncode', None)
             )
             self._sidecars.pop(agent_name, None)
             self._fingerprints.pop(agent_name, None)
