@@ -474,74 +474,110 @@ class MilkieProvider:
         handle.skill_observation_pending.clear()
         handle.skill_observation_complete = False
         handle.skill_observation_reason = "terminal_not_seen"
-        try:
-            # lease 与流同生命周期(#43):turn 在飞期间该 agent 的 sidecar 重生被推迟。
-            async with self._lease_base_url(handle) as base_url, client.stream(
-                "POST", f"{base_url}/chat", json=payload
-            ) as resp:
-                if resp.status_code >= 400:
-                    # 非2xx 不能静默吞:不抛 → 无事件 → core_service 显示「(无响应)」。
-                    # 读 body 并抛清晰 RuntimeError(headers 此时已就绪,可读 status)。
-                    body = await resp.aread()
-                    raise RuntimeError(
-                        f"milkie /chat failed: HTTP {resp.status_code}: "
-                        f"{body.decode('utf-8', 'replace')[:500]}"
+        
+        # S2: Wrap with ConnectError handling for sidecar evict+retry
+        retry_attempted = False
+        
+        while True:
+            try:
+                # lease 与流同生命周期(#43):turn 在飞期间该 agent 的 sidecar 重生被推迟。
+                async with self._lease_base_url(handle) as base_url, client.stream(
+                    "POST", f"{base_url}/chat", json=payload
+                ) as resp:
+                    if resp.status_code >= 400:
+                        # 非2xx 不能静默吞:不抛 → 无事件 → core_service 显示「(无响应)」。
+                        # 读 body 并抛清晰 RuntimeError(headers 此时已就绪,可读 status)。
+                        body = await resp.aread()
+                        raise RuntimeError(
+                            f"milkie /chat failed: HTTP {resp.status_code}: "
+                            f"{body.decode('utf-8', 'replace')[:500]}"
+                        )
+                    async for chunk in resp.aiter_text():
+                        for event, data_str in parser.feed(chunk):
+                            data = json.loads(data_str)
+                            # milkie surfaces failures via an ``error`` frame and/or an
+                            # ``agent.run.completed`` terminal with ``status=="error"``
+                            # (e.g. an LLM-endpoint connection error). The adapter maps
+                            # both to None (no _progress), so without this an agent/LLM
+                            # failure would masquerade as an empty turn — surfacing as
+                            # "(no response)" on chat or "LLM reflection returned empty
+                            # response" on heartbeat, with no retry. Raise instead: the
+                            # message carries retryable markers (e.g. "connection error")
+                            # so the orchestrator retries transient failures, and genuine
+                            # errors propagate their real cause instead of an empty string.
+                            if event == "error":
+                                pending_error = data
+                                continue
+                            if event == "tool.requested":
+                                self._observe_skill_request(handle, data)
+                            elif event == "tool.responded":
+                                self._observe_skill_response(handle, data)
+                            if event == "agent.run.completed":
+                                # #47: 捕获本轮 runId(milkie#140)到 handle —— 必须在
+                                # 下面 error 抛出之前,失败 run 才同样可被留证。runId 是
+                                # milkie 私有,只落在 provider 内的 handle,不进 _progress。
+                                run_id = data.get("runId")
+                                if run_id:
+                                    handle.last_run_id = run_id
+                                if data.get("status") == "error":
+                                    detail = data.get("error")
+                                    if not isinstance(detail, dict) and pending_error:
+                                        candidate = pending_error.get("error")
+                                        detail = candidate if isinstance(candidate, dict) else None
+                                    msg = (
+                                        (detail or {}).get("message")
+                                        or data.get("message")
+                                        or data.get("output")
+                                        or data.get("lastTextOutput")
+                                        or (pending_error or {}).get("message")
+                                        or (data.get("error") if isinstance(data.get("error"), str) else None)
+                                        or "unknown error"
+                                    )
+                                    raise MilkieAgentError(msg, envelope=detail, run_id=run_id)
+                                handle.skill_observation_complete = True
+                                handle.skill_observation_reason = ""
+                            item = milkie_event_to_progress(event, data)
+                            if item is not None:
+                                yield {"_progress": [item]}
+                    if pending_error is not None:
+                        detail = pending_error.get("error")
+                        detail = detail if isinstance(detail, dict) else None
+                        msg = (detail or {}).get("message") or pending_error.get("message") or "unknown error"
+                        raise MilkieAgentError(msg, envelope=detail)
+                # Success, exit retry loop
+                break
+            except httpx.ConnectError as exc:
+                if retry_attempted:
+                    # Already retried once, give up
+                    if owns_client:
+                        await client.aclose()
+                    raise
+                
+                # S2: First ConnectError → evict sidecar and retry once
+                agent_name = getattr(handle, "name", "") or ""
+                if agent_name and self._pool is not None:
+                    logger.warning(
+                        "milkie provider: ConnectError for '%s', evicting sidecar and retrying: %s",
+                        agent_name, exc
                     )
-                async for chunk in resp.aiter_text():
-                    for event, data_str in parser.feed(chunk):
-                        data = json.loads(data_str)
-                        # milkie surfaces failures via an ``error`` frame and/or an
-                        # ``agent.run.completed`` terminal with ``status=="error"``
-                        # (e.g. an LLM-endpoint connection error). The adapter maps
-                        # both to None (no _progress), so without this an agent/LLM
-                        # failure would masquerade as an empty turn — surfacing as
-                        # "(no response)" on chat or "LLM reflection returned empty
-                        # response" on heartbeat, with no retry. Raise instead: the
-                        # message carries retryable markers (e.g. "connection error")
-                        # so the orchestrator retries transient failures, and genuine
-                        # errors propagate their real cause instead of an empty string.
-                        if event == "error":
-                            pending_error = data
-                            continue
-                        if event == "tool.requested":
-                            self._observe_skill_request(handle, data)
-                        elif event == "tool.responded":
-                            self._observe_skill_response(handle, data)
-                        if event == "agent.run.completed":
-                            # #47: 捕获本轮 runId(milkie#140)到 handle —— 必须在
-                            # 下面 error 抛出之前,失败 run 才同样可被留证。runId 是
-                            # milkie 私有,只落在 provider 内的 handle,不进 _progress。
-                            run_id = data.get("runId")
-                            if run_id:
-                                handle.last_run_id = run_id
-                            if data.get("status") == "error":
-                                detail = data.get("error")
-                                if not isinstance(detail, dict) and pending_error:
-                                    candidate = pending_error.get("error")
-                                    detail = candidate if isinstance(candidate, dict) else None
-                                msg = (
-                                    (detail or {}).get("message")
-                                    or data.get("message")
-                                    or data.get("output")
-                                    or data.get("lastTextOutput")
-                                    or (pending_error or {}).get("message")
-                                    or (data.get("error") if isinstance(data.get("error"), str) else None)
-                                    or "unknown error"
-                                )
-                                raise MilkieAgentError(msg, envelope=detail, run_id=run_id)
-                            handle.skill_observation_complete = True
-                            handle.skill_observation_reason = ""
-                        item = milkie_event_to_progress(event, data)
-                        if item is not None:
-                            yield {"_progress": [item]}
-                if pending_error is not None:
-                    detail = pending_error.get("error")
-                    detail = detail if isinstance(detail, dict) else None
-                    msg = (detail or {}).get("message") or pending_error.get("message") or "unknown error"
-                    raise MilkieAgentError(msg, envelope=detail)
-        finally:
-            if owns_client:
-                await client.aclose()
+                    self._pool.evict(agent_name)
+                    retry_attempted = True
+                    # Loop will re-enter _lease_base_url, which will call get_or_spawn and respawn
+                    continue
+                else:
+                    # No pool or agent name, can't evict+retry
+                    if owns_client:
+                        await client.aclose()
+                    raise
+            except BaseException:
+                # Any other exception, cleanup and re-raise
+                if owns_client:
+                    await client.aclose()
+                raise
+        
+        # Normal cleanup after successful completion
+        if owns_client:
+            await client.aclose()
 
     @staticmethod
     def _observe_skill_request(handle: MilkieAgentHandle, data: dict[str, Any]) -> None:

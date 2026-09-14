@@ -631,18 +631,38 @@ class MemoryManager:
         self.store.save(projected_entries)
 
     @contextmanager
-    def review_lock(self):
-        """Serialize the short MEMORY/USER/watermark review commit boundary."""
+    def review_lock(self, *, timeout: float = 5.0):
+        """Serialize the short MEMORY/USER/watermark review commit boundary.
+        
+        S1: Uses LOCK_NB + timeout to avoid blocking event loop.
+        Default 5s timeout per design requirement.
+        """
         import fcntl
+        import time
 
         lock_path = self.store.memory_path.with_suffix(".md.lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(lock_path, "w") as lock_fd:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        
+        f = open(lock_path, "w")
+        try:
+            deadline = time.monotonic() + timeout
+            poll_interval = 0.05  # 50ms polling
+            while True:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"Could not acquire review_lock within {timeout}s"
+                        )
+                    time.sleep(poll_interval)
             try:
                 yield
             finally:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        finally:
+            f.close()
 
     def apply_review(self, review: dict) -> dict:
         """Apply a review result from memory-review skill.

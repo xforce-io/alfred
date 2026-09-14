@@ -103,7 +103,15 @@ class RoutineCheckpointStore:
 
         steps[step] = "pending"
         self._write_manifest(manifest)
-        await operation()
+        
+        # S3: Check operation return value; False → raise error
+        result = await operation()
+        if result is False:
+            # Revert to no state (will retry on next run)
+            steps.pop(step, None)
+            self._write_manifest(manifest)
+            raise RuntimeError(f"Delivery step {step} failed: operation returned False")
+        
         steps[step] = "delivered"
         self._write_manifest(manifest)
         return True

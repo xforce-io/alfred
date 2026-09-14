@@ -90,9 +90,15 @@ def ensure_registered(
     *,
     repo_skills_dir: Optional[Path] = None,
 ) -> RegistrationResult:
-    """Normalize SLM state for one skill. Idempotent, concurrent-safe."""
+    """Normalize SLM state for one skill. Idempotent, concurrent-safe.
+    
+    S1: Uses LOCK_NB + timeout to avoid blocking event loop during chat.
+    Raises LockTimeoutError when skill is being updated (evolve in progress).
+    """
+    from ._atomic_io import LockTimeoutError
+    
     lock_path = ver_mgr._eval_dir(skill_id) / ".lock"
-    with skill_lock(lock_path):
+    with skill_lock(lock_path, timeout=5.0):
         return _ensure_registered_locked(ver_mgr, skill_id, repo_skills_dir)
 
 

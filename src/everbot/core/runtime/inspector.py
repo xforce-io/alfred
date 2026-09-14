@@ -901,18 +901,22 @@ push_message 是直接发送给用户的消息。请用**自然的助手口吻**
                             suppress_if_stale=False,
                             dedupe_key=f"routine_proposal:{self.agent_name}:{normalized.get('title')}:{run_id}",
                         )
-                        await session_manager.deposit_mailbox_event(
+                        deposit_ok = await session_manager.deposit_mailbox_event(
                             primary_session_id,
                             event,
                             timeout=5.0,
                             blocking=True,
                         )
-                        deposited += 1
-                        self._write_event(
-                            "routine_proposal_deposited",
-                            title=normalized.get("title"),
-                            run_id=run_id,
-                        )
+                        # S3: Only count deposited when deposit succeeds
+                        if deposit_ok:
+                            deposited += 1
+                            self._write_event(
+                                "routine_proposal_deposited",
+                                title=normalized.get("title"),
+                                run_id=run_id,
+                            )
+                        else:
+                            logger.warning("Failed to deposit routine proposal for %s", normalized.get("title"))
                     except Exception as exc:
                         logger.warning("Failed to deposit proposal: %s", exc)
 
@@ -925,7 +929,10 @@ push_message 是直接发送给用户的消息。请用**自然的助手口吻**
         primary_session_id: Optional[str],
         run_id: str,
     ) -> bool:
-        """Deliver urgent push message to primary session."""
+        """Deliver urgent push message to primary session.
+        
+        S3: Returns True only if deposit succeeded.
+        """
         if not session_manager or not primary_session_id or not result.push_message:
             return False
 
@@ -940,13 +947,15 @@ push_message 是直接发送给用户的消息。请用**自然的助手口吻**
                 suppress_if_stale=False,
                 dedupe_key=f"inspector_push:{self.agent_name}:{run_id}",
             )
-            await session_manager.deposit_mailbox_event(
+            deposit_ok = await session_manager.deposit_mailbox_event(
                 primary_session_id,
                 event,
                 timeout=5.0,
                 blocking=True,
             )
-            return True
+            if not deposit_ok:
+                logger.warning("Failed to deliver push message: deposit returned False")
+            return deposit_ok
         except Exception as exc:
             logger.warning("Failed to deliver push message: %s", exc)
             return False

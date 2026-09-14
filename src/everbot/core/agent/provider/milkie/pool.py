@@ -59,6 +59,15 @@ class SidecarPool:
         agent 名解析当前 base_url(#43:handle 不再冻结端口)。不触发 spawn/检查。"""
         return self._sidecars.get(agent_name)
 
+    def evict(self, agent_name: str) -> None:
+        """Evict a cached sidecar (S2: ConnectError recovery).
+        
+        Does not close the sidecar — caller should attempt close separately.
+        Next get_or_spawn will spawn a fresh instance.
+        """
+        self._sidecars.pop(agent_name, None)
+        self._fingerprints.pop(agent_name, None)
+
     async def get_or_spawn(self, agent_name: str) -> Any:
         # 注入 fingerprint 后命中路径也要做 freshness 检查/可能重生,必须全程在
         # per-agent 锁内(与 lease 登记互斥,消除"取到老 sidecar 后才登记"竞态)。
@@ -88,6 +97,24 @@ class SidecarPool:
         existing = self._sidecars.get(agent_name)
         if existing is None:
             return await self._spawn_locked(agent_name)
+        
+        # S2: Check if cached sidecar has exited (returncode is not None)
+        if hasattr(existing, 'returncode') and existing.returncode is not None:
+            logger.info(
+                "sidecar pool: '%s' cached sidecar has exited (returncode=%s), evicting and respawning",
+                agent_name, existing.returncode
+            )
+            self._sidecars.pop(agent_name, None)
+            self._fingerprints.pop(agent_name, None)
+            try:
+                await existing.close()
+            except Exception:
+                logger.warning(
+                    "sidecar pool: failed to close dead sidecar for '%s' (ignoring, continuing respawn)",
+                    agent_name, exc_info=True
+                )
+            return await self._spawn_locked(agent_name)
+        
         if self._fingerprint is None:
             return existing
         current = await self._current_fingerprint(agent_name)
