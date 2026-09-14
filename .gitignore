@@ -71,7 +71,8 @@ tmp_*.py
 .agents/skills/*
 !.agents/skills/verify-*/
 !.agents/skills/verify-*/**
-.cursor/
+.cursor/*
+!.cursor/environment.json
 .factory/
 .trae/
 

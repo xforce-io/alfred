@@ -1,0 +1,7 @@
+{
+  "name": "EverBot (alfred)",
+  "install": "sudo apt-get update -qq && sudo apt-get install -y -qq python3.12-venv && bin/setup && .venv/bin/pip install -q pytest pytest-asyncio pytest-cov ruff",
+  "ports": [
+    { "name": "web", "port": 8765 }
+  ]
+}
