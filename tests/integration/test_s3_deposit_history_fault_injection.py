@@ -4,131 +4,148 @@ Tests that when deposit_job_event or inject_to_history returns False,
 the task is marked FAILED (not DONE) and will retry.
 """
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.everbot.core.runtime.cron import CronExecutor
+from src.everbot.core.runtime.cron_delivery import CronDelivery
+from src.everbot.core.tasks.routine_manager import RoutineManager
 
-@pytest.mark.asyncio
-async def test_deposit_job_event_false_fails_task():
-    """S3: deposit_job_event returning False must raise RuntimeError."""
-    from everbot.core.runtime.cron import TaskRunner
-    from everbot.core.runtime.task import Task
-    
-    # Mock delivery
-    mock_delivery = MagicMock()
-    mock_delivery.deposit_job_event = AsyncMock(return_value=False)  # Force failure
-    mock_delivery.inject_to_history = AsyncMock(return_value=True)
-    mock_delivery._emit_realtime = AsyncMock()
-    
-    # Mock agent provider
-    mock_provider = MagicMock()
-    mock_provider.run_turn = AsyncMock(return_value="test result")
-    
-    # Mock agent
-    mock_agent = MagicMock()
-    mock_agent.name = "test_agent"
-    
-    # Create task runner
-    runner = TaskRunner(
-        agent_loader=MagicMock(),
-        skill_loader=MagicMock(),
-        delivery=mock_delivery,
-        workspace=Path("/tmp/test_workspace"),
+
+def _make_executor(tmp_path: Path, **overrides) -> CronExecutor:
+    """Helper to create CronExecutor with mocked dependencies."""
+    sm = AsyncMock()
+    sm.get_primary_session_id.return_value = "web_session_test"
+    sm.get_heartbeat_session_id.return_value = "heartbeat_session_test"
+    delivery = CronDelivery(
+        session_manager=sm,
+        primary_session_id="web_session_test",
+        heartbeat_session_id="heartbeat_session_test",
+        agent_name="test_agent",
+        realtime_push=False,
     )
-    
-    # Stub _create_job_agent to return our mock
-    async def _mock_create_job_agent(session_id):
-        return mock_agent
-    runner._create_job_agent = _mock_create_job_agent
-    
-    # Stub _build_job_system_prompt
-    runner._build_job_system_prompt = MagicMock(return_value="test prompt")
-    
-    # Create a simple non-isolated task
-    task = Task(
-        id="test_task",
-        schedule="* * * * *",
-        type="message",
-        agent="test_agent",
-        content="test content",
+    defaults = dict(
+        agent_name="test_agent",
+        workspace_path=tmp_path,
+        session_manager=sm,
+        agent_factory=AsyncMock(),
+        routine_manager=RoutineManager(tmp_path),
+        delivery=delivery,
     )
-    
-    # Run task and expect RuntimeError from deposit failure
-    with pytest.raises(RuntimeError, match="Failed to deposit job completion event to mailbox"):
-        await runner._run_simple_message(task, run_id="test_run_123", run_agent=mock_provider.run_turn)
-    
-    # Verify deposit was called but returned False
-    mock_delivery.deposit_job_event.assert_called()
-    # inject_to_history should NOT be called (task failed before that)
-    mock_delivery.inject_to_history.assert_not_called()
+    defaults.update(overrides)
+    return CronExecutor(**defaults)
+
+
+def _seed_task(tmp_path: Path, **task_overrides):
+    """Seed HEARTBEAT.md with one task and return the manager."""
+    mgr = RoutineManager(tmp_path)
+    defaults = dict(
+        title="Test task",
+        schedule="1h",
+        next_run_at="2026-03-01T11:00:00+00:00",
+        now=datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc),
+    )
+    defaults.update(task_overrides)
+    mgr.add_routine(**defaults)
+    return mgr
 
 
 @pytest.mark.asyncio
-async def test_inject_to_history_false_fails_task():
-    """S3: inject_to_history returning False must raise RuntimeError."""
-    from everbot.core.runtime.cron import TaskRunner
-    from everbot.core.runtime.task import Task
-    
-    # Mock delivery
-    mock_delivery = MagicMock()
-    mock_delivery.deposit_job_event = AsyncMock(return_value=True)  # Succeed
-    mock_delivery.inject_to_history = AsyncMock(return_value=False)  # Force failure
-    mock_delivery._emit_realtime = AsyncMock()
-    
-    # Mock agent provider
-    mock_provider = MagicMock()
-    mock_provider.run_turn = AsyncMock(return_value="test result")
-    
-    # Mock agent
-    mock_agent = MagicMock()
-    mock_agent.name = "test_agent"
-    
-    # Create task runner
-    runner = TaskRunner(
-        agent_loader=MagicMock(),
-        skill_loader=MagicMock(),
-        delivery=mock_delivery,
-        workspace=Path("/tmp/test_workspace"),
+async def test_deposit_job_event_false_fails_task(tmp_path):
+    """S3: deposit_job_event returning False must fail task."""
+    mgr = _seed_task(
+        tmp_path,
+        title="S3 deposit test",
+        execution_mode="isolated",
+        job="skill-evaluate",
     )
+    executor = _make_executor(tmp_path, routine_manager=mgr)
     
-    # Stub _create_job_agent
-    async def _mock_create_job_agent(session_id):
-        return mock_agent
-    runner._create_job_agent = _mock_create_job_agent
-    
-    # Stub _build_job_system_prompt
-    runner._build_job_system_prompt = MagicMock(return_value="test prompt")
-    
-    # Create task
-    task = Task(
-        id="test_task",
-        schedule="* * * * *",
-        type="message",
-        agent="test_agent",
-        content="test content",
-    )
-    
-    # Run task and expect RuntimeError from history inject failure
-    with pytest.raises(RuntimeError, match="Failed to inject job result to history"):
-        await runner._run_simple_message(task, run_id="test_run_123", run_agent=mock_provider.run_turn)
-    
-    # Verify both deposit and inject were called
-    mock_delivery.deposit_job_event.assert_called()
-    mock_delivery.inject_to_history.assert_called()
-    # _emit_realtime should NOT be called (task failed before that)
-    mock_delivery._emit_realtime.assert_not_called()
+    # Patch _invoke_job to return a result
+    with patch.object(executor, '_invoke_job', new_callable=AsyncMock) as mock_invoke:
+        mock_invoke.return_value = "test result"
+        
+        # Patch deposit_job_event to return False (simulate failure)
+        with patch.object(
+            executor.delivery, 'deposit_job_event', new_callable=AsyncMock
+        ) as mock_deposit:
+            mock_deposit.return_value = False
+            
+            task_list = mgr.load_task_list()
+            result = await executor.tick(
+                task_list,
+                run_agent=AsyncMock(),
+                inject_context=AsyncMock(),
+                run_id="test_run",
+            )
+            
+            # Task should have failed
+            assert result.executed == 1
+            assert result.results[0].status == "failed"
+            # Error message should match S3 requirement
+            assert "Failed to deposit job completion event to mailbox" in result.results[0].error
+            
+            # Verify deposit was called
+            mock_deposit.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_staged_history_step_false_fails_task():
+async def test_inject_to_history_false_fails_task(tmp_path):
+    """S3: inject_to_history returning False must fail task."""
+    mgr = _seed_task(
+        tmp_path,
+        title="S3 history test",
+        execution_mode="isolated",
+        job="skill-evaluate",
+    )
+    executor = _make_executor(tmp_path, routine_manager=mgr)
+    
+    # Patch _invoke_job to return a result
+    with patch.object(executor, '_invoke_job', new_callable=AsyncMock) as mock_invoke:
+        mock_invoke.return_value = "test result"
+        
+        # Patch deposit_job_event to succeed
+        with patch.object(
+            executor.delivery, 'deposit_job_event', new_callable=AsyncMock
+        ) as mock_deposit:
+            mock_deposit.return_value = True
+            
+            # Patch inject_to_history to return False (simulate failure)
+            with patch.object(
+                executor.delivery, 'inject_to_history', new_callable=AsyncMock
+            ) as mock_inject:
+                mock_inject.return_value = False
+                
+                task_list = mgr.load_task_list()
+                result = await executor.tick(
+                    task_list,
+                    run_agent=AsyncMock(),
+                    inject_context=AsyncMock(),
+                    run_id="test_run",
+                )
+                
+                # Task should have failed
+                assert result.executed == 1
+                assert result.results[0].status == "failed"
+                # Error message should match S3 requirement
+                assert "Failed to inject job result to history" in result.results[0].error
+                
+                # Verify both were called
+                mock_deposit.assert_called_once()
+                mock_inject.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_staged_history_step_false_fails_task(tmp_path):
     """S3: staged history delivery step returning False must fail via run_delivery_step."""
-    from everbot.core.runtime.routine_checkpoint import RoutineCheckpointStore
+    from src.everbot.core.runtime.routine_checkpoint import RoutineCheckpointStore
     
     # Create checkpoint store
     store = RoutineCheckpointStore(
-        workspace_path=Path("/tmp/test_workspace"),
+        workspace_path=tmp_path,
         execution_id="test_exec_123",
         task_id="test_task",
     )
@@ -154,5 +171,5 @@ async def test_staged_history_step_false_fails_task():
 
 
 if __name__ == "__main__":
-    # Run tests with: python -m pytest tests/integration/test_s3_deposit_history_fault_injection.py -v
+    # Run tests with: PYTHONPATH=src python -m pytest tests/integration/test_s3_deposit_history_fault_injection.py -v
     pytest.main([__file__, "-v"])

@@ -12,125 +12,185 @@ import pytest
 @pytest.mark.asyncio
 async def test_telegram_send_failure_attempts_mailbox():
     """S4: Telegram send failure must still attempt mailbox deposit."""
-    from everbot.channels.telegram_channel import TelegramChannel
+    from src.everbot.channels.telegram_channel import TelegramChannel
     
-    # Mock dependencies
-    mock_agent_loader = MagicMock()
-    mock_skill_loader = MagicMock()
-    mock_delivery = MagicMock()
+    # Mock session manager
+    mock_sm = AsyncMock()
+    mock_sm.deposit_mailbox_event = AsyncMock(return_value=True)
     
-    # Create channel
+    # Create channel with real constructor signature
     channel = TelegramChannel(
-        token="fake_token",
-        agent_loader=mock_agent_loader,
-        skill_loader=mock_skill_loader,
-        delivery=mock_delivery,
+        bot_token="123:FAKE_TOKEN",
+        session_manager=mock_sm,
+        default_agent="test_agent",
     )
     
-    # Mock Telegram bot send to fail
-    mock_bot = MagicMock()
-    mock_bot.send_message = AsyncMock(side_effect=Exception("Telegram API error"))
-    channel._bot = mock_bot
-    
-    # Mock mailbox deposit to succeed
-    mock_delivery.deposit_mailbox_event = AsyncMock(return_value=True)
-    
-    # Create mock event
-    mock_event = MagicMock()
-    mock_event.user_id = 12345
-    mock_event.content = "test message"
-    mock_event.run_id = "test_run_123"
-    
-    # Call handler (should not raise, mailbox succeeds)
-    await channel._handle_realtime_event(mock_event)
-    
-    # Verify both were attempted
-    mock_bot.send_message.assert_called_once()
-    mock_delivery.deposit_mailbox_event.assert_called_once()
+    # Mock _send_split_with_entities to fail (ok_count=0, total=1 → sent=False)
+    with patch.object(channel, '_send_split_with_entities', new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = (0, 1)  # Failed to send
+        
+        # Mock _maybe_attach_projection (not relevant for this test)
+        with patch.object(channel, '_maybe_attach_projection', new_callable=AsyncMock) as mock_proj:
+            mock_proj.return_value = False
+            
+            # Mock _convert_markdown
+            with patch.object(channel, '_convert_markdown') as mock_md:
+                mock_md.return_value = ("test text", [])
+                
+                # Set up bindings (agent → chat_id)
+                channel._bindings = {12345: "test_agent"}
+                
+                # Create realistic event data
+                data = {
+                    "source_type": "heartbeat_delivery",
+                    "agent_name": "test_agent",
+                    "detail": "test message content",
+                    "run_id": "test_run_123",
+                }
+                
+                # Call handler (should not raise, mailbox succeeds)
+                await channel._on_background_event("heartbeat_session_test", data)
+                
+                # Verify Telegram send was attempted
+                mock_send.assert_called_once()
+                # Verify mailbox deposit was attempted (S4: always attempt)
+                mock_sm.deposit_mailbox_event.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_both_telegram_and_mailbox_fail_raises():
     """S4: When both Telegram send AND mailbox deposit fail, task must fail."""
-    from everbot.channels.telegram_channel import TelegramChannel
+    from src.everbot.channels.telegram_channel import TelegramChannel
     
-    # Mock dependencies
-    mock_agent_loader = MagicMock()
-    mock_skill_loader = MagicMock()
-    mock_delivery = MagicMock()
+    # Mock session manager with deposit failure
+    mock_sm = AsyncMock()
+    mock_sm.deposit_mailbox_event = AsyncMock(return_value=False)  # Mailbox fails
     
     # Create channel
     channel = TelegramChannel(
-        token="fake_token",
-        agent_loader=mock_agent_loader,
-        skill_loader=mock_skill_loader,
-        delivery=mock_delivery,
+        bot_token="123:FAKE_TOKEN",
+        session_manager=mock_sm,
+        default_agent="test_agent",
     )
     
-    # Mock Telegram bot send to fail
-    mock_bot = MagicMock()
-    mock_bot.send_message = AsyncMock(side_effect=Exception("Telegram API error"))
-    channel._bot = mock_bot
-    
-    # Mock mailbox deposit to also fail
-    mock_delivery.deposit_mailbox_event = AsyncMock(return_value=False)
-    
-    # Create mock event
-    mock_event = MagicMock()
-    mock_event.user_id = 12345
-    mock_event.content = "test message"
-    mock_event.run_id = "test_run_123"
-    
-    # Call handler and expect RuntimeError (both failed)
-    with pytest.raises(RuntimeError, match="Failed to deliver message via both Telegram and mailbox"):
-        await channel._handle_realtime_event(mock_event)
-    
-    # Verify both were attempted
-    mock_bot.send_message.assert_called_once()
-    mock_delivery.deposit_mailbox_event.assert_called_once()
+    # Mock _send_split_with_entities to fail
+    with patch.object(channel, '_send_split_with_entities', new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = (0, 1)  # Telegram send failed
+        
+        with patch.object(channel, '_maybe_attach_projection', new_callable=AsyncMock) as mock_proj:
+            mock_proj.return_value = False
+            
+            with patch.object(channel, '_convert_markdown') as mock_md:
+                mock_md.return_value = ("test text", [])
+                
+                channel._bindings = {12345: "test_agent"}
+                
+                data = {
+                    "source_type": "heartbeat_delivery",
+                    "agent_name": "test_agent",
+                    "detail": "test message content",
+                    "run_id": "test_run_123",
+                }
+                
+                # Call handler and expect RuntimeError (both failed)
+                with pytest.raises(RuntimeError, match="Both Telegram delivery and mailbox deposit failed for heartbeat_delivery"):
+                    await channel._on_background_event("heartbeat_session_test", data)
+                
+                # Verify both were attempted
+                mock_send.assert_called_once()
+                mock_sm.deposit_mailbox_event.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_telegram_send_success_skips_mailbox():
-    """S4: When Telegram send succeeds, mailbox deposit is NOT needed."""
-    from everbot.channels.telegram_channel import TelegramChannel
+async def test_telegram_send_success_mailbox_still_attempted():
+    """S4: When Telegram send succeeds, mailbox deposit is still attempted (unless projected)."""
+    from src.everbot.channels.telegram_channel import TelegramChannel
     
-    # Mock dependencies
-    mock_agent_loader = MagicMock()
-    mock_skill_loader = MagicMock()
-    mock_delivery = MagicMock()
+    # Mock session manager
+    mock_sm = AsyncMock()
+    mock_sm.deposit_mailbox_event = AsyncMock(return_value=True)
     
     # Create channel
     channel = TelegramChannel(
-        token="fake_token",
-        agent_loader=mock_agent_loader,
-        skill_loader=mock_skill_loader,
-        delivery=mock_delivery,
+        bot_token="123:FAKE_TOKEN",
+        session_manager=mock_sm,
+        default_agent="test_agent",
     )
     
-    # Mock Telegram bot send to succeed
-    mock_bot = MagicMock()
-    mock_bot.send_message = AsyncMock(return_value=MagicMock())
-    channel._bot = mock_bot
+    # Mock _send_split_with_entities to succeed (ok_count=total → sent=True)
+    with patch.object(channel, '_send_split_with_entities', new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = (1, 1)  # Telegram send succeeded
+        
+        # Mock projection to fail (so mailbox is attempted)
+        with patch.object(channel, '_maybe_attach_projection', new_callable=AsyncMock) as mock_proj:
+            mock_proj.return_value = False  # No projection → mailbox attempted
+            
+            with patch.object(channel, '_convert_markdown') as mock_md:
+                mock_md.return_value = ("test text", [])
+                
+                channel._bindings = {12345: "test_agent"}
+                
+                data = {
+                    "source_type": "heartbeat_delivery",
+                    "agent_name": "test_agent",
+                    "detail": "test message content",
+                    "run_id": "test_run_123",
+                }
+                
+                # Call handler
+                await channel._on_background_event("heartbeat_session_test", data)
+                
+                # Verify Telegram send was called
+                mock_send.assert_called_once()
+                # S4: Mailbox is still attempted (unless projected=True)
+                mock_sm.deposit_mailbox_event.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_telegram_send_success_projected_skips_mailbox():
+    """S4: When Telegram send succeeds AND projection succeeds, mailbox is skipped."""
+    from src.everbot.channels.telegram_channel import TelegramChannel
     
-    # Mock mailbox deposit (should not be called)
-    mock_delivery.deposit_mailbox_event = AsyncMock()
+    # Mock session manager
+    mock_sm = AsyncMock()
+    mock_sm.deposit_mailbox_event = AsyncMock()
     
-    # Create mock event
-    mock_event = MagicMock()
-    mock_event.user_id = 12345
-    mock_event.content = "test message"
-    mock_event.run_id = "test_run_123"
+    # Create channel
+    channel = TelegramChannel(
+        bot_token="123:FAKE_TOKEN",
+        session_manager=mock_sm,
+        default_agent="test_agent",
+    )
     
-    # Call handler
-    await channel._handle_realtime_event(mock_event)
-    
-    # Verify Telegram send was called
-    mock_bot.send_message.assert_called_once()
-    # Verify mailbox was NOT called (Telegram succeeded)
-    mock_delivery.deposit_mailbox_event.assert_not_called()
+    # Mock _send_split_with_entities to succeed
+    with patch.object(channel, '_send_split_with_entities', new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = (1, 1)  # Telegram send succeeded
+        
+        # Mock projection to succeed (so mailbox is skipped)
+        with patch.object(channel, '_maybe_attach_projection', new_callable=AsyncMock) as mock_proj:
+            mock_proj.return_value = True  # Projected → mailbox skipped
+            
+            with patch.object(channel, '_convert_markdown') as mock_md:
+                mock_md.return_value = ("test text", [])
+                
+                channel._bindings = {12345: "test_agent"}
+                
+                data = {
+                    "source_type": "heartbeat_delivery",
+                    "agent_name": "test_agent",
+                    "detail": "test message content",
+                    "run_id": "test_run_123",
+                }
+                
+                # Call handler
+                await channel._on_background_event("heartbeat_session_test", data)
+                
+                # Verify Telegram send was called
+                mock_send.assert_called_once()
+                # Mailbox is NOT called (projected=True)
+                mock_sm.deposit_mailbox_event.assert_not_called()
 
 
 if __name__ == "__main__":
-    # Run tests with: python -m pytest tests/integration/test_s4_telegram_mailbox_fallback.py -v
+    # Run tests with: PYTHONPATH=src python -m pytest tests/integration/test_s4_telegram_mailbox_fallback.py -v
     pytest.main([__file__, "-v"])
