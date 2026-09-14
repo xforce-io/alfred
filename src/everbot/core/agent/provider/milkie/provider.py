@@ -661,6 +661,19 @@ class MilkieProvider:
             pass
         return asyncio.run(self._pool.get_or_spawn(agent_name))
 
+    def _check_running_loop(self) -> bool:
+        """Check if we're in a running event loop (WS/async context).
+        
+        S2: Sync methods on the chat path cannot spawn (asyncio.run forbidden).
+        Return True if loop is running; caller should evict + return safe default.
+        """
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            return True
+        except RuntimeError:
+            return False
+
     def is_user_interrupt_paused(self, agent: Any) -> bool:
         # milkie#137:经 serve /context/state 查运行态。paused ⇔ context 被 /interrupt
         # 停在 FSM 保留态 paused、可 /resume 续跑;此前恒 False 使 resume gate 成死分支。
