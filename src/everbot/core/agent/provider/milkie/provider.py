@@ -649,18 +649,45 @@ class MilkieProvider:
     def is_user_interrupt_paused(self, agent: Any) -> bool:
         # milkie#137:经 serve /context/state 查运行态。paused ⇔ context 被 /interrupt
         # 停在 FSM 保留态 paused、可 /resume 续跑;此前恒 False 使 resume gate 成死分支。
-        client = self._sync_client or self._new_sync_client()
-        owns = self._sync_client is None
-        try:
-            resp = client.post(
-                f"{self._agent_base_url(agent)}/context/state",
-                json={"contextId": agent.context_id},
-            )
-            resp.raise_for_status()  # 非2xx 不能静默返回 False,明确抛错
-            return bool(resp.json().get("paused", False))
-        finally:
-            if owns:
-                client.close()
+        # S2: Wrap with ConnectError evict+retry (same as run_turn async path)
+        agent_name = getattr(agent, "name", "") or ""
+        retry_attempted = False
+        
+        while True:
+            client = self._sync_client or self._new_sync_client()
+            owns = self._sync_client is None
+            try:
+                resp = client.post(
+                    f"{self._agent_base_url(agent)}/context/state",
+                    json={"contextId": agent.context_id},
+                )
+                resp.raise_for_status()  # 非2xx 不能静默返回 False,明确抛错
+                result = bool(resp.json().get("paused", False))
+                if owns:
+                    client.close()
+                return result
+            except httpx.ConnectError as exc:
+                if owns:
+                    client.close()
+                
+                if retry_attempted or not agent_name or self._pool is None:
+                    # Already retried or can't evict, give up
+                    raise
+                
+                # S2: First ConnectError → evict sidecar and retry once
+                logger.warning(
+                    "milkie provider: ConnectError in is_user_interrupt_paused for '%s', "
+                    "evicting sidecar and retrying: %s",
+                    agent_name, exc
+                )
+                self._pool.evict(agent_name)
+                retry_attempted = True
+                # Loop will retry with fresh get_or_spawn on next _agent_base_url call
+                continue
+            except BaseException:
+                if owns:
+                    client.close()
+                raise
 
     async def attach_projection(
         self,
@@ -755,25 +782,50 @@ class MilkieProvider:
     def export_session(self, agent: Any) -> dict:
         # 全量历史经 serve /session/history(milkie#128)取回 canonical Message[],
         # 翻译成 alfred history 格式。variables 走 serve 自持久化,此处不导(milkie#130)。
-        client = self._sync_client or self._new_sync_client()
-        owns = self._sync_client is None
-        try:
-            resp = client.post(
-                f"{self._agent_base_url(agent)}/session/history",
-                json={"contextId": agent.context_id},
-            )
-            if resp.status_code == 404:
-                # 新会话,serve 尚无该 context → 空历史(不抛)。
-                return {"history_messages": [], "variables": {}}
-            resp.raise_for_status()
-            messages = resp.json().get("messages", [])
-        finally:
-            if owns:
-                client.close()
-        return {
-            "history_messages": _milkie_messages_to_history(messages),
-            "variables": {},
-        }
+        # S2: Wrap with ConnectError evict+retry
+        agent_name = getattr(agent, "name", "") or ""
+        retry_attempted = False
+        
+        while True:
+            client = self._sync_client or self._new_sync_client()
+            owns = self._sync_client is None
+            try:
+                resp = client.post(
+                    f"{self._agent_base_url(agent)}/session/history",
+                    json={"contextId": agent.context_id},
+                )
+                if resp.status_code == 404:
+                    # 新会话,serve 尚无该 context → 空历史(不抛)。
+                    if owns:
+                        client.close()
+                    return {"history_messages": [], "variables": {}}
+                resp.raise_for_status()
+                messages = resp.json().get("messages", [])
+                if owns:
+                    client.close()
+                return {
+                    "history_messages": _milkie_messages_to_history(messages),
+                    "variables": {},
+                }
+            except httpx.ConnectError as exc:
+                if owns:
+                    client.close()
+                
+                if retry_attempted or not agent_name or self._pool is None:
+                    raise
+                
+                logger.warning(
+                    "milkie provider: ConnectError in export_session for '%s', "
+                    "evicting sidecar and retrying: %s",
+                    agent_name, exc
+                )
+                self._pool.evict(agent_name)
+                retry_attempted = True
+                continue
+            except BaseException:
+                if owns:
+                    client.close()
+                raise
 
     def import_session(self, agent: Any, portable_state: dict) -> None:
         """Apply compacted / portable session into milkie serve (#166 / milkie#124).
@@ -783,42 +835,71 @@ class MilkieProvider:
         - alfred ``{history_messages, ...}`` → export current portable, rewrite
           checkpoint history regions from compacted messages, re-import under
           the same contextId so the next LLM call uses the reduced base.
+        
+        S2: Wrapped with ConnectError evict+retry.
         """
         if not isinstance(portable_state, dict):
             raise TypeError("portable_state must be a dict")
 
-        client = self._sync_client or self._new_sync_client()
-        owns = self._sync_client is None
-        base = self._agent_base_url(agent)
-        try:
-            if "manifest" in portable_state:
-                session = portable_state
-                expected_latest_run_id = None
-            else:
-                session, expected_latest_run_id = self._portable_from_compacted_history(
-                    client, base, agent, portable_state
+        agent_name = getattr(agent, "name", "") or ""
+        retry_attempted = False
+        
+        while True:
+            client = self._sync_client or self._new_sync_client()
+            owns = self._sync_client is None
+            base = self._agent_base_url(agent)
+            try:
+                if "manifest" in portable_state:
+                    session = portable_state
+                    expected_latest_run_id = None
+                else:
+                    session, expected_latest_run_id = self._portable_from_compacted_history(
+                        client, base, agent, portable_state
+                    )
+                payload = {"session": session}
+                if expected_latest_run_id:
+                    payload["expectedLatestRunId"] = expected_latest_run_id
+                resp = client.post(
+                    f"{base}/session/import",
+                    json=payload,
+                    timeout=_SESSION_IMPORT_HTTP_TIMEOUT_SECONDS,
                 )
-            payload = {"session": session}
-            if expected_latest_run_id:
-                payload["expectedLatestRunId"] = expected_latest_run_id
-            resp = client.post(
-                f"{base}/session/import",
-                json=payload,
-                timeout=_SESSION_IMPORT_HTTP_TIMEOUT_SECONDS,
-            )
-            if resp.status_code == 409:
-                raise MilkieSessionImportConflict(
-                    "milkie /session/import rejected stale session snapshot"
+                if resp.status_code == 409:
+                    if owns:
+                        client.close()
+                    raise MilkieSessionImportConflict(
+                        "milkie /session/import rejected stale session snapshot"
+                    )
+                resp.raise_for_status()
+                if expected_latest_run_id and resp.json().get("conditionApplied") is not True:
+                    if owns:
+                        client.close()
+                    raise RuntimeError(
+                        "milkie /session/import lacks conditional-import support; "
+                        "refusing an unsafe history rewrite"
+                    )
+                if owns:
+                    client.close()
+                return
+            except httpx.ConnectError as exc:
+                if owns:
+                    client.close()
+                
+                if retry_attempted or not agent_name or self._pool is None:
+                    raise
+                
+                logger.warning(
+                    "milkie provider: ConnectError in import_session for '%s', "
+                    "evicting sidecar and retrying: %s",
+                    agent_name, exc
                 )
-            resp.raise_for_status()
-            if expected_latest_run_id and resp.json().get("conditionApplied") is not True:
-                raise RuntimeError(
-                    "milkie /session/import lacks conditional-import support; "
-                    "refusing an unsafe history rewrite"
-                )
-        finally:
-            if owns:
-                client.close()
+                self._pool.evict(agent_name)
+                retry_attempted = True
+                continue
+            except BaseException:
+                if owns:
+                    client.close()
+                raise
 
     def _portable_from_compacted_history(
         self,
