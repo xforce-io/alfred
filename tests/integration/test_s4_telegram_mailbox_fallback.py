@@ -37,24 +37,28 @@ async def test_telegram_send_failure_attempts_mailbox():
             with patch.object(channel, '_convert_markdown') as mock_md:
                 mock_md.return_value = ("test text", [])
                 
-                # Set up bindings (agent → chat_id)
-                channel._bindings = {12345: "test_agent"}
-                
-                # Create realistic event data
-                data = {
-                    "source_type": "heartbeat_delivery",
-                    "agent_name": "test_agent",
-                    "detail": "test message content",
-                    "run_id": "test_run_123",
-                }
-                
-                # Call handler (should not raise, mailbox succeeds)
-                await channel._on_background_event("heartbeat_session_test", data)
-                
-                # Verify Telegram send was attempted
-                mock_send.assert_called_once()
-                # Verify mailbox deposit was attempted (S4: always attempt)
-                mock_sm.deposit_mailbox_event.assert_called_once()
+                # Mock _should_defer to return False (not deferring pushes)
+                with patch.object(channel, '_should_defer', return_value=False):
+                    
+                    # Set up bindings (agent → chat_id, use string chat_id)
+                    channel._bindings = {"12345": "test_agent"}
+                    
+                    # Create realistic event data (scope=agent to pass routing)
+                    data = {
+                        "scope": "agent",  # Required for routing.deliver=True without session id
+                        "source_type": "heartbeat_delivery",
+                        "agent_name": "test_agent",
+                        "detail": "test message content",
+                        "run_id": "test_run_123",
+                    }
+                    
+                    # Call handler (should not raise, mailbox succeeds)
+                    await channel._on_background_event("heartbeat_session_test", data)
+                    
+                    # Verify Telegram send was attempted
+                    mock_send.assert_called_once()
+                    # Verify mailbox deposit was attempted (S4: always attempt)
+                    mock_sm.deposit_mailbox_event.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -83,22 +87,25 @@ async def test_both_telegram_and_mailbox_fail_raises():
             with patch.object(channel, '_convert_markdown') as mock_md:
                 mock_md.return_value = ("test text", [])
                 
-                channel._bindings = {12345: "test_agent"}
-                
-                data = {
-                    "source_type": "heartbeat_delivery",
-                    "agent_name": "test_agent",
-                    "detail": "test message content",
-                    "run_id": "test_run_123",
-                }
-                
-                # Call handler and expect RuntimeError (both failed)
-                with pytest.raises(RuntimeError, match="Both Telegram delivery and mailbox deposit failed for heartbeat_delivery"):
-                    await channel._on_background_event("heartbeat_session_test", data)
-                
-                # Verify both were attempted
-                mock_send.assert_called_once()
-                mock_sm.deposit_mailbox_event.assert_called_once()
+                with patch.object(channel, '_should_defer', return_value=False):
+                    
+                    channel._bindings = {"12345": "test_agent"}
+                    
+                    data = {
+                        "scope": "agent",  # Required for routing.deliver=True
+                        "source_type": "heartbeat_delivery",
+                        "agent_name": "test_agent",
+                        "detail": "test message content",
+                        "run_id": "test_run_123",
+                    }
+                    
+                    # Call handler and expect RuntimeError (both failed)
+                    with pytest.raises(RuntimeError, match="Both Telegram delivery and mailbox deposit failed for heartbeat_delivery"):
+                        await channel._on_background_event("heartbeat_session_test", data)
+                    
+                    # Verify both were attempted
+                    mock_send.assert_called_once()
+                    mock_sm.deposit_mailbox_event.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -128,22 +135,25 @@ async def test_telegram_send_success_mailbox_still_attempted():
             with patch.object(channel, '_convert_markdown') as mock_md:
                 mock_md.return_value = ("test text", [])
                 
-                channel._bindings = {12345: "test_agent"}
-                
-                data = {
-                    "source_type": "heartbeat_delivery",
-                    "agent_name": "test_agent",
-                    "detail": "test message content",
-                    "run_id": "test_run_123",
-                }
-                
-                # Call handler
-                await channel._on_background_event("heartbeat_session_test", data)
-                
-                # Verify Telegram send was called
-                mock_send.assert_called_once()
-                # S4: Mailbox is still attempted (unless projected=True)
-                mock_sm.deposit_mailbox_event.assert_called_once()
+                with patch.object(channel, '_should_defer', return_value=False):
+                    
+                    channel._bindings = {"12345": "test_agent"}
+                    
+                    data = {
+                        "scope": "agent",  # Required for routing.deliver=True
+                        "source_type": "heartbeat_delivery",
+                        "agent_name": "test_agent",
+                        "detail": "test message content",
+                        "run_id": "test_run_123",
+                    }
+                    
+                    # Call handler
+                    await channel._on_background_event("heartbeat_session_test", data)
+                    
+                    # Verify Telegram send was called
+                    mock_send.assert_called_once()
+                    # S4: Mailbox is still attempted (unless projected=True)
+                    mock_sm.deposit_mailbox_event.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -173,22 +183,25 @@ async def test_telegram_send_success_projected_skips_mailbox():
             with patch.object(channel, '_convert_markdown') as mock_md:
                 mock_md.return_value = ("test text", [])
                 
-                channel._bindings = {12345: "test_agent"}
-                
-                data = {
-                    "source_type": "heartbeat_delivery",
-                    "agent_name": "test_agent",
-                    "detail": "test message content",
-                    "run_id": "test_run_123",
-                }
-                
-                # Call handler
-                await channel._on_background_event("heartbeat_session_test", data)
-                
-                # Verify Telegram send was called
-                mock_send.assert_called_once()
-                # Mailbox is NOT called (projected=True)
-                mock_sm.deposit_mailbox_event.assert_not_called()
+                with patch.object(channel, '_should_defer', return_value=False):
+                    
+                    channel._bindings = {"12345": "test_agent"}
+                    
+                    data = {
+                        "scope": "agent",  # Required for routing.deliver=True
+                        "source_type": "heartbeat_delivery",
+                        "agent_name": "test_agent",
+                        "detail": "test message content",
+                        "run_id": "test_run_123",
+                    }
+                    
+                    # Call handler
+                    await channel._on_background_event("heartbeat_session_test", data)
+                    
+                    # Verify Telegram send was called
+                    mock_send.assert_called_once()
+                    # Mailbox is NOT called (projected=True)
+                    mock_sm.deposit_mailbox_event.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -82,8 +82,9 @@ async def test_deposit_job_event_false_fails_task(tmp_path):
                 run_id="test_run",
             )
             
-            # Task should have failed
-            assert result.executed == 1
+            # Task should have failed (failed tasks increment 'failed', not 'executed')
+            assert result.failed == 1
+            assert result.executed == 0
             assert result.results[0].status == "failed"
             # Error message should match S3 requirement
             assert "Failed to deposit job completion event to mailbox" in result.results[0].error
@@ -127,8 +128,9 @@ async def test_inject_to_history_false_fails_task(tmp_path):
                     run_id="test_run",
                 )
                 
-                # Task should have failed
-                assert result.executed == 1
+                # Task should have failed (failed tasks increment 'failed', not 'executed')
+                assert result.failed == 1
+                assert result.executed == 0
                 assert result.results[0].status == "failed"
                 # Error message should match S3 requirement
                 assert "Failed to inject job result to history" in result.results[0].error
