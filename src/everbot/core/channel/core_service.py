@@ -291,12 +291,32 @@ class ChannelCoreService:
             self._bind_session_id_to_context(agent, session_id)
             self._init_session_trajectory(agent, agent_name, session_id, overwrite=False)
 
-            if not provider.is_paused(agent):
-                provider.set_variable(agent, "query", effective_message)
-            self._reload_workspace_instructions_if_missing(agent, agent_name)
-            self._cache_runtime_workspace_instructions(agent, agent_name)
-            # Refresh current_time so the LLM always knows the actual time
-            provider.set_variable(agent, "current_time", datetime.now().strftime("%Y-%m-%d %H:%M"))
+            # S2: Ensure sidecar is live before sync HTTP calls (set_variable/get_variable)
+            ensure_fn = getattr(provider, "ensure_sidecar", None)
+            if ensure_fn is not None:
+                await ensure_fn(agent)
+
+            # S2: Wrap set_variable/get_variable prep in ConnectError recovery
+            def _prep_variables():
+                if not provider.is_paused(agent):
+                    provider.set_variable(agent, "query", effective_message)
+                self._reload_workspace_instructions_if_missing(agent, agent_name)
+                self._cache_runtime_workspace_instructions(agent, agent_name)
+                provider.set_variable(agent, "current_time", datetime.now().strftime("%Y-%m-%d %H:%M"))
+
+            try:
+                _prep_variables()
+            except httpx.ConnectError as exc:
+                logger.warning(
+                    "ConnectError during variable prep for '%s', recovering sidecar: %s",
+                    agent_name, exc
+                )
+                recover_fn = getattr(provider, "recover_sidecar", None)
+                if recover_fn is not None:
+                    await recover_fn(agent)
+                # Single retry after recovery
+                _prep_variables()
+
             system_prompt_override = self._build_turn_system_prompt(session_data, agent_name)
 
             history_messages = provider.get_variable(agent, KEY_HISTORY)

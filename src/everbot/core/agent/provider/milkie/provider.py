@@ -674,6 +674,30 @@ class MilkieProvider:
         except RuntimeError:
             return False
 
+    async def ensure_sidecar(self, agent: Any) -> None:
+        """S2: Ensure pool has live sidecar; refresh agent.base_url.
+        
+        Call before sync HTTP methods (set_variable/get_variable) to preempt
+        ConnectError from dead sidecar. Idempotent on already-live sidecar.
+        """
+        agent_name = getattr(agent, "name", "") or ""
+        if not agent_name or self._pool is None:
+            return
+        sidecar = await self._pool.get_or_spawn(agent_name)
+        agent.base_url = sidecar.base_url
+
+    async def recover_sidecar(self, agent: Any) -> None:
+        """S2: Evict dead sidecar + respawn. Public helper for core_service retry.
+        
+        Called after ConnectError on sync methods to evict stale cache and
+        force fresh spawn before retry.
+        """
+        agent_name = getattr(agent, "name", "") or ""
+        if not agent_name or self._pool is None:
+            return
+        self._pool.evict(agent_name)
+        await self.ensure_sidecar(agent)
+
     def is_user_interrupt_paused(self, agent: Any) -> bool:
         # milkie#137:经 serve /context/state 查运行态。paused ⇔ context 被 /interrupt
         # 停在 FSM 保留态 paused、可 /resume 续跑;此前恒 False 使 resume gate 成死分支。
