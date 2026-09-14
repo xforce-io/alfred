@@ -501,14 +501,16 @@ class TestEventFiltering:
         assert "Task completed" in deposited_event["detail"]
 
     @pytest.mark.asyncio
-    async def test_skips_mailbox_mirror_when_telegram_delivery_fails(self, channel):
-        """Do not mirror unseen heartbeat events into tg session mailbox.
+    async def test_deposits_mailbox_when_telegram_delivery_fails(self, channel):
+        """S4: Mailbox anchor when Telegram send fails.
 
-        Regression: _on_background_event previously deposited mailbox events
-        even when Telegram send failed, causing hidden background updates to
-        leak into the next user turn despite no visible push notification.
+        When Telegram delivery fails, mailbox deposit is still attempted as an
+        anchor. If mailbox deposit succeeds, the event is preserved for the
+        user to see on next connection (no raise). If both fail, the task fails
+        and retries (tested in integration suite).
         """
         channel._send_message = AsyncMock(return_value=False)
+        channel._session_manager.deposit_mailbox_event = AsyncMock(return_value=True)
 
         await channel._on_background_event("session_1", {
             "source_type": "heartbeat_delivery",
@@ -519,7 +521,8 @@ class TestEventFiltering:
         })
 
         channel._send_message.assert_awaited_once()
-        channel._session_manager.deposit_mailbox_event.assert_not_awaited()
+        # S4: Mailbox deposit is attempted (anchor when TG fails)
+        channel._session_manager.deposit_mailbox_event.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_long_heartbeat_preserves_entities_per_part(self, channel):
@@ -547,10 +550,14 @@ class TestEventFiltering:
         channel._session_manager.deposit_mailbox_event.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_multipart_partial_failure_skips_mailbox_mirror(self, channel):
-        """#76: if any split part fails to send, the heartbeat counts as
-        undelivered and must not be mirrored into the session mailbox."""
+    async def test_multipart_partial_failure_attempts_mailbox(self, channel):
+        """S4: Multipart send partial failure still attempts mailbox anchor.
+
+        When any split part fails to send, the heartbeat counts as undelivered
+        to Telegram, but mailbox deposit is still attempted (S4 policy).
+        """
         channel._send_message = AsyncMock(side_effect=[True, False])
+        channel._session_manager.deposit_mailbox_event = AsyncMock(return_value=True)
         converted = "a" * 3000 + "\n\n" + "b" * 3000
         channel._convert_markdown = lambda text: (converted, None)
 
@@ -563,7 +570,30 @@ class TestEventFiltering:
         })
 
         assert channel._send_message.await_count == 2
-        channel._session_manager.deposit_mailbox_event.assert_not_awaited()
+        # S4: Mailbox deposit is attempted even when TG send partially fails
+        channel._session_manager.deposit_mailbox_event.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_both_telegram_and_mailbox_fail_raises(self, channel):
+        """S4: When both Telegram send AND mailbox deposit fail, raise error.
+
+        This causes the cron task to fail and retry, ensuring the report is
+        not dropped silently.
+        """
+        channel._send_message = AsyncMock(return_value=False)
+        channel._session_manager.deposit_mailbox_event = AsyncMock(return_value=False)
+
+        with pytest.raises(RuntimeError, match="Both Telegram delivery and mailbox deposit failed"):
+            await channel._on_background_event("session_1", {
+                "source_type": "heartbeat_delivery",
+                "agent_name": "my_agent",
+                "detail": "Task completed",
+                "deliver": True,
+                "scope": "agent",
+            })
+
+        channel._send_message.assert_awaited_once()
+        channel._session_manager.deposit_mailbox_event.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_ignores_non_heartbeat_delivery(self, channel):
