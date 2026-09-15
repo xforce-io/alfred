@@ -91,3 +91,7 @@ tmp_*.py
 # keel-verify run evidence (local only, see .agents/skills/verify-*/SKILL.md)
 .agents/verify-runs/
 .grok/verify-runs/
+
+# Cloud-agent dumps (not product)
+/json
+.kairo/

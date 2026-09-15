@@ -46,7 +46,7 @@ cp ~/.alfred/config.yaml ~/.alfred/config.yaml.bak_verify_<issue-no>
 
 ## Evidence
 
-写入仓库 `.grok/verify-runs/<issue-no>/`（已在 `.gitignore`）：
+写入仓库 `.agents/verify-runs/<issue-no>/`（该目录不进 git；禁止 `git add` / `git add -f`）：
 
 | 文件 | 内容 |
 |---|---|
@@ -56,11 +56,11 @@ cp ~/.alfred/config.yaml ~/.alfred/config.yaml.bak_verify_<issue-no>
 | `sN-*.png` | Telegram 对话截图（若该 Story 走 Telegram 入口） |
 | `notes.md` | 入口、chat_id（只留后 4 位）、run_id、观察 |
 
-日志证据用 `rg -n <pattern> ~/.alfred/logs/everbot.err ~/.alfred/logs/everbot.out` 原文，不要转述。
+日志证据用 `rg -n <pattern> ~/.alfred/logs/everbot.err ~/.alfred/logs/everbot.out` 原文，不要转述。完成表写进 Issue/PR comment，不要把本目录送进 diff。
 
 ## Cleanup
 
 - 若 Issue 要求的配置（如 `allowed_chat_ids`、`web.api_key`、`env_passthrough`）就是最终形态，**保留**，只删 `config.yaml.bak_verify_*` 之外的临时改动（如为验证临时移除的 chat_id 要加回）。
 - Drive 中启动的额外进程（`websocat`、临时 python）全部结束。
 - 最后 `./bin/everbot status` 必须仍为 `运行中`、demo_agent 心跳继续。
-- **不得删除** `.grok/verify-runs/`。
+- **不得删除** `.agents/verify-runs/`。
