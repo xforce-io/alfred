@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -21,14 +23,21 @@ from src.everbot.core.tasks.routine_manager import RoutineManager
 from src.everbot.infra.workspace import WorkspaceLoader
 
 
+# Relative timestamps to avoid fixture drift (7-day scanner window)
+NOW = datetime.now(timezone.utc)
+RECENT = (NOW - timedelta(days=1)).isoformat()  # Yesterday (within scanner window)
+MEMORY_OLD = (NOW - timedelta(days=60)).isoformat()  # 60 days ago
+MEMORY_ACTIVATED = (NOW - timedelta(days=30)).isoformat()  # 30 days ago
+
+
 def _old_assignment() -> MemoryEntry:
     return MemoryEntry(
         id="old001",
         content="用户是项目 A 的核心研发者并负责该项目",
         category="fact",
         score=0.8,
-        created_at="2026-06-01T00:00:00+00:00",
-        last_activated="2026-07-01T00:00:00+00:00",
+        created_at=MEMORY_OLD,  # 60 days ago
+        last_activated=MEMORY_ACTIVATED,  # 30 days ago
         activation_count=3,
         source_session="old-session",
     )
@@ -38,7 +47,7 @@ def _write_session(path, *, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
         "session_id": path.stem,
-        "updated_at": "2026-08-02T08:00:00+00:00",
+        "updated_at": RECENT,  # Yesterday (within 7-day scanner window)
         "session_type": "primary",
         "agent_name": "demo",
         "history_messages": [
@@ -46,6 +55,8 @@ def _write_session(path, *, content: str) -> None:
             {"role": "assistant", "content": "我会更新记忆。"},
         ],
     }, ensure_ascii=False), encoding="utf-8")
+    # Ensure mtime is fresh so scanner mtime prefilter doesn't skip
+    os.utime(path, times=(time.time(), time.time()))
 
 
 def _context(tmp_path, manager, llm) -> SkillContext:

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import time
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -14,25 +17,36 @@ from src.everbot.core.runtime.skill_context import SkillContext
 from src.everbot.core.scanners.reflection_state import ReflectionState
 
 
+# Relative timestamps to avoid fixture drift (7-day scanner window)
+NOW = datetime.now(timezone.utc)
+RECENT = (NOW - timedelta(days=1)).isoformat()  # Yesterday (within scanner window)
+MEMORY_OLD = (NOW - timedelta(days=60)).isoformat()  # 60 days ago
+MEMORY_ACTIVATED = (NOW - timedelta(days=30)).isoformat()  # 30 days ago
+
+
 def _seed(tmp_path):
     sessions = tmp_path / "sessions"
     sessions.mkdir()
     session_id = "web_session_demo_atomic"
-    (sessions / f"{session_id}.json").write_text(json.dumps({
+    session_path = sessions / f"{session_id}.json"
+    session_path.write_text(json.dumps({
         "session_id": session_id,
-        "updated_at": "2026-08-02T08:00:00+00:00",
+        "updated_at": RECENT,  # Yesterday (within 7-day scanner window)
         "session_type": "primary",
         "agent_name": "demo",
         "history_messages": [{"role": "user", "content": "我现在不负责项目 A"}],
     }, ensure_ascii=False), encoding="utf-8")
+    # Ensure mtime is fresh so scanner mtime prefilter doesn't skip
+    os.utime(session_path, times=(time.time(), time.time()))
+    
     manager = MemoryManager(tmp_path / "MEMORY.md")
     manager.store.save([MemoryEntry(
         id="old001",
         content="用户负责项目 A",
         category="fact",
         score=0.8,
-        created_at="2026-06-01T00:00:00+00:00",
-        last_activated="2026-07-01T00:00:00+00:00",
+        created_at=MEMORY_OLD,  # 60 days ago
+        last_activated=MEMORY_ACTIVATED,  # 30 days ago
         activation_count=1,
         source_session="old",
     )])
@@ -142,8 +156,8 @@ async def test_concurrent_memory_insert_is_preserved_and_review_retries(tmp_path
                 content="用户偏好简洁输出",
                 category="preference",
                 score=0.8,
-                created_at="2026-08-02T08:00:00+00:00",
-                last_activated="2026-08-02T08:00:00+00:00",
+                created_at=RECENT,  # Yesterday
+                last_activated=RECENT,  # Yesterday
                 activation_count=1,
                 source_session="concurrent-session",
             ))
@@ -179,8 +193,8 @@ async def test_integrity_error_before_review_write_does_not_restore_over_concurr
             content="用户偏好简洁输出",
             category="preference",
             score=0.8,
-            created_at="2026-08-02T08:00:00+00:00",
-            last_activated="2026-08-02T08:00:00+00:00",
+            created_at=RECENT,  # Yesterday
+            last_activated=RECENT,  # Yesterday
             activation_count=1,
             source_session="late-session",
         ))
@@ -269,13 +283,17 @@ async def test_single_session_missing_source_is_backfilled(tmp_path):
 async def test_multi_session_missing_source_fails_without_advancing_watermark(tmp_path):
     context, _review = _seed(tmp_path)
     second_id = "web_session_demo_second"
-    (context.sessions_dir / f"{second_id}.json").write_text(json.dumps({
+    second_path = context.sessions_dir / f"{second_id}.json"
+    second_path.write_text(json.dumps({
         "session_id": second_id,
-        "updated_at": "2026-08-02T08:01:00+00:00",
+        "updated_at": RECENT,  # Yesterday (within 7-day scanner window)
         "session_type": "primary",
         "agent_name": "demo",
         "history_messages": [{"role": "user", "content": "补充说明"}],
     }, ensure_ascii=False), encoding="utf-8")
+    # Ensure mtime is fresh so scanner doesn't skip
+    os.utime(second_path, times=(time.time(), time.time()))
+    
     before = _snapshots(tmp_path)
     context.llm.complete.return_value = json.dumps({
         "corrections": [{
@@ -295,7 +313,9 @@ async def test_multi_session_missing_source_fails_without_advancing_watermark(tm
 async def test_watermark_never_advances_past_sessions_sent_to_judge(tmp_path):
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()
-    timestamps = [f"2026-08-02T08:0{i}:00+00:00" for i in range(1, 6)]
+    # Create 5 sessions with staggered timestamps (all within 7-day window)
+    base_time = NOW - timedelta(days=1)  # Start from yesterday
+    timestamps = [(base_time + timedelta(minutes=i)).isoformat() for i in range(1, 6)]
     session_ids = [f"web_session_demo_backlog_{i}" for i in range(1, 6)]
     for index, (session_id, updated_at) in enumerate(
         zip(session_ids, timestamps), start=1,
@@ -305,13 +325,16 @@ async def test_watermark_never_advances_past_sessions_sent_to_judge(tmp_path):
             if index == 5
             else f"普通对话 {index}"
         )
-        (sessions_dir / f"{session_id}.json").write_text(json.dumps({
+        session_path = sessions_dir / f"{session_id}.json"
+        session_path.write_text(json.dumps({
             "session_id": session_id,
             "updated_at": updated_at,
             "session_type": "primary",
             "agent_name": "demo",
             "history_messages": [{"role": "user", "content": user_text}],
         }, ensure_ascii=False), encoding="utf-8")
+        # Ensure mtime is fresh so scanner doesn't skip
+        os.utime(session_path, times=(time.time(), time.time()))
 
     manager = MemoryManager(tmp_path / "MEMORY.md")
     manager.store.save([MemoryEntry(
@@ -319,8 +342,8 @@ async def test_watermark_never_advances_past_sessions_sent_to_judge(tmp_path):
         content="用户负责项目 A",
         category="fact",
         score=0.8,
-        created_at="2026-06-01T00:00:00+00:00",
-        last_activated="2026-07-01T00:00:00+00:00",
+        created_at=MEMORY_OLD,  # 60 days ago
+        last_activated=MEMORY_ACTIVATED,  # 30 days ago
         activation_count=1,
         source_session="old",
     )])
@@ -382,8 +405,8 @@ async def test_no_session_bootstrap_rejects_stale_profile_after_memory_change(tm
         content="用户负责项目 A",
         category="fact",
         score=0.8,
-        created_at="2026-06-01T00:00:00+00:00",
-        last_activated="2026-07-01T00:00:00+00:00",
+        created_at=MEMORY_OLD,  # 60 days ago
+        last_activated=MEMORY_ACTIVATED,  # 30 days ago
         activation_count=1,
         source_session="old",
     )])
@@ -406,8 +429,8 @@ async def test_no_session_bootstrap_rejects_stale_profile_after_memory_change(tm
             content="用户偏好简洁输出",
             category="preference",
             score=0.8,
-            created_at="2026-08-02T08:00:00+00:00",
-            last_activated="2026-08-02T08:00:00+00:00",
+            created_at=RECENT,  # Yesterday
+            last_activated=RECENT,  # Yesterday
             activation_count=1,
             source_session="concurrent-session",
         ))
@@ -433,8 +456,8 @@ async def test_no_session_bootstrap_write_failure_restores_user_profile(tmp_path
         content="用户负责项目 A",
         category="fact",
         score=0.8,
-        created_at="2026-06-01T00:00:00+00:00",
-        last_activated="2026-07-01T00:00:00+00:00",
+        created_at=MEMORY_OLD,  # 60 days ago
+        last_activated=MEMORY_ACTIVATED,  # 30 days ago
         activation_count=1,
         source_session="old",
     )])
