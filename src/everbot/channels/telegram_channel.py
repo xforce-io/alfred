@@ -30,7 +30,7 @@ from ..core.channel.core_service import ChannelCoreService
 from ..core.channel.models import OutboundMessage
 from ..core.channel.session_resolver import ChannelSessionResolver
 from ..core.runtime import events
-from ..core.runtime.events import resolve_routing
+from ..core.runtime.events import DeliveryFailed, resolve_routing
 from ..core.session.session import SessionManager
 from ..infra.user_data import get_user_data_manager
 from ..core.agent.agent_service import AgentService
@@ -451,10 +451,11 @@ class TelegramChannel:
                         "Failed to deposit %s event into tg session %s mailbox (Telegram sent=%s)",
                         source_type, tg_session_id, sent,
                     )
-                    # S4: If BOTH Telegram send AND mailbox deposit failed, raise error
-                    # so the task fails and retries (report must not be dropped)
+                    # S4: If BOTH Telegram send AND mailbox deposit failed, raise
+                    # DeliveryFailed so events.emit re-raises after every
+                    # subscriber and cron marks the task FAILED+retry.
                     if not sent:
-                        raise RuntimeError(
+                        raise DeliveryFailed(
                             f"Both Telegram delivery and mailbox deposit failed for {source_type}"
                         )
                 elif not sent:

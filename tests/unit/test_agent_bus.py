@@ -151,6 +151,31 @@ class TestEmitEnvelope:
         await events.emit("s", {"type": "test"})
 
     @pytest.mark.asyncio
+    async def test_async_subscriber_exception_does_not_propagate(self):
+        async def bad_handler(sid, data):
+            raise RuntimeError("boom")
+
+        events.subscribe(bad_handler)
+        await events.emit("s", {"type": "test"})
+
+    @pytest.mark.asyncio
+    async def test_delivery_failed_is_reraised_after_all_subscribers(self):
+        ran = []
+
+        async def ok_handler(sid, data):
+            ran.append("ok")
+
+        async def fail_handler(sid, data):
+            ran.append("fail")
+            raise events.DeliveryFailed("tg both-fail")
+
+        events.subscribe(fail_handler)
+        events.subscribe(ok_handler)
+        with pytest.raises(events.DeliveryFailed, match="tg both-fail"):
+            await events.emit("s", {"type": "heartbeat_delivery"})
+        assert set(ran) == {"fail", "ok"}
+
+    @pytest.mark.asyncio
     async def test_backward_compatible_no_kwargs(self):
         """Callers without keyword args still work (defaults)."""
         received = []

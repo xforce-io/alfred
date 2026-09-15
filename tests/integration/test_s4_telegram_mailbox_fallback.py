@@ -1,12 +1,18 @@
 """S4 test: Telegram send failure must attempt mailbox deposit; both-failed raises.
 
 Tests that when Telegram send fails, mailbox deposit is still attempted.
-When both fail, RuntimeError is raised to fail the task and trigger retry.
+When both fail, DeliveryFailed is raised so events.emit / cron mark FAILED.
 """
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
+
+from src.everbot.core.runtime import events
+from src.everbot.core.runtime.cron import CronExecutor
+from src.everbot.core.runtime.cron_delivery import CronDelivery
+from src.everbot.core.tasks.routine_manager import RoutineManager
 
 
 @pytest.mark.asyncio
@@ -202,6 +208,123 @@ async def test_telegram_send_success_projected_skips_mailbox():
                     mock_send.assert_called_once()
                     # Mailbox is NOT called (projected=True)
                     mock_sm.deposit_mailbox_event.assert_not_called()
+
+
+def _make_executor(tmp_path: Path, **overrides) -> CronExecutor:
+    sm = AsyncMock()
+    sm.get_primary_session_id.return_value = "web_session_test"
+    sm.get_heartbeat_session_id.return_value = "heartbeat_session_test"
+    sm.inject_history_message = AsyncMock(return_value=True)
+    sm.deposit_mailbox_event = AsyncMock(return_value=True)
+    delivery = CronDelivery(
+        session_manager=sm,
+        primary_session_id="web_session_test",
+        heartbeat_session_id="heartbeat_session_test",
+        agent_name="test_agent",
+        realtime_push=True,
+    )
+    defaults = dict(
+        agent_name="test_agent",
+        workspace_path=tmp_path,
+        session_manager=sm,
+        agent_factory=AsyncMock(),
+        routine_manager=RoutineManager(tmp_path),
+        delivery=delivery,
+    )
+    defaults.update(overrides)
+    return CronExecutor(**defaults)
+
+
+def _seed_task(tmp_path: Path, **task_overrides):
+    mgr = RoutineManager(tmp_path)
+    defaults = dict(
+        title="Test task",
+        schedule="1h",
+        next_run_at="2026-03-01T11:00:00+00:00",
+        now=datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc),
+    )
+    defaults.update(task_overrides)
+    mgr.add_routine(**defaults)
+    return mgr
+
+
+def _telegram_channel(*, deposit_ok: bool):
+    from src.everbot.channels.telegram_channel import TelegramChannel
+
+    mock_sm = AsyncMock()
+    mock_sm.deposit_mailbox_event = AsyncMock(return_value=deposit_ok)
+    channel = TelegramChannel(
+        bot_token="123:FAKE_TOKEN",
+        session_manager=mock_sm,
+        default_agent="test_agent",
+    )
+    channel._bindings = {"12345": "test_agent"}
+    return channel, mock_sm
+
+
+@pytest.mark.asyncio
+async def test_emit_reraises_telegram_both_fail():
+    """S4: _emit_realtime → events.emit → Telegram handler both-fail must raise."""
+    events._subscribers.clear()
+    try:
+        channel, mock_sm = _telegram_channel(deposit_ok=False)
+        events.subscribe(channel._on_background_event)
+        with patch.object(channel, "_send_split_with_entities", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = (0, 1)
+            with patch.object(channel, "_maybe_attach_projection", new_callable=AsyncMock, return_value=False):
+                with patch.object(channel, "_convert_markdown", return_value=("test text", [])):
+                    with patch.object(channel, "_should_defer", return_value=False):
+                        with pytest.raises(
+                            events.DeliveryFailed,
+                            match="Both Telegram delivery and mailbox deposit failed for heartbeat_delivery",
+                        ):
+                            await events.emit(
+                                "web_session_test",
+                                {"detail": "test message content", "deliver": True},
+                                agent_name="test_agent",
+                                scope="agent",
+                                source_type="heartbeat_delivery",
+                                run_id="test_run_123",
+                            )
+        mock_send.assert_called_once()
+        mock_sm.deposit_mailbox_event.assert_called_once()
+    finally:
+        events._subscribers.clear()
+
+
+@pytest.mark.asyncio
+async def test_cron_marks_failed_when_telegram_emit_both_fails(tmp_path):
+    """S4: cron realtime emit both-fail must mark the isolated task failed."""
+    events._subscribers.clear()
+    try:
+        mgr = _seed_task(
+            tmp_path,
+            title="S4 emit test",
+            execution_mode="isolated",
+            job="skill-evaluate",
+        )
+        executor = _make_executor(tmp_path, routine_manager=mgr)
+        channel, _mock_sm = _telegram_channel(deposit_ok=False)
+        events.subscribe(channel._on_background_event)
+
+        with patch.object(executor, "_invoke_job", new_callable=AsyncMock, return_value="test result"):
+            with patch.object(channel, "_send_split_with_entities", new_callable=AsyncMock, return_value=(0, 1)):
+                with patch.object(channel, "_maybe_attach_projection", new_callable=AsyncMock, return_value=False):
+                    with patch.object(channel, "_convert_markdown", return_value=("test text", [])):
+                        with patch.object(channel, "_should_defer", return_value=False):
+                            result = await executor.tick(
+                                mgr.load_task_list(),
+                                run_agent=AsyncMock(),
+                                inject_context=AsyncMock(),
+                                run_id="test_run",
+                            )
+
+        assert result.failed == 1
+        assert result.executed == 0
+        assert result.results[0].status == "failed"
+        assert "Both Telegram delivery and mailbox deposit failed" in result.results[0].error
+    finally:
+        events._subscribers.clear()
 
 
 if __name__ == "__main__":

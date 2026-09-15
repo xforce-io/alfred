@@ -19,6 +19,15 @@ VALID_CHANNELS = frozenset(ChannelSessionResolver.list_supported_channels())
 _subscribers: List[Callable[[str, Dict[str, Any]], Any]] = []
 
 
+class DeliveryFailed(RuntimeError):
+    """A subscriber could not deliver a user-visible event.
+
+    Ordinary subscriber errors are logged and swallowed so one channel cannot
+    take down the bus. ``DeliveryFailed`` is re-raised after every subscriber
+    has run, so the producer (cron / inspector) can mark the task FAILED.
+    """
+
+
 @dataclass(frozen=True)
 class RoutingDecision:
     """Normalized routing decision derived from one event envelope."""
@@ -147,6 +156,8 @@ async def emit(
     """Emit an event to all subscribers.
 
     The function enriches *data* with envelope fields before dispatching.
+    Ordinary subscriber exceptions are logged and swallowed. ``DeliveryFailed``
+    is collected and re-raised after every subscriber has been invoked.
     """
     # Shallow-copy to avoid mutating the caller's dict
     envelope = dict(data)
@@ -172,14 +183,25 @@ async def emit(
     if not _subscribers:
         return
 
+    delivery_failures: List[DeliveryFailed] = []
     tasks = []
     for callback in _subscribers:
         try:
             res = callback(source_session_id, envelope)
             if asyncio.iscoroutine(res):
                 tasks.append(res)
+        except DeliveryFailed as e:
+            delivery_failures.append(e)
         except Exception as e:
             logger.error("Error in event subscriber: %s", e)
 
     if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, DeliveryFailed):
+                delivery_failures.append(result)
+            elif isinstance(result, BaseException):
+                logger.error("Error in event subscriber: %s", result)
+
+    if delivery_failures:
+        raise delivery_failures[0]
