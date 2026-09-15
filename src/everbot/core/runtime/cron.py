@@ -59,17 +59,24 @@ SILENT_ISOLATED_TOKEN = "NO_USER_MESSAGE"
 
 
 def is_silent_isolated_output(result: Optional[str]) -> bool:
-    """True when an isolated agent turn asked for no user-facing delivery."""
+    """True when an isolated agent turn asked for no user-facing delivery.
+    
+    S5: Returns True ONLY when non-empty text whose first non-empty line
+    is exactly NO_USER_MESSAGE. None/empty → False; callers must fail
+    empty output (ERROR + FAILED + retry).
+    """
     if result is None:
-        return True
+        return False
     text = str(result).strip()
     if not text:
-        return True
+        return False
+    # Find first non-empty line
     for line in text.splitlines():
         stripped = line.strip()
         if stripped:
             return stripped == SILENT_ISOLATED_TOKEN
-    return True
+    # All lines were empty (whitespace-only text)
+    return False
 
 
 ALLOWED_SKILLS: frozenset[str] = frozenset({
@@ -692,14 +699,22 @@ class CronExecutor:
 
             summary = f"{task_title or task.id} completed"
             job_session_id = f"job_{task.id}"
-            await self.delivery.deposit_job_event(
+            deposit_ok = await self.delivery.deposit_job_event(
                 event_type="job_completed",
                 source_session_id=job_session_id,
                 summary=summary,
                 detail=result,
                 run_id=run_id,
             )
-            await self.delivery.inject_to_history(result, run_id)
+            # S3: deposit failure → raise error, task will be marked FAILED
+            if not deposit_ok:
+                raise RuntimeError("Failed to deposit job completion event to mailbox")
+            
+            # S3: history inject failure → raise error, task will be marked FAILED
+            history_ok = await self.delivery.inject_to_history(result, run_id)
+            if not history_ok:
+                raise RuntimeError("Failed to inject job result to history")
+            
             await self.delivery._emit_realtime(
                 result, run_id, transcript_worthy=True,
                 source_session_id=job_session_id,  # #122:可解析溯源锚点,非合成 run_id
@@ -756,6 +771,13 @@ class CronExecutor:
             # #130 T1: mechanically append each signal's top-1 source link to the
             # delivered result (independent of the LLM prose).
             result = self._append_run_provenance(result, agent)
+            
+            # S5: Empty/None output is an error, not silent. Explicit NO_USER_MESSAGE is silent.
+            if result is None or not str(result).strip():
+                raise ValueError(
+                    "Isolated agent returned empty output; this is an error, not silent completion"
+                )
+            
             if is_silent_isolated_output(result):
                 self._record_skill_log(task, result, job_session_id, agent=agent)
                 return None
@@ -768,14 +790,22 @@ class CronExecutor:
 
             summary = f"{task_title or task.id} completed"
             if checkpoint_store is None:
-                await self.delivery.deposit_job_event(
+                deposit_ok = await self.delivery.deposit_job_event(
                     event_type="job_completed",
                     source_session_id=job_session_id,
                     summary=summary,
                     detail=result,
                     run_id=run_id,
                 )
-                await self.delivery.inject_to_history(result, run_id)
+                # S3: deposit failure → task FAILED, never DONE
+                if not deposit_ok:
+                    raise RuntimeError("Failed to deposit job completion event to mailbox")
+                
+                # S3: history inject failure → task FAILED, never DONE
+                history_ok = await self.delivery.inject_to_history(result, run_id)
+                if not history_ok:
+                    raise RuntimeError("Failed to inject job result to history")
+                
                 await self.delivery._emit_realtime(
                     result, run_id, transcript_worthy=True,
                     source_session_id=projection_anchor,  # #130 T2: milkie runId, deref-able

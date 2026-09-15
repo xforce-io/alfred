@@ -29,6 +29,19 @@ def _default_factory(cmd, env):
     return MilkieSidecar(cmd, env=env)
 
 
+def _sidecar_exited(sidecar) -> bool:
+    """Check if sidecar has exited (S2: duck-type safe for fakes/tests).
+    
+    Prefers sidecar.exited() if callable, falls back to returncode check.
+    """
+    exited = getattr(sidecar, "exited", None)
+    if callable(exited):
+        return bool(exited())
+    # Fallback: check returncode if present
+    rc = getattr(sidecar, "returncode", None)
+    return rc is not None
+
+
 class SidecarPool:
     def __init__(
         self,
@@ -56,8 +69,26 @@ class SidecarPool:
 
     def peek(self, agent_name: str) -> Any:
         """同步取已存活的 sidecar(无则 None)—— 供 provider 的 sync 方法按
-        agent 名解析当前 base_url(#43:handle 不再冻结端口)。不触发 spawn/检查。"""
-        return self._sidecars.get(agent_name)
+        agent 名解析当前 base_url(#43:handle 不再冻结端口)。不触发 spawn/检查。
+        
+        S2: Check if exited before returning (kill -9 detection via kill(pid, 0)).
+        Pop from cache on exit so sync _agent_base_url stops seeing dead URL.
+        """
+        sidecar = self._sidecars.get(agent_name)
+        if sidecar is not None and _sidecar_exited(sidecar):
+            self._sidecars.pop(agent_name, None)
+            self._fingerprints.pop(agent_name, None)
+            return None
+        return sidecar
+
+    def evict(self, agent_name: str) -> None:
+        """Evict a cached sidecar (S2: ConnectError recovery).
+        
+        Does not close the sidecar — caller should attempt close separately.
+        Next get_or_spawn will spawn a fresh instance.
+        """
+        self._sidecars.pop(agent_name, None)
+        self._fingerprints.pop(agent_name, None)
 
     async def get_or_spawn(self, agent_name: str) -> Any:
         # 注入 fingerprint 后命中路径也要做 freshness 检查/可能重生,必须全程在
@@ -88,6 +119,24 @@ class SidecarPool:
         existing = self._sidecars.get(agent_name)
         if existing is None:
             return await self._spawn_locked(agent_name)
+        
+        # S2: Check if cached sidecar has exited (kill -9 detection via kill(pid, 0))
+        if _sidecar_exited(existing):
+            logger.info(
+                "sidecar pool: '%s' cached sidecar has exited (returncode=%s), evicting and respawning",
+                agent_name, getattr(existing, 'returncode', None)
+            )
+            self._sidecars.pop(agent_name, None)
+            self._fingerprints.pop(agent_name, None)
+            try:
+                await existing.close()
+            except Exception:
+                logger.warning(
+                    "sidecar pool: failed to close dead sidecar for '%s' (ignoring, continuing respawn)",
+                    agent_name, exc_info=True
+                )
+            return await self._spawn_locked(agent_name)
+        
         if self._fingerprint is None:
             return existing
         current = await self._current_fingerprint(agent_name)

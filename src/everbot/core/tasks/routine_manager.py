@@ -115,6 +115,8 @@ class RoutineManager:
 
         Production bug: rapid CLI calls (3 in 24s) caused a read-modify-write
         race that corrupted HEARTBEAT.md with invalid control characters.
+        
+        S1: Uses LOCK_NB + timeout (5s) to avoid blocking event loop.
         """
         task_list.version = max(2, int(float(task_list.version or 0)))
         # File lock prevents concurrent read-modify-write races between
@@ -123,8 +125,24 @@ class RoutineManager:
             self.heartbeat_path.suffix + ".lock"
         )
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(lock_path, "w") as lock_fd:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        
+        f = open(lock_path, "w")
+        try:
+            # S1: LOCK_NB + timeout polling instead of blocking LOCK_EX
+            import time
+            deadline = time.monotonic() + 5.0  # 5s timeout
+            poll_interval = 0.05  # 50ms polling
+            while True:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"Could not acquire HEARTBEAT.md lock within 5s"
+                        )
+                    time.sleep(poll_interval)
+            
             try:
                 # Re-read inside lock to get the latest markdown structure,
                 # so we don't overwrite concurrent changes to non-task sections.
@@ -134,7 +152,9 @@ class RoutineManager:
                     self.heartbeat_path, updated.encode("utf-8"),
                 )
             finally:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        finally:
+            f.close()
 
     @staticmethod
     def infer_execution_mode(

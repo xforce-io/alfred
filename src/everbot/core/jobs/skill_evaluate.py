@@ -258,7 +258,7 @@ async def _evaluate_one(
             f"Request timed out during skill evaluation for {skill_id}"
         ) from exc
     lock_path = ver_mgr._eval_dir(skill_id) / ".lock"
-    with skill_lock(lock_path):
+    with skill_lock(lock_path, timeout=5.0):
         existing = ver_mgr.get_eval_report(skill_id, target_version)
         if existing and existing.segment_count >= len(segments):
             return None
@@ -274,8 +274,22 @@ async def _evaluate_one(
                 pointer.current_version if pointer else None,
             )
             return None
+        # Capture pointer for post-evaluate verification (outside lock)
+        post_eval_target_version = target_version
 
-        await _post_evaluate(context, ver_mgr, seg_logger, skill_id, target_version, report)
+    # S1: Move await _post_evaluate OUTSIDE skill_lock to ensure zero await inside lock.
+    # Verify pointer again after lock to catch concurrent evolve.
+    pointer_after = ver_mgr.get_pointer(skill_id)
+    if pointer_after is None or pointer_after.current_version != post_eval_target_version:
+        logger.info(
+            "Skipping post-evaluate for stale %s v%s after lock; current is %s",
+            skill_id,
+            post_eval_target_version,
+            pointer_after.current_version if pointer_after else None,
+        )
+        return None
+
+    await _post_evaluate(context, ver_mgr, seg_logger, skill_id, post_eval_target_version, report)
 
     return SkillEvaluationResult(
         summary=(

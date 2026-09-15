@@ -19,6 +19,15 @@ class _FakeSidecar:
     def base_url(self):
         return f"http://127.0.0.1:{self.port}"
 
+    @property
+    def returncode(self):
+        # Fake sidecars never exit unless explicitly marked
+        return getattr(self, "_returncode", None)
+
+    def exited(self) -> bool:
+        """S2: compatibility method for pool exited checks."""
+        return self.returncode is not None
+
     async def start(self):
         self.started += 1
         await asyncio.sleep(0)

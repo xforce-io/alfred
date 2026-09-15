@@ -30,7 +30,7 @@ from ..core.channel.core_service import ChannelCoreService
 from ..core.channel.models import OutboundMessage
 from ..core.channel.session_resolver import ChannelSessionResolver
 from ..core.runtime import events
-from ..core.runtime.events import resolve_routing
+from ..core.runtime.events import DeliveryFailed, resolve_routing
 from ..core.session.session import SessionManager
 from ..infra.user_data import get_user_data_manager
 from ..core.agent.agent_service import AgentService
@@ -404,21 +404,19 @@ class TelegramChannel:
                 chat_id, text, entities,
             )
             sent = total > 0 and ok_count == total
-            # Deposit heartbeat result into channel session mailbox so the
-            # next user turn sees it via "## Background Updates" prefix.
-            # This replaces the old inject_history_message approach which
-            # created fake assistant messages and placeholder pairs that
-            # broke role alternation on restore.
-            if not sent:
-                logger.warning(
-                    "Skip mailbox mirror for %s chat %s because Telegram delivery failed",
-                    source_type, chat_id,
-                )
-                continue
+            
+            # S4: Always attempt mailbox deposit. If Telegram send fails, mailbox
+            # acts as the anchor so the user can see the report eventually (when
+            # they next connect). If deposit also fails, the task should fail+retry.
+            
             # #60:内容型投递 → 登记 milkie context projection,使模型下一轮看得见
             # 这篇已投递给用户的报告(读侧、不进 history)。成功则 projection 取代下面的
             # mailbox 镜像(否则报告会被双重表示、且镜像版贴着"上面"劫持指代)。
-            projected = await self._maybe_attach_projection(agent_name, chat_id, data)
+            projected = False
+            if sent:
+                projected = await self._maybe_attach_projection(agent_name, chat_id, data)
+            
+            # Deposit to mailbox (always attempt, even when Telegram send failed)
             if (
                 not projected
                 and source_type != "deferred_result"
@@ -449,9 +447,21 @@ class TelegramChannel:
                     tg_session_id, event, timeout=TIMEOUT_FAST, blocking=False,
                 )
                 if not ok:
+                    logger.error(
+                        "Failed to deposit %s event into tg session %s mailbox (Telegram sent=%s)",
+                        source_type, tg_session_id, sent,
+                    )
+                    # S4: If BOTH Telegram send AND mailbox deposit failed, raise
+                    # DeliveryFailed so events.emit re-raises after every
+                    # subscriber and cron marks the task FAILED+retry.
+                    if not sent:
+                        raise DeliveryFailed(
+                            f"Both Telegram delivery and mailbox deposit failed for {source_type}"
+                        )
+                elif not sent:
                     logger.warning(
-                        "Failed to deposit %s event into tg session %s mailbox",
-                        source_type, tg_session_id,
+                        "Telegram delivery failed for %s chat %s, but report saved to mailbox",
+                        source_type, chat_id,
                     )
 
     # ------------------------------------------------------------------

@@ -17,7 +17,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from ._atomic_io import atomic_write_text, skill_lock
+from ._atomic_io import atomic_write_text, skill_lock, async_skill_lock
 from .models import CurrentPointer, VersionMetadata, VersionStatus
 from .version_manager import VersionManager, read_frontmatter_version
 
@@ -90,9 +90,36 @@ def ensure_registered(
     *,
     repo_skills_dir: Optional[Path] = None,
 ) -> RegistrationResult:
-    """Normalize SLM state for one skill. Idempotent, concurrent-safe."""
+    """Normalize SLM state for one skill. Idempotent, concurrent-safe.
+    
+    S1: Uses LOCK_NB + timeout to avoid blocking event loop during chat.
+    Raises LockTimeoutError when skill is being updated (evolve in progress).
+    
+    NOTE: Sync version for sync callers (skill_evaluate). Chat/async callers
+    should use async_ensure_registered to avoid blocking the event loop.
+    """
+    from ._atomic_io import LockTimeoutError
+    
     lock_path = ver_mgr._eval_dir(skill_id) / ".lock"
-    with skill_lock(lock_path):
+    with skill_lock(lock_path, timeout=5.0):
+        return _ensure_registered_locked(ver_mgr, skill_id, repo_skills_dir)
+
+
+async def async_ensure_registered(
+    ver_mgr: VersionManager,
+    skill_id: str,
+    *,
+    repo_skills_dir: Optional[Path] = None,
+) -> RegistrationResult:
+    """Async version of ensure_registered for chat/async callers.
+    
+    S1: Uses async_skill_lock with 2s timeout (chat budget) to avoid blocking
+    the event loop. Raises LockTimeoutError when skill is being updated.
+    """
+    from ._atomic_io import LockTimeoutError
+    
+    lock_path = ver_mgr._eval_dir(skill_id) / ".lock"
+    async with async_skill_lock(lock_path, timeout=2.0):
         return _ensure_registered_locked(ver_mgr, skill_id, repo_skills_dir)
 
 

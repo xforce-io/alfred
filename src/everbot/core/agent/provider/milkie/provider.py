@@ -474,74 +474,110 @@ class MilkieProvider:
         handle.skill_observation_pending.clear()
         handle.skill_observation_complete = False
         handle.skill_observation_reason = "terminal_not_seen"
-        try:
-            # lease 与流同生命周期(#43):turn 在飞期间该 agent 的 sidecar 重生被推迟。
-            async with self._lease_base_url(handle) as base_url, client.stream(
-                "POST", f"{base_url}/chat", json=payload
-            ) as resp:
-                if resp.status_code >= 400:
-                    # 非2xx 不能静默吞:不抛 → 无事件 → core_service 显示「(无响应)」。
-                    # 读 body 并抛清晰 RuntimeError(headers 此时已就绪,可读 status)。
-                    body = await resp.aread()
-                    raise RuntimeError(
-                        f"milkie /chat failed: HTTP {resp.status_code}: "
-                        f"{body.decode('utf-8', 'replace')[:500]}"
+        
+        # S2: Wrap with ConnectError handling for sidecar evict+retry
+        retry_attempted = False
+        
+        while True:
+            try:
+                # lease 与流同生命周期(#43):turn 在飞期间该 agent 的 sidecar 重生被推迟。
+                async with self._lease_base_url(handle) as base_url, client.stream(
+                    "POST", f"{base_url}/chat", json=payload
+                ) as resp:
+                    if resp.status_code >= 400:
+                        # 非2xx 不能静默吞:不抛 → 无事件 → core_service 显示「(无响应)」。
+                        # 读 body 并抛清晰 RuntimeError(headers 此时已就绪,可读 status)。
+                        body = await resp.aread()
+                        raise RuntimeError(
+                            f"milkie /chat failed: HTTP {resp.status_code}: "
+                            f"{body.decode('utf-8', 'replace')[:500]}"
+                        )
+                    async for chunk in resp.aiter_text():
+                        for event, data_str in parser.feed(chunk):
+                            data = json.loads(data_str)
+                            # milkie surfaces failures via an ``error`` frame and/or an
+                            # ``agent.run.completed`` terminal with ``status=="error"``
+                            # (e.g. an LLM-endpoint connection error). The adapter maps
+                            # both to None (no _progress), so without this an agent/LLM
+                            # failure would masquerade as an empty turn — surfacing as
+                            # "(no response)" on chat or "LLM reflection returned empty
+                            # response" on heartbeat, with no retry. Raise instead: the
+                            # message carries retryable markers (e.g. "connection error")
+                            # so the orchestrator retries transient failures, and genuine
+                            # errors propagate their real cause instead of an empty string.
+                            if event == "error":
+                                pending_error = data
+                                continue
+                            if event == "tool.requested":
+                                self._observe_skill_request(handle, data)
+                            elif event == "tool.responded":
+                                self._observe_skill_response(handle, data)
+                            if event == "agent.run.completed":
+                                # #47: 捕获本轮 runId(milkie#140)到 handle —— 必须在
+                                # 下面 error 抛出之前,失败 run 才同样可被留证。runId 是
+                                # milkie 私有,只落在 provider 内的 handle,不进 _progress。
+                                run_id = data.get("runId")
+                                if run_id:
+                                    handle.last_run_id = run_id
+                                if data.get("status") == "error":
+                                    detail = data.get("error")
+                                    if not isinstance(detail, dict) and pending_error:
+                                        candidate = pending_error.get("error")
+                                        detail = candidate if isinstance(candidate, dict) else None
+                                    msg = (
+                                        (detail or {}).get("message")
+                                        or data.get("message")
+                                        or data.get("output")
+                                        or data.get("lastTextOutput")
+                                        or (pending_error or {}).get("message")
+                                        or (data.get("error") if isinstance(data.get("error"), str) else None)
+                                        or "unknown error"
+                                    )
+                                    raise MilkieAgentError(msg, envelope=detail, run_id=run_id)
+                                handle.skill_observation_complete = True
+                                handle.skill_observation_reason = ""
+                            item = milkie_event_to_progress(event, data)
+                            if item is not None:
+                                yield {"_progress": [item]}
+                    if pending_error is not None:
+                        detail = pending_error.get("error")
+                        detail = detail if isinstance(detail, dict) else None
+                        msg = (detail or {}).get("message") or pending_error.get("message") or "unknown error"
+                        raise MilkieAgentError(msg, envelope=detail)
+                # Success, exit retry loop
+                break
+            except httpx.ConnectError as exc:
+                if retry_attempted:
+                    # Already retried once, give up
+                    if owns_client:
+                        await client.aclose()
+                    raise
+                
+                # S2: First ConnectError → evict sidecar and retry once
+                agent_name = getattr(handle, "name", "") or ""
+                if agent_name and self._pool is not None:
+                    logger.warning(
+                        "milkie provider: ConnectError for '%s', evicting and respawning sidecar: %s",
+                        agent_name, exc
                     )
-                async for chunk in resp.aiter_text():
-                    for event, data_str in parser.feed(chunk):
-                        data = json.loads(data_str)
-                        # milkie surfaces failures via an ``error`` frame and/or an
-                        # ``agent.run.completed`` terminal with ``status=="error"``
-                        # (e.g. an LLM-endpoint connection error). The adapter maps
-                        # both to None (no _progress), so without this an agent/LLM
-                        # failure would masquerade as an empty turn — surfacing as
-                        # "(no response)" on chat or "LLM reflection returned empty
-                        # response" on heartbeat, with no retry. Raise instead: the
-                        # message carries retryable markers (e.g. "connection error")
-                        # so the orchestrator retries transient failures, and genuine
-                        # errors propagate their real cause instead of an empty string.
-                        if event == "error":
-                            pending_error = data
-                            continue
-                        if event == "tool.requested":
-                            self._observe_skill_request(handle, data)
-                        elif event == "tool.responded":
-                            self._observe_skill_response(handle, data)
-                        if event == "agent.run.completed":
-                            # #47: 捕获本轮 runId(milkie#140)到 handle —— 必须在
-                            # 下面 error 抛出之前,失败 run 才同样可被留证。runId 是
-                            # milkie 私有,只落在 provider 内的 handle,不进 _progress。
-                            run_id = data.get("runId")
-                            if run_id:
-                                handle.last_run_id = run_id
-                            if data.get("status") == "error":
-                                detail = data.get("error")
-                                if not isinstance(detail, dict) and pending_error:
-                                    candidate = pending_error.get("error")
-                                    detail = candidate if isinstance(candidate, dict) else None
-                                msg = (
-                                    (detail or {}).get("message")
-                                    or data.get("message")
-                                    or data.get("output")
-                                    or data.get("lastTextOutput")
-                                    or (pending_error or {}).get("message")
-                                    or (data.get("error") if isinstance(data.get("error"), str) else None)
-                                    or "unknown error"
-                                )
-                                raise MilkieAgentError(msg, envelope=detail, run_id=run_id)
-                            handle.skill_observation_complete = True
-                            handle.skill_observation_reason = ""
-                        item = milkie_event_to_progress(event, data)
-                        if item is not None:
-                            yield {"_progress": [item]}
-                if pending_error is not None:
-                    detail = pending_error.get("error")
-                    detail = detail if isinstance(detail, dict) else None
-                    msg = (detail or {}).get("message") or pending_error.get("message") or "unknown error"
-                    raise MilkieAgentError(msg, envelope=detail)
-        finally:
-            if owns_client:
-                await client.aclose()
+                    self._pool.evict(agent_name)
+                    retry_attempted = True
+                    # Loop will re-enter _lease_base_url, which will call get_or_spawn and respawn
+                    continue
+                else:
+                    # No pool or agent name, can't evict+retry
+                    if owns_client:
+                        await client.aclose()
+                    raise
+            except BaseException:
+                # Any other exception, cleanup and re-raise
+                if owns_client:
+                    await client.aclose()
+                raise
+        
+        # Normal cleanup after successful completion
+        if owns_client:
+            await client.aclose()
 
     @staticmethod
     def _observe_skill_request(handle: MilkieAgentHandle, data: dict[str, Any]) -> None:
@@ -610,21 +646,115 @@ class MilkieProvider:
             milkie_cmd=_milkie_cli_cmd(),
         )
 
+    def _respawn_sidecar_sync(self, agent_name: str) -> Any:
+        """Synchronous bridge to async get_or_spawn for sync methods.
+        
+        S2: After pool.evict(), must actually respawn to get fresh base_url.
+        Sync methods cannot directly await, so use asyncio.run().
+        """
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                raise RuntimeError("Cannot respawn sidecar from running event loop in sync method")
+        except RuntimeError:
+            pass
+        return asyncio.run(self._pool.get_or_spawn(agent_name))
+
+    def _check_running_loop(self) -> bool:
+        """Check if we're in a running event loop (WS/async context).
+        
+        S2: Sync methods on the chat path cannot spawn (asyncio.run forbidden).
+        Return True if loop is running; caller should evict + return safe default.
+        """
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            return True
+        except RuntimeError:
+            return False
+
+    async def ensure_sidecar(self, agent: Any) -> None:
+        """S2: Ensure pool has live sidecar; refresh agent.base_url.
+        
+        Call before sync HTTP methods (set_variable/get_variable) to preempt
+        ConnectError from dead sidecar. Idempotent on already-live sidecar.
+        """
+        agent_name = getattr(agent, "name", "") or ""
+        if not agent_name or self._pool is None:
+            return
+        sidecar = await self._pool.get_or_spawn(agent_name)
+        agent.base_url = sidecar.base_url
+
+    async def recover_sidecar(self, agent: Any) -> None:
+        """S2: Evict dead sidecar + respawn. Public helper for core_service retry.
+        
+        Called after ConnectError on sync methods to evict stale cache and
+        force fresh spawn before retry.
+        """
+        agent_name = getattr(agent, "name", "") or ""
+        if not agent_name or self._pool is None:
+            return
+        self._pool.evict(agent_name)
+        await self.ensure_sidecar(agent)
+
     def is_user_interrupt_paused(self, agent: Any) -> bool:
         # milkie#137:经 serve /context/state 查运行态。paused ⇔ context 被 /interrupt
         # 停在 FSM 保留态 paused、可 /resume 续跑;此前恒 False 使 resume gate 成死分支。
-        client = self._sync_client or self._new_sync_client()
-        owns = self._sync_client is None
-        try:
-            resp = client.post(
-                f"{self._agent_base_url(agent)}/context/state",
-                json={"contextId": agent.context_id},
-            )
-            resp.raise_for_status()  # 非2xx 不能静默返回 False,明确抛错
-            return bool(resp.json().get("paused", False))
-        finally:
-            if owns:
-                client.close()
+        # S2: Wrap with ConnectError evict+retry (same as run_turn async path)
+        agent_name = getattr(agent, "name", "") or ""
+        retry_attempted = False
+        
+        while True:
+            client = self._sync_client or self._new_sync_client()
+            owns = self._sync_client is None
+            try:
+                resp = client.post(
+                    f"{self._agent_base_url(agent)}/context/state",
+                    json={"contextId": agent.context_id},
+                )
+                resp.raise_for_status()  # 非2xx 不能静默返回 False,明确抛错
+                result = bool(resp.json().get("paused", False))
+                if owns:
+                    client.close()
+                return result
+            except httpx.ConnectError as exc:
+                if owns:
+                    client.close()
+                
+                if retry_attempted or not agent_name or self._pool is None:
+                    # Already retried or can't evict, give up
+                    raise
+                
+                # S2: First ConnectError → evict sidecar and retry once
+                logger.warning(
+                    "milkie provider: ConnectError in is_user_interrupt_paused for '%s', "
+                    "evicting and respawning sidecar: %s",
+                    agent_name, exc
+                )
+                self._pool.evict(agent_name)
+                
+                # S2: Check if in async context (WS handler)
+                if self._check_running_loop():
+                    logger.info("In async context, evicted; run_turn will respawn")
+                    if owns:
+                        client.close()
+                    return False
+                
+                # Sync context (rare CLI): try sync spawn
+                try:
+                    new_sidecar = self._respawn_sidecar_sync(agent_name)
+                    agent.base_url = new_sidecar.base_url
+                except Exception as spawn_exc:
+                    logger.error("Failed to respawn: %s", spawn_exc)
+                    raise exc from spawn_exc
+                
+                retry_attempted = True
+                continue
+            except BaseException:
+                if owns:
+                    client.close()
+                raise
 
     async def attach_projection(
         self,
@@ -719,25 +849,66 @@ class MilkieProvider:
     def export_session(self, agent: Any) -> dict:
         # 全量历史经 serve /session/history(milkie#128)取回 canonical Message[],
         # 翻译成 alfred history 格式。variables 走 serve 自持久化,此处不导(milkie#130)。
-        client = self._sync_client or self._new_sync_client()
-        owns = self._sync_client is None
-        try:
-            resp = client.post(
-                f"{self._agent_base_url(agent)}/session/history",
-                json={"contextId": agent.context_id},
-            )
-            if resp.status_code == 404:
-                # 新会话,serve 尚无该 context → 空历史(不抛)。
-                return {"history_messages": [], "variables": {}}
-            resp.raise_for_status()
-            messages = resp.json().get("messages", [])
-        finally:
-            if owns:
-                client.close()
-        return {
-            "history_messages": _milkie_messages_to_history(messages),
-            "variables": {},
-        }
+        # S2: Wrap with ConnectError evict+retry
+        agent_name = getattr(agent, "name", "") or ""
+        retry_attempted = False
+        
+        while True:
+            client = self._sync_client or self._new_sync_client()
+            owns = self._sync_client is None
+            try:
+                resp = client.post(
+                    f"{self._agent_base_url(agent)}/session/history",
+                    json={"contextId": agent.context_id},
+                )
+                if resp.status_code == 404:
+                    # 新会话,serve 尚无该 context → 空历史(不抛)。
+                    if owns:
+                        client.close()
+                    return {"history_messages": [], "variables": {}}
+                resp.raise_for_status()
+                messages = resp.json().get("messages", [])
+                if owns:
+                    client.close()
+                return {
+                    "history_messages": _milkie_messages_to_history(messages),
+                    "variables": {},
+                }
+            except httpx.ConnectError as exc:
+                if owns:
+                    client.close()
+                
+                if retry_attempted or not agent_name or self._pool is None:
+                    raise
+                
+                logger.warning(
+                    "milkie provider: ConnectError in export_session for '%s', evicting",
+                    agent_name
+                )
+                self._pool.evict(agent_name)
+                
+                # S2: Check if in async context (WS handler)
+                if self._check_running_loop():
+                    logger.info("In async context, evicted; run_turn will respawn")
+                    if owns:
+                        client.close()
+                    # Return empty session (safe default, same as 404)
+                    return {"history_messages": [], "variables": {}}
+                
+                # Sync context (rare CLI): try sync spawn
+                try:
+                    new_sidecar = self._respawn_sidecar_sync(agent_name)
+                    agent.base_url = new_sidecar.base_url
+                except Exception as spawn_exc:
+                    logger.error("Failed to respawn: %s", spawn_exc)
+                    raise exc from spawn_exc
+                
+                retry_attempted = True
+                continue
+            except BaseException:
+                if owns:
+                    client.close()
+                raise
 
     def import_session(self, agent: Any, portable_state: dict) -> None:
         """Apply compacted / portable session into milkie serve (#166 / milkie#124).
@@ -747,42 +918,87 @@ class MilkieProvider:
         - alfred ``{history_messages, ...}`` → export current portable, rewrite
           checkpoint history regions from compacted messages, re-import under
           the same contextId so the next LLM call uses the reduced base.
+        
+        S2: Wrapped with ConnectError evict+retry.
         """
         if not isinstance(portable_state, dict):
             raise TypeError("portable_state must be a dict")
 
-        client = self._sync_client or self._new_sync_client()
-        owns = self._sync_client is None
-        base = self._agent_base_url(agent)
-        try:
-            if "manifest" in portable_state:
-                session = portable_state
-                expected_latest_run_id = None
-            else:
-                session, expected_latest_run_id = self._portable_from_compacted_history(
-                    client, base, agent, portable_state
+        agent_name = getattr(agent, "name", "") or ""
+        retry_attempted = False
+        
+        while True:
+            client = self._sync_client or self._new_sync_client()
+            owns = self._sync_client is None
+            base = self._agent_base_url(agent)
+            try:
+                if "manifest" in portable_state:
+                    session = portable_state
+                    expected_latest_run_id = None
+                else:
+                    session, expected_latest_run_id = self._portable_from_compacted_history(
+                        client, base, agent, portable_state
+                    )
+                payload = {"session": session}
+                if expected_latest_run_id:
+                    payload["expectedLatestRunId"] = expected_latest_run_id
+                resp = client.post(
+                    f"{base}/session/import",
+                    json=payload,
+                    timeout=_SESSION_IMPORT_HTTP_TIMEOUT_SECONDS,
                 )
-            payload = {"session": session}
-            if expected_latest_run_id:
-                payload["expectedLatestRunId"] = expected_latest_run_id
-            resp = client.post(
-                f"{base}/session/import",
-                json=payload,
-                timeout=_SESSION_IMPORT_HTTP_TIMEOUT_SECONDS,
-            )
-            if resp.status_code == 409:
-                raise MilkieSessionImportConflict(
-                    "milkie /session/import rejected stale session snapshot"
+                if resp.status_code == 409:
+                    if owns:
+                        client.close()
+                    raise MilkieSessionImportConflict(
+                        "milkie /session/import rejected stale session snapshot"
+                    )
+                resp.raise_for_status()
+                if expected_latest_run_id and resp.json().get("conditionApplied") is not True:
+                    if owns:
+                        client.close()
+                    raise RuntimeError(
+                        "milkie /session/import lacks conditional-import support; "
+                        "refusing an unsafe history rewrite"
+                    )
+                if owns:
+                    client.close()
+                return
+            except httpx.ConnectError as exc:
+                if owns:
+                    client.close()
+                
+                if retry_attempted or not agent_name or self._pool is None:
+                    raise
+                
+                logger.warning(
+                    "milkie provider: ConnectError in import_session for '%s', evicting",
+                    agent_name
                 )
-            resp.raise_for_status()
-            if expected_latest_run_id and resp.json().get("conditionApplied") is not True:
-                raise RuntimeError(
-                    "milkie /session/import lacks conditional-import support; "
-                    "refusing an unsafe history rewrite"
-                )
-        finally:
-            if owns:
-                client.close()
+                self._pool.evict(agent_name)
+                
+                # S2: Check if in async context (WS handler)
+                if self._check_running_loop():
+                    logger.info("In async context, evicted; run_turn will respawn")
+                    if owns:
+                        client.close()
+                    # Import is not critical; no-op return to let run_turn proceed
+                    return
+                
+                # Sync context (rare CLI): try sync spawn
+                try:
+                    new_sidecar = self._respawn_sidecar_sync(agent_name)
+                    agent.base_url = new_sidecar.base_url
+                except Exception as spawn_exc:
+                    logger.error("Failed to respawn: %s", spawn_exc)
+                    raise exc from spawn_exc
+                
+                retry_attempted = True
+                continue
+            except BaseException:
+                if owns:
+                    client.close()
+                raise
 
     def _portable_from_compacted_history(
         self,
