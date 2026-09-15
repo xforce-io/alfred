@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol
 
 from .mailbox import compose_message_with_mailbox_updates
-from .skill_catalog import append_catalog_if_listing_query, load_installed_skills
+from .skill_catalog import append_authoritative_skill_catalog, load_installed_skills
 
 
 @dataclass
@@ -59,7 +59,7 @@ class PrimaryContextStrategy:
         except Exception:
             skills = None
         if skills is not None:
-            message = append_catalog_if_listing_query(trigger, message, skills)
+            message = append_authoritative_skill_catalog(message, skills)
         return BuildMessageResult(message=message, mailbox_ack_ids=ack_ids)
 
 

@@ -1,42 +1,20 @@
-"""Host-side skill catalog for natural listing questions.
+"""Host-side authoritative skill catalog for primary compose.
 
 Models ignore the prompt rule "call skill_list when asked what skills you have"
-and recite MEMORY / old names. When the user asks that question in ordinary
-language, attach this turn's discover_skills list to the composed message.
+and recite MEMORY / old names. Primary compose always attaches this turn's
+discover_skills names so listing answers cannot invent skills outside the list.
 """
 
 from __future__ import annotations
 
-import re
 from typing import Any, Dict, Iterable, List, Sequence
-
-_CATALOG_RE = re.compile(
-    r"^\s*(?:你|您)?"
-    r"(?:现在|目前|当前)?"
-    r"(?:到底)?"
-    r"(?:都)?"
-    r"(?:有哪些|有什么)"
-    r"\s*(?:skills?|技能)\s*[?？]?\s*$"
-    r"|^\s*(?:列出|罗列)(?:一下)?(?:你的|全部|所有)?(?:已安装)?(?:的)?"
-    r"(?:skills?|技能)\s*[?？]?\s*$"
-    r"|^\s*(?:what|which)\s+skills(?:\s+do\s+you\s+have|\s+are\s+installed)?\s*[?]?\s*$"
-    r"|^\s*list(?:\s+your)?(?:\s+installed)?\s+skills\s*[?]?\s*$",
-    re.IGNORECASE,
-)
-
-
-def is_skill_catalog_query(text: str) -> bool:
-    """True when the raw user trigger is a skill-listing question."""
-    if not text or not isinstance(text, str):
-        return False
-    return _CATALOG_RE.match(text.strip()) is not None
 
 
 def format_authoritative_skill_catalog(skills: Sequence[Dict[str, Any]]) -> str:
+    """Short block: skill names plus one forbid-outside-list line."""
     lines = [
         "## Installed skills (authoritative this turn)",
-        "回答「有哪些技能」时**只列出下面这些名字**。禁止根据记忆补充清单里没有的技能"
-        "（例如已卸载的 kweaver、已替换的 paper-discovery）。",
+        "禁止补充清单外的技能名（例如已卸载的 kweaver、已替换的 paper-discovery）。",
         "",
     ]
     if not skills:
@@ -46,25 +24,19 @@ def format_authoritative_skill_catalog(skills: Sequence[Dict[str, Any]]) -> str:
         name = str(skill.get("name") or "").strip()
         if not name:
             continue
-        desc = str(skill.get("description") or skill.get("title") or "").strip()
-        if desc:
-            lines.append(f"- **{name}** — {desc}")
-        else:
-            lines.append(f"- **{name}**")
+        lines.append(f"- **{name}**")
     return "\n".join(lines)
 
 
-def append_catalog_if_listing_query(
-    trigger: str,
+def append_authoritative_skill_catalog(
     composed: str,
     skills: Iterable[Dict[str, Any]],
 ) -> str:
-    if not is_skill_catalog_query(trigger):
-        return composed
+    """Append the short catalog after the composed user message."""
     block = format_authoritative_skill_catalog(list(skills))
-    base = (composed or trigger or "").rstrip()
+    base = (composed or "").rstrip()
     if not base:
-        return block
+        return f"{block}\n"
     return f"{base}\n\n{block}\n"
 
 
